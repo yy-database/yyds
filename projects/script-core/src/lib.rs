@@ -5,5 +5,6 @@
 #![doc(html_favicon_url = "https://raw.githubusercontent.com/oovm/shape-rs/dev/projects/images/Trapezohedron.svg")]
 
 mod errors;
+mod type_system;
 
 pub use crate::errors::{ScriptErrorKind, Result};
