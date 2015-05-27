@@ -1,11 +1,16 @@
 {
     "private": true,
+    "type": "module",
     "scripts": {
-        "doc": "cargo doc --no-deps --all-features",
-        "test": "cargo test --release",
-        "fmt": "cargo fmt --all",
+        "check": "cargo check --workspace",
+        "fmt": "node scripts/format.mjs",
+        "fmt:check": "node scripts/format.mjs --check",
+        "test": "cargo test --release --workspace",
         "p": "git push && git push --tags --prune",
-        "reset": "git reset Head~ --soft",
-        "u": "cargo upgrade --workspace"
+        "u": "cargo upgrade --pinned"
+    },
+    "packageManager": "pnpm@10.18.3",
+    "devDependencies": {
+        "@biomejs/biome": "^2.4.8"
     }
 }
