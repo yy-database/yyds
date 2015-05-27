@@ -1,12 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["projects/*"]
-default-members = [
-    "projects/script-core",
-]
-exclude = [
-    "projects/.DS_Store",
-]
+members = ["projects/crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
 
 [profile.release]
 lto = true
