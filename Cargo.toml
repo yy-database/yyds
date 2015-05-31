@@ -5,6 +5,15 @@ members = ["projects/crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/yy-database/yyds"
+
+[workspace.dependencies]
+yyds-types = { path = "projects/crates/yyds-types" }
+napi = { version = "2", default-features = false, features = ["napi4"] }
+napi-derive = "2"
+napi-build = "2"
+wasm-bindgen = "0.2"
 
 [profile.release]
 lto = true

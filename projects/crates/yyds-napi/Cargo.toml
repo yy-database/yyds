@@ -1,0 +1,21 @@
+[package]
+name = "yyds-napi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Node-API binding for the YYDS scripting runtime"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+yyds-types = { workspace = true }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }
+
+[package.metadata.napi]
+name = "yyds"
