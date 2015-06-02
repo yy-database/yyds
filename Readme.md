@@ -7,9 +7,13 @@ Rust monorepo for the YYDS scripting runtime.
 
 | Path | Role |
 |------|------|
-| `projects/crates/*` | Rust workspace crates |
-| `projects/packages/*` | pnpm workspace packages |
-| `scripts/` | Workspace tooling |
+| `projects/crates/yyds-types` | Shared Rust types and core |
+| `projects/crates/yyds-napi` | Node-API binding |
+| `projects/crates/yyds-wasm` | Browser WebAssembly binding |
+| `projects/packages/yyds` | TypeScript facade (`@yyds/yyds`) |
+| `projects/packages/yyds-unknown-wasm32` | WASM artifacts for browsers |
+| `projects/packages/yyds-*` | Platform Node-API binaries |
+| `scripts/` | Workspace tooling (`format`, `build:napi`, `build:wasm`) |
 
 ## Change the initial commit
 

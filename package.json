@@ -8,6 +8,8 @@
         "test": "cargo test --release --workspace",
         "build:napi": "node scripts/build-napi.mjs",
         "build:wasm": "node scripts/build-wasm.mjs",
+        "typecheck": "pnpm -r --filter @yyds/yyds --filter @yyds/yyds-unknown-wasm32 run typecheck",
+        "test:ts": "pnpm --filter @yyds/yyds run test",
         "p": "git push && git push --tags --prune",
         "u": "cargo upgrade --pinned"
     },
