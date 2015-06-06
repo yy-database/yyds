@@ -6,9 +6,11 @@
 
 mod errors;
 mod identity;
+mod schema;
 
 pub use crate::errors::{Error, Result};
 pub use crate::identity::{Namespace, ShardId, CATALOG_SUFFIX, SHARD_SUFFIX};
+pub use crate::schema::{adopt_catalog_schema, validate_document, CatalogSchema, VOS_GIT_DEV};
 
 /// Returns the `yyds-types` crate version.
 pub fn version() -> &'static str {
