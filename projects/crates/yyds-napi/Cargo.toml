@@ -3,7 +3,7 @@ name = "yyds-napi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Node-API binding for the YYDS scripting runtime"
+description = "Node-API binding for the distributed YYDS database"
 publish = false
 
 [lib]

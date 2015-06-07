@@ -1,13 +1,16 @@
 YYDS
 ====
 
-Rust monorepo for the YYDS scripting runtime.
+**Distributed VOS database** — the network-facing sibling of embedded [YYDB](https://github.com/yy-database/yydb.rs).
+
+YYDS shares the **VOS schema contract** and CAS object semantics with YYDB, but its storage plane is **not** the single-file `.yydb` layout. Versioned VOS documents live in `.yyds` catalog files and opaque shard records in `.yykv` files. The smallest building block is **`yyds-kv`**.
 
 ## Layout
 
 | Path | Role |
 |------|------|
-| `projects/crates/yyds-types` | Shared Rust types and core |
+| `projects/crates/yyds-kv` | Shard KV engine (`.yykv`) |
+| `projects/crates/yyds-types` | Shared identity and error types |
 | `projects/crates/yyds-napi` | Node-API binding |
 | `projects/crates/yyds-wasm` | Browser WebAssembly binding |
 | `projects/packages/yyds` | TypeScript facade (`@yyds/yyds`) |
@@ -17,6 +20,16 @@ Rust monorepo for the YYDS scripting runtime.
 | `projects/packages/mysql` | MySQL disguise (`@yyds/mysql`) |
 | `projects/packages/postgresql` | PostgreSQL disguise (`@yyds/postgresql`) |
 | `scripts/` | Workspace tooling (`format`, `build:napi`, `build:wasm`) |
+
+## Storage model (vs YYDB)
+
+| | YYDB | YYDS |
+|---|------|------|
+| Deployment | Embedded single process | Distributed nodes |
+| Primary artifact | One `.yydb` file | `.yyds` catalog + many `.yykv` shards |
+| Smallest engine crate | `yydb` | `yyds-kv` |
+| Schema language | VOS (`vos-language` `dev`) | VOS (`vos-language` `dev`) |
+| SQL | Never | Never |
 
 ## Change the initial commit
 

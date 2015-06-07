@@ -3,7 +3,7 @@ name = "yyds-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Browser WebAssembly binding for the YYDS scripting runtime"
+description = "Browser WebAssembly binding for the distributed YYDS database"
 publish = false
 
 [lib]
