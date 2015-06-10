@@ -1,0 +1,16 @@
+[package]
+name = "yyds-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared disguise gateway core for YYDS protocol adapters"
+publish = false
+readme = "readme.md"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+yyds-types = { workspace = true }
+
+[dev-dependencies]

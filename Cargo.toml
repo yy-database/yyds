@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["projects/crates/*"]
+members = [
+    "projects/crates/*",
+    "projects/crates/yyds-gateways/yyds-gateway",
+]
+exclude = ["projects/crates/yyds-gateways"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +19,7 @@ vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", bra
 yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
+yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 napi-build = "2"
