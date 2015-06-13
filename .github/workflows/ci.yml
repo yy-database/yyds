@@ -36,6 +36,9 @@ jobs:
       - run: cargo build -p yyds-wasm --release
       - run: cargo build -p yyds-catalog --release
       - run: cargo build -p yyds-gateway --release
+      - run: cargo build -p yyds-gateway-redis --release
+      - run: cargo build -p yyds-gateway-mysql --release
+      - run: cargo build -p yyds-gateway-pgsql --release
 
   ts:
     name: pnpm packages
