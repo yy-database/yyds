@@ -22,6 +22,7 @@ vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", bra
 yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
+yyds-sqlite = { path = "projects/crates/sqlite" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
