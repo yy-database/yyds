@@ -9,14 +9,15 @@ use yyds_types::version;
 
 mod config;
 mod kind;
+mod sql;
 
 pub use crate::config::GatewayConfig;
 pub use crate::kind::{GatewayKind, ALL_GATEWAY_KINDS};
+pub use crate::sql::{parse_sql, SqlFrontendError};
 
 /// Legacy surfaces that must never be revived as YYDS product paths.
 pub const FORBIDDEN_LEGACY_SURFACES: &[&str] = &[
     "yyds-gateway/src/sql",
-    "oak-sql",
     "yyds-odbc",
     "we-trust-sqlite",
     "we-trust-mysql",
