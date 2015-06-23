@@ -23,7 +23,7 @@ yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
 yyds-sqlite = { path = "projects/crates/sqlite" }
-yy-execution = { git = "https://github.com/yy-database/yydb.git", rev = "36152cd33316642050a6d2fadf5f0df655fb4578", package = "yy-execution" }
+yy-execution = { git = "https://github.com/yy-database/yydb.git", rev = "da53e8c3974717818c8fdc37e8dff3530a69ff2d", package = "yy-execution" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
