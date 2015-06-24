@@ -12,8 +12,8 @@ pub use crate::errors::{Error, Result};
 pub use crate::identity::{CATALOG_SUFFIX, Namespace, SHARD_SUFFIX, ShardId};
 pub use crate::schema::{CatalogSchema, VOS_GIT_DEV, adopt_catalog_schema, validate_document};
 pub use yy_execution::{
-    EvalError, Node, Program, Type, Udf, UdfEffect, UdfPlacement, UdfValidationError, ValidatedProgram, ValidatedUdf,
-    ValidationError, Value,
+    EvalError, FileRef, Node, Program, Type, Udf, UdfEffect, UdfPlacement, UdfValidationError, ValidatedProgram, ValidatedUdf,
+    ValidationError, Value, VectorMetric, VectorValue, VectorValueError,
 };
 
 /// Returns the `yyds-types` crate version.
