@@ -16,9 +16,9 @@ license = "MPL-2.0"
 repository = "https://github.com/yy-database/yyds"
 
 [workspace.dependencies]
-# Shared VOS schema contract — always the voml/vos-language `dev` branch (not a
-# forked dialect). Path overrides are for local hacking only, publish and CI use git.
-vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", branch = "dev" }
+# Shared VOS schema contract. Keep the revision explicit so Oak-backed syntax
+# changes are reproducible in CI and never become a forked dialect.
+vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", rev = "6670ec34fd0001588eaa848af2c44f9082f4695e" }
 yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
