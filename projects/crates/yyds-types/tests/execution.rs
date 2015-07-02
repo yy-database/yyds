@@ -1,4 +1,6 @@
-use yyds_types::{FileRef, Node, Program, Type, ValidatedProgram, Value, VectorMetric, VectorValue};
+use yyds_types::{
+    FileRef, Node, Program, RecordValue, Type, ValidatedProgram, Value, VectorMetric, VectorValue,
+};
 
 #[test]
 fn yyds_consumes_the_pushed_yy_execution_model() {
@@ -33,4 +35,13 @@ fn yyds_preserves_file_and_vector_execution_values() {
         dimension: 3,
         metric: VectorMetric::Cosine,
     });
+}
+
+#[test]
+fn yyds_preserves_schema_identified_records() {
+    let record = RecordValue::new(11, vec![Value::I64(9), Value::Text("ready".into())])
+        .expect("record schema identity is valid");
+    assert_eq!(record.schema_id(), 11);
+    assert_eq!(record.fields().len(), 2);
+    assert_eq!(Value::Record(record).ty(), Type::Record { schema_id: 11, field_count: 2 });
 }
