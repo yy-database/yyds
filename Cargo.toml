@@ -18,12 +18,12 @@ repository = "https://github.com/yy-database/yyds"
 [workspace.dependencies]
 # Shared VOS schema contract. Keep the revision explicit so Oak-backed syntax
 # changes are reproducible in CI and never become a forked dialect.
-vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", rev = "815a9cd048f4faf107b092c9f79de63e3e39718f" }
+vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", rev = "23de05b9ca92c985ebe262cc4bff10ee22745171" }
 yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
 yyds-sqlite = { path = "projects/crates/sqlite" }
-yy-execution = { git = "https://github.com/yy-database/yydb.git", rev = "b3b73b961402b3dfe3a6693e040e99fcd7b334ec", package = "yy-execution" }
+yy-execution = { git = "https://github.com/yy-database/yydb.git", rev = "80198df2d28fda3aab7f7bb98a323469f1254787", package = "yy-execution" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "424dd544c57f2d9e40b248056ab12a1725ae932f", package = "oak-sql" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
