@@ -5,19 +5,19 @@
 #![doc(html_favicon_url = "https://raw.githubusercontent.com/oovm/shape-rs/dev/projects/images/Trapezohedron.svg")]
 
 mod errors;
+mod execution;
 mod identity;
 mod schema;
 
 pub use crate::errors::{Error, Result};
+pub use crate::execution::{
+    EvalError, FileRef, LayoutField, Node, Program, RecordLayout, RecordLayoutError,
+    RecordValue, RecordValueError, Type, Udf, UdfEffect, UdfPlacement, UdfValidationError,
+    ValidatedProgram, ValidatedUdf, ValidationError, Value, VectorMetric, VectorValue,
+    VectorValueError,
+};
 pub use crate::identity::{CATALOG_SUFFIX, Namespace, SHARD_SUFFIX, ShardId};
 pub use crate::schema::{CatalogSchema, VOS_GIT_DEV, adopt_catalog_schema, validate_document};
-pub use yy_execution::{
-    EvalError, FieldHandle, FieldHandleError, FileRef, LayoutField, Node, Program, RecordLayout,
-    RecordLayoutError, RecordValue, RecordValueError, Type, Udf, UdfEffect, UdfPlacement,
-    UdfValidationError, ValidatedProgram, ValidatedUdf, ValidationError, Value, VectorMetric,
-    VectorValue, VectorValueError,
-};
-
 /// Returns the `yyds-types` crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
