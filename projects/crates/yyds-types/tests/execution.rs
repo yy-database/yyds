@@ -4,7 +4,7 @@ use yyds_types::{
 };
 
 #[test]
-fn yyds_consumes_the_pushed_yy_execution_model() {
+fn yyds_evaluates_its_distributed_execution_model() {
     let program = ValidatedProgram::validate(Program {
         parameters: vec![Type::I64],
         inputs: vec![Type::I64],
