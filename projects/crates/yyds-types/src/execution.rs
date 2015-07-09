@@ -8,6 +8,162 @@
 /// A node identifier in a distributed scalar program.
 pub type NodeId = u32;
 
+/// Identifier of a distributed execution fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FragmentId(pub u32);
+
+/// Placement role of a distributed fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FragmentRole { Shard, Coordinator, Edge }
+
+/// Exchange performed between distributed fragments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exchange {
+    /// Send all partial rows to one coordinator.
+    Gather,
+    /// Send a copy to every target fragment.
+    Broadcast,
+    /// Repartition rows by a stable catalog field identity.
+    Repartition { field_id: u64 },
+    /// Merge compatible partial aggregate states.
+    Merge,
+}
+
+/// Retry contract for one fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Maximum number of attempts including the first attempt.
+    pub max_attempts: u16,
+    /// Whether replay is safe for the fragment effect.
+    pub idempotent: bool,
+}
+
+/// Read consistency requested by a distributed plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Consistency { Snapshot, Eventual, BoundedStaleness { max_millis: u64 } }
+
+/// Approximation contract attached to a distributed result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Approximation {
+    /// Whether an approximate result is accepted.
+    pub allowed: bool,
+    /// Optional absolute or relative error bound defined by the operator.
+    pub error_bound: Option<f64>,
+    /// Optional confidence level in the interval `(0, 1]`.
+    pub confidence: Option<f64>,
+}
+
+/// One independently scheduled shard, coordinator, or edge fragment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fragment {
+    /// Stable fragment identity within the plan.
+    pub id: FragmentId,
+    /// Physical placement role.
+    pub role: FragmentRole,
+    /// Upstream fragment identities.
+    pub inputs: Vec<FragmentId>,
+    /// Exchange used to consume upstream partials.
+    pub exchange: Option<Exchange>,
+    /// Typed scalar body or fragment-local expression.
+    pub program: Program,
+    /// Replay policy after transport or lease failure.
+    pub retry: RetryPolicy,
+}
+
+/// A validated distributed execution plan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DistributedPlan {
+    /// Fragments in deterministic plan order.
+    pub fragments: Vec<Fragment>,
+    /// Coordinator or edge root that publishes the result.
+    pub root: FragmentId,
+    /// Read consistency contract.
+    pub consistency: Consistency,
+    /// Approximation contract.
+    pub approximation: Approximation,
+}
+
+impl DistributedPlan {
+    /// Validate fragment references, root placement, retries, and approximation metadata.
+    pub fn validate(self) -> Result<ValidatedDistributedPlan, PlanValidationError> {
+        if self.fragments.is_empty() { return Err(PlanValidationError::Empty); }
+        let mut published = std::collections::BTreeSet::new();
+        for fragment in &self.fragments {
+            if !published.insert(fragment.id) {
+                return Err(PlanValidationError::DuplicateFragment);
+            }
+        }
+        if self.fragments.iter().filter(|fragment| fragment.id == self.root).count() != 1 {
+            return Err(PlanValidationError::InvalidRoot);
+        }
+        if !self.fragments.iter().any(|fragment| fragment.id == self.root && matches!(fragment.role, FragmentRole::Coordinator | FragmentRole::Edge)) {
+            return Err(PlanValidationError::RootMustPublish);
+        }
+        let mut preceding = std::collections::BTreeSet::new();
+        for fragment in &self.fragments {
+            if fragment.retry.max_attempts == 0 || (!fragment.retry.idempotent && fragment.retry.max_attempts > 1) {
+                return Err(PlanValidationError::RetryPolicy);
+            }
+            if fragment.inputs.iter().any(|input| !self.fragments.iter().any(|candidate| candidate.id == *input)) {
+                return Err(PlanValidationError::MissingInput);
+            }
+            if fragment.inputs.iter().any(|input| !preceding.contains(input)) {
+                return Err(PlanValidationError::InvalidDependencyOrder);
+            }
+            if fragment.inputs.is_empty() != fragment.exchange.is_none() {
+                return Err(PlanValidationError::InvalidExchange);
+            }
+            ValidatedProgram::validate(fragment.program.clone())
+                .map_err(|_| PlanValidationError::InvalidProgram)?;
+            preceding.insert(fragment.id);
+        }
+        if self.approximation.confidence.is_some_and(|value| !(0.0 < value && value <= 1.0)) {
+            return Err(PlanValidationError::ApproximationMetadata);
+        }
+        if self.approximation.error_bound.is_some_and(|value| !value.is_finite() || value < 0.0) {
+            return Err(PlanValidationError::ApproximationMetadata);
+        }
+        if !self.approximation.allowed && (self.approximation.error_bound.is_some() || self.approximation.confidence.is_some()) {
+            return Err(PlanValidationError::ApproximationMetadata);
+        }
+        Ok(ValidatedDistributedPlan { plan: self })
+    }
+}
+
+/// A distributed plan accepted by the scheduler boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidatedDistributedPlan { plan: DistributedPlan }
+
+impl ValidatedDistributedPlan {
+    /// Return the validated plan.
+    pub fn plan(&self) -> &DistributedPlan { &self.plan }
+}
+
+/// Validation failure for a distributed plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanValidationError {
+    /// More than one fragment uses the same identity.
+    DuplicateFragment,
+    /// Dependencies must refer to earlier fragments, excluding cycles.
+    InvalidDependencyOrder,
+    /// An exchange must be present exactly when upstream fragments exist.
+    InvalidExchange,
+    /// A fragment contains an invalid typed scalar body.
+    InvalidProgram,
+    /// No fragments were supplied.
+    Empty,
+    /// Root does not identify exactly one fragment.
+    InvalidRoot,
+    /// Root is not a result-publishing role.
+    RootMustPublish,
+    /// A fragment references an unknown input.
+    MissingInput,
+    /// Retry count conflicts with idempotency.
+    RetryPolicy,
+    /// Error or confidence metadata is invalid.
+    ApproximationMetadata,
+}
+
 /// Metric attached to a distributed vector value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorMetric { Cosine, Euclidean, Dot }
@@ -190,6 +346,37 @@ impl ValidatedProgram {
         if program.nodes.is_empty() || program.output as usize >= program.nodes.len() {
             return Err(ValidationError::InvalidProgram);
         }
+        let mut types = Vec::with_capacity(program.nodes.len());
+        for node in &program.nodes {
+            let ty = match node {
+                Node::Literal(value) => value.ty(),
+                Node::Parameter { index, ty } => {
+                    if program.parameters.get(*index as usize) != Some(ty) {
+                        return Err(ValidationError::TypeMismatch);
+                    }
+                    *ty
+                }
+                Node::Input { index, ty } => {
+                    if program.inputs.get(*index as usize) != Some(ty) {
+                        return Err(ValidationError::TypeMismatch);
+                    }
+                    *ty
+                }
+                Node::AddI64 { left, right } => {
+                    if *left as usize >= types.len() || *right as usize >= types.len() {
+                        return Err(ValidationError::InvalidReference);
+                    }
+                    if types[*left as usize] != Type::I64 || types[*right as usize] != Type::I64 {
+                        return Err(ValidationError::TypeMismatch);
+                    }
+                    Type::I64
+                }
+            };
+            types.push(ty);
+        }
+        if types[program.output as usize] != program.output_type {
+            return Err(ValidationError::TypeMismatch);
+        }
         Ok(Self { program })
     }
 
@@ -209,7 +396,7 @@ impl ValidatedProgram {
 
 /// Validation errors for a distributed execution fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationError { InvalidProgram }
+pub enum ValidationError { InvalidProgram, InvalidReference, TypeMismatch }
 
 /// A distributed UDF placement policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +431,8 @@ impl Udf {
         if self.program.nodes.is_empty() || self.program.output as usize >= self.program.nodes.len() {
             return Err(UdfValidationError::InvalidProgram);
         }
+        ValidatedProgram::validate(self.program.clone())
+            .map_err(|_| UdfValidationError::InvalidProgram)?;
         Ok(ValidatedUdf { metadata: self })
     }
 }
