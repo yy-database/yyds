@@ -25,6 +25,7 @@ yyds-catalog = { path = "projects/crates/yyds-catalog" }
 yyds-sqlite = { path = "projects/crates/sqlite" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "424dd544c57f2d9e40b248056ab12a1725ae932f", package = "oak-sql" }
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 napi-build = "2"

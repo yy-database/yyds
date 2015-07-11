@@ -9,5 +9,5 @@ mod value;
 
 pub use crate::key::Key;
 pub use crate::record::Record;
-pub use crate::store::{compare_and_put, KvStore, MemoryShard};
+pub use crate::store::{compare_and_put, FileShard, KvStore, MemoryShard};
 pub use crate::value::{InlineValue, ObjectRef, StoredValue};

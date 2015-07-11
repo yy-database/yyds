@@ -13,4 +13,7 @@ path = "src/lib.rs"
 [dependencies]
 yyds-types = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
 [dev-dependencies]
