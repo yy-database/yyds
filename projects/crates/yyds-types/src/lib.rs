@@ -8,6 +8,7 @@ mod errors;
 mod execution;
 mod identity;
 mod schema;
+mod vos_udf;
 
 pub use crate::errors::{Error, Result};
 pub use crate::execution::{
@@ -20,6 +21,7 @@ pub use crate::execution::{
 };
 pub use crate::identity::{CATALOG_SUFFIX, Namespace, SHARD_SUFFIX, ShardId};
 pub use crate::schema::{CatalogSchema, VOS_GIT_DEV, adopt_catalog_schema, validate_document};
+pub use crate::vos_udf::lower_vos_udf;
 /// Returns the `yyds-types` crate version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

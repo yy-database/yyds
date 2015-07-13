@@ -20,6 +20,8 @@ pub enum Error {
     Unsupported(&'static str),
     /// Independent compare-and-set failed.
     CasConflict { key: String },
+    /// VOS-authored UDF could not be lowered into the distributed execution model.
+    Udf { name: String, message: String },
 }
 
 impl fmt::Display for Error {
@@ -34,6 +36,7 @@ impl fmt::Display for Error {
             Self::Schema { message } => write!(f, "VOS schema: {message}"),
             Self::Unsupported(feature) => write!(f, "unsupported: {feature}"),
             Self::CasConflict { key } => write!(f, "cas conflict on key: {key}"),
+            Self::Udf { name, message } => write!(f, "UDF {name}: {message}"),
         }
     }
 }
