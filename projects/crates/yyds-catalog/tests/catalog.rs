@@ -54,3 +54,12 @@ fn ensure_schema_rejects_version_mismatch() {
     let err = catalog.ensure_schema(2, VOS).expect_err("conflict");
     assert!(err.to_string().contains("schema version conflict"));
 }
+
+#[test]
+fn identity_initialization_requires_explicit_call_for_empty_state() {
+    let mut catalog = Catalog::open_memory();
+    assert!(catalog.initialize_identity().is_err());
+    catalog.ensure_schema(1, VOS).expect("ensure");
+    assert!(catalog.identity().is_some());
+    catalog.initialize_identity().expect("idempotent");
+}
