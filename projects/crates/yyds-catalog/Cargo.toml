@@ -11,6 +11,8 @@ readme = "readme.md"
 path = "src/lib.rs"
 
 [dependencies]
+serde_json = { workspace = true }
+vos = { workspace = true }
 yyds-types = { workspace = true }
 
 [dev-dependencies]

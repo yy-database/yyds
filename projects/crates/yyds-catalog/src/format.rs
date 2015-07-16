@@ -7,10 +7,14 @@ use yyds_types::{CatalogSchema, Error, Result, ShardId};
 /// Catalog file magic (`YYDS` catalog plane, not `.yydb`).
 pub const MAGIC: &[u8] = b"YYDS\x01";
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Serialize catalog state to `.yyds` bytes.
-pub fn encode(schema: Option<&CatalogSchema>, shards: &[ShardId]) -> Result<Vec<u8>> {
+pub fn encode(
+    schema: Option<&CatalogSchema>,
+    identity: Option<&vos::ast::CatalogSnapshot>,
+    shards: &[ShardId],
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.write_all(MAGIC)?;
     out.write_all(&FORMAT_VERSION.to_le_bytes())?;
@@ -25,6 +29,19 @@ pub fn encode(schema: Option<&CatalogSchema>, shards: &[ShardId]) -> Result<Vec<
             }
             out.write_all(&(doc.len() as u32).to_le_bytes())?;
             out.write_all(doc)?;
+        }
+        None => out.write_all(&0u32.to_le_bytes())?,
+    }
+
+    match identity {
+        Some(identity) => {
+            let json = serde_json::to_vec(identity).map_err(|_| Error::Corrupt("catalog identity encode"))?;
+            if json.len() > u32::MAX as usize {
+                return Err(Error::Unsupported("catalog identity too large"));
+            }
+            out.write_all(&1u32.to_le_bytes())?;
+            out.write_all(&(json.len() as u32).to_le_bytes())?;
+            out.write_all(&json)?;
         }
         None => out.write_all(&0u32.to_le_bytes())?,
     }
@@ -46,7 +63,9 @@ pub fn encode(schema: Option<&CatalogSchema>, shards: &[ShardId]) -> Result<Vec<
 }
 
 /// Parse catalog bytes previously written by [`encode`].
-pub fn decode(bytes: &[u8]) -> Result<(Option<CatalogSchema>, Vec<ShardId>)> {
+pub fn decode(
+    bytes: &[u8],
+) -> Result<(Option<CatalogSchema>, Option<vos::ast::CatalogSnapshot>, Vec<ShardId>)> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0u8; MAGIC.len()];
     read_exact(&mut cursor, &mut magic)?;
@@ -55,7 +74,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Option<CatalogSchema>, Vec<ShardId>)> {
     }
 
     let format_version = read_u32(&mut cursor)?;
-    if format_version != FORMAT_VERSION {
+    if format_version != 1 && format_version != FORMAT_VERSION {
         return Err(Error::Corrupt("unsupported catalog format version"));
     }
 
@@ -72,6 +91,21 @@ pub fn decode(bytes: &[u8]) -> Result<(Option<CatalogSchema>, Vec<ShardId>)> {
         _ => return Err(Error::Corrupt("invalid catalog schema presence flag")),
     };
 
+    let identity = if format_version >= 2 {
+        match read_u32(&mut cursor)? {
+            0 => None,
+            1 => {
+                let len = read_u32(&mut cursor)? as usize;
+                let mut json = vec![0u8; len];
+                read_exact(&mut cursor, &mut json)?;
+                Some(serde_json::from_slice(&json).map_err(|_| Error::Corrupt("catalog identity decode"))?)
+            }
+            _ => return Err(Error::Corrupt("invalid catalog identity presence flag")),
+        }
+    } else {
+        None
+    };
+
     let shard_count = read_u32(&mut cursor)? as usize;
     let mut shards = Vec::with_capacity(shard_count);
     for _ in 0..shard_count {
@@ -86,7 +120,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Option<CatalogSchema>, Vec<ShardId>)> {
         return Err(Error::Corrupt("trailing catalog bytes"));
     }
 
-    Ok((schema, shards))
+    Ok((schema, identity, shards))
 }
 
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {

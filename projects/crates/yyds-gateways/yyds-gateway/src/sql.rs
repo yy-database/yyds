@@ -149,7 +149,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
             }
             let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
             Ok(SqlBoundStatement::Select(SqlBoundSelect {
-                source: select.from.as_ref().map(|table| table.name.name.to_string()),
+                source: select.from.as_ref().map(|table| normalize_identifier(table.name.name.as_ref())),
                 projections,
                 predicate: select.expr.as_ref().map(bind_expression).transpose()?,
             }))
@@ -163,14 +163,16 @@ fn bind_projection(item: &SelectItem) -> Result<SqlBoundProjection, SqlFrontendE
         SelectItem::Star { .. } => Ok(SqlBoundProjection::Star),
         SelectItem::Expression { expr, alias, .. } => Ok(SqlBoundProjection::Expression {
             expression: bind_expression(expr)?,
-            alias: alias.as_ref().map(|alias| alias.name.to_string()),
+            alias: alias.as_ref().map(|alias| normalize_identifier(alias.name.as_ref())),
         }),
     }
 }
 
 fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFrontendError> {
     match expression {
-        Expression::Identifier(identifier) => Ok(SqlBoundExpression::Identifier(identifier.name.to_string())),
+        Expression::Identifier(identifier) => {
+            Ok(SqlBoundExpression::Identifier(normalize_identifier(identifier.name.as_ref())))
+        }
         Expression::Literal(literal) => Ok(SqlBoundExpression::Literal(match literal {
             Literal::Number(value, _) => SqlBoundLiteral::Number(value.to_string()),
             Literal::String(value, _) => SqlBoundLiteral::String(value.to_string()),
@@ -215,4 +217,8 @@ fn bind_binary_operator(operator: BinaryOperator) -> Result<SqlBoundBinaryOperat
 
 fn bind_error(message: &str) -> SqlFrontendError {
     SqlFrontendError { message: message.into() }
+}
+
+fn normalize_identifier(name: &str) -> String {
+    name.trim().to_string()
 }

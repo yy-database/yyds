@@ -7,9 +7,16 @@ use std::path::PathBuf;
 
 use yyds_types::version;
 
+mod catalog_bind;
 mod config;
 mod kind;
 mod sql;
+
+pub use crate::catalog_bind::{
+    bind_sql_catalog, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression,
+    SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement,
+    SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable,
+};
 
 pub use crate::config::GatewayConfig;
 pub use crate::kind::{GatewayKind, ALL_GATEWAY_KINDS};

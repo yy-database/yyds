@@ -5,10 +5,11 @@ use yyds_types::{adopt_catalog_schema, CatalogSchema, Error, Result, ShardId, CA
 use crate::format;
 
 /// In-memory or file-backed `.yyds` catalog state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Catalog {
     path: Option<PathBuf>,
     schema: Option<CatalogSchema>,
+    identity: Option<vos::ast::CatalogSnapshot>,
     shards: Vec<ShardId>,
 }
 
@@ -18,6 +19,7 @@ impl Catalog {
         Self {
             path: None,
             schema: None,
+            identity: None,
             shards: Vec::new(),
         }
     }
@@ -27,16 +29,18 @@ impl Catalog {
         let path = path.as_ref().to_path_buf();
         if path.exists() {
             let bytes = std::fs::read(&path)?;
-            let (schema, shards) = format::decode(&bytes)?;
+            let (schema, identity, shards) = format::decode(&bytes)?;
             Ok(Self {
                 path: Some(path),
                 schema,
+                identity,
                 shards,
             })
         } else {
             Ok(Self {
                 path: Some(path),
                 schema: None,
+                identity: None,
                 shards: Vec::new(),
             })
         }
@@ -52,6 +56,11 @@ impl Catalog {
         self.schema.as_ref()
     }
 
+    /// Published VOS identity snapshot used by gateways and distributed planners.
+    pub fn identity(&self) -> Option<&vos::ast::CatalogSnapshot> {
+        self.identity.as_ref()
+    }
+
     /// Registered shard ids in catalog order.
     pub fn shards(&self) -> &[ShardId] {
         &self.shards
@@ -64,9 +73,18 @@ impl Catalog {
                 expected: version,
                 found: schema.version,
             }),
+            Some(schema) if schema.document != document => Err(Error::SchemaConflict {
+                expected: version,
+                found: schema.version,
+            }),
             Some(_) => Ok(()),
             None => {
                 self.schema = Some(adopt_catalog_schema(version, document)?);
+                let parsed = vos::parser::parse_document(document)
+                    .map_err(|diagnostics| Error::Schema { message: diagnostics.to_string() })?;
+                self.identity = Some(vos::catalog_from_document(&parsed).map_err(|message| {
+                    Error::Schema { message }
+                })?);
                 Ok(())
             }
         }
@@ -91,7 +109,7 @@ impl Catalog {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let bytes = format::encode(self.schema.as_ref(), &self.shards)?;
+        let bytes = format::encode(self.schema.as_ref(), self.identity.as_ref(), &self.shards)?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
