@@ -117,6 +117,24 @@ impl DistributedPlan {
                 .map_err(|_| PlanValidationError::InvalidProgram)?;
             preceding.insert(fragment.id);
         }
+        let by_id = self
+            .fragments
+            .iter()
+            .map(|fragment| (fragment.id, fragment))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut pending = vec![self.root];
+        while let Some(id) = pending.pop() {
+            if !reachable.insert(id) {
+                continue;
+            }
+            if let Some(fragment) = by_id.get(&id) {
+                pending.extend(fragment.inputs.iter().copied());
+            }
+        }
+        if reachable.len() != self.fragments.len() {
+            return Err(PlanValidationError::UnreachableFragment);
+        }
         if self.approximation.confidence.is_some_and(|value| !(0.0 < value && value <= 1.0)) {
             return Err(PlanValidationError::ApproximationMetadata);
         }
@@ -158,6 +176,8 @@ pub enum PlanValidationError {
     RootMustPublish,
     /// A fragment references an unknown input.
     MissingInput,
+    /// A fragment is not connected to the published result root.
+    UnreachableFragment,
     /// Retry count conflicts with idempotency.
     RetryPolicy,
     /// Error or confidence metadata is invalid.
