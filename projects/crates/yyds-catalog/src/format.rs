@@ -2,17 +2,18 @@
 
 use std::io::{Cursor, Read, Write};
 
-use yyds_types::{CatalogSchema, Error, Result, ShardId};
+use yyds_types::{CatalogSchema, Error, Result, ShardEpoch, ShardId};
 
 /// Catalog file magic (`YYDS` catalog plane, not `.yydb`).
 pub const MAGIC: &[u8] = b"YYDS\x01";
 
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 
 /// Serialize catalog state to `.yyds` bytes.
 pub fn encode(
     schema: Option<&CatalogSchema>,
     identity: Option<&vos::ast::CatalogSnapshot>,
+    routing_epoch: Option<ShardEpoch>,
     shards: &[ShardId],
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
@@ -46,6 +47,17 @@ pub fn encode(
         None => out.write_all(&0u32.to_le_bytes())?,
     }
 
+    match routing_epoch {
+        Some(epoch) => {
+            if epoch.0 == 0 {
+                return Err(Error::Unsupported("routing epoch must be nonzero"));
+            }
+            out.write_all(&1u32.to_le_bytes())?;
+            out.write_all(&epoch.0.to_le_bytes())?;
+        }
+        None => out.write_all(&0u32.to_le_bytes())?,
+    }
+
     if shards.len() > u32::MAX as usize {
         return Err(Error::Unsupported("too many shard registrations"));
     }
@@ -65,7 +77,7 @@ pub fn encode(
 /// Parse catalog bytes previously written by [`encode`].
 pub fn decode(
     bytes: &[u8],
-) -> Result<(Option<CatalogSchema>, Option<vos::ast::CatalogSnapshot>, Vec<ShardId>)> {
+) -> Result<(Option<CatalogSchema>, Option<vos::ast::CatalogSnapshot>, Option<ShardEpoch>, Vec<ShardId>)> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0u8; MAGIC.len()];
     read_exact(&mut cursor, &mut magic)?;
@@ -74,7 +86,7 @@ pub fn decode(
     }
 
     let format_version = read_u32(&mut cursor)?;
-    if format_version != 1 && format_version != FORMAT_VERSION {
+    if format_version != 1 && format_version != 2 && format_version != FORMAT_VERSION {
         return Err(Error::Corrupt("unsupported catalog format version"));
     }
 
@@ -106,6 +118,22 @@ pub fn decode(
         None
     };
 
+    let routing_epoch = if format_version >= 3 {
+        match read_u32(&mut cursor)? {
+            0 => None,
+            1 => {
+                let epoch = read_u64(&mut cursor)?;
+                if epoch == 0 {
+                    return Err(Error::Corrupt("invalid catalog routing epoch"));
+                }
+                Some(ShardEpoch(epoch))
+            }
+            _ => return Err(Error::Corrupt("invalid catalog routing presence flag")),
+        }
+    } else {
+        None
+    };
+
     let shard_count = read_u32(&mut cursor)? as usize;
     let mut shards = Vec::with_capacity(shard_count);
     for _ in 0..shard_count {
@@ -120,13 +148,19 @@ pub fn decode(
         return Err(Error::Corrupt("trailing catalog bytes"));
     }
 
-    Ok((schema, identity, shards))
+    Ok((schema, identity, routing_epoch, shards))
 }
 
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {
     let mut buf = [0u8; 4];
     read_exact(cursor, &mut buf)?;
     Ok(u32::from_le_bytes(buf))
+}
+
+fn read_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64> {
+    let mut buf = [0u8; 8];
+    read_exact(cursor, &mut buf)?;
+    Ok(u64::from_le_bytes(buf))
 }
 
 fn read_exact(cursor: &mut Cursor<&[u8]>, buf: &mut [u8]) -> Result<()> {

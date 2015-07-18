@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use yyds_types::{adopt_catalog_schema, CatalogSchema, Error, Result, ShardId, CATALOG_SUFFIX};
+use yyds_types::{
+    adopt_catalog_schema, CatalogSchema, Error, Result, ShardEpoch, ShardId, ShardMap, CATALOG_SUFFIX,
+};
 
 use crate::format;
 
@@ -11,6 +13,7 @@ pub struct Catalog {
     schema: Option<CatalogSchema>,
     identity: Option<vos::ast::CatalogSnapshot>,
     shards: Vec<ShardId>,
+    routing_epoch: Option<ShardEpoch>,
 }
 
 impl Catalog {
@@ -21,6 +24,7 @@ impl Catalog {
             schema: None,
             identity: None,
             shards: Vec::new(),
+            routing_epoch: None,
         }
     }
 
@@ -29,12 +33,13 @@ impl Catalog {
         let path = path.as_ref().to_path_buf();
         if path.exists() {
             let bytes = std::fs::read(&path)?;
-            let (schema, identity, shards) = format::decode(&bytes)?;
+            let (schema, identity, routing_epoch, shards) = format::decode(&bytes)?;
             Ok(Self {
                 path: Some(path),
                 schema,
                 identity,
                 shards,
+                routing_epoch,
             })
         } else {
             Ok(Self {
@@ -42,6 +47,7 @@ impl Catalog {
                 schema: None,
                 identity: None,
                 shards: Vec::new(),
+                routing_epoch: None,
             })
         }
     }
@@ -64,6 +70,13 @@ impl Catalog {
     /// Registered shard ids in catalog order.
     pub fn shards(&self) -> &[ShardId] {
         &self.shards
+    }
+
+    /// Returns the currently published routing map, if one exists.
+    pub fn routing(&self) -> Result<Option<ShardMap>> {
+        self.routing_epoch
+            .map(|epoch| ShardMap::new(epoch, self.shards.clone()).map_err(|_| Error::Corrupt("invalid catalog routing map")))
+            .transpose()
     }
 
     /// Stores catalog schema truth when empty and rejects mismatched versions thereafter.
@@ -109,10 +122,26 @@ impl Catalog {
 
     /// Registers a shard id exactly once.
     pub fn register_shard(&mut self, shard: ShardId) -> Result<()> {
+        if self.routing_epoch.is_some() {
+            return Err(Error::Unsupported("publish a newer routing epoch to change shard membership"));
+        }
         if self.shards.iter().any(|existing| existing == &shard) {
             return Err(Error::Unsupported("shard already registered in catalog"));
         }
         self.shards.push(shard);
+        Ok(())
+    }
+
+    /// Publishes a newer complete shard map and routing epoch atomically in catalog state.
+    pub fn publish_routing(&mut self, epoch: ShardEpoch, shards: Vec<ShardId>) -> Result<()> {
+        if let Some(current) = self.routing_epoch {
+            if epoch <= current {
+                return Err(Error::RoutingConflict { expected: current.0, found: epoch.0 });
+            }
+        }
+        let map = ShardMap::new(epoch, shards).map_err(|_| Error::Unsupported("invalid routing map"))?;
+        self.shards = map.shards().to_vec();
+        self.routing_epoch = Some(epoch);
         Ok(())
     }
 
@@ -126,7 +155,12 @@ impl Catalog {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let bytes = format::encode(self.schema.as_ref(), self.identity.as_ref(), &self.shards)?;
+        let bytes = format::encode(
+            self.schema.as_ref(),
+            self.identity.as_ref(),
+            self.routing_epoch,
+            &self.shards,
+        )?;
         std::fs::write(path, bytes)?;
         Ok(())
     }

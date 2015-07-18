@@ -14,6 +14,8 @@ pub enum Error {
     NotFound { key: String },
     /// Stored catalog schema version does not match the caller's expectation.
     SchemaConflict { expected: u32, found: u32 },
+    /// A routing epoch is not newer than the published catalog epoch.
+    RoutingConflict { expected: u64, found: u64 },
     /// Schema document failed VOS validation (shared language contract).
     Schema { message: String },
     /// Feature exists as a product surface but is not implemented yet.
@@ -32,6 +34,9 @@ impl fmt::Display for Error {
             Self::NotFound { key } => write!(f, "key not found: {key}"),
             Self::SchemaConflict { expected, found } => {
                 write!(f, "catalog schema version conflict: expected {expected}, found {found}")
+            }
+            Self::RoutingConflict { expected, found } => {
+                write!(f, "routing epoch conflict: expected newer than {expected}, found {found}")
             }
             Self::Schema { message } => write!(f, "VOS schema: {message}"),
             Self::Unsupported(feature) => write!(f, "unsupported: {feature}"),
