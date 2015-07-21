@@ -122,11 +122,18 @@ impl KvStore for FileShard {
     fn put(&mut self, key: Key, value: StoredValue) -> Result<u64> {
         let revision = self.next_revision.checked_add(1).ok_or(Error::Corrupt("shard revision exhausted"))?;
         let record = Record { key: key.clone(), value, revision };
-        self.records.insert(key, record);
+        let previous = self.records.insert(key.clone(), record);
         self.next_revision = revision;
         if let Err(error) = self.persist() {
             self.next_revision = revision - 1;
-            self.records.retain(|_, record| record.revision != revision);
+            match previous {
+                Some(record) => {
+                    self.records.insert(key, record);
+                }
+                None => {
+                    self.records.remove(&key);
+                }
+            }
             return Err(error);
         }
         Ok(revision)

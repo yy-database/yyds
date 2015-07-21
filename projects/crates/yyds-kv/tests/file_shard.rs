@@ -51,3 +51,43 @@ fn file_shard_rejects_corrupt_bytes() {
     assert!(FileShard::open(&path).is_err());
     cleanup(&path);
 }
+
+#[test]
+fn failed_snapshot_publication_preserves_records_and_revision() {
+    let path = temp_path("failed-publication");
+    let backup = path.with_extension("saved");
+    let mut shard = FileShard::open(&path).expect("open");
+    let existing = Key::new("tenant", b"existing".to_vec());
+    let inserted = Key::new("tenant", b"inserted".to_vec());
+    let original = StoredValue::Inline(InlineValue(b"original".to_vec()));
+    let replacement = StoredValue::Inline(InlineValue(b"replacement".to_vec()));
+    assert_eq!(shard.put(existing.clone(), original.clone()).unwrap(), 1);
+    let published = fs::read(&path).unwrap();
+    fs::rename(&path, &backup).unwrap();
+    fs::create_dir(&path).unwrap();
+
+    assert!(shard.put(existing.clone(), replacement.clone()).is_err());
+    let record = shard.get(&existing).unwrap().expect("original remains visible");
+    assert_eq!(record.value, original);
+    assert_eq!(record.revision, 1);
+    assert!(shard.put(inserted.clone(), replacement.clone()).is_err());
+    assert_eq!(shard.get(&inserted).unwrap(), None);
+    assert!(shard.delete(&existing).is_err());
+    assert_eq!(shard.get(&existing).unwrap(), Some(record));
+    assert_eq!(fs::read(&backup).unwrap(), published);
+
+    fs::remove_dir(&path).unwrap();
+    fs::rename(&backup, &path).unwrap();
+    let reopened = FileShard::open(&path).unwrap();
+    assert_eq!(reopened.get(&existing).unwrap().unwrap().value, original);
+    assert_eq!(reopened.get(&inserted).unwrap(), None);
+    drop(reopened);
+    assert_eq!(shard.put(existing.clone(), replacement.clone()).unwrap(), 2);
+    drop(shard);
+    let reopened = FileShard::open(&path).unwrap();
+    let record = reopened.get(&existing).unwrap().unwrap();
+    assert_eq!(record.value, replacement);
+    assert_eq!(record.revision, 2);
+    drop(reopened);
+    cleanup(&path);
+}
