@@ -31,8 +31,7 @@ impl DurableReplicationLog {
         if path.exists() {
             let bytes = fs::read(&path)?;
             decode(&path, &bytes)
-        }
-        else {
+        } else {
             if let Some(parent) = path.parent() {
                 if !parent.as_os_str().is_empty() {
                     fs::create_dir_all(parent)?;
@@ -57,6 +56,11 @@ impl DurableReplicationLog {
     /// Returns the recovered committed prefix.
     pub fn committed(&self) -> LogIndex {
         self.committed
+    }
+
+    /// Iterates entries covered by the durable committed prefix.
+    pub fn committed_entries(&self) -> impl Iterator<Item = &ReplicationEntry> {
+        self.entries.iter().take(self.committed.0 as usize)
     }
 
     /// Appends the next contiguous entry and synchronizes it to disk.
