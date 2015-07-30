@@ -1,0 +1,162 @@
+name: Release
+
+# Independent of CI. Trigger only by pushing a semver tag:
+#   git tag v0.0.2 && git push origin v0.0.2
+# Publishes @yyds/* (OIDC) and GitHub Release native-binding zips.
+# Trusted Publisher workflow filename must stay: release-npm.yml
+# Setup: documentation/ci-secrets.md
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-engine:
+    name: engine ${{ matrix.pkg }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            pkg: yyds-win32-x64
+            napi_artifact: index.win32-x64-msvc.node
+            dest_name: yyds-win32-x64-msvc.node
+          - os: ubuntu-latest
+            pkg: yyds-linux-x64
+            napi_artifact: index.linux-x64-gnu.node
+            dest_name: yyds-linux-x64-gnu.node
+          - os: macos-13
+            pkg: yyds-darwin-x64
+            napi_artifact: index.darwin-x64.node
+            dest_name: yyds-darwin-x64.node
+          - os: macos-latest
+            pkg: yyds-darwin-arm64
+            napi_artifact: index.darwin-arm64.node
+            dest_name: yyds-darwin-arm64.node
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly-2026-07-20
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build yyds-napi
+        working-directory: projects/crates/yyds-napi
+        run: pnpm exec napi build --platform --release
+      - name: Stage native binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="projects/crates/yyds-napi/${{ matrix.napi_artifact }}"
+          DEST="projects/packages/${{ matrix.pkg }}/lib/${{ matrix.dest_name }}"
+          mkdir -p "$(dirname "$DEST")"
+          cp "$SRC" "$DEST"
+          chmod +x "$DEST" || true
+          ls -la "$DEST"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: engine-${{ matrix.pkg }}
+          path: projects/packages/${{ matrix.pkg }}/lib/${{ matrix.dest_name }}
+          if-no-files-found: error
+
+  build-wasm:
+    name: engine wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly-2026-07-20
+      - uses: jetli/wasm-pack-action@v0.4.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build:wasm
+      - uses: actions/upload-artifact@v7
+        with:
+          name: engine-wasm
+          path: projects/packages/yyds-unknown-wasm32/lib
+          if-no-files-found: error
+
+  publish-npm:
+    name: publish npm
+    needs: [build-engine, build-wasm]
+    runs-on: ubuntu-latest
+    environment: NPM_PUBLISH
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          scope: "@yyds"
+          cache: pnpm
+      - name: Ensure npm CLI supports OIDC
+        run: |
+          npm install -g npm@latest
+          node -v
+          npm -v
+      - run: pnpm install --frozen-lockfile
+
+      - name: Download engine artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: engine-*
+          path: _engines
+
+      - name: Resolve version from tag
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "expected semver tag like v1.2.3, got: $tag" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publishing version $version (tag $tag)"
+
+      - name: Prepare packages for publish
+        env:
+          INPUT_VERSION: ${{ steps.ver.outputs.version }}
+        run: node scripts/prepare-npm-publish.mjs
+
+      - name: Publish npm
+        run: node scripts/publish-npm-packages.mjs
+
+  github-release:
+    name: github release zips
+    needs: build-engine
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download engine artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: engine-*
+          path: _engines
+
+      - name: Upload zips to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/upload-github-release-zips.mjs
