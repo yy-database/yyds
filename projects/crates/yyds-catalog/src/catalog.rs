@@ -93,6 +93,8 @@ impl Catalog {
             Some(_) => Ok(()),
             None => {
                 self.schema = Some(adopt_catalog_schema(version, document)?);
+                // Compatibility adapter until the durable ResolvedContract
+                // catalog replaces the legacy identity snapshot.
                 let parsed = vos::parser::parse_document(document)
                     .map_err(|diagnostics| Error::Schema { message: diagnostics.to_string() })?;
                 self.identity = Some(vos::catalog_from_document(&parsed).map_err(|message| {
