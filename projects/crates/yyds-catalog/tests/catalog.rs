@@ -81,3 +81,35 @@ fn routing_epoch_round_trips_and_requires_monotonic_publish() {
     assert_eq!(map.epoch(), ShardEpoch(1));
     assert_eq!(map.shards(), &[ShardId("a".into()), ShardId("b".into())]);
 }
+
+#[test]
+fn resolved_contract_round_trips_and_rejects_conflicting_publish() {
+    let source = "class T { id: uuid }";
+    let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::contract::TypeIdentity {
+            canonical_path: vec!["T".into()],
+            type_id: 1,
+            kind: vos::contract::TypeContractKind::Class,
+            fields: vec![vos::contract::FieldIdentity {
+                canonical_name: "id".into(),
+                field_id: 2,
+                virtual_field_index: 0,
+            }],
+        }],
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    let dir = tempdir().expect("tempdir");
+    let path = catalog_path(dir.path().join("contract"));
+    let mut catalog = Catalog::open(&path).expect("open");
+    catalog.publish_resolved_contract(contract.clone()).expect("publish");
+    catalog.flush().expect("flush");
+
+    let reopened = Catalog::open(&path).expect("reload");
+    assert_eq!(reopened.resolved_contract(), Some(&contract));
+
+    let mut conflicting = contract.clone();
+    conflicting.schema_fingerprint = "0".repeat(64);
+    assert!(reopened.clone().publish_resolved_contract(conflicting).is_err());
+}
