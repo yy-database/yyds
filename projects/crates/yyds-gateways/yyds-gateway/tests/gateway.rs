@@ -33,11 +33,11 @@ fn sql_catalog_binding_prefers_published_resolved_contract() {
         format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
         types: vec![vos::contract::TypeIdentity {
             canonical_path: vec!["users".into()],
-            type_id: 17,
+            type_id: 1,
             kind: vos::contract::TypeContractKind::Table,
             fields: vec![vos::contract::FieldIdentity {
                 canonical_name: "id".into(),
-                field_id: 23,
+                field_id: 1,
                 virtual_field_index: 0,
             }],
         }],
@@ -47,8 +47,8 @@ fn sql_catalog_binding_prefers_published_resolved_contract() {
     yyds_catalog.ensure_schema(7, source).expect("schema");
     yyds_catalog.publish_resolved_contract(contract).expect("contract");
     let catalog = yyds_gateway::SqlCatalog::from_yyds_catalog(&yyds_catalog).expect("gateway catalog");
-    assert_eq!(catalog.tables()[0].type_id, 17);
-    assert_eq!(catalog.tables()[0].fields[0].field_id, 23);
+    assert_eq!(catalog.tables()[0].type_id, 1);
+    assert_eq!(catalog.tables()[0].fields[0].field_id, 1);
 }
 
 #[test]

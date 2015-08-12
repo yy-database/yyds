@@ -94,7 +94,7 @@ fn resolved_contract_round_trips_and_rejects_conflicting_publish() {
             kind: vos::contract::TypeContractKind::Class,
             fields: vec![vos::contract::FieldIdentity {
                 canonical_name: "id".into(),
-                field_id: 2,
+                field_id: 1,
                 virtual_field_index: 0,
             }],
         }],
@@ -103,6 +103,8 @@ fn resolved_contract_round_trips_and_rejects_conflicting_publish() {
     let dir = tempdir().expect("tempdir");
     let path = catalog_path(dir.path().join("contract"));
     let mut catalog = Catalog::open(&path).expect("open");
+    assert!(catalog.publish_resolved_contract(contract.clone()).is_err());
+    catalog.ensure_schema(1, source).expect("schema");
     catalog.publish_resolved_contract(contract.clone()).expect("publish");
     catalog.flush().expect("flush");
 
