@@ -26,6 +26,32 @@ fn sql_catalog_binding_consumes_published_yyds_identity() {
 }
 
 #[test]
+fn sql_catalog_binding_prefers_published_resolved_contract() {
+    let source = "table users { @@id: i64 }\n";
+    let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::contract::TypeIdentity {
+            canonical_path: vec!["users".into()],
+            type_id: 17,
+            kind: vos::contract::TypeContractKind::Table,
+            fields: vec![vos::contract::FieldIdentity {
+                canonical_name: "id".into(),
+                field_id: 23,
+                virtual_field_index: 0,
+            }],
+        }],
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    let mut yyds_catalog = yyds_catalog::Catalog::open_memory();
+    yyds_catalog.ensure_schema(7, source).expect("schema");
+    yyds_catalog.publish_resolved_contract(contract).expect("contract");
+    let catalog = yyds_gateway::SqlCatalog::from_yyds_catalog(&yyds_catalog).expect("gateway catalog");
+    assert_eq!(catalog.tables()[0].type_id, 17);
+    assert_eq!(catalog.tables()[0].fields[0].field_id, 23);
+}
+
+#[test]
 fn all_gateway_kinds_have_distinct_ids() {
     let ids: Vec<_> = ALL_GATEWAY_KINDS.iter().map(|kind| kind.id()).collect();
     let mut unique = ids.clone();

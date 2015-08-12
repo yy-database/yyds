@@ -33,15 +33,63 @@ pub struct SqlCatalog {
 }
 
 impl SqlCatalog {
-    /// Builds a gateway view from the identity snapshot published by YYDS catalog.
+    /// Builds a gateway view from the newest contract published by YYDS.
     pub fn from_yyds_catalog(catalog: &yyds_catalog::Catalog) -> Result<Self, SqlFrontendError> {
         let schema = catalog
             .schema()
             .ok_or_else(|| catalog_error("YYDS catalog has no published schema"))?;
+        if let Some(contract) = catalog.resolved_contract() {
+            return Self::from_resolved_contract(schema.version, contract);
+        }
         let identity = catalog
             .identity()
             .ok_or_else(|| catalog_error("YYDS catalog has no published identity snapshot"))?;
         Self::from_snapshot(schema.version, identity)
+    }
+
+    /// Projects gateway table identities from a validated resolved contract.
+    pub fn from_resolved_contract(
+        schema_version: u32,
+        contract: &vos::ResolvedContract,
+    ) -> Result<Self, SqlFrontendError> {
+        if schema_version == 0 {
+            return Err(catalog_error("catalog schema version must be nonzero"));
+        }
+        contract.validate().map_err(|error| {
+            catalog_error(&format!("invalid resolved VOS contract {}: {}", error.code, error.message))
+        })?;
+        let mut type_ids = std::collections::BTreeSet::new();
+        let mut field_ids = std::collections::BTreeSet::new();
+        let tables = contract
+            .types
+            .iter()
+            .filter(|entry| entry.kind == vos::contract::TypeContractKind::Table)
+            .map(|entry| {
+                if entry.type_id == 0 || !type_ids.insert(entry.type_id) {
+                    return Err(catalog_error("invalid or duplicate catalog type identity"));
+                }
+                let name = entry
+                    .canonical_path
+                    .last()
+                    .cloned()
+                    .ok_or_else(|| catalog_error("catalog table has no canonical name"))?;
+                let fields = entry
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        if field.field_id == 0 || !field_ids.insert(field.field_id) {
+                            return Err(catalog_error("invalid or duplicate catalog field identity"));
+                        }
+                        Ok(SqlCatalogField {
+                            field_id: field.field_id,
+                            name: field.canonical_name.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SqlCatalogTable { type_id: entry.type_id, name, fields })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { schema_version, tables })
     }
 
     /// Projects identities supplied by the catalog publisher, without reallocating them.
