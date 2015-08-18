@@ -7,6 +7,7 @@ use yyds_gateway::{GatewayConfig, GatewayKind, version_label};
 use yyds_types::{Error, Result};
 
 pub mod resp;
+pub mod connection;
 
 /// Gateway kind implemented by this crate.
 pub const GATEWAY_KIND: GatewayKind = GatewayKind::Redis;
