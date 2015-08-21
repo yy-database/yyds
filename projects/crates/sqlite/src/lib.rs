@@ -7,10 +7,12 @@
 
 mod database;
 mod format;
+mod record;
 
 use yyds_types::{Error, Result};
 
 pub use crate::database::{read_existing, SqliteDatabase};
+pub use crate::record::{decode_record, decode_varint, RecordLimits, RecordValue, TextEncoding};
 pub use crate::format::{
     blank_database, decode_library_version, validate_database, validate_header,
     ENGINE_LIBRARY_VERSION, ENGINE_LIBRARY_VERSION_NUMBER, MAGIC,
