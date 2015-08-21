@@ -9,6 +9,7 @@ use crate::resp::{Request, RequestLimits, decode_request};
 /// Serves one bounded RESP2 connection with a 30-second I/O timeout.
 /// Only PING, ECHO and QUIT are supported. Database commands require a binder.
 pub fn serve_connection(mut stream: TcpStream, limits: RequestLimits) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
     let mut pending = Vec::new();
