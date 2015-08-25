@@ -3,14 +3,16 @@ import test from "node:test";
 
 import { WHY_NOT_YY_OPTIMIZED } from "../src/disguise.ts";
 
-test("@yyds/sqlite re-exports @yyds/yyds", async () => {
+test("@yyds/sqlite default entry does not expose the YYDS engine", async () => {
     const sqlite = await import("../src/index.ts");
-    assert.equal(typeof sqlite.initWasm, "function");
+    assert.equal("initWasm" in sqlite, false);
+    assert.equal("loadYydsNative" in sqlite, false);
 });
 
-test("@yyds/sqlite node entry re-exports native loader", async () => {
+test("@yyds/sqlite node entry exposes the independent snapshot reader", async () => {
     const node = await import("../src/node.ts");
-    assert.equal(typeof node.loadYydsNative, "function");
+    assert.equal(typeof node.SqliteSnapshot, "function");
+    assert.equal("loadYydsNative" in node, false);
 });
 
 test("@yyds/sqlite documents binary compatibility constraint", () => {
