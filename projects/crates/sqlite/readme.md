@@ -1,12 +1,12 @@
 # yyds-sqlite
 
-SQLite **foreign passthrough** for YYDS, implemented in **pure Rust**.
+SQLite compatibility crate for YYDS. SQL execution is provided by upstream SQLite via `rusqlite` with the bundled C library. A separate pure-Rust reader provides bounded format-3 snapshot inspection.
 
-On-disk `.sqlite` / `.db` files are a stable external binary contract. YYDS cannot replace that layout with `yyds-kv`, `.yyds` catalog bytes, or other YY-system optimizations on this path. This crate owns the format-3 container (header validation, blank database materialization, file roundtrip) without `rusqlite`, bundled `libsqlite3`, or other native SQLite bindings.
+On-disk `.sqlite` / `.db` files use the upstream SQLite format and engine behavior. This path is independent of `yyds-kv`, `.yyds` catalog storage, and YYDS cluster execution. `SqliteEngine` opens in-memory and file databases, runs one statement per call, and inherits SQLite's pager, file locking, transactions, journal and WAL recovery. The N-API layer preserves signed 64-bit integers and BLOB bytes. It does not expose SQLite's C ABI or bind parameters.
 
 This is **not** a disguise wire gateway (`yyds-gateway-*`) and **not** a VOS executor.
 
-Existing files are read-only main-file snapshots. Dropping a handle never writes. Blank files are created exclusively. File-backed `flush()` rejects writes until a transactional pager exists. Header validation is not an integrity check or a consistent view of an active WAL database. SQL execution, journal recovery, locking, and C ABI compatibility are not implemented.
+`SqliteDatabase` and `SqliteSnapshot` are read-only format inspection APIs. They do not recover WALs or represent a live connection. Use `SqliteEngine` for SQL and normal SQLite file semantics. Engine operations must pass through upstream SQLite and must not be emulated by writing container bytes directly.
 
 Record payload decoding supports SQLite varints, signed integers, binary64, NULL, BLOB, and Unicode text in UTF-8/UTF-16LE/UTF-16BE under explicit size and column limits. Non-Unicode text is explicitly unsupported rather than silently replaced.
 
@@ -14,4 +14,4 @@ Record payload decoding supports SQLite varints, signed integers, binary64, NULL
 
 `read_schema` returns typed table/index/view/trigger objects, preserving names, root pages and opaque CREATE source (including NULL SQL for automatic indexes). `read_named_table` and `SqliteDatabase::table` resolve ordinary rowid tables by ASCII-insensitive stored names. The main-file schema aliases `sqlite_schema` and `sqlite_master` are supported. Views and virtual tables are not executed. Limits apply to each schema/table scan separately. These APIs return raw records, not SQL projections or expanded INTEGER PRIMARY KEY values. CREATE source remains unparsed and belongs to the Oak SQL frontend when semantic resolution is implemented.
 
-Run the independent reference-engine check with `YYDS_SQLITE_REFERENCE_PYTHON` set to a Python executable providing `sqlite3`, then `cargo test -p yyds-sqlite --test reference -- --ignored`. It verifies original SQLite files, all five schema columns, named table traversal, overflow BLOBs and signed rowid extremes at 512/4096/65536-byte page sizes, plus original-engine acceptance of the generated blank file. It includes automatic indexes, views, triggers, and explicit rejection of WITHOUT ROWID reads. The reference subprocess has a 20-second deadline. This does not prove SQL or transaction compatibility.
+Run the independent format-reader oracle with `YYDS_SQLITE_REFERENCE_PYTHON` set to Python with `sqlite3`, then `cargo test -p yyds-sqlite --test reference -- --ignored`. It covers original files, page sizes, encodings, schema and row traversal. SQL compatibility is independently exercised by executing through the bundled engine and checking the created database from Python's original SQLite. This does not prove complete sqlite3 shell or C ABI compatibility.

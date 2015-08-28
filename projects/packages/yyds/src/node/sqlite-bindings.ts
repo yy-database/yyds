@@ -29,4 +29,26 @@ export interface SqliteSnapshotBinding {
 /** An independent SQLite reader hosted in the same native addon. */
 export interface YydsSqliteBindings {
     SqliteSnapshot: new (bytes: Buffer, maxSnapshotBytes?: number) => SqliteSnapshotBinding;
+    SqliteConnection: new (path: string) => SqliteConnectionBinding;
+}
+
+export interface SqliteConnectionBinding {
+    execute(sql: string): SqliteQueryResultBinding;
+    sourceId(): string;
+}
+
+export interface SqliteQueryResultBinding {
+    columns: string[];
+    rows: SqliteResultValueBinding[][];
+    changes: string;
+    lastInsertRowid: string;
+}
+
+export interface SqliteResultValueBinding {
+    kind: "null" | "integer" | "real" | "text" | "blob";
+    integer?: string;
+    real?: number;
+    text?: string;
+    textBytes?: Buffer;
+    blob?: Buffer;
 }

@@ -1,6 +1,6 @@
 use yyds_sqlite::{
-    BACKEND_ID, CONSTRAINT, ENGINE_LIBRARY_VERSION, MAGIC, SqliteDatabase, WHY_NOT_YY_OPTIMIZED, blank_database,
-    decode_library_version, handle_sql, read_existing, validate_database,
+    BACKEND_ID, CONSTRAINT, MAGIC, SqliteDatabase, WHY_NOT_YY_OPTIMIZED, blank_database, decode_library_version, read_existing,
+    sqlite_library_version, validate_database,
 };
 
 #[test]
@@ -11,24 +11,17 @@ fn sqlite_backend_metadata() {
 }
 
 #[test]
-fn sqlite_disguise_select_one() {
-    let lines = handle_sql("SELECT 1").expect("select");
-    assert_eq!(lines, vec!["1"]);
-}
-
-#[test]
-fn sqlite_disguise_select_version() {
-    let lines = handle_sql("SELECT sqlite_version()").expect("version");
-    assert_eq!(lines, vec![ENGINE_LIBRARY_VERSION]);
-}
-
-#[test]
 fn sqlite_blank_database_is_valid_format3() {
     let pages = blank_database().expect("blank");
     assert_eq!(pages.len(), 4096);
     assert_eq!(pages.get(..MAGIC.len()), Some(MAGIC));
     assert_eq!(validate_database(&pages).expect("validate"), 4096);
-    assert_eq!(decode_library_version(&pages).expect("version"), ENGINE_LIBRARY_VERSION);
+    assert_eq!(decode_library_version(&pages).expect("version"), rusqlite::version());
+}
+
+#[test]
+fn reported_library_version_is_the_linked_sqlite_version() {
+    assert_eq!(sqlite_library_version(), rusqlite::version());
 }
 
 #[test]
@@ -36,7 +29,7 @@ fn sqlite_live_ping_and_version() {
     let db = SqliteDatabase::open_in_memory().expect("open");
     assert_eq!(db.page_size(), 4096);
     assert_eq!(db.ping().expect("ping"), 1);
-    assert_eq!(db.sqlite_version().expect("version"), ENGINE_LIBRARY_VERSION);
+    assert_eq!(db.sqlite_version().expect("version"), rusqlite::version());
 }
 
 #[test]
@@ -49,7 +42,7 @@ fn sqlite_file_roundtrip() {
 
     let bytes = read_existing(&path).expect("read back");
     assert_eq!(bytes.len(), 4096);
-    assert_eq!(decode_library_version(&bytes).expect("version"), ENGINE_LIBRARY_VERSION);
+    assert_eq!(decode_library_version(&bytes).expect("version"), rusqlite::version());
 }
 
 #[test]
@@ -72,4 +65,50 @@ fn sqlite_file_flush_rejects_snapshot_write() {
     assert!(matches!(db.flush(), Err(yyds_types::Error::Unsupported(_))));
     drop(db);
     assert_eq!(std::fs::read(&path).expect("read"), original);
+}
+
+#[test]
+fn upstream_engine_executes_sql_and_preserves_storage_classes() {
+    use yyds_sqlite::{SqliteEngine, SqliteValue};
+
+    let database = SqliteEngine::open_in_memory().unwrap();
+    database
+        .execute(
+            "CREATE TABLE values_probe (integer_value INTEGER, real_value REAL, text_value TEXT, blob_value BLOB, null_value)",
+        )
+        .unwrap();
+    database.execute("INSERT INTO values_probe VALUES (-9223372036854775808, 1.25, 'hello', X'00ff', NULL)").unwrap();
+    let result =
+        database.execute("SELECT integer_value, real_value, text_value, blob_value, null_value FROM values_probe").unwrap();
+    assert_eq!(result.columns, ["integer_value", "real_value", "text_value", "blob_value", "null_value"]);
+    assert_eq!(
+        result.rows,
+        vec![vec![
+            SqliteValue::Integer(i64::MIN),
+            SqliteValue::Real(1.25),
+            SqliteValue::Text(b"hello".to_vec()),
+            SqliteValue::Blob(vec![0, 255]),
+            SqliteValue::Null,
+        ]]
+    );
+    assert_eq!(database.execute("SELECT sqlite_version()").unwrap().rows[0][0].to_string(), rusqlite::version());
+    assert!(database.execute("SELECT FROM").is_err());
+    assert!(database.execute("SELECT 1; SELECT 2").is_err());
+}
+
+#[test]
+fn upstream_engine_creates_binary_compatible_database_files() {
+    use yyds_sqlite::SqliteEngine;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("engine.sqlite");
+    {
+        let database = SqliteEngine::open(&path).unwrap();
+        database.execute("PRAGMA journal_mode=WAL").unwrap();
+        database.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, value BLOB)").unwrap();
+        database.execute("INSERT INTO sample(value) VALUES (X'00ff')").unwrap();
+        let row = database.execute("SELECT id, value FROM sample").unwrap();
+        assert_eq!(row.rows[0][1].to_string(), "x'00ff'");
+    }
+    assert_eq!(std::fs::read(path).unwrap().get(..16), Some(&b"SQLite format 3\0"[..]));
 }

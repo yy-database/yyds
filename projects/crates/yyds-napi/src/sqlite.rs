@@ -1,6 +1,6 @@
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
-use yyds_sqlite::{SchemaObjectKind, TableLimits, read_named_table, read_schema, validate_database};
+use yyds_sqlite::{SchemaObjectKind, SqliteEngine, SqliteValue, TableLimits, read_named_table, read_schema, validate_database};
 
 /// Optional resource bounds for each schema or table scan.
 #[napi(object)]
@@ -60,6 +60,121 @@ pub struct SqliteTableRow {
 #[napi]
 pub struct SqliteSnapshot {
     bytes: Vec<u8>,
+}
+
+/// A SQLite query result value with its native storage class.
+#[napi(object)]
+pub struct SqliteResultValue {
+    /// SQLite storage class: null, integer, real, text, or blob.
+    pub kind: String,
+    /// Decimal signed integer when `kind` is integer.
+    pub integer: Option<String>,
+    /// Floating point value when `kind` is real.
+    pub real: Option<f64>,
+    /// Text value when `kind` is text.
+    pub text: Option<String>,
+    /// Lossless SQLite text bytes when the value is not valid UTF-8.
+    pub text_bytes: Option<Buffer>,
+    /// Binary value when `kind` is blob.
+    pub blob: Option<Buffer>,
+}
+
+/// Result of executing one SQLite statement.
+#[napi(object)]
+pub struct SqliteQueryResult {
+    /// Column labels in result order.
+    pub columns: Vec<String>,
+    /// Rows with lossless integer and binary values.
+    pub rows: Vec<Vec<SqliteResultValue>>,
+    /// Changed row count.
+    pub changes: String,
+    /// Last insert rowid as exact signed decimal text.
+    pub last_insert_rowid: String,
+}
+
+/// A real SQLite connection backed by upstream SQLite, independent of YYDS storage.
+#[napi]
+pub struct SqliteConnection {
+    engine: SqliteEngine,
+}
+
+#[napi]
+impl SqliteConnection {
+    /// Opens or creates a SQLite database file. Use `:memory:` for a private memory database.
+    #[napi(constructor)]
+    pub fn new(path: String) -> napi::Result<Self> {
+        let engine = if path == ":memory:" { SqliteEngine::open_in_memory() } else { SqliteEngine::open(&path) }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(Self { engine })
+    }
+
+    /// Executes one statement through the SQLite engine.
+    #[napi]
+    pub fn execute(&self, sql: String) -> napi::Result<SqliteQueryResult> {
+        let result = self.engine.execute(&sql).map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(SqliteQueryResult {
+            columns: result.columns,
+            rows: result.rows.into_iter().map(|row| row.into_iter().map(result_value).collect()).collect(),
+            changes: result.changes.to_string(),
+            last_insert_rowid: result.last_insert_rowid.to_string(),
+        })
+    }
+
+    /// Returns SQLite's native engine source id.
+    #[napi]
+    pub fn source_id(&self) -> napi::Result<String> {
+        self.engine.source_id().map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+}
+
+fn result_value(value: SqliteValue) -> SqliteResultValue {
+    match value {
+        SqliteValue::Null => {
+            SqliteResultValue { kind: "null".into(), integer: None, real: None, text: None, text_bytes: None, blob: None }
+        }
+        SqliteValue::Integer(value) => SqliteResultValue {
+            kind: "integer".into(),
+            integer: Some(value.to_string()),
+            real: None,
+            text: None,
+            text_bytes: None,
+            blob: None,
+        },
+        SqliteValue::Real(value) => SqliteResultValue {
+            kind: "real".into(),
+            integer: None,
+            real: Some(value),
+            text: None,
+            text_bytes: None,
+            blob: None,
+        },
+        SqliteValue::Text(value) => match String::from_utf8(value.clone()) {
+            Ok(text) => SqliteResultValue {
+                kind: "text".into(),
+                integer: None,
+                real: None,
+                text: Some(text),
+                text_bytes: None,
+                blob: None,
+            },
+            Err(_) => SqliteResultValue {
+                kind: "text".into(),
+                integer: None,
+                real: None,
+                text: None,
+                text_bytes: Some(value.into()),
+                blob: None,
+            },
+        },
+        SqliteValue::Blob(value) => SqliteResultValue {
+            kind: "blob".into(),
+            integer: None,
+            real: None,
+            text: None,
+            text_bytes: None,
+            blob: Some(value.into()),
+        },
+    }
 }
 
 #[napi]
