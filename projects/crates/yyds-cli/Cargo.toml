@@ -1,0 +1,18 @@
+[package]
+name = "yyds-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The YYDS cluster lifecycle command"
+publish = false
+
+[[bin]]
+name = "yyds"
+path = "src/main.rs"
+
+[dependencies]
+yyds-control = { workspace = true }
+yyds-gateway-redis = { path = "../yyds-gateways/yyds-gateway-redis" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { version = "1", features = ["serde", "v4"] }
