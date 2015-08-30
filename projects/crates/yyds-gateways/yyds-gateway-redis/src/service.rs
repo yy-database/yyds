@@ -13,7 +13,12 @@ use std::{
 
 use yyds_control::NodeLease;
 
-use crate::{connection::serve_cancellable, resp::RequestLimits};
+use yyds_execution::KeyValueExecutor;
+
+use crate::{
+    connection::{serve_cancellable, serve_cancellable_with_executor},
+    resp::RequestLimits,
+};
 
 const MAX_CLIENTS: usize = 64;
 
@@ -29,6 +34,25 @@ pub struct RedisService {
 impl RedisService {
     /// Starts a protocol probe without creating a new node or cluster identity.
     pub fn start(owner: Arc<NodeLease>, address: SocketAddr, limits: RequestLimits) -> io::Result<Self> {
+        Self::start_inner(owner, address, limits, None)
+    }
+
+    /// Starts a Redis listener bound to an existing YYDS key/value executor.
+    pub fn start_with_executor(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        limits: RequestLimits,
+        executor: Arc<dyn KeyValueExecutor>,
+    ) -> io::Result<Self> {
+        Self::start_inner(owner, address, limits, Some(executor))
+    }
+
+    fn start_inner(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        limits: RequestLimits,
+        executor: Option<Arc<dyn KeyValueExecutor>>,
+    ) -> io::Result<Self> {
         if !address.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -42,7 +66,7 @@ impl RedisService {
         let signal = Arc::clone(&stopping);
         let worker = thread::Builder::new().name("yyds-redis-listener".into()).spawn(move || {
             let _owner = owner;
-            listen(listener, signal, limits)
+            listen(listener, signal, limits, executor)
         })?;
         Ok(Self { address, stopping, worker: Some(worker) })
     }
@@ -107,7 +131,12 @@ impl Drop for Clients {
     }
 }
 
-fn listen(listener: TcpListener, stopping: Arc<AtomicBool>, limits: RequestLimits) -> io::Result<()> {
+fn listen(
+    listener: TcpListener,
+    stopping: Arc<AtomicBool>,
+    limits: RequestLimits,
+    executor: Option<Arc<dyn KeyValueExecutor>>,
+) -> io::Result<()> {
     let mut clients = Clients { workers: Vec::new(), stopping: Arc::clone(&stopping) };
     while !stopping.load(Ordering::Acquire) {
         clients.reap();
@@ -123,8 +152,12 @@ fn listen(listener: TcpListener, stopping: Arc<AtomicBool>, limits: RequestLimit
                     continue;
                 }
                 let cancellation = Arc::clone(&stopping);
+                let connection_executor = executor.clone();
                 let worker = thread::Builder::new().name("yyds-redis-client".into()).spawn(move || {
-                    let _ = serve_cancellable(stream, limits, cancellation);
+                    let _ = match connection_executor {
+                        Some(executor) => serve_cancellable_with_executor(stream, limits, cancellation, executor),
+                        None => serve_cancellable(stream, limits, cancellation),
+                    };
                 })?;
                 clients.workers.push(worker);
             }
