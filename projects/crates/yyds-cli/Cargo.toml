@@ -17,6 +17,7 @@ yyds-kv = { workspace = true }
 yyds-types = { workspace = true }
 yyds-gateway-redis = { path = "../yyds-gateways/yyds-gateway-redis" }
 yyds-gateway-pgsql = { path = "../yyds-gateways/yyds-gateway-pgsql" }
+yyds-gateway-mysql = { path = "../yyds-gateways/yyds-gateway-mysql" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 uuid = { version = "1", features = ["serde", "v4"] }

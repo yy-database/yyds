@@ -11,6 +11,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
+use yyds_gateway_mysql::service::MysqlService;
 use yyds_gateway_pgsql::service::PgsqlService;
 use yyds_gateway_redis::{DEFAULT_PORT, resp::RequestLimits, service::RedisService};
 use yyds_kv::FileShard;
@@ -36,6 +37,7 @@ struct Arguments {
     node_id: Option<String>,
     redis_port: u16,
     pgsql_port: Option<u16>,
+    mysql_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -47,6 +49,7 @@ struct RuntimeStatus {
     started_at_unix_ms: u128,
     redis_address: SocketAddr,
     pgsql_address: Option<SocketAddr>,
+    mysql_address: Option<SocketAddr>,
 }
 
 fn main() {
@@ -80,6 +83,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
     let mut node_id = None;
     let mut redis_port = DEFAULT_PORT;
     let mut pgsql_port = None;
+    let mut mysql_port = None;
     let mut index = 1;
     let mut seen = std::collections::HashSet::new();
     while index < arguments.len() {
@@ -87,7 +91,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
         if !seen.insert(flag) {
             return Err(format!("duplicate option `{flag}`"));
         }
-        if command != Command::Start && matches!(flag, "--redis-port" | "--pgsql-port")
+        if command != Command::Start && matches!(flag, "--redis-port" | "--pgsql-port" | "--mysql-port")
             || matches!(command, Command::Status | Command::Stop) && matches!(flag, "--cluster-id" | "--node-id")
         {
             return Err(format!("option `{flag}` is not valid for this command"));
@@ -102,15 +106,16 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
             "--node-id" => node_id = Some(value.clone()),
             "--redis-port" => redis_port = value.parse().map_err(|_| "invalid --redis-port".to_string())?,
             "--pgsql-port" => pgsql_port = Some(value.parse().map_err(|_| "invalid --pgsql-port".to_string())?),
+            "--mysql-port" => mysql_port = Some(value.parse().map_err(|_| "invalid --mysql-port".to_string())?),
             _ => return Err(format!("unknown option `{flag}`\n{}", usage())),
         }
         index += 2;
     }
-    Ok(Arguments { command, data_dir: data_dir.ok_or_else(usage)?, cluster_id, node_id, redis_port, pgsql_port })
+    Ok(Arguments { command, data_dir: data_dir.ok_or_else(usage)?, cluster_id, node_id, redis_port, pgsql_port, mysql_port })
 }
 
 fn usage() -> String {
-    "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT] [--pgsql-port PORT]"
+    "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT]"
         .into()
 }
 
@@ -141,6 +146,11 @@ fn start(arguments: &Arguments) -> Result<(), String> {
         .map(|port| PgsqlService::start(Arc::clone(&lease), SocketAddr::from(([127, 0, 0, 1], port))))
         .transpose()
         .map_err(|error| error.to_string())?;
+    let mysql_service = arguments
+        .mysql_port
+        .map(|port| MysqlService::start(Arc::clone(&lease), SocketAddr::from(([127, 0, 0, 1], port))))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let runtime = RuntimeStatus {
         version: CONTROL_VERSION,
         generation: uuid::Uuid::new_v4(),
@@ -148,16 +158,25 @@ fn start(arguments: &Arguments) -> Result<(), String> {
         started_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_millis(),
         redis_address: service.address(),
         pgsql_address: pgsql_service.as_ref().map(PgsqlService::address),
+        mysql_address: mysql_service.as_ref().map(MysqlService::address),
     };
     write_status(&arguments.data_dir, &runtime)?;
-    println!("yyds running pid={} redis={} pgsql={:?}", runtime.pid, runtime.redis_address, runtime.pgsql_address);
+    println!(
+        "yyds running pid={} redis={} pgsql={:?} mysql={:?}",
+        runtime.pid, runtime.redis_address, runtime.pgsql_address, runtime.mysql_address
+    );
     let stop_path = stop_path(&arguments.data_dir, runtime.generation);
-    while !stop_path.exists() && !service.is_finished() && pgsql_service.as_ref().is_none_or(|pgsql| !pgsql.is_finished()) {
+    while !stop_path.exists()
+        && !service.is_finished()
+        && pgsql_service.as_ref().is_none_or(|pgsql| !pgsql.is_finished())
+        && mysql_service.as_ref().is_none_or(|mysql| !mysql.is_finished())
+    {
         thread::sleep(Duration::from_millis(50));
     }
     let redis_result = service.stop().map_err(|error| error.to_string());
     let pgsql_result = pgsql_service.map(PgsqlService::stop).transpose().map_err(|error| error.to_string());
-    let result = redis_result.and(pgsql_result.map(|_| ()));
+    let mysql_result = mysql_service.map(MysqlService::stop).transpose().map_err(|error| error.to_string());
+    let result = redis_result.and(pgsql_result.map(|_| ())).and(mysql_result.map(|_| ()));
     let _ = fs::remove_file(arguments.data_dir.join(STATUS_FILE));
     let _ = fs::remove_file(stop_path);
     result
@@ -258,6 +277,7 @@ fn read_status(directory: &Path) -> Result<Option<RuntimeStatus>, String> {
                 || status.generation.is_nil()
                 || !status.redis_address.ip().is_loopback()
                 || status.pgsql_address.is_some_and(|address| !address.ip().is_loopback())
+                || status.mysql_address.is_some_and(|address| !address.ip().is_loopback())
             {
                 return Err("unsupported or invalid runtime status".into());
             }
