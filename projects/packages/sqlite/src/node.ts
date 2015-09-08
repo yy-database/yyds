@@ -23,6 +23,8 @@ export type SqliteCell =
     | { kind: "text"; value: string | Buffer }
     | { kind: "blob"; value: Buffer };
 
+export type SqliteParameter = SqliteCell;
+
 export interface SqliteQueryResult {
     columns: string[];
     rows: SqliteCell[][];
@@ -55,8 +57,40 @@ export class SqliteConnection {
         };
     }
 
+    executeWithParameters(sql: string, parameters: SqliteParameter[]): SqliteQueryResult {
+        if (typeof sql !== "string" || sql.length === 0) {
+            throw new TypeError("SQLite SQL must be a non-empty string");
+        }
+        if (!Array.isArray(parameters)) {
+            throw new TypeError("SQLite parameters must be an array");
+        }
+        const bound = parameters.map(encodeParameter);
+        const result = this.#native.executeWithParameters(sql, bound);
+        return {
+            columns: result.columns,
+            rows: result.rows.map((row) => row.map(decodeCell)),
+            changes: BigInt(result.changes),
+            lastInsertRowid: BigInt(result.lastInsertRowid),
+        };
+    }
+
     sourceId(): string {
         return this.#native.sourceId();
+    }
+}
+
+function encodeParameter(value: SqliteParameter): NonNullable<Parameters<SqliteConnectionBinding["executeWithParameters"]>[1][number]> {
+    switch (value.kind) {
+        case "null":
+            return { kind: "null" };
+        case "integer":
+            return { kind: "integer", integer: value.value.toString() };
+        case "real":
+            return { kind: "real", real: value.value };
+        case "text":
+            return { kind: "text", text: typeof value.value === "string" ? Buffer.from(value.value, "utf8") : value.value };
+        case "blob":
+            return { kind: "blob", blob: value.value };
     }
 }
 

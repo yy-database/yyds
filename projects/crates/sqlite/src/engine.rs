@@ -2,7 +2,10 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, types::ValueRef};
+use rusqlite::{
+    Connection, OpenFlags, params_from_iter,
+    types::{ToSql, ToSqlOutput, ValueRef},
+};
 
 /// One SQL result cell preserving SQLite's runtime storage class.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +20,18 @@ pub enum SqliteValue {
     Text(Vec<u8>),
     /// SQLite BLOB.
     Blob(Vec<u8>),
+}
+
+impl ToSql for SqliteValue {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::Borrowed(match self {
+            Self::Null => ValueRef::Null,
+            Self::Integer(value) => ValueRef::Integer(*value),
+            Self::Real(value) => ValueRef::Real(*value),
+            Self::Text(value) => ValueRef::Text(value),
+            Self::Blob(value) => ValueRef::Blob(value),
+        }))
+    }
 }
 
 impl std::fmt::Display for SqliteValue {
@@ -75,14 +90,19 @@ impl SqliteEngine {
 
     /// Executes exactly one statement and preserves native SQLite value types.
     pub fn execute(&self, sql: &str) -> rusqlite::Result<SqliteQueryResult> {
+        self.execute_with_parameters(sql, &[])
+    }
+
+    /// Executes exactly one statement with all SQLite parameter slots bound in index order.
+    pub fn execute_with_parameters(&self, sql: &str, parameters: &[SqliteValue]) -> rusqlite::Result<SqliteQueryResult> {
         let mut statement = self.connection.prepare(sql)?;
         let columns = statement.column_names().iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
         let mut rows = Vec::new();
         if columns.is_empty() {
-            statement.execute([])?;
+            statement.execute(params_from_iter(parameters))?;
         }
         else {
-            let mut cursor = statement.query([])?;
+            let mut cursor = statement.query(params_from_iter(parameters))?;
             while let Some(row) = cursor.next()? {
                 let mut values = Vec::with_capacity(columns.len());
                 for index in 0..columns.len() {

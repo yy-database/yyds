@@ -34,7 +34,16 @@ export interface YydsSqliteBindings {
 
 export interface SqliteConnectionBinding {
     execute(sql: string): SqliteQueryResultBinding;
+    executeWithParameters(sql: string, parameters: SqliteParameterBinding[]): SqliteQueryResultBinding;
     sourceId(): string;
+}
+
+export interface SqliteParameterBinding {
+    kind: "null" | "integer" | "real" | "text" | "blob";
+    integer?: string;
+    real?: number;
+    text?: Buffer;
+    blob?: Buffer;
 }
 
 export interface SqliteQueryResultBinding {
