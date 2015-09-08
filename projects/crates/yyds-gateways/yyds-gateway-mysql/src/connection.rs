@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::wire::{MAX_PACKET_PAYLOAD, PacketError, encode_packet};
+use yyds_gateway::parse_sql;
 
 const SERVER_CAPABILITIES: u32 =
     0x0000_0001 | 0x0000_0004 | 0x0000_0008 | 0x0000_0200 | 0x0000_2000 | 0x0000_8000 | 0x0002_0000 | 0x0008_0000;
@@ -82,13 +83,27 @@ fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
         }
         match payload[0] {
             0x01 => return Ok(()),
-            0x03 => write_error(
-                &mut stream,
-                sequence.wrapping_add(1),
-                1235,
-                "42000",
-                "YYDS MySQL SQL execution is not implemented",
-            )?,
+            0x03 => {
+                let sql = match std::str::from_utf8(&payload[1..]) {
+                    Ok(sql) => sql,
+                    Err(_) => {
+                        write_error(&mut stream, sequence.wrapping_add(1), 1300, "HY000", "query is not valid UTF-8")?;
+                        continue;
+                    }
+                };
+                if parse_sql(sql).is_err() {
+                    write_error(&mut stream, sequence.wrapping_add(1), 1064, "42000", "Oak could not parse the SQL statement")?;
+                }
+                else {
+                    write_error(
+                        &mut stream,
+                        sequence.wrapping_add(1),
+                        1235,
+                        "42000",
+                        "YYDS MySQL SQL execution is not implemented",
+                    )?;
+                }
+            }
             _ => write_error(&mut stream, sequence.wrapping_add(1), 1047, "08S01", "unsupported MySQL command")?,
         }
     }
