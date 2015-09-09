@@ -45,3 +45,19 @@ fn binding_binary_text_preserves_text_storage_class() {
     let result = engine.execute_with_parameters("SELECT ?, typeof(?)", &[value.clone(), value.clone()]).unwrap();
     assert_eq!(result.rows, vec![vec![value, SqliteValue::Text(b"text".to_vec())]]);
 }
+
+#[test]
+fn batches_execute_multiple_statements_and_preserve_transaction_behavior() {
+    let engine = SqliteEngine::open_in_memory().unwrap();
+    engine
+        .execute_batch("CREATE TABLE sample (value INTEGER); INSERT INTO sample VALUES (1); INSERT INTO sample VALUES (2);")
+        .unwrap();
+    engine.execute_batch("BEGIN; INSERT INTO sample VALUES (3); ROLLBACK;").unwrap();
+    assert_eq!(
+        engine.execute("SELECT value FROM sample ORDER BY value").unwrap().rows,
+        vec![vec![SqliteValue::Integer(1)], vec![SqliteValue::Integer(2)],]
+    );
+    assert!(engine.execute_batch("INSERT INTO sample VALUES (4); INVALID SQL;").is_err());
+    assert_eq!(engine.execute("SELECT count(*) FROM sample").unwrap().rows, vec![vec![SqliteValue::Integer(3)]]);
+    assert_eq!(engine.execute("SELECT max(value) FROM sample").unwrap().rows, vec![vec![SqliteValue::Integer(4)]]);
+}

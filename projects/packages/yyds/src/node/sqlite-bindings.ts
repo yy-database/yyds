@@ -35,6 +35,7 @@ export interface YydsSqliteBindings {
 export interface SqliteConnectionBinding {
     execute(sql: string): SqliteQueryResultBinding;
     executeWithParameters(sql: string, parameters: SqliteParameterBinding[]): SqliteQueryResultBinding;
+    executeBatch(sql: string): void;
     sourceId(): string;
 }
 
