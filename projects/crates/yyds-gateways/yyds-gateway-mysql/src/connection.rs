@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::wire::{MAX_PACKET_PAYLOAD, PacketError, encode_packet};
-use yyds_gateway::parse_sql;
+use yyds_gateway::{SqlSessionCommand, parse_session_command};
 
 const SERVER_CAPABILITIES: u32 =
     0x0000_0001 | 0x0000_0004 | 0x0000_0008 | 0x0000_0200 | 0x0000_2000 | 0x0000_8000 | 0x0002_0000 | 0x0008_0000;
@@ -91,17 +91,36 @@ fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
                         continue;
                     }
                 };
-                if parse_sql(sql).is_err() {
-                    write_error(&mut stream, sequence.wrapping_add(1), 1064, "42000", "Oak could not parse the SQL statement")?;
-                }
-                else {
-                    write_error(
+                match parse_session_command(sql) {
+                    Err(_) => write_error(
+                        &mut stream,
+                        sequence.wrapping_add(1),
+                        1064,
+                        "42000",
+                        "Oak could not parse the SQL statement",
+                    )?,
+                    Ok(Some(SqlSessionCommand::SetNames { character_set, .. }))
+                        if !character_set.eq_ignore_ascii_case("utf8mb4") =>
+                    {
+                        write_error(&mut stream, sequence.wrapping_add(1), 1115, "42000", "unknown character set")?;
+                    }
+                    Ok(Some(SqlSessionCommand::SetNames { collation, .. }))
+                        if collation
+                            .as_deref()
+                            .is_none_or(|collation| collation.eq_ignore_ascii_case("utf8mb4_general_ci")) =>
+                    {
+                        write_ok(&mut stream, sequence.wrapping_add(1))?;
+                    }
+                    Ok(Some(SqlSessionCommand::SetNames { .. })) => {
+                        write_error(&mut stream, sequence.wrapping_add(1), 1273, "HY000", "unsupported utf8mb4 collation")?;
+                    }
+                    _ => write_error(
                         &mut stream,
                         sequence.wrapping_add(1),
                         1235,
                         "42000",
                         "YYDS MySQL SQL execution is not implemented",
-                    )?;
+                    )?,
                 }
             }
             _ => write_error(&mut stream, sequence.wrapping_add(1), 1047, "08S01", "unsupported MySQL command")?,
