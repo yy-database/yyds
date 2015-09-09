@@ -112,3 +112,26 @@ fn upstream_engine_creates_binary_compatible_database_files() {
     }
     assert_eq!(std::fs::read(path).unwrap().get(..16), Some(&b"SQLite format 3\0"[..]));
 }
+
+#[test]
+fn upstream_engine_read_only_open_never_creates_or_modifies_database() {
+    use yyds_sqlite::SqliteEngine;
+
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("missing.sqlite");
+    assert!(SqliteEngine::open_read_only(&missing).is_err());
+    assert!(!missing.exists());
+
+    let path = directory.path().join("readonly.sqlite");
+    {
+        let database = SqliteEngine::open(&path).unwrap();
+        database.execute("CREATE TABLE sample (value TEXT)").unwrap();
+        database.execute("INSERT INTO sample VALUES ('kept')").unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    let database = SqliteEngine::open_read_only(&path).unwrap();
+    assert_eq!(database.execute("SELECT value FROM sample").unwrap().rows[0][0].to_string(), "kept");
+    assert!(database.execute("INSERT INTO sample VALUES ('blocked')").is_err());
+    drop(database);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

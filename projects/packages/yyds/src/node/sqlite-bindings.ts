@@ -29,7 +29,7 @@ export interface SqliteSnapshotBinding {
 /** An independent SQLite reader hosted in the same native addon. */
 export interface YydsSqliteBindings {
     SqliteSnapshot: new (bytes: Buffer, maxSnapshotBytes?: number) => SqliteSnapshotBinding;
-    SqliteConnection: new (path: string) => SqliteConnectionBinding;
+    SqliteConnection: new (path: string, readOnly?: boolean) => SqliteConnectionBinding;
 }
 
 export interface SqliteConnectionBinding {
