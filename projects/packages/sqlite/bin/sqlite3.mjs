@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { SqliteConnection } from "../src/node.ts";
 
-function formatCell(cell) {
+function formatCell(cell, nullValue) {
     switch (cell.kind) {
         case "null":
-            return "";
+            return nullValue;
         case "integer":
             return cell.value.toString();
         case "real":
@@ -14,6 +14,42 @@ function formatCell(cell) {
         case "blob":
             return `X'${cell.value.toString("hex")}'`;
     }
+}
+
+function csvCell(value) {
+    return /[",\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+}
+
+function printRows(result, options) {
+    const rows = result.rows.map((row) => row.map((cell) => formatCell(cell, options.nullValue)));
+    if (options.headers && result.columns.length > 0) rows.unshift(result.columns);
+    if (options.mode === "csv") {
+        for (const row of rows) console.log(row.map(csvCell).join(","));
+        return;
+    }
+    if (options.mode === "column") {
+        const widths = result.columns.map((name, index) =>
+            rows.reduce((width, row) => Math.max(width, row[index]?.length ?? 0), name.length),
+        );
+        for (const row of rows) {
+            console.log(
+                row
+                    .map((value, index) => {
+                        const numeric = result.rows.some(
+                            (source) =>
+                                source[index]?.kind === "integer" || source[index]?.kind === "real",
+                        );
+                        return numeric
+                            ? value.padStart(widths[index])
+                            : value.padEnd(widths[index]);
+                    })
+                    .join("  ")
+                    .trimEnd(),
+            );
+        }
+        return;
+    }
+    for (const row of rows) console.log(row.join(options.separator));
 }
 
 function runDotCommand(database, command) {
@@ -46,26 +82,58 @@ function main(args) {
     }
     if (args.length === 1 && ["--help", "-help"].includes(args[0])) {
         console.log(
-            "Usage: sqlite3 DATABASE SQL\nExecutes one SQLite statement. Supported dot commands: .tables, .schema.",
+            "Usage: sqlite3 [OPTIONS] DATABASE SQL\nOptions: -readonly -header -noheader -separator SEP -nullvalue TEXT -csv -column\nSupported dot commands: .tables, .schema.",
         );
         return;
     }
-    let readOnly = false;
-    if (args[0] === "-readonly") {
-        readOnly = true;
-        args = args.slice(1);
+    const options = {
+        readOnly: false,
+        headers: false,
+        separator: "|",
+        nullValue: "",
+        mode: "list",
+    };
+    while (args[0]?.startsWith("-")) {
+        const option = args.shift();
+        switch (option) {
+            case "-readonly":
+                options.readOnly = true;
+                break;
+            case "-header":
+                options.headers = true;
+                break;
+            case "-noheader":
+                options.headers = false;
+                break;
+            case "-csv":
+                options.mode = "csv";
+                break;
+            case "-column":
+                options.mode = "column";
+                break;
+            case "-separator":
+            case "-nullvalue": {
+                const value = args.shift();
+                if (value === undefined) throw new Error(`missing value for ${option}`);
+                if (option === "-separator") options.separator = value;
+                else options.nullValue = value;
+                break;
+            }
+            default:
+                throw new Error(`unsupported option '${option}'`);
+        }
     }
     if (args.length !== 2 || args[0].startsWith("-") || args[0] === "") {
-        throw new Error("expected [-readonly] DATABASE and one SQL statement or supported dot command");
+        throw new Error("expected DATABASE and one SQL statement or supported dot command");
     }
     const [path, input] = args;
-    const database = new SqliteConnection(path, { readOnly });
+    const database = new SqliteConnection(path, { readOnly: options.readOnly });
     if (input.trim().startsWith(".")) {
         runDotCommand(database, input.trim());
         return;
     }
     const result = database.execute(input);
-    for (const row of result.rows) console.log(row.map(formatCell).join("|"));
+    printRows(result, options);
 }
 
 try {
