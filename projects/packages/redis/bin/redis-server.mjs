@@ -1,7 +1,17 @@
 #!/usr/bin/env node
-import { loadDisguiseRuntime } from "../src/disguise.ts";
+import { launchYydsServer } from "@yyds/yyds/node/cluster";
 
-const runtime = loadDisguiseRuntime("redis");
-
-console.log(`[disguise] redis-server ${runtime.yydsVersion} ready on port 6379 (YYDS)`);
-console.log(`[disguise] backend ping: ${runtime.ping}`);
+const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === "--help") {
+    console.log("Usage: redis-server --data-dir DIR --cluster-id ID --node-id ID [--port PORT]");
+    console.log("Starts the YYDS node and its protocol listener through the yyds cluster tool.");
+} else {
+    launchYydsServer("redis", args)
+        .then((code) => {
+            process.exitCode = code;
+        })
+        .catch((error) => {
+            console.error("@yyds/redis: " + error.message);
+            process.exitCode = 127;
+        });
+}
