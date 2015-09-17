@@ -20,6 +20,8 @@ pub enum KeyValueAction {
     Get,
     /// Check whether the key currently has a value.
     Exists,
+    /// Return the current value and remove the key atomically.
+    GetDelete,
     /// Replace the current value with these bytes.
     Put(Vec<u8>),
     /// Store these bytes only when the key is absent.
@@ -37,6 +39,8 @@ pub enum KeyValueResult {
     Get(Option<Vec<u8>>),
     /// Whether the key currently has a value.
     Exists(bool),
+    /// Value returned before an atomic delete.
+    GetDelete(Option<Vec<u8>>),
     /// Revision assigned to a successful write.
     Put { revision: u64 },
     /// Revision assigned when a conditional write inserts the key, or `None` when it exists.
