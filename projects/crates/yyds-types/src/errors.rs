@@ -20,6 +20,10 @@ pub enum Error {
     Schema { message: String },
     /// Feature exists as a product surface but is not implemented yet.
     Unsupported(&'static str),
+    /// A stored or supplied decimal integer is invalid or outside signed 64-bit range.
+    InvalidIntegerValue,
+    /// A checked integer operation exceeds signed 64-bit range.
+    IntegerOverflow,
     /// Independent compare-and-set failed.
     CasConflict { key: String },
     /// VOS-authored UDF could not be lowered into the distributed execution model.
@@ -40,6 +44,8 @@ impl fmt::Display for Error {
             }
             Self::Schema { message } => write!(f, "VOS schema: {message}"),
             Self::Unsupported(feature) => write!(f, "unsupported: {feature}"),
+            Self::InvalidIntegerValue => write!(f, "value is not an integer or out of range"),
+            Self::IntegerOverflow => write!(f, "increment or decrement would overflow"),
             Self::CasConflict { key } => write!(f, "cas conflict on key: {key}"),
             Self::Udf { name, message } => write!(f, "UDF {name}: {message}"),
         }
