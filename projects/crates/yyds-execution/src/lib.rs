@@ -61,6 +61,7 @@ where
                     .transpose()?;
                 Ok(KeyValueResult::Get(value))
             }
+            KeyValueAction::Exists => Ok(KeyValueResult::Exists(shard.get(&key)?.is_some())),
             KeyValueAction::Put(value) => {
                 let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
                 Ok(KeyValueResult::Put { revision })

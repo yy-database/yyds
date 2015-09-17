@@ -26,12 +26,15 @@ fn local_executor_routes_and_persists_binary_commands() {
         .unwrap();
 
     assert_eq!(executor.execute(command(KeyValueAction::Get, &key)).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(false));
     assert_eq!(
         executor.execute(command(KeyValueAction::Put(vec![0, 0xff, 0x80]), &key)).unwrap(),
         KeyValueResult::Put { revision: 1 },
     );
     assert_eq!(executor.execute(command(KeyValueAction::Get, &key)).unwrap(), KeyValueResult::Get(Some(vec![0, 0xff, 0x80])),);
+    assert_eq!(executor.execute(command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(true));
     assert_eq!(executor.execute(command(KeyValueAction::Delete, &key)).unwrap(), KeyValueResult::Delete { removed: true });
+    assert_eq!(executor.execute(command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(false));
     assert_eq!(executor.execute(command(KeyValueAction::Delete, &key)).unwrap(), KeyValueResult::Delete { removed: false });
     assert_eq!(executor.routing().epoch(), ShardEpoch(3));
 

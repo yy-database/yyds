@@ -18,6 +18,8 @@ pub struct KeyValueCommand {
 pub enum KeyValueAction {
     /// Return the current value, if any.
     Get,
+    /// Check whether the key currently has a value.
+    Exists,
     /// Replace the current value with these bytes.
     Put(Vec<u8>),
     /// Store these bytes only when the key is absent.
@@ -33,6 +35,8 @@ pub enum KeyValueAction {
 pub enum KeyValueResult {
     /// Value returned by a read.
     Get(Option<Vec<u8>>),
+    /// Whether the key currently has a value.
+    Exists(bool),
     /// Revision assigned to a successful write.
     Put { revision: u64 },
     /// Revision assigned when a conditional write inserts the key, or `None` when it exists.
