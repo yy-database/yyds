@@ -1,6 +1,6 @@
 # yyds-gateway-redis
 
-Redis protocol compatibility work for YYDS. The standalone Rust `yyds-redis-server` remains a bounded RESP2 PING, ECHO and QUIT probe on IPv4 loopback. The node-owned `RedisService` additionally binds binary GET, option-free SET, single-key DEL and signed 64-bit INCR/INCRBY to the YYDS execution contract. Increments are atomic within the current single-process executor and persisted by its mounted shard. It preserves binary arguments and pipelines, limits connections to 64, and uses a bounded I/O wait.
+Redis protocol compatibility work for YYDS. The standalone Rust `yyds-redis-server` remains a bounded RESP2 PING, ECHO and QUIT probe on IPv4 loopback. The node-owned `RedisService` additionally binds binary GET, SET, SET NX, single-key DEL and signed 64-bit INCR/INCRBY to the YYDS execution contract. Conditional set and increments are atomic within the current single-process executor and persisted by its mounted shard. Other SET options remain unsupported. It preserves binary arguments and pipelines, limits connections to 64, and uses a bounded I/O wait.
 
 Run `cargo run -p yyds-gateway-redis --bin yyds-redis-server -- --port 6379`, then use an original `redis-cli -h 127.0.0.1 -p 6379 PING`. The standalone binary is a protocol probe. The `yyds` CLI attaches the executor-backed service to its local `.yykv` shard. Replication, multi-key commands, SET options, SELECT, transactions, authentication, TLS and RESP3 are not implemented. The npm launcher is not yet connected to this listener.
 

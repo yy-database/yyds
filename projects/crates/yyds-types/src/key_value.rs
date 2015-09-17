@@ -20,6 +20,8 @@ pub enum KeyValueAction {
     Get,
     /// Replace the current value with these bytes.
     Put(Vec<u8>),
+    /// Store these bytes only when the key is absent.
+    PutIfAbsent(Vec<u8>),
     /// Remove the current value if it exists.
     Delete,
     /// Atomically add a signed delta to a decimal integer value, treating an absent key as zero.
@@ -33,6 +35,8 @@ pub enum KeyValueResult {
     Get(Option<Vec<u8>>),
     /// Revision assigned to a successful write.
     Put { revision: u64 },
+    /// Revision assigned when a conditional write inserts the key, or `None` when it exists.
+    PutIfAbsent { revision: Option<u64> },
     /// Whether a delete found and removed a value.
     Delete { removed: bool },
     /// Result of an atomic signed integer increment.
