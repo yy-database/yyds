@@ -139,19 +139,18 @@ fn get_delete_is_atomic_under_competing_readers() {
         )
         .unwrap(),
     );
-    executor
-        .execute(command(KeyValueAction::Put(b"payload".to_vec()), b"once"))
-        .unwrap();
+    executor.execute(command(KeyValueAction::Put(b"payload".to_vec()), b"once")).unwrap();
     let mut workers = Vec::new();
     for _ in 0..8 {
         let executor = std::sync::Arc::clone(&executor);
-        workers.push(std::thread::spawn(move || {
-            executor.execute(command(KeyValueAction::GetDelete, b"once")).unwrap()
-        }));
+        workers.push(std::thread::spawn(move || executor.execute(command(KeyValueAction::GetDelete, b"once")).unwrap()));
     }
     let results = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
     assert_eq!(
-        results.iter().filter(|result| matches!(result, KeyValueResult::GetDelete(Some(value)) if value == b"payload" )).count(),
+        results
+            .iter()
+            .filter(|result| matches!(result, KeyValueResult::GetDelete(Some(value)) if value == b"payload" ))
+            .count(),
         1
     );
     assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::GetDelete(None))).count(), 7);
