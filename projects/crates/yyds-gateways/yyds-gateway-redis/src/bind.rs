@@ -51,6 +51,9 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
         if arguments.len() == 4 && arguments[3].eq_ignore_ascii_case(b"NX") {
             KeyValueAction::PutIfAbsent(arguments[2].to_vec())
         }
+        else if arguments.len() == 4 && arguments[3].eq_ignore_ascii_case(b"XX") {
+            KeyValueAction::PutIfPresent(arguments[2].to_vec())
+        }
         else if arguments.len() > 3 {
             return Err(BindError::UnsupportedOptions);
         }
