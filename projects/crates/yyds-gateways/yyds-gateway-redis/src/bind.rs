@@ -64,12 +64,17 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
         }
         KeyValueAction::Delete
     }
-    else if command.eq_ignore_ascii_case(b"INCR") || command.eq_ignore_ascii_case(b"INCRBY") {
-        let increment = command.eq_ignore_ascii_case(b"INCR");
-        if arguments.len() != if increment { 2 } else { 3 } {
+    else if command.eq_ignore_ascii_case(b"INCR")
+        || command.eq_ignore_ascii_case(b"INCRBY")
+        || command.eq_ignore_ascii_case(b"DECR")
+        || command.eq_ignore_ascii_case(b"DECRBY")
+    {
+        let unit = command.eq_ignore_ascii_case(b"INCR") || command.eq_ignore_ascii_case(b"DECR");
+        let increment = command.eq_ignore_ascii_case(b"INCR") || command.eq_ignore_ascii_case(b"INCRBY");
+        if arguments.len() != if unit { 2 } else { 3 } {
             return Err(BindError::WrongArity);
         }
-        let delta = if increment {
+        let magnitude = if unit {
             1
         }
         else {
@@ -80,6 +85,7 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
             }
             value
         };
+        let delta = if increment { magnitude } else { magnitude.checked_neg().ok_or(BindError::InvalidInteger)? };
         KeyValueAction::IncrementBy(delta)
     }
     else {
