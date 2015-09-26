@@ -93,6 +93,15 @@ test("psql sends protocol-v3 queries and displays server rows and errors", async
                             backendMessage("Z", Buffer.from("I")),
                         ]),
                     );
+                } else if (sql === "SELECT 1; SELECT 2") {
+                    const first = Buffer.concat([Buffer.from([0, 1]), Buffer.from("one\0"), Buffer.alloc(18)]);
+                    const second = Buffer.concat([Buffer.from([0, 1]), Buffer.from("two\0"), Buffer.alloc(18)]);
+                    const row = (value: string) => Buffer.concat([Buffer.from([0, 1, 0, 0, 0, value.length]), Buffer.from(value)]);
+                    socket.write(Buffer.concat([
+                        backendMessage("T", first), backendMessage("D", row("1")), backendMessage("C", Buffer.from("SELECT 1\0")),
+                        backendMessage("T", second), backendMessage("D", row("2")), backendMessage("C", Buffer.from("SELECT 1\0")),
+                        backendMessage("Z", Buffer.from("I")),
+                    ]));
                 } else {
                     const error = Buffer.from("SERROR\0C42601\0Mserver syntax error\0\0");
                     socket.write(
@@ -125,6 +134,10 @@ test("psql sends protocol-v3 queries and displays server rows and errors", async
     assert.equal(failure.code, 1);
     assert.match(failure.stderr, /42601: server syntax error/);
     assert.deepEqual(queries, ["SELECT 1", "SELECT FROM"]);
+
+    const multiple = await runCli([...args, "-c", "SELECT 1; SELECT 2"]);
+    assert.equal(multiple.code, 0, multiple.stderr);
+    assert.equal(multiple.stdout, "one\n1\ntwo\n2\n");
 });
 
 test("psql applies field and NULL output settings to text rows", async (context) => {
