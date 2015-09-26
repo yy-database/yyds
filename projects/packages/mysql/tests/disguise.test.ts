@@ -232,4 +232,12 @@ test("mysql client decodes protocol-4.1 text result sets", async (context) => {
     const result = await runCli(["-P", String(address.port), "-e", "SELECT id, message"]);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.stdout, "id\tmessage\n7\tline\\n\\\\path\nNULL\t\\0�\n");
+
+    const noHeaders = await runCli(["-P", String(address.port), "-N", "-e", "SELECT id, message"]);
+    assert.equal(noHeaders.code, 0, noHeaders.stderr);
+    assert.equal(noHeaders.stdout, "7\tline\\n\\\\path\nNULL\t\\0�\n");
+
+    const raw = await runCli(["-P", String(address.port), "-B", "-r", "-e", "SELECT id, message"]);
+    assert.equal(raw.code, 0, raw.stderr);
+    assert.equal(raw.stdout, "id\tmessage\n7\tline\n\\path\nNULL\t\0�\n");
 });
