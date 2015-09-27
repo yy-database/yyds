@@ -11,6 +11,15 @@ use yyds_types::{Error, KeyValueAction, KeyValueCommand, KeyValueResult, ShardId
 pub trait KeyValueExecutor: Debug + Send + Sync {
     /// Routes and applies one namespace-scoped command.
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult>;
+
+    /// Applies an ordered batch without promising cross-command atomicity.
+    ///
+    /// A distributed implementation may override this method to route and
+    /// schedule the batch explicitly. The default preserves compatibility for
+    /// executors that only expose single-command execution.
+    fn execute_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
+        commands.iter().cloned().map(|command| self.execute(command)).collect()
+    }
 }
 
 /// Routes commands to mounted local shards under one immutable routing map.
