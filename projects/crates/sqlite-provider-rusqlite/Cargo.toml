@@ -1,0 +1,12 @@
+[package]
+name = "sqlite-provider-rusqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Rusqlite reference implementation of the sqlite-provider contract"
+publish = false
+
+[dependencies]
+sqlite-provider = { path = "../sqlite-provider" }
+rusqlite = { version = "0.37", features = ["bundled"] }
