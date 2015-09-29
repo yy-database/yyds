@@ -21,8 +21,11 @@ pub use provider::{OpenOptions, SqliteProvider};
 pub use result::StatementResult;
 pub use value::SqliteValue;
 
-/// Frozen contract version exchanged across Iris and YYDS provider surfaces.
-pub const CONTRACT_VERSION: &str = "1.0.0";
+/// Pre-release contract identity exchanged across Iris and YYDS provider surfaces.
+///
+/// The provider has not reached the `1.0.0` stability boundary. A breaking
+/// contract rewrite is allowed while this remains `v0`.
+pub const CONTRACT_VERSION: &str = "v0";
 
 /// Stable provider backend label for diagnostics.
 pub const PROVIDER_BACKEND_ID: &str = "sqlite-provider";
