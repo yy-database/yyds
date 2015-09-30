@@ -96,6 +96,24 @@ export declare class SqliteConnection {
   executeWithParameters(sql: string, parameters: Array<SqliteParameter>): SqliteQueryResult
   /** Executes a multi-statement SQLite batch and discards result rows. */
   executeBatch(sql: string): void
+  /** Starts an immediate write transaction. */
+  beginImmediate(): void
+  /** Commits the active transaction. */
+  commit(): void
+  /** Rolls back the active transaction. */
+  rollback(): void
+  /** Creates a named savepoint. */
+  savepoint(name: string): void
+  /** Releases a named savepoint. */
+  releaseSavepoint(name: string): void
+  /** Rolls back to a named savepoint without releasing it. */
+  rollbackToSavepoint(name: string): void
+  /** Reports whether the connection is outside a transaction. */
+  isAutocommit(): boolean
+  /** Reports the observed SQLite journal mode. */
+  journalMode(): string
+  /** Performs a passive WAL checkpoint. */
+  checkpoint(): void
   /** Returns SQLite's native engine source id. */
   sourceId(): string
 }
