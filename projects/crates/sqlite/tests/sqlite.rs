@@ -1,3 +1,4 @@
+use fs_tools::temp::create_folder;
 use yyds_sqlite::{
     BACKEND_ID, CONSTRAINT, MAGIC, SqliteDatabase, WHY_NOT_YY_OPTIMIZED, blank_database, decode_library_version, read_existing,
     sqlite_library_version, validate_database,
@@ -34,7 +35,7 @@ fn sqlite_live_ping_and_version() {
 
 #[test]
 fn sqlite_file_roundtrip() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = dir.path().join("probe.sqlite");
     let db = SqliteDatabase::open(&path).expect("open file");
     assert_eq!(db.path(), Some(path.as_path()));
@@ -47,7 +48,7 @@ fn sqlite_file_roundtrip() {
 
 #[test]
 fn sqlite_drop_preserves_external_changes() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = dir.path().join("probe.sqlite");
     let db = SqliteDatabase::open(&path).expect("open file");
     let replacement = b"external writer owns these bytes";
@@ -58,7 +59,7 @@ fn sqlite_drop_preserves_external_changes() {
 
 #[test]
 fn sqlite_file_flush_rejects_snapshot_write() {
-    let dir = tempfile::tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = dir.path().join("probe.sqlite");
     let db = SqliteDatabase::open(&path).expect("open file");
     let original = std::fs::read(&path).expect("read");
@@ -100,7 +101,7 @@ fn upstream_engine_executes_sql_and_preserves_storage_classes() {
 fn upstream_engine_creates_binary_compatible_database_files() {
     use yyds_sqlite::SqliteEngine;
 
-    let directory = tempfile::tempdir().unwrap();
+    let directory = create_folder().unwrap();
     let path = directory.path().join("engine.sqlite");
     {
         let database = SqliteEngine::open(&path).unwrap();
@@ -117,7 +118,7 @@ fn upstream_engine_creates_binary_compatible_database_files() {
 fn upstream_engine_read_only_open_never_creates_or_modifies_database() {
     use yyds_sqlite::SqliteEngine;
 
-    let directory = tempfile::tempdir().unwrap();
+    let directory = create_folder().unwrap();
     let missing = directory.path().join("missing.sqlite");
     assert!(SqliteEngine::open_read_only(&missing).is_err());
     assert!(!missing.exists());

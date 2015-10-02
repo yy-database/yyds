@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use fs_tools::temp::create_folder;
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
 use yyds_kv::FileShard;
 use yyds_types::{KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, ShardEpoch, ShardId, ShardMap};
@@ -10,7 +11,7 @@ fn command(action: KeyValueAction, key: &[u8]) -> KeyValueCommand {
 
 #[test]
 fn batch_execution_preserves_order_and_duplicates() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = create_folder().unwrap();
     let shard_id = ShardId("shard-a".into());
     let executor = LocalExecutor::new(
         ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
@@ -33,7 +34,7 @@ fn batch_execution_preserves_order_and_duplicates() {
 
 #[test]
 fn local_executor_routes_and_persists_binary_commands() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = create_folder().unwrap();
     let shard_id = ShardId("shard-a".into());
     let second_shard_id = ShardId("shard-b".into());
     let routing = ShardMap::new(ShardEpoch(3), vec![shard_id.clone(), second_shard_id.clone()]).unwrap();
@@ -81,7 +82,7 @@ fn executor_rejects_incomplete_shard_mounts() {
 
 #[test]
 fn increments_are_atomic_persisted_and_errors_do_not_write() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = create_folder().unwrap();
     let path = directory.path().join("counter.yykv");
     let id = ShardId("counter".into());
     let routing = ShardMap::new(ShardEpoch(1), vec![id.clone()]).unwrap();

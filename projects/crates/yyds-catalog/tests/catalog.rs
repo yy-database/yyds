@@ -1,6 +1,6 @@
 use std::fs;
 
-use tempfile::tempdir;
+use fs_tools::temp::create_folder;
 use yyds_catalog::{catalog_path, Catalog};
 use yyds_types::{ShardEpoch, ShardId};
 
@@ -24,7 +24,7 @@ fn ensure_schema_and_register_shard_in_memory() {
 
 #[test]
 fn file_catalog_round_trip() {
-    let dir = tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = catalog_path(dir.path().join("cluster-a"));
 
     {
@@ -67,7 +67,7 @@ fn identity_initialization_requires_explicit_call_for_empty_state() {
 
 #[test]
 fn routing_epoch_round_trips_and_requires_monotonic_publish() {
-    let dir = tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = catalog_path(dir.path().join("routing"));
     let mut catalog = Catalog::open(&path).expect("open");
     catalog
@@ -101,7 +101,7 @@ fn resolved_contract_round_trips_and_rejects_conflicting_publish() {
         }],
     };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
-    let dir = tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = catalog_path(dir.path().join("contract"));
     let mut catalog = Catalog::open(&path).expect("open");
     assert!(catalog.publish_resolved_contract(contract.clone()).is_err());
@@ -143,7 +143,7 @@ fn legacy_v3_bytes(identity: &vos::ast::CatalogSnapshot) -> Vec<u8> {
 
 #[test]
 fn legacy_v3_upgrade_preserves_ids_slots_routing_and_bytes_until_flush() {
-    let dir = tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = catalog_path(dir.path().join("legacy"));
     let bytes = legacy_v3_bytes(&legacy_identity());
     fs::write(&path, &bytes).expect("legacy file");
@@ -163,7 +163,7 @@ fn legacy_v3_upgrade_preserves_ids_slots_routing_and_bytes_until_flush() {
 
 #[test]
 fn incomplete_legacy_identity_is_rejected_without_reassigning_ids() {
-    let dir = tempdir().expect("tempdir");
+    let dir = create_folder().expect("tempdir");
     let path = catalog_path(dir.path().join("broken"));
     let mut identity = legacy_identity();
     identity.types[0].fields.clear();

@@ -17,4 +17,4 @@ sqlite-provider-rusqlite = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
-tempfile = "3"
+fs-tools.workspace = true

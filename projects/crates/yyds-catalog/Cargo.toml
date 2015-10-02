@@ -16,4 +16,4 @@ vos = { workspace = true }
 yyds-types = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+fs-tools.workspace = true
