@@ -15,4 +15,4 @@ yyds-types = { workspace = true }
 yyds-kv = { workspace = true }
 
 [dev-dependencies]
-fs-tools.workspace = true
+boost-fs.workspace = true

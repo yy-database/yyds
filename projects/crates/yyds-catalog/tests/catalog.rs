@@ -1,6 +1,6 @@
 use std::fs;
 
-use fs_tools::temp::create_folder;
+use boost_fs::temp::create_folder;
 use yyds_catalog::{catalog_path, Catalog};
 use yyds_types::{ShardEpoch, ShardId};
 
