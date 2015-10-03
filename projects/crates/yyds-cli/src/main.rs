@@ -1,3 +1,7 @@
+mod wire;
+mod wire_dispatch;
+mod wire_serve;
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read},
@@ -9,6 +13,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use yyds_catalog::Catalog;
 use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
 use yyds_gateway_mysql::service::MysqlService;
@@ -16,6 +21,8 @@ use yyds_gateway_pgsql::service::PgsqlService;
 use yyds_gateway_redis::{DEFAULT_PORT, resp::RequestLimits, service::RedisService};
 use yyds_kv::FileShard;
 use yyds_types::{ShardEpoch, ShardId, ShardMap};
+use wire_dispatch::WireContext;
+use wire_serve::WireServer;
 
 const STATUS_FILE: &str = "node.status.json";
 const CONTROL_VERSION: u32 = 1;
@@ -38,6 +45,7 @@ struct Arguments {
     redis_port: u16,
     pgsql_port: Option<u16>,
     mysql_port: Option<u16>,
+    wire_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +58,7 @@ struct RuntimeStatus {
     redis_address: SocketAddr,
     pgsql_address: Option<SocketAddr>,
     mysql_address: Option<SocketAddr>,
+    wire_address: Option<SocketAddr>,
 }
 
 fn main() {
@@ -84,6 +93,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
     let mut redis_port = DEFAULT_PORT;
     let mut pgsql_port = None;
     let mut mysql_port = None;
+    let mut wire_port = None;
     let mut index = 1;
     let mut seen = std::collections::HashSet::new();
     while index < arguments.len() {
@@ -91,8 +101,10 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
         if !seen.insert(flag) {
             return Err(format!("duplicate option `{flag}`"));
         }
-        if command != Command::Start && matches!(flag, "--redis-port" | "--pgsql-port" | "--mysql-port")
-            || matches!(command, Command::Status | Command::Stop) && matches!(flag, "--cluster-id" | "--node-id")
+        if command != Command::Start
+            && matches!(flag, "--redis-port" | "--pgsql-port" | "--mysql-port" | "--wire-port")
+            || matches!(command, Command::Status | Command::Stop)
+                && matches!(flag, "--cluster-id" | "--node-id")
         {
             return Err(format!("option `{flag}` is not valid for this command"));
         }
@@ -107,15 +119,26 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
             "--redis-port" => redis_port = value.parse().map_err(|_| "invalid --redis-port".to_string())?,
             "--pgsql-port" => pgsql_port = Some(value.parse().map_err(|_| "invalid --pgsql-port".to_string())?),
             "--mysql-port" => mysql_port = Some(value.parse().map_err(|_| "invalid --mysql-port".to_string())?),
+            "--wire-port" => wire_port = Some(value.parse().map_err(|_| "invalid --wire-port".to_string())?),
             _ => return Err(format!("unknown option `{flag}`\n{}", usage())),
         }
         index += 2;
     }
-    Ok(Arguments { command, data_dir: data_dir.ok_or_else(usage)?, cluster_id, node_id, redis_port, pgsql_port, mysql_port })
+    Ok(Arguments {
+        command,
+        data_dir: data_dir.ok_or_else(usage)?,
+        cluster_id,
+        node_id,
+        redis_port,
+        pgsql_port,
+        mysql_port,
+        wire_port,
+    })
 }
 
 fn usage() -> String {
-    "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT]"
+    "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] \
+     [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--wire-port PORT]"
         .into()
 }
 
@@ -128,55 +151,104 @@ fn identity(arguments: &Arguments) -> Result<NodeIdentity, String> {
 }
 
 fn init(arguments: &Arguments) -> Result<(), String> {
-    let lease = NodeLease::acquire(&arguments.data_dir, identity(arguments)?).map_err(|error| error.to_string())?;
+    let _lease =
+        NodeLease::acquire(&arguments.data_dir, identity(arguments)?).map_err(|error| error.to_string())?;
     open_executor(&arguments.data_dir)?;
-    println!("initialized {}", lease.directory().display());
+    println!("initialized {}", arguments.data_dir.display());
     Ok(())
 }
 
 fn start(arguments: &Arguments) -> Result<(), String> {
-    let lease = Arc::new(NodeLease::acquire(&arguments.data_dir, identity(arguments)?).map_err(|error| error.to_string())?);
+    let lease = Arc::new(
+        NodeLease::acquire(&arguments.data_dir, identity(arguments)?).map_err(|error| error.to_string())?,
+    );
     let executor = open_executor(&arguments.data_dir)?;
     remove_if_present(&arguments.data_dir.join(STATUS_FILE))?;
-    let address = SocketAddr::from(([127, 0, 0, 1], arguments.redis_port));
-    let service = RedisService::start_with_executor(Arc::clone(&lease), address, RequestLimits::default(), executor)
-        .map_err(|error| error.to_string())?;
+
+    // Redis (always on)
+    let redis_address = SocketAddr::from(([127, 0, 0, 1], arguments.redis_port));
+    let service = RedisService::start_with_executor(
+        Arc::clone(&lease),
+        redis_address,
+        RequestLimits::default(),
+        Arc::clone(&executor),
+    )
+    .map_err(|error| error.to_string())?;
+
+    // PostgreSQL (optional)
     let pgsql_service = arguments
         .pgsql_port
         .map(|port| PgsqlService::start(Arc::clone(&lease), SocketAddr::from(([127, 0, 0, 1], port))))
         .transpose()
         .map_err(|error| error.to_string())?;
+
+    // MySQL (optional)
     let mysql_service = arguments
         .mysql_port
         .map(|port| MysqlService::start(Arc::clone(&lease), SocketAddr::from(([127, 0, 0, 1], port))))
         .transpose()
         .map_err(|error| error.to_string())?;
+
+    // Wire /native protocol (optional)
+    let wire_server = arguments
+        .wire_port
+        .map(|port| {
+            let wire_addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let ctx = WireContext::new(Arc::clone(&executor));
+            WireServer::start(wire_addr, ctx)
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?;
+
+    let wire_address = wire_server.as_ref().map(WireServer::address);
+
     let runtime = RuntimeStatus {
         version: CONTROL_VERSION,
         generation: uuid::Uuid::new_v4(),
         pid: std::process::id(),
-        started_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_millis(),
+        started_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_millis(),
         redis_address: service.address(),
         pgsql_address: pgsql_service.as_ref().map(PgsqlService::address),
         mysql_address: mysql_service.as_ref().map(MysqlService::address),
+        wire_address,
     };
     write_status(&arguments.data_dir, &runtime)?;
     println!(
-        "yyds running pid={} redis={} pgsql={:?} mysql={:?}",
-        runtime.pid, runtime.redis_address, runtime.pgsql_address, runtime.mysql_address
+        "yyds running pid={} redis={} pgsql={:?} mysql={:?} wire={:?}",
+        runtime.pid, runtime.redis_address, runtime.pgsql_address, runtime.mysql_address, runtime.wire_address
     );
+
     let stop_path = stop_path(&arguments.data_dir, runtime.generation);
-    while !stop_path.exists()
-        && !service.is_finished()
-        && pgsql_service.as_ref().is_none_or(|pgsql| !pgsql.is_finished())
-        && mysql_service.as_ref().is_none_or(|mysql| !mysql.is_finished())
-    {
+    loop {
+        if stop_path.exists() {
+            break;
+        }
+        if service.is_finished() {
+            break;
+        }
+        if pgsql_service.as_ref().is_none_or(|p| p.is_finished()) {
+            break;
+        }
+        if mysql_service.as_ref().is_none_or(|m| m.is_finished()) {
+            break;
+        }
+        if wire_server.as_ref().is_none_or(|w| w.is_finished()) {
+            break;
+        }
         thread::sleep(Duration::from_millis(50));
     }
+
     let redis_result = service.stop().map_err(|error| error.to_string());
     let pgsql_result = pgsql_service.map(PgsqlService::stop).transpose().map_err(|error| error.to_string());
     let mysql_result = mysql_service.map(MysqlService::stop).transpose().map_err(|error| error.to_string());
-    let result = redis_result.and(pgsql_result.map(|_| ())).and(mysql_result.map(|_| ()));
+    let wire_result = wire_server.map(WireServer::stop).transpose().map_err(|error| error.to_string());
+    let result = redis_result
+        .and(pgsql_result.map(|_| ()))
+        .and(mysql_result.map(|_| ()))
+        .and(wire_result.map(|_| ()));
     let _ = fs::remove_file(arguments.data_dir.join(STATUS_FILE));
     let _ = fs::remove_file(stop_path);
     result
@@ -184,16 +256,33 @@ fn start(arguments: &Arguments) -> Result<(), String> {
 
 fn open_executor(directory: &Path) -> Result<Arc<dyn KeyValueExecutor>, String> {
     let shard_id = ShardId(LOCAL_SHARD_ID.into());
-    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).map_err(|error| format!("routing: {error:?}"))?;
-    let shard = FileShard::open(directory.join(format!("{LOCAL_SHARD_ID}.yykv"))).map_err(|error| error.to_string())?;
-    let executor =
-        LocalExecutor::new(routing, std::collections::HashMap::from([(shard_id, shard)])).map_err(|error| error.to_string())?;
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()])
+        .map_err(|error| format!("routing: {error:?}"))?;
+    let shard = FileShard::open(directory.join(format!("{LOCAL_SHARD_ID}.yykv")))
+        .map_err(|error| error.to_string())?;
+    let executor = LocalExecutor::new(
+        routing,
+        std::collections::HashMap::from([(shard_id, shard)]),
+    )
+    .map_err(|error| error.to_string())?;
     Ok(Arc::new(executor))
+}
+
+#[allow(dead_code)]
+/// Open or create the catalog file at `<data-dir>/.yyds`.
+/// Kept for a future wire ↔ catalog wiring pass; Phase-1 catalog slot is None.
+fn open_catalog(data_dir: &Path) -> Result<Catalog, String> {
+    let path = data_dir.with_extension(yyds_types::CATALOG_SUFFIX);
+    Catalog::open(&path).map_err(|error| error.to_string())
 }
 
 fn status(arguments: &Arguments) -> Result<(), String> {
     let state = NodeLease::inspect(&arguments.data_dir).map_err(|error| error.to_string())?;
-    let runtime = if state.ownership == LocalOwnership::Held { read_status(&arguments.data_dir)? } else { None };
+    let runtime = if state.ownership == LocalOwnership::Held {
+        read_status(&arguments.data_dir)?
+    } else {
+        None
+    };
     println!(
         "{}",
         serde_json::to_string(&serde_json::json!({
@@ -209,8 +298,8 @@ fn status(arguments: &Arguments) -> Result<(), String> {
 }
 
 fn stop(arguments: &Arguments) -> Result<(), String> {
-    let status = NodeLease::inspect(&arguments.data_dir).map_err(|error| error.to_string())?;
-    if status.ownership == LocalOwnership::Available {
+    let state = NodeLease::inspect(&arguments.data_dir).map_err(|error| error.to_string())?;
+    if state.ownership == LocalOwnership::Available {
         return Err("node is not running".into());
     }
     let runtime = read_status(&arguments.data_dir)?.ok_or("node owner has not published CLI runtime status")?;
@@ -278,6 +367,7 @@ fn read_status(directory: &Path) -> Result<Option<RuntimeStatus>, String> {
                 || !status.redis_address.ip().is_loopback()
                 || status.pgsql_address.is_some_and(|address| !address.ip().is_loopback())
                 || status.mysql_address.is_some_and(|address| !address.ip().is_loopback())
+                || status.wire_address.is_some_and(|address| !address.ip().is_loopback())
             {
                 return Err("unsupported or invalid runtime status".into());
             }
