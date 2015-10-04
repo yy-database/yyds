@@ -37,7 +37,6 @@ windows-sys = { version = "0.61.2", default-features = false, features = ["Win32
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 napi-build = "2"
-wasm-bindgen = "0.2"
 
 [profile.release]
 lto = true
