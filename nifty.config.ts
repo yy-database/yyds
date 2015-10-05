@@ -15,7 +15,6 @@ export default defineConfig({
             '@yyds/yyds-linux-x64',
             '@yyds/yyds-darwin-x64',
             '@yyds/yyds-darwin-arm64',
-            '@yyds/yyds-unknown-wasm32',
             '@yyds/yyds',
             '@yyds/redis',
             '@yyds/mysql',

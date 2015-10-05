@@ -69,29 +69,9 @@ jobs:
           path: projects/packages/${{ matrix.pkg }}/lib/${{ matrix.dest_name }}
           if-no-files-found: error
 
-  build-wasm:
-    name: engine wasm
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly-2026-07-20
-      - uses: jetli/wasm-pack-action@v0.4.0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build:wasm
-      - uses: actions/upload-artifact@v7
-        with:
-          name: engine-wasm
-          path: projects/packages/yyds-unknown-wasm32/lib
-          if-no-files-found: error
-
   publish-npm:
     name: publish npm
-    needs: [build-engine, build-wasm]
+    needs: build-engine
     runs-on: ubuntu-latest
     environment: NPM_PUBLISH
     permissions:
