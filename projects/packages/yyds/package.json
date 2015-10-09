@@ -1,6 +1,6 @@
 {
     "name": "@yyds/yyds",
-    "version": "0.1.0",
+    "version": "0.0.1",
     "description": "YYDS scripting runtime for TypeScript and Node.js",
     "license": "MPL-2.0",
     "private": true,
