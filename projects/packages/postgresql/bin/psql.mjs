@@ -231,6 +231,6 @@ async function main(args) {
 }
 
 main(process.argv.slice(2)).catch((error) => {
-    console.error(`@yyds/postgresql: ${error.message}`);
+    console.error(`@yydb/postgresql: ${error.message}`);
     process.exitCode = 1;
 });

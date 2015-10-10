@@ -187,6 +187,6 @@ async function main(args) {
 }
 
 main(process.argv.slice(2)).catch((error) => {
-    console.error(`@yyds/redis: ${error.message}`);
+    console.error(`@yydb/redis: ${error.message}`);
     process.exitCode = 1;
 });

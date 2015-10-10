@@ -1,8 +1,9 @@
 name: Release
 
-# Independent of CI. Trigger only by pushing a semver tag:
+# Independent of CI (check/test). Trigger only by pushing a semver tag:
 #   git tag v0.0.2 && git push origin v0.0.2
-# Publishes @yyds/* (OIDC) and GitHub Release native-binding zips.
+# Publishes @yydb/* via npm OIDC (platform .node packages included).
+# Already-published npm versions are skipped (retry-safe).
 # Trusted Publisher workflow filename must stay: release-npm.yml
 # Release setup: AGENTS.md
 
@@ -13,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # required for publish-npm OIDC (job-level permissions also set)
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,39 +28,41 @@ jobs:
       matrix:
         include:
           - os: windows-latest
+            target: x86_64-pc-windows-msvc
             pkg: yyds-win32-x64
-            napi_artifact: index.win32-x64-msvc.node
-            dest_name: yyds-win32-x64-msvc.node
+            node_file: index.win32-x64-msvc.node
+            lib: yyds_napi.dll
           - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
             pkg: yyds-linux-x64
-            napi_artifact: index.linux-x64-gnu.node
-            dest_name: yyds-linux-x64-gnu.node
+            node_file: index.linux-x64-gnu.node
+            lib: libyyds_napi.so
           - os: macos-13
+            target: x86_64-apple-darwin
             pkg: yyds-darwin-x64
-            napi_artifact: index.darwin-x64.node
-            dest_name: yyds-darwin-x64.node
+            node_file: index.darwin-x64.node
+            lib: libyyds_napi.dylib
           - os: macos-latest
+            target: aarch64-apple-darwin
             pkg: yyds-darwin-arm64
-            napi_artifact: index.darwin-arm64.node
-            dest_name: yyds-darwin-arm64.node
+            node_file: index.darwin-arm64.node
+            lib: libyyds_napi.dylib
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly-2026-07-20
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install compilation target
+        run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
         with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
+          key: ${{ matrix.target }}
       - name: Build yyds-napi
-        working-directory: projects/crates/yyds-napi
-        run: pnpm exec napi build --platform --release
+        run: cargo build -p yyds-napi --release --target ${{ matrix.target }}
       - name: Stage native binding
         shell: bash
         run: |
           set -euo pipefail
-          SRC="projects/crates/yyds-napi/${{ matrix.napi_artifact }}"
-          DEST="projects/packages/${{ matrix.pkg }}/lib/${{ matrix.dest_name }}"
+          SRC="target/${{ matrix.target }}/release/${{ matrix.lib }}"
+          DEST="projects/packages/${{ matrix.pkg }}/lib/${{ matrix.node_file }}"
           mkdir -p "$(dirname "$DEST")"
           cp "$SRC" "$DEST"
           chmod +x "$DEST" || true
@@ -66,7 +70,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: engine-${{ matrix.pkg }}
-          path: projects/packages/${{ matrix.pkg }}/lib/${{ matrix.dest_name }}
+          path: projects/packages/${{ matrix.pkg }}/lib/${{ matrix.node_file }}
           if-no-files-found: error
 
   publish-npm:
@@ -83,15 +87,13 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
-          scope: "@yyds"
-          cache: pnpm
+          # Do not set registry-url: it writes _authToken into npmrc and blocks OIDC (npm E404 on PUT).
       - name: Ensure npm CLI supports OIDC
         run: |
           npm install -g npm@latest
           node -v
           npm -v
-      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --no-frozen-lockfile
 
       - name: Download engine artifacts
         uses: actions/download-artifact@v8
@@ -118,6 +120,20 @@ jobs:
           INPUT_VERSION: ${{ steps.ver.outputs.version }}
         run: node scripts/prepare-npm-publish.mjs
 
+      - name: Strip token-style npmrc (OIDC only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset NODE_AUTH_TOKEN NPM_TOKEN || true
+          for f in "${HOME}/.npmrc" "${NPM_CONFIG_USERCONFIG:-}" "${RUNNER_TEMP:-}/.npmrc"; do
+            [[ -n "${f}" && -f "${f}" ]] || continue
+            if grep -q '_authToken' "${f}"; then
+              grep -v '_authToken' "${f}" > "${f}.oidc" && mv "${f}.oidc" "${f}"
+              echo "stripped _authToken from ${f}"
+            fi
+          done
+
+      # OIDC only — do not set NODE_AUTH_TOKEN (even empty).
       - name: Publish npm
         run: node scripts/publish-npm-packages.mjs
 

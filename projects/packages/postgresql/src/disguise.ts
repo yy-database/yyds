@@ -1,4 +1,4 @@
-import { loadYydsNative } from "@yyds/yyds/node";
+import { loadYydsNative } from "@yydb/yyds/node";
 
 export type DisguiseRuntime = {
     product: string;
@@ -16,7 +16,7 @@ export function loadDisguiseRuntime(product: string): DisguiseRuntime {
         };
     } catch (error) {
         throw new Error(
-            `@yyds/${product}: native runtime missing. Install @yyds/yyds and run pnpm build:napi`,
+            `@yydb/${product}: native runtime missing. Install @yydb/yyds and run pnpm build:napi`,
             { cause: error },
         );
     }

@@ -1,11 +1,10 @@
 {
-    "name": "@yyds/yyds-skills",
+    "name": "@yydb/yyds-skills",
     "version": "0.0.1",
     "description": "Agent Skills for integrating with YYDS storage, wire protocol, and protocol disguise gateways",
     "type": "module",
     "license": "MPL-2.0",
-    "private": true,
-    "files": [
+        "files": [
         "skills",
         "README.md"
     ],

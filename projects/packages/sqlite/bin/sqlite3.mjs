@@ -139,6 +139,6 @@ function main(args) {
 try {
     main(process.argv.slice(2));
 } catch (error) {
-    console.error(`@yyds/sqlite: ${error.message}`);
+    console.error(`@yydb/sqlite: ${error.message}`);
     process.exitCode = 1;
 }

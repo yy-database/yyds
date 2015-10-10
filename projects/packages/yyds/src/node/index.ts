@@ -1,7 +1,7 @@
 /**
- * `@yyds/yyds/node` — Node N-API facade.
+ * `@yydb/yyds/node` — Node N-API facade.
  *
- * Browser code must use the default `@yyds/yyds` entry or `@yyds/yyds/wasm`.
+ * Browser code must use the default `@yydb/yyds` entry or `@yydb/yyds/wasm`.
  */
 
 export type { YydsBindings } from "../bindings.ts";

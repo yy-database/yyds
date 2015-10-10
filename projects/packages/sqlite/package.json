@@ -1,10 +1,9 @@
 {
-    "name": "@yyds/sqlite",
+    "name": "@yydb/sqlite",
     "version": "0.0.1",
     "description": "SQLite-compatible engine and bounded format-3 snapshot reader, independent of YYDS storage.",
     "license": "MPL-2.0",
-    "private": true,
-    "type": "module",
+        "type": "module",
     "sideEffects": false,
     "exports": {
         ".": {
@@ -49,7 +48,7 @@
         "access": "public"
     },
     "dependencies": {
-        "@yyds/yyds": "workspace:*"
+        "@yydb/yyds": "workspace:*"
     },
     "devDependencies": {
         "@types/node": "^22.15.0",

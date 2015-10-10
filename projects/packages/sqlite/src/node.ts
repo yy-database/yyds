@@ -1,4 +1,4 @@
-import { loadYydsSqliteNative } from "@yyds/yyds/node";
+import { loadYydsSqliteNative } from "@yydb/yyds/node";
 import type {
     SqliteConnectionBinding,
     SqliteReadLimits,
@@ -6,7 +6,7 @@ import type {
     SqliteSnapshotBinding,
     SqliteTableRow,
     SqliteQueryResultBinding,
-} from "@yyds/yyds/node";
+} from "@yydb/yyds/node";
 
 export type {
     SqliteQueryResultBinding,
@@ -14,7 +14,7 @@ export type {
     SqliteResultValueBinding,
     SqliteSchemaObject,
     SqliteTableRow,
-} from "@yyds/yyds/node";
+} from "@yydb/yyds/node";
 
 export type SqliteCell =
     | { kind: "null" }

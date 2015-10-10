@@ -5,4 +5,4 @@ export {
     yydsVersion,
     type InitWasmOptions,
     type WasmInitInput,
-} from "@yyds/yyds-unknown-wasm32";
+} from "@yydb/yyds-unknown-wasm32";
