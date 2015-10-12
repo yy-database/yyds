@@ -1,4 +1,4 @@
-use yyds_gateway_mysql::wire::{PacketError, decode_packet, encode_packet};
+use yyds_gateway_mysql::wire::{decode_packet, encode_packet, PacketError};
 
 #[test]
 fn binary_payload_roundtrip_and_every_fragment_boundary() {

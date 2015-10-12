@@ -1,4 +1,4 @@
-use yyds_sqlite::{TableLimits, blank_database, read_table};
+use yyds_sqlite::{blank_database, read_table, TableLimits};
 
 fn leaf(payload: &[u8]) -> Vec<u8> {
     let mut bytes = blank_database().unwrap();

@@ -13,17 +13,17 @@ mod kind;
 mod sql;
 
 pub use crate::catalog_bind::{
-    SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundProjection, SqlCatalogBoundSelect,
-    SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable, bind_sql_catalog,
+    bind_sql_catalog, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundProjection,
+    SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable,
 };
 
 pub use crate::{
     config::GatewayConfig,
-    kind::{ALL_GATEWAY_KINDS, GatewayKind},
+    kind::{GatewayKind, ALL_GATEWAY_KINDS},
     sql::{
-        SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement,
-        SqlBoundUnaryOperator, SqlFrontendError, SqlSessionCommand, SqlTransactionAction, bind_sql, parse_session_command,
-        parse_sql,
+        bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral,
+        SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlFrontendError, SqlSessionCommand,
+        SqlTransactionAction,
     },
 };
 

@@ -77,9 +77,7 @@ pub fn encode(
 
     match resolved_contract {
         Some(contract) => {
-            let json = contract
-                .to_json()
-                .map_err(|_| Error::Corrupt("resolved contract encode"))?;
+            let json = contract.to_json().map_err(|_| Error::Corrupt("resolved contract encode"))?;
             let bytes = json.as_bytes();
             if bytes.len() > u32::MAX as usize {
                 return Err(Error::Unsupported("resolved contract too large"));
@@ -140,7 +138,8 @@ pub fn decode(
             }
             _ => return Err(Error::Corrupt("invalid catalog identity presence flag")),
         }
-    } else {
+    }
+    else {
         None
     };
 
@@ -156,7 +155,8 @@ pub fn decode(
             }
             _ => return Err(Error::Corrupt("invalid catalog routing presence flag")),
         }
-    } else {
+    }
+    else {
         None
     };
 
@@ -177,15 +177,13 @@ pub fn decode(
                 let len = read_u32(&mut cursor)? as usize;
                 let mut json = vec![0u8; len];
                 read_exact(&mut cursor, &mut json)?;
-                let json = String::from_utf8(json)
-                    .map_err(|_| Error::Corrupt("resolved contract utf8"))?;
-                Some(vos::ResolvedContract::from_json(&json).map_err(|_| {
-                    Error::Corrupt("resolved contract decode")
-                })?)
+                let json = String::from_utf8(json).map_err(|_| Error::Corrupt("resolved contract utf8"))?;
+                Some(vos::ResolvedContract::from_json(&json).map_err(|_| Error::Corrupt("resolved contract decode"))?)
             }
             _ => return Err(Error::Corrupt("invalid resolved contract presence flag")),
         }
-    } else {
+    }
+    else {
         None
     };
 
@@ -213,10 +211,10 @@ fn read_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64> {
 }
 
 fn read_exact(cursor: &mut Cursor<&[u8]>, buf: &mut [u8]) -> Result<()> {
-    cursor
-        .read_exact(buf)
-        .map_err(|err| Error::Corrupt(match err.kind() {
+    cursor.read_exact(buf).map_err(|err| {
+        Error::Corrupt(match err.kind() {
             std::io::ErrorKind::UnexpectedEof => "unexpected catalog eof",
             _ => "catalog read failed",
-        }))
+        })
+    })
 }

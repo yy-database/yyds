@@ -1,4 +1,4 @@
-use yyds_gateway_mysql::{DEFAULT_PORT, GATEWAY_ID, GATEWAY_KIND, startup_banner};
+use yyds_gateway_mysql::{startup_banner, DEFAULT_PORT, GATEWAY_ID, GATEWAY_KIND};
 
 #[test]
 fn mysql_gateway_metadata_is_stable() {

@@ -24,9 +24,7 @@ pub struct CatalogSchema {
 /// Uses Oak parsing and VOS semantic projection before catalog publication.
 pub fn validate_document(document: &str) -> Result<()> {
     if document.contains('\0') {
-        return Err(Error::Schema {
-            message: "VOS schema document must not contain NUL bytes".into(),
-        });
+        return Err(Error::Schema { message: "VOS schema document must not contain NUL bytes".into() });
     }
     vos::validate_schema(document).map(|_| ()).map_err(|message| Error::Schema { message })
 }
@@ -34,8 +32,5 @@ pub fn validate_document(document: &str) -> Result<()> {
 /// Validate and adopt a catalog schema revision.
 pub fn adopt_catalog_schema(version: u32, document: &str) -> Result<CatalogSchema> {
     validate_document(document)?;
-    Ok(CatalogSchema {
-        version,
-        document: document.to_string(),
-    })
+    Ok(CatalogSchema { version, document: document.to_string() })
 }

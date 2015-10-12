@@ -12,11 +12,13 @@ use std::{
     time::Duration,
 };
 
-use sha1::{Digest, Sha1};
 use base64::Engine;
+use sha1::{Digest, Sha1};
 
-use crate::wire::{decode_frame, read_frame, write_frame};
-use crate::wire_dispatch::{dispatch, WireContext};
+use crate::{
+    wire::{decode_frame, read_frame, write_frame},
+    wire_dispatch::{dispatch, WireContext},
+};
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -94,9 +96,7 @@ impl Clone for WireContext {
     fn clone(&self) -> Self {
         Self {
             executor: Arc::clone(&self.executor),
-            catalog: std::sync::Mutex::new(
-                self.catalog.lock().unwrap().as_ref().map(|inner| Arc::clone(inner)),
-            ),
+            catalog: std::sync::Mutex::new(self.catalog.lock().unwrap().as_ref().map(|inner| Arc::clone(inner))),
         }
     }
 }
@@ -106,7 +106,8 @@ fn handle_client(stream: TcpStream, ctx: &WireContext) -> Result<(), String> {
     let n = stream.peek(&mut peek).map_err(|e| e.to_string())?;
     if n >= 3 && &peek[..3] == b"GET" {
         handle_websocket(stream, ctx)
-    } else {
+    }
+    else {
         handle_tcp(stream, ctx)
     }
 }
@@ -142,17 +143,10 @@ fn handle_websocket(mut stream: TcpStream, ctx: &WireContext) -> Result<(), Stri
     }
 
     let request = String::from_utf8_lossy(&buf);
-    let path_ok = request
-        .lines()
-        .next()
-        .map(|line| line.contains(" /wire"))
-        .unwrap_or(false);
+    let path_ok = request.lines().next().map(|line| line.contains(" /wire")).unwrap_or(false);
     if !path_ok {
         let body = b"use path /wire for YYDS binary websocket\n";
-        let resp = format!(
-            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            body.len()
-        );
+        let resp = format!("HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
         stream.write_all(resp.as_bytes()).map_err(|e| e.to_string())?;
         stream.write_all(body).map_err(|e| e.to_string())?;
         return Ok(());
@@ -164,7 +158,8 @@ fn handle_websocket(mut stream: TcpStream, ctx: &WireContext) -> Result<(), Stri
             let (name, value) = line.split_once(':')?;
             if name.eq_ignore_ascii_case("Sec-WebSocket-Key") {
                 Some(value.trim().to_owned())
-            } else {
+            }
+            else {
                 None
             }
         })
@@ -173,8 +168,7 @@ fn handle_websocket(mut stream: TcpStream, ctx: &WireContext) -> Result<(), Stri
     let mut hasher = Sha1::new();
     hasher.update(key.as_bytes());
     hasher.update(WS_GUID.as_bytes());
-    let accept = base64::engine::general_purpose::STANDARD
-        .encode(hasher.finalize());
+    let accept = base64::engine::general_purpose::STANDARD.encode(hasher.finalize());
 
     let response = format!(
         "HTTP/1.1 101 Switching Protocols\r\n\
@@ -213,7 +207,8 @@ fn read_ws_binary(stream: &mut TcpStream) -> Result<Option<Vec<u8>>, String> {
         let mut ext = [0_u8; 2];
         stream.read_exact(&mut ext).map_err(|e| e.to_string())?;
         len = u16::from_be_bytes(ext) as u64;
-    } else if len == 127 {
+    }
+    else if len == 127 {
         let mut ext = [0_u8; 8];
         stream.read_exact(&mut ext).map_err(|e| e.to_string())?;
         len = u64::from_be_bytes(ext);
@@ -239,12 +234,13 @@ fn read_ws_binary(stream: &mut TcpStream) -> Result<Option<Vec<u8>>, String> {
     }
 
     match opcode {
-        0x8 => Ok(None),                                      // close
-        0x9 => {                                              // ping → pong
+        0x8 => Ok(None), // close
+        0x9 => {
+            // ping → pong
             write_ws_frame(stream, 0xA, &payload)?;
             read_ws_binary(stream)
         }
-        0x2 | 0x1 => Ok(Some(payload)),                       // binary | text
+        0x2 | 0x1 => Ok(Some(payload)), // binary | text
         0x0 => Err("websocket continuation not supported".into()),
         other => Err(format!("unsupported websocket opcode {other}")),
     }
@@ -260,10 +256,12 @@ fn write_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8]) -> Result<
     let len = payload.len();
     if len < 126 {
         header.push(len as u8);
-    } else if len <= u16::MAX as usize {
+    }
+    else if len <= u16::MAX as usize {
         header.push(126);
         header.extend_from_slice(&(len as u16).to_be_bytes());
-    } else {
+    }
+    else {
         header.push(127);
         header.extend_from_slice(&(len as u64).to_be_bytes());
     }

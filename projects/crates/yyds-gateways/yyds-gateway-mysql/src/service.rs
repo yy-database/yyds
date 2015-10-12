@@ -4,8 +4,8 @@ use std::{
     io,
     net::{SocketAddr, TcpListener},
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     thread::{self, JoinHandle},
     time::Duration,

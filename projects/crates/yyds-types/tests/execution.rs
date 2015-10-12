@@ -1,7 +1,6 @@
 use yyds_types::{
-    Approximation, Consistency, DistributedPlan, FileRef, Fragment, FragmentId, FragmentRole,
-    LayoutField, Node, Program, RecordLayout, RecordValue, RetryPolicy, Type, ValidatedProgram,
-    Value, VectorMetric, VectorValue,
+    Approximation, Consistency, DistributedPlan, FileRef, Fragment, FragmentId, FragmentRole, LayoutField, Node, Program,
+    RecordLayout, RecordValue, RetryPolicy, Type, ValidatedProgram, Value, VectorMetric, VectorValue,
 };
 
 #[test]
@@ -102,25 +101,17 @@ fn yyds_evaluates_its_distributed_execution_model() {
 
 #[test]
 fn yyds_preserves_file_and_vector_execution_values() {
-    let file = Value::File(FileRef {
-        object_id: "asset-1".into(),
-        generation: 3,
-        byte_len: 4096,
-    });
+    let file = Value::File(FileRef { object_id: "asset-1".into(), generation: 3, byte_len: 4096 });
     assert_eq!(file.ty(), Type::File);
 
-    let vector = VectorValue::new(vec![0.25, 0.5, 0.75], VectorMetric::Cosine)
-        .expect("finite vector is valid");
-    assert_eq!(Value::Vector(vector).ty(), Type::Vector {
-        dimension: 3,
-        metric: VectorMetric::Cosine,
-    });
+    let vector = VectorValue::new(vec![0.25, 0.5, 0.75], VectorMetric::Cosine).expect("finite vector is valid");
+    assert_eq!(Value::Vector(vector).ty(), Type::Vector { dimension: 3, metric: VectorMetric::Cosine });
 }
 
 #[test]
 fn yyds_preserves_schema_identified_records() {
-    let record = RecordValue::new(11, vec![Value::I64(9), Value::Text("ready".into())])
-        .expect("record schema identity is valid");
+    let record =
+        RecordValue::new(11, vec![Value::I64(9), Value::Text("ready".into())]).expect("record schema identity is valid");
     assert_eq!(record.schema_id(), 11);
     assert_eq!(record.fields().len(), 2);
     assert_eq!(Value::Record(record).ty(), Type::Record { schema_id: 11, field_count: 2 });
@@ -128,15 +119,8 @@ fn yyds_preserves_schema_identified_records() {
 
 #[test]
 fn yyds_preserves_published_record_layouts() {
-    let layout = RecordLayout::new(
-        11,
-        vec![LayoutField {
-            field_id: 101,
-            index: 0,
-            ty: Type::I64,
-        }],
-    )
-    .expect("record layout is valid");
+    let layout =
+        RecordLayout::new(11, vec![LayoutField { field_id: 101, index: 0, ty: Type::I64 }]).expect("record layout is valid");
     assert_eq!(layout.schema_id(), 11);
     assert_eq!(layout.fields()[0].field_id, 101);
 }

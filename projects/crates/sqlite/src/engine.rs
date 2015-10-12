@@ -20,12 +20,7 @@ pub struct SqliteQueryResult {
 
 impl From<StatementResult> for SqliteQueryResult {
     fn from(value: StatementResult) -> Self {
-        Self {
-            columns: value.columns,
-            rows: value.rows,
-            changes: value.changes,
-            last_insert_rowid: value.last_insert_rowid,
-        }
+        Self { columns: value.columns, rows: value.rows, changes: value.changes, last_insert_rowid: value.last_insert_rowid }
     }
 }
 
@@ -53,9 +48,7 @@ impl SqliteEngine {
 
     /// Opens an existing SQLite file without write access or implicit creation.
     pub fn open_read_only(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        Ok(Self {
-            provider: RusqliteProvider::open_with_options(path, OpenOptions { read_only: true }).map_err(map_provider)?,
-        })
+        Ok(Self { provider: RusqliteProvider::open_with_options(path, OpenOptions { read_only: true }).map_err(map_provider)? })
     }
 
     /// Executes exactly one statement and preserves native SQLite value types.

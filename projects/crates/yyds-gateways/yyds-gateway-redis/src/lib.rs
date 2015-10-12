@@ -3,7 +3,7 @@
 //! Accepts a tiny Redis-style command surface (`PING`, `INFO`) and answers with
 //! YYDS-backed health metadata. This is not a Redis server implementation.
 
-use yyds_gateway::{GatewayConfig, GatewayKind, version_label};
+use yyds_gateway::{version_label, GatewayConfig, GatewayKind};
 use yyds_types::{Error, Result};
 
 pub mod bind;
@@ -30,10 +30,7 @@ pub fn parse_command(input: &str) -> &str {
 pub fn handle_command(input: &str) -> Result<String> {
     match parse_command(input).to_ascii_uppercase().as_str() {
         "PING" => Ok("PONG".to_string()),
-        "INFO" => Ok(format!(
-            "# Server\r\nredis_version:{}\r\nredis_mode:disguise\r\nrole:master\r\n",
-            version_label()
-        )),
+        "INFO" => Ok(format!("# Server\r\nredis_version:{}\r\nredis_mode:disguise\r\nrole:master\r\n", version_label())),
         other if other.is_empty() => Err(Error::Unsupported("empty redis command")),
         _other => Err(Error::Unsupported("unknown redis command")),
     }

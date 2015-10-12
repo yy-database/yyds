@@ -6,7 +6,7 @@ fn oak_parse_errors_recovered_as_ast_nodes_are_reported() {
 
 #[test]
 fn oak_session_statements_are_projected_without_gateway_parsing() {
-    use yyds_gateway::{SqlSessionCommand, SqlTransactionAction, parse_session_command};
+    use yyds_gateway::{parse_session_command, SqlSessionCommand, SqlTransactionAction};
 
     assert_eq!(
         parse_session_command("SET NAMES utf8mb4").unwrap(),

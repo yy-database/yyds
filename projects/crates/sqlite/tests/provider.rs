@@ -1,6 +1,6 @@
 //! Ensures `SqliteEngine` exposes the shared provider contract.
 
-use yyds_sqlite::{CONTRACT_VERSION, SqliteEngine, SqliteProvider};
+use yyds_sqlite::{SqliteEngine, SqliteProvider, CONTRACT_VERSION};
 
 #[test]
 fn engine_implements_provider_contract() {

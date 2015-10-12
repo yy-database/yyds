@@ -12,10 +12,7 @@ pub struct Key {
 impl Key {
     /// Builds a key from a namespace label and opaque bytes.
     pub fn new(namespace: impl Into<String>, bytes: impl Into<Vec<u8>>) -> Self {
-        Self {
-            namespace: Namespace(namespace.into()),
-            bytes: bytes.into(),
-        }
+        Self { namespace: Namespace(namespace.into()), bytes: bytes.into() }
     }
 
     /// Stable diagnostic label for errors and logs.
@@ -29,7 +26,8 @@ fn hex_preview(bytes: &[u8]) -> String {
     let head = bytes.iter().take(LIMIT).map(|b| format!("{b:02x}")).collect::<String>();
     if bytes.len() > LIMIT {
         format!("{head}…({} bytes)", bytes.len())
-    } else {
+    }
+    else {
         head
     }
 }

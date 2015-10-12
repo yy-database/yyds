@@ -70,7 +70,12 @@ impl<'snapshot> Scan<'snapshot> {
         }
         else {
             let candidate = minimum + (length - minimum) % (self.usable - 4);
-            if candidate <= maximum { candidate } else { minimum }
+            if candidate <= maximum {
+                candidate
+            }
+            else {
+                minimum
+            }
         };
         let end = offset.checked_add(local).ok_or(Error::Corrupt("sqlite cell length overflow"))?;
         let initial = page.get(offset..end).ok_or(Error::Corrupt("sqlite cell payload truncated"))?;

@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
@@ -117,9 +117,7 @@ fn executor_backed_mget_returns_ordered_duplicate_and_null_values() {
         .unwrap(),
     );
     let namespace = Namespace("redis:0".into());
-    executor
-        .execute(bind(&[b"SET", b"first", b"value"], &namespace).unwrap())
-        .unwrap();
+    executor.execute(bind(&[b"SET", b"first", b"value"], &namespace).unwrap()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let worker = std::thread::spawn(move || {
@@ -128,9 +126,7 @@ fn executor_backed_mget_returns_ordered_duplicate_and_null_values() {
     });
     let mut client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    client
-        .write_all(b"*4\r\n$4\r\nMGET\r\n$5\r\nfirst\r\n$7\r\nmissing\r\n$5\r\nfirst\r\n")
-        .unwrap();
+    client.write_all(b"*4\r\n$4\r\nMGET\r\n$5\r\nfirst\r\n$7\r\nmissing\r\n$5\r\nfirst\r\n").unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();

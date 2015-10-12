@@ -14,7 +14,11 @@ pub struct FragmentId(pub u32);
 
 /// Placement role of a distributed fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FragmentRole { Shard, Coordinator, Edge }
+pub enum FragmentRole {
+    Shard,
+    Coordinator,
+    Edge,
+}
 
 /// Exchange performed between distributed fragments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +44,11 @@ pub struct RetryPolicy {
 
 /// Read consistency requested by a distributed plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Consistency { Snapshot, Eventual, BoundedStaleness { max_millis: u64 } }
+pub enum Consistency {
+    Snapshot,
+    Eventual,
+    BoundedStaleness { max_millis: u64 },
+}
 
 /// Approximation contract attached to a distributed result.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,7 +94,9 @@ pub struct DistributedPlan {
 impl DistributedPlan {
     /// Validate fragment references, root placement, retries, and approximation metadata.
     pub fn validate(self) -> Result<ValidatedDistributedPlan, PlanValidationError> {
-        if self.fragments.is_empty() { return Err(PlanValidationError::Empty); }
+        if self.fragments.is_empty() {
+            return Err(PlanValidationError::Empty);
+        }
         let mut published = std::collections::BTreeSet::new();
         for fragment in &self.fragments {
             if !published.insert(fragment.id) {
@@ -96,7 +106,11 @@ impl DistributedPlan {
         if self.fragments.iter().filter(|fragment| fragment.id == self.root).count() != 1 {
             return Err(PlanValidationError::InvalidRoot);
         }
-        if !self.fragments.iter().any(|fragment| fragment.id == self.root && matches!(fragment.role, FragmentRole::Coordinator | FragmentRole::Edge)) {
+        if !self
+            .fragments
+            .iter()
+            .any(|fragment| fragment.id == self.root && matches!(fragment.role, FragmentRole::Coordinator | FragmentRole::Edge))
+        {
             return Err(PlanValidationError::RootMustPublish);
         }
         let mut preceding = std::collections::BTreeSet::new();
@@ -113,15 +127,10 @@ impl DistributedPlan {
             if fragment.inputs.is_empty() != fragment.exchange.is_none() {
                 return Err(PlanValidationError::InvalidExchange);
             }
-            ValidatedProgram::validate(fragment.program.clone())
-                .map_err(|_| PlanValidationError::InvalidProgram)?;
+            ValidatedProgram::validate(fragment.program.clone()).map_err(|_| PlanValidationError::InvalidProgram)?;
             preceding.insert(fragment.id);
         }
-        let by_id = self
-            .fragments
-            .iter()
-            .map(|fragment| (fragment.id, fragment))
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let by_id = self.fragments.iter().map(|fragment| (fragment.id, fragment)).collect::<std::collections::BTreeMap<_, _>>();
         let mut reachable = std::collections::BTreeSet::new();
         let mut pending = vec![self.root];
         while let Some(id) = pending.pop() {
@@ -141,7 +150,8 @@ impl DistributedPlan {
         if self.approximation.error_bound.is_some_and(|value| !value.is_finite() || value < 0.0) {
             return Err(PlanValidationError::ApproximationMetadata);
         }
-        if !self.approximation.allowed && (self.approximation.error_bound.is_some() || self.approximation.confidence.is_some()) {
+        if !self.approximation.allowed && (self.approximation.error_bound.is_some() || self.approximation.confidence.is_some())
+        {
             return Err(PlanValidationError::ApproximationMetadata);
         }
         Ok(ValidatedDistributedPlan { plan: self })
@@ -150,11 +160,15 @@ impl DistributedPlan {
 
 /// A distributed plan accepted by the scheduler boundary.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValidatedDistributedPlan { plan: DistributedPlan }
+pub struct ValidatedDistributedPlan {
+    plan: DistributedPlan,
+}
 
 impl ValidatedDistributedPlan {
     /// Return the validated plan.
-    pub fn plan(&self) -> &DistributedPlan { &self.plan }
+    pub fn plan(&self) -> &DistributedPlan {
+        &self.plan
+    }
 }
 
 /// Validation failure for a distributed plan.
@@ -186,7 +200,11 @@ pub enum PlanValidationError {
 
 /// Metric attached to a distributed vector value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VectorMetric { Cosine, Euclidean, Dot }
+pub enum VectorMetric {
+    Cosine,
+    Euclidean,
+    Dot,
+}
 
 /// Runtime type understood by the YYDS data and control planes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,18 +229,27 @@ pub enum Type {
 
 /// A reference to an immutable object manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileRef { pub object_id: String, pub generation: u64, pub byte_len: u64 }
+pub struct FileRef {
+    pub object_id: String,
+    pub generation: u64,
+    pub byte_len: u64,
+}
 
 /// A finite vector value carried by a shard or coordinator.
 #[derive(Debug, Clone, PartialEq)]
-pub struct VectorValue { values: Vec<f32>, metric: VectorMetric }
+pub struct VectorValue {
+    values: Vec<f32>,
+    metric: VectorMetric,
+}
 
 impl Eq for VectorValue {}
 
 impl VectorValue {
     /// Construct a vector and reject empty or non-finite values.
     pub fn new(values: Vec<f32>, metric: VectorMetric) -> Result<Self, VectorValueError> {
-        if values.is_empty() { return Err(VectorValueError::InvalidDimension); }
+        if values.is_empty() {
+            return Err(VectorValueError::InvalidDimension);
+        }
         if let Some(index) = values.iter().position(|value| !value.is_finite()) {
             return Err(VectorValueError::NonFiniteComponent { index });
         }
@@ -230,66 +257,101 @@ impl VectorValue {
     }
 
     /// Return the number of components.
-    pub fn dimension(&self) -> u32 { self.values.len() as u32 }
+    pub fn dimension(&self) -> u32 {
+        self.values.len() as u32
+    }
 
     /// Return the components.
-    pub fn values(&self) -> &[f32] { &self.values }
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
 
     /// Return the metric.
-    pub fn metric(&self) -> VectorMetric { self.metric }
+    pub fn metric(&self) -> VectorMetric {
+        self.metric
+    }
 }
 
 /// Error raised while constructing a distributed vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VectorValueError { InvalidDimension, NonFiniteComponent { index: usize } }
+pub enum VectorValueError {
+    InvalidDimension,
+    NonFiniteComponent { index: usize },
+}
 
 /// A schema-bound record value.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordValue { schema_id: u64, fields: Vec<Value> }
+pub struct RecordValue {
+    schema_id: u64,
+    fields: Vec<Value>,
+}
 
 impl RecordValue {
     /// Construct a record with a non-zero schema identity.
     pub fn new(schema_id: u64, fields: Vec<Value>) -> Result<Self, RecordValueError> {
-        if schema_id == 0 { return Err(RecordValueError::InvalidSchemaId); }
+        if schema_id == 0 {
+            return Err(RecordValueError::InvalidSchemaId);
+        }
         Ok(Self { schema_id, fields })
     }
 
     /// Return the schema identity.
-    pub fn schema_id(&self) -> u64 { self.schema_id }
+    pub fn schema_id(&self) -> u64 {
+        self.schema_id
+    }
 
     /// Return logical fields in catalog order.
-    pub fn fields(&self) -> &[Value] { &self.fields }
+    pub fn fields(&self) -> &[Value] {
+        &self.fields
+    }
 }
 
 /// Error raised while constructing a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordValueError { InvalidSchemaId }
+pub enum RecordValueError {
+    InvalidSchemaId,
+}
 
 /// One published distributed record layout field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LayoutField { pub field_id: u64, pub index: u32, pub ty: Type }
+pub struct LayoutField {
+    pub field_id: u64,
+    pub index: u32,
+    pub ty: Type,
+}
 
 /// A layout published by the distributed catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordLayout { schema_id: u64, fields: Vec<LayoutField> }
+pub struct RecordLayout {
+    schema_id: u64,
+    fields: Vec<LayoutField>,
+}
 
 impl RecordLayout {
     /// Create a layout and reject zero schema identities.
     pub fn new(schema_id: u64, fields: Vec<LayoutField>) -> Result<Self, RecordLayoutError> {
-        if schema_id == 0 { return Err(RecordLayoutError::InvalidSchemaId); }
+        if schema_id == 0 {
+            return Err(RecordLayoutError::InvalidSchemaId);
+        }
         Ok(Self { schema_id, fields })
     }
 
     /// Return the schema identity.
-    pub fn schema_id(&self) -> u64 { self.schema_id }
+    pub fn schema_id(&self) -> u64 {
+        self.schema_id
+    }
 
     /// Return published fields.
-    pub fn fields(&self) -> &[LayoutField] { &self.fields }
+    pub fn fields(&self) -> &[LayoutField] {
+        &self.fields
+    }
 }
 
 /// Error raised while publishing a distributed layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecordLayoutError { InvalidSchemaId }
+pub enum RecordLayoutError {
+    InvalidSchemaId,
+}
 
 /// A runtime value in shard or coordinator execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,7 +420,9 @@ pub struct Program {
 
 /// A program accepted by the YYDS fragment validator.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedProgram { program: Program }
+pub struct ValidatedProgram {
+    program: Program,
+}
 
 impl ValidatedProgram {
     /// Validate node references and the declared output type.
@@ -416,15 +480,27 @@ impl ValidatedProgram {
 
 /// Validation errors for a distributed execution fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationError { InvalidProgram, InvalidReference, TypeMismatch }
+pub enum ValidationError {
+    InvalidProgram,
+    InvalidReference,
+    TypeMismatch,
+}
 
 /// A distributed UDF placement policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UdfPlacement { Shard, Coordinator, Edge }
+pub enum UdfPlacement {
+    Shard,
+    Coordinator,
+    Edge,
+}
 
 /// A distributed UDF effect contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UdfEffect { Read, Write, External }
+pub enum UdfEffect {
+    Read,
+    Write,
+    External,
+}
 
 /// A VOS-authored UDF after YYDS binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,27 +522,36 @@ pub struct Udf {
 impl Udf {
     /// Validate the distributed UDF metadata and body shape.
     pub fn validate(self) -> Result<ValidatedUdf, UdfValidationError> {
-        if self.id.is_empty() { return Err(UdfValidationError::EmptyId); }
-        if self.version == 0 { return Err(UdfValidationError::InvalidVersion); }
+        if self.id.is_empty() {
+            return Err(UdfValidationError::EmptyId);
+        }
+        if self.version == 0 {
+            return Err(UdfValidationError::InvalidVersion);
+        }
         if self.program.nodes.is_empty() || self.program.output as usize >= self.program.nodes.len() {
             return Err(UdfValidationError::InvalidProgram);
         }
-        ValidatedProgram::validate(self.program.clone())
-            .map_err(|_| UdfValidationError::InvalidProgram)?;
+        ValidatedProgram::validate(self.program.clone()).map_err(|_| UdfValidationError::InvalidProgram)?;
         Ok(ValidatedUdf { metadata: self })
     }
 }
 
 /// A validated distributed UDF contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedUdf { metadata: Udf }
+pub struct ValidatedUdf {
+    metadata: Udf,
+}
 
 impl ValidatedUdf {
     /// Return the function identity.
-    pub fn id(&self) -> &str { &self.metadata.id }
+    pub fn id(&self) -> &str {
+        &self.metadata.id
+    }
 
     /// Return the implementation version.
-    pub fn version(&self) -> u32 { self.metadata.version }
+    pub fn version(&self) -> u32 {
+        self.metadata.version
+    }
 
     /// Evaluate the supported scalar fragment.
     pub fn evaluate(&self, parameters: &[Value], inputs: &[Value]) -> Result<Value, EvalError> {
@@ -480,7 +565,9 @@ impl ValidatedUdf {
                     let left = values.get(*left as usize).ok_or(EvalError::InvalidReference)?;
                     let right = values.get(*right as usize).ok_or(EvalError::InvalidReference)?;
                     match (left, right) {
-                        (Value::I64(left), Value::I64(right)) => left.checked_add(*right).map(Value::I64).ok_or(EvalError::Overflow)?,
+                        (Value::I64(left), Value::I64(right)) => {
+                            left.checked_add(*right).map(Value::I64).ok_or(EvalError::Overflow)?
+                        }
                         _ => return Err(EvalError::TypeMismatch),
                     }
                 }
@@ -488,21 +575,33 @@ impl ValidatedUdf {
             values.push(value);
         }
         let result = values.get(self.metadata.program.output as usize).ok_or(EvalError::InvalidReference)?.clone();
-        if result.ty() != self.metadata.program.output_type { return Err(EvalError::TypeMismatch); }
+        if result.ty() != self.metadata.program.output_type {
+            return Err(EvalError::TypeMismatch);
+        }
         Ok(result)
     }
 }
 
 fn fetch_value(values: &[Value], index: u32, ty: Type) -> Result<Value, EvalError> {
     let value = values.get(index as usize).ok_or(EvalError::InvalidReference)?.clone();
-    if value.ty() != ty { return Err(EvalError::TypeMismatch); }
+    if value.ty() != ty {
+        return Err(EvalError::TypeMismatch);
+    }
     Ok(value)
 }
 
 /// Validation errors for distributed UDF contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UdfValidationError { EmptyId, InvalidVersion, InvalidProgram }
+pub enum UdfValidationError {
+    EmptyId,
+    InvalidVersion,
+    InvalidProgram,
+}
 
 /// Evaluation errors for a distributed scalar fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvalError { InvalidReference, TypeMismatch, Overflow }
+pub enum EvalError {
+    InvalidReference,
+    TypeMismatch,
+    Overflow,
+}

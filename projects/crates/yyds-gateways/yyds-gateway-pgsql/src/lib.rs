@@ -3,12 +3,12 @@
 //! Accepts a tiny `psql` surface (`SELECT 1`, `SELECT version()`, `\conninfo`) and
 //! answers with YYDS-backed metadata. This is not a PostgreSQL server implementation.
 
-use yyds_gateway::{GatewayConfig, GatewayKind, version_label};
-use yyds_types::{Error, Result, version};
+use yyds_gateway::{version_label, GatewayConfig, GatewayKind};
+use yyds_types::{version, Error, Result};
 
-pub mod wire;
 pub mod connection;
 pub mod service;
+pub mod wire;
 
 /// Gateway kind implemented by this crate.
 pub const GATEWAY_KIND: GatewayKind = GatewayKind::Pgsql;
@@ -33,10 +33,7 @@ fn matches_select_version(sql: &str) -> bool {
 pub fn handle_input(input: &str) -> Result<Vec<String>> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Ok(vec![
-            format!("psql (YYDS {version})", version = version()),
-            "Type \"help\" for help.".into(),
-        ]);
+        return Ok(vec![format!("psql (YYDS {version})", version = version()), "Type \"help\" for help.".into()]);
     }
 
     if trimmed == "\\conninfo" {
@@ -47,12 +44,7 @@ pub fn handle_input(input: &str) -> Result<Vec<String>> {
     }
 
     if matches_select_one(trimmed) {
-        return Ok(vec![
-            " ?column? ".into(),
-            "----------".into(),
-            "        1".into(),
-            "(1 row)".into(),
-        ]);
+        return Ok(vec![" ?column? ".into(), "----------".into(), "        1".into(), "(1 row)".into()]);
     }
 
     if matches_select_version(trimmed) {

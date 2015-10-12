@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use yyds_types::{
-    adopt_catalog_schema, CatalogSchema, Error, Result, ShardEpoch, ShardId, ShardMap, CATALOG_SUFFIX,
-};
+use yyds_types::{adopt_catalog_schema, CatalogSchema, Error, Result, ShardEpoch, ShardId, ShardMap, CATALOG_SUFFIX};
 
 use crate::format;
 
@@ -20,14 +18,7 @@ pub struct Catalog {
 impl Catalog {
     /// Creates an empty in-memory catalog.
     pub fn open_memory() -> Self {
-        Self {
-            path: None,
-            schema: None,
-            identity: None,
-            resolved_contract: None,
-            shards: Vec::new(),
-            routing_epoch: None,
-        }
+        Self { path: None, schema: None, identity: None, resolved_contract: None, shards: Vec::new(), routing_epoch: None }
     }
 
     /// Opens an existing catalog file or starts an empty catalog at `path`.
@@ -41,15 +32,9 @@ impl Catalog {
                     resolved_contract = Some(resolved_contract_for_schema(schema, Some(identity))?);
                 }
             }
-            Ok(Self {
-                path: Some(path),
-                schema,
-                identity,
-                resolved_contract,
-                shards,
-                routing_epoch,
-            })
-        } else {
+            Ok(Self { path: Some(path), schema, identity, resolved_contract, shards, routing_epoch })
+        }
+        else {
             Ok(Self {
                 path: Some(path),
                 schema: None,
@@ -108,14 +93,12 @@ impl Catalog {
     /// Stores catalog schema truth when empty and rejects mismatched versions thereafter.
     pub fn ensure_schema(&mut self, version: u32, document: &str) -> Result<()> {
         match &self.schema {
-            Some(schema) if schema.version != version => Err(Error::SchemaConflict {
-                expected: version,
-                found: schema.version,
-            }),
-            Some(schema) if schema.document != document => Err(Error::SchemaConflict {
-                expected: version,
-                found: schema.version,
-            }),
+            Some(schema) if schema.version != version => {
+                Err(Error::SchemaConflict { expected: version, found: schema.version })
+            }
+            Some(schema) if schema.document != document => {
+                Err(Error::SchemaConflict { expected: version, found: schema.version })
+            }
             Some(_) => {
                 if self.resolved_contract.is_none() {
                     self.resolved_contract = Some(resolved_contract_for_schema(
@@ -140,10 +123,7 @@ impl Catalog {
         if self.resolved_contract.is_some() {
             return Ok(());
         }
-        let schema = self
-            .schema
-            .as_ref()
-            .ok_or(Error::Unsupported("catalog schema must be published before identity"))?;
+        let schema = self.schema.as_ref().ok_or(Error::Unsupported("catalog schema must be published before identity"))?;
         self.resolved_contract = Some(resolved_contract_for_schema(schema, self.identity.as_ref())?);
         Ok(())
     }
@@ -175,7 +155,8 @@ impl Catalog {
 
     /// Persists the catalog when file-backed.
     pub fn flush(&self) -> Result<()> {
-        let Some(path) = &self.path else {
+        let Some(path) = &self.path
+        else {
             return Ok(());
         };
         if let Some(parent) = path.parent() {
@@ -202,19 +183,12 @@ fn resolved_contract_for_schema(
     let projection = vos::parse_oak(&schema.document)
         .map_err(|message| Error::Schema { message })?
         .project_schema()
-        .map_err(|diagnostics| Error::Schema {
-            message: format!("VOS semantic projection failed: {diagnostics:?}"),
-        })?;
+        .map_err(|diagnostics| Error::Schema { message: format!("VOS semantic projection failed: {diagnostics:?}") })?;
     let mut used_type_ids = std::collections::BTreeSet::new();
     let mut used_field_ids = std::collections::BTreeSet::new();
     if let Some(identity) = identity {
         used_type_ids.extend(identity.types.iter().map(|entry| entry.type_id.0));
-        used_field_ids.extend(
-            identity
-                .types
-                .iter()
-                .flat_map(|entry| entry.fields.iter().map(|field| field.field_id.0)),
-        );
+        used_field_ids.extend(identity.types.iter().flat_map(|entry| entry.fields.iter().map(|field| field.field_id.0)));
     }
     let mut next_type_id = 1u64;
     let mut next_field_id = 1u64;
@@ -222,11 +196,8 @@ fn resolved_contract_for_schema(
         .types
         .iter()
         .map(|projected| {
-            let name = projected
-                .canonical_path
-                .last()
-                .cloned()
-                .ok_or(Error::Corrupt("VOS type has an empty canonical path"))?;
+            let name =
+                projected.canonical_path.last().cloned().ok_or(Error::Corrupt("VOS type has an empty canonical path"))?;
             let legacy = identity.and_then(|catalog| {
                 catalog.types.iter().find(|entry| {
                     entry.name == name
@@ -242,7 +213,8 @@ fn resolved_contract_for_schema(
             }
             let type_id = if let Some(entry) = legacy {
                 entry.type_id.0
-            } else {
+            }
+            else {
                 while used_type_ids.contains(&next_type_id) {
                     next_type_id += 1;
                 }
@@ -256,17 +228,15 @@ fn resolved_contract_for_schema(
                 .iter()
                 .enumerate()
                 .map(|(field_index, field)| {
-                    let legacy_field = legacy.and_then(|entry| {
-                        entry.fields.iter().find(|candidate| {
-                            candidate.current_name == field.canonical_name
-                        })
-                    });
+                    let legacy_field = legacy
+                        .and_then(|entry| entry.fields.iter().find(|candidate| candidate.current_name == field.canonical_name));
                     if legacy.is_some() && legacy_field.is_none() {
                         return Err(Error::Corrupt("legacy catalog is missing a schema field"));
                     }
                     let field_id = if let Some(field) = legacy_field {
                         field.field_id.0
-                    } else {
+                    }
+                    else {
                         while used_field_ids.contains(&next_field_id) {
                             next_field_id += 1;
                         }
@@ -275,9 +245,7 @@ fn resolved_contract_for_schema(
                         next_field_id += 1;
                         id
                     };
-                    let virtual_field_index = legacy_field
-                        .map(|field| field.virtual_field)
-                        .unwrap_or(field_index as u32);
+                    let virtual_field_index = legacy_field.map(|field| field.virtual_field).unwrap_or(field_index as u32);
                     Ok(vos::contract::FieldIdentity {
                         canonical_name: field.canonical_name.clone(),
                         field_id,
@@ -293,13 +261,10 @@ fn resolved_contract_for_schema(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.to_owned(),
-        types,
-    };
-    let contract = vos::resolve_contract(&projection, &manifest).map_err(|diagnostics| Error::Schema {
-        message: format!("VOS resolved contract failed: {diagnostics:?}"),
-    })?;
+    let manifest =
+        vos::contract::IdentityManifest { format_version: vos::contract::IDENTITY_MANIFEST_VERSION.to_owned(), types };
+    let contract = vos::resolve_contract(&projection, &manifest)
+        .map_err(|diagnostics| Error::Schema { message: format!("VOS resolved contract failed: {diagnostics:?}") })?;
     validate_contract(Some(schema), identity, &contract)?;
     Ok(contract)
 }
@@ -317,16 +282,24 @@ pub(crate) fn validate_contract(
     let projection = vos::validate_schema(&schema.document).map_err(|message| Error::Schema { message })?;
     let manifest = vos::contract::IdentityManifest {
         format_version: contract.identity_manifest_version.clone(),
-        types: contract.types.iter().map(|entry| vos::contract::TypeIdentity {
-            canonical_path: entry.canonical_path.clone(),
-            type_id: entry.type_id,
-            kind: entry.kind,
-            fields: entry.fields.iter().map(|field| vos::contract::FieldIdentity {
-                canonical_name: field.canonical_name.clone(),
-                field_id: field.field_id,
-                virtual_field_index: field.virtual_field_index,
-            }).collect(),
-        }).collect(),
+        types: contract
+            .types
+            .iter()
+            .map(|entry| vos::contract::TypeIdentity {
+                canonical_path: entry.canonical_path.clone(),
+                type_id: entry.type_id,
+                kind: entry.kind,
+                fields: entry
+                    .fields
+                    .iter()
+                    .map(|field| vos::contract::FieldIdentity {
+                        canonical_name: field.canonical_name.clone(),
+                        field_id: field.field_id,
+                        virtual_field_index: field.virtual_field_index,
+                    })
+                    .collect(),
+            })
+            .collect(),
     };
     let expected = vos::resolve_contract(&projection, &manifest).map_err(|diagnostics| Error::Schema {
         message: format!("resolved contract does not match schema: {diagnostics:?}"),
@@ -351,20 +324,27 @@ pub(crate) fn validate_contract(
             return Err(Error::Corrupt("resolved contract does not match identity ledger"));
         }
         for entry in &identity.types {
-            let resolved = contract.types.iter().find(|item| item.type_id == entry.type_id.0)
+            let resolved = contract
+                .types
+                .iter()
+                .find(|item| item.type_id == entry.type_id.0)
                 .ok_or(Error::Corrupt("resolved contract type identity mismatch"))?;
             let kind = match entry.kind {
                 vos::ast::TypeKind::Table => vos::contract::TypeContractKind::Table,
                 vos::ast::TypeKind::Class => vos::contract::TypeContractKind::Class,
             };
-            if resolved.canonical_path.last() != Some(&entry.name) || resolved.kind != kind
-                || resolved.fields.len() != entry.fields.len() {
+            if resolved.canonical_path.last() != Some(&entry.name)
+                || resolved.kind != kind
+                || resolved.fields.len() != entry.fields.len()
+            {
                 return Err(Error::Corrupt("resolved contract type does not match identity ledger"));
             }
             for field in &entry.fields {
-                if !resolved.fields.iter().any(|item| item.field_id == field.field_id.0
-                    && item.canonical_name == field.current_name
-                    && item.virtual_field_index == field.virtual_field) {
+                if !resolved.fields.iter().any(|item| {
+                    item.field_id == field.field_id.0
+                        && item.canonical_name == field.current_name
+                        && item.virtual_field_index == field.virtual_field
+                }) {
                     return Err(Error::Corrupt("resolved contract field identity mismatch"));
                 }
             }

@@ -9,9 +9,8 @@ use std::{
 use yyds_types::{Error, Result};
 
 use crate::{
-    SchemaObject, TableLimits, TableRow,
     format::{blank_database, stamp_library_version, validate_database},
-    read_named_table, read_schema,
+    read_named_table, read_schema, SchemaObject, TableLimits, TableRow,
 };
 
 /// Storage mode for [`SqliteDatabase`].

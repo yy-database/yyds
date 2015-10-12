@@ -1,4 +1,4 @@
-use yyds_gateway_redis::resp::{FrameError, RequestLimits, decode_request};
+use yyds_gateway_redis::resp::{decode_request, FrameError, RequestLimits};
 
 #[test]
 fn request_preserves_binary_arguments() {

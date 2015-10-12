@@ -1,8 +1,6 @@
 //! Provider trait and open options.
 
-use crate::{
-    CatalogSnapshot, SqliteCapabilities, SqliteError, SqliteValue, StatementResult,
-};
+use crate::{CatalogSnapshot, SqliteCapabilities, SqliteError, SqliteValue, StatementResult};
 
 /// Options used when opening a file-backed SQLite provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

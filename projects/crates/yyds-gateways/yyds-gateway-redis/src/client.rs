@@ -8,7 +8,7 @@ use std::{
 
 use yyds_types::{Error, Result};
 
-use crate::resp::{FrameError, RequestLimits, encode_request};
+use crate::resp::{encode_request, FrameError, RequestLimits};
 
 /// One decoded RESP2 reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +126,10 @@ impl Client {
 }
 
 fn decode_response(buffer: &[u8]) -> Result<Option<(Response, usize)>> {
-    let Some(marker) = buffer.first() else { return Ok(None) };
+    let Some(marker) = buffer.first()
+    else {
+        return Ok(None);
+    };
     match marker {
         b'+' | b'-' | b':' => decode_line_response(buffer, *marker),
         b'$' => decode_bulk_response(buffer),
@@ -135,7 +138,10 @@ fn decode_response(buffer: &[u8]) -> Result<Option<(Response, usize)>> {
 }
 
 fn decode_line_response(buffer: &[u8], marker: u8) -> Result<Option<(Response, usize)>> {
-    let Some(end) = find_crlf(buffer, 1) else { return Ok(None) };
+    let Some(end) = find_crlf(buffer, 1)
+    else {
+        return Ok(None);
+    };
     let line = &buffer[1..end];
     let text = std::str::from_utf8(line).map_err(|_| Error::Corrupt("redis reply is not UTF-8"))?;
     let response = match marker {
@@ -148,7 +154,10 @@ fn decode_line_response(buffer: &[u8], marker: u8) -> Result<Option<(Response, u
 }
 
 fn decode_bulk_response(buffer: &[u8]) -> Result<Option<(Response, usize)>> {
-    let Some(end) = find_crlf(buffer, 1) else { return Ok(None) };
+    let Some(end) = find_crlf(buffer, 1)
+    else {
+        return Ok(None);
+    };
     let length_text = std::str::from_utf8(&buffer[1..end]).map_err(|_| Error::Corrupt("redis bulk length"))?;
     let length = length_text.parse::<i64>().map_err(|_| Error::Corrupt("redis bulk length"))?;
     if length < 0 {

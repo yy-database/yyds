@@ -1,6 +1,8 @@
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
-use yyds_sqlite::{SchemaObjectKind, SqliteEngine, SqliteProvider, SqliteValue, TableLimits, read_named_table, read_schema, validate_database};
+use yyds_sqlite::{
+    read_named_table, read_schema, validate_database, SchemaObjectKind, SqliteEngine, SqliteProvider, SqliteValue, TableLimits,
+};
 
 /// Optional resource bounds for each schema or table scan.
 #[napi(object)]
@@ -214,7 +216,8 @@ impl SqliteConnection {
             yyds_sqlite::JournalMode::Delete => "delete",
             yyds_sqlite::JournalMode::Wal => "wal",
             yyds_sqlite::JournalMode::Other => "other",
-        }.into())
+        }
+        .into())
     }
 
     /// Performs a passive WAL checkpoint.

@@ -1,7 +1,12 @@
-use yyds_sqlite::{SchemaObjectKind, SqliteDatabase, TableLimits, blank_database, read_named_table, read_schema};
+use yyds_sqlite::{blank_database, read_named_table, read_schema, SchemaObjectKind, SqliteDatabase, TableLimits};
 
 fn varint(value: usize) -> Vec<u8> {
-    if value < 128 { vec![value as u8] } else { vec![0x80 | (value >> 7) as u8, (value & 0x7f) as u8] }
+    if value < 128 {
+        vec![value as u8]
+    }
+    else {
+        vec![0x80 | (value >> 7) as u8, (value & 0x7f) as u8]
+    }
 }
 
 fn record(kind: &str, name: &str, root: Option<i8>, sql: Option<&str>) -> Vec<u8> {

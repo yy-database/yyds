@@ -16,11 +16,7 @@ pub struct GatewayConfig {
 impl GatewayConfig {
     /// Creates a config using the kind's default port.
     pub fn new(kind: GatewayKind) -> Self {
-        Self {
-            kind,
-            port: kind.default_port(),
-            catalog: GatewayCatalog::new(),
-        }
+        Self { kind, port: kind.default_port(), catalog: GatewayCatalog::new() }
     }
 
     /// Overrides the listen port.

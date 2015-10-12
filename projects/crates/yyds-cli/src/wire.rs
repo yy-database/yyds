@@ -80,8 +80,16 @@ impl MessageType {
     /// Returns true for frame types the server never sends to clients.
     #[allow(dead_code)]
     pub fn is_client_only(self) -> bool {
-        matches!(self, Self::HelloOk | Self::InfoOk | Self::SchemaGetOk |
-            Self::SchemaEnsureOk | Self::KvGetOk | Self::KvPutOk | Self::Error)
+        matches!(
+            self,
+            Self::HelloOk
+                | Self::InfoOk
+                | Self::SchemaGetOk
+                | Self::SchemaEnsureOk
+                | Self::KvGetOk
+                | Self::KvPutOk
+                | Self::Error
+        )
     }
 }
 
@@ -135,10 +143,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, String> {
         return Err("wire frame bad product magic (want YYDB|YYDS)".into());
     }
     if version != WIRE_VERSION {
-        return Err(format!(
-            "wire version not supported (want 0000, got {})",
-            String::from_utf8_lossy(version)
-        ));
+        return Err(format!("wire version not supported (want 0000, got {})", String::from_utf8_lossy(version)));
     }
     let msg_raw = u16::from_le_bytes([bytes[8], bytes[9]]);
     let flags = u16::from_le_bytes([bytes[10], bytes[11]]);
@@ -151,12 +156,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Frame, String> {
     if bytes.len() < need {
         return Err("wire frame truncated body".into());
     }
-    Ok(Frame {
-        msg_type: MessageType::from_u16(msg_raw),
-        flags,
-        request_id,
-        body: bytes[HEADER_LEN..need].to_vec(),
-    })
+    Ok(Frame { msg_type: MessageType::from_u16(msg_raw), flags, request_id, body: bytes[HEADER_LEN..need].to_vec() })
 }
 
 /// Read exactly one frame from a blocking reader (TCP).
@@ -317,11 +317,7 @@ mod tests {
 
     #[test]
     fn kv_put_body_roundtrip() {
-        let (key, value) = decode_kv_put(&[
-            3, 0, 0, 0, b'f', b'o', b'o',
-            5, 0, 0, 0, b'h', b'e', b'l', b'l', b'o',
-        ])
-        .unwrap();
+        let (key, value) = decode_kv_put(&[3, 0, 0, 0, b'f', b'o', b'o', 5, 0, 0, 0, b'h', b'e', b'l', b'l', b'o']).unwrap();
         assert_eq!(key, "foo");
         assert_eq!(value, b"hello");
     }

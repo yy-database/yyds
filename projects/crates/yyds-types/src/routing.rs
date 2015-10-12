@@ -69,11 +69,7 @@ impl ShardMap {
     pub fn route(&self, namespace: &str, key: &[u8]) -> RouteDecision {
         let hash = stable_key_hash(namespace, key);
         let index = (hash % self.shards.len() as u64) as usize;
-        RouteDecision {
-            epoch: self.epoch,
-            hash,
-            shard: self.shards[index].clone(),
-        }
+        RouteDecision { epoch: self.epoch, hash, shard: self.shards[index].clone() }
     }
 
     /// Routes a key only when the caller has observed this exact map epoch.
@@ -92,10 +88,15 @@ impl ShardMap {
 
 fn stable_key_hash(namespace: &str, key: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in (namespace.len() as u64).to_le_bytes().iter().chain(namespace.as_bytes()).chain((key.len() as u64).to_le_bytes().iter()).chain(key) {
+    for byte in (namespace.len() as u64)
+        .to_le_bytes()
+        .iter()
+        .chain(namespace.as_bytes())
+        .chain((key.len() as u64).to_le_bytes().iter())
+        .chain(key)
+    {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3_u64);
     }
     hash
 }
-

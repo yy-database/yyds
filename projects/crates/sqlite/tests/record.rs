@@ -1,4 +1,4 @@
-use yyds_sqlite::{RecordLimits, RecordValue, TextEncoding, decode_record, decode_varint};
+use yyds_sqlite::{decode_record, decode_varint, RecordLimits, RecordValue, TextEncoding};
 
 #[test]
 fn varint_boundaries_and_truncation() {

@@ -4,14 +4,14 @@ use std::{
     io::{self, Read, Write},
     net::TcpStream,
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };
 
-use crate::wire::{FrameError, StartupParameterError, StartupParameters, decode_message, decode_startup, encode_message};
-use yyds_gateway::{SqlSessionCommand, SqlTransactionAction, parse_session_command};
+use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
+use yyds_gateway::{parse_session_command, SqlSessionCommand, SqlTransactionAction};
 
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;

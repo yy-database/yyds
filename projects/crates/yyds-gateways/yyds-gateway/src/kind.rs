@@ -10,11 +10,7 @@ pub enum GatewayKind {
 }
 
 /// All supported gateway kinds in stable order.
-pub const ALL_GATEWAY_KINDS: [GatewayKind; 3] = [
-    GatewayKind::Redis,
-    GatewayKind::Mysql,
-    GatewayKind::Pgsql,
-];
+pub const ALL_GATEWAY_KINDS: [GatewayKind; 3] = [GatewayKind::Redis, GatewayKind::Mysql, GatewayKind::Pgsql];
 
 impl GatewayKind {
     /// Stable gateway identifier used in logs and diagnostics.

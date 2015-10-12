@@ -1,6 +1,6 @@
 use yyds_gateway::{
-    ALL_GATEWAY_KINDS, FORBIDDEN_LEGACY_SURFACES, GatewayConfig, GatewayKind, SqlBoundExpression, SqlBoundLiteral,
-    SqlBoundProjection, SqlBoundStatement, bind_sql,
+    bind_sql, GatewayConfig, GatewayKind, SqlBoundExpression, SqlBoundLiteral, SqlBoundProjection, SqlBoundStatement,
+    ALL_GATEWAY_KINDS, FORBIDDEN_LEGACY_SURFACES,
 };
 
 fn catalog(source: &str) -> yyds_gateway::SqlCatalog {
@@ -22,18 +22,15 @@ fn catalog(source: &str) -> yyds_gateway::SqlCatalog {
                     let field_id = next_field_id;
                     next_field_id += 1;
                     vos::contract::FieldIdentity {
-                    canonical_name: field.canonical_name.clone(),
-                    field_id,
-                    virtual_field_index: field_index as u32,
+                        canonical_name: field.canonical_name.clone(),
+                        field_id,
+                        virtual_field_index: field_index as u32,
                     }
                 })
                 .collect(),
         })
         .collect();
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
-        types,
-    };
+    let manifest = vos::contract::IdentityManifest { format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(), types };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     yyds_gateway::SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog")
 }
@@ -41,17 +38,10 @@ fn catalog(source: &str) -> yyds_gateway::SqlCatalog {
 #[test]
 fn sql_catalog_binding_consumes_published_yyds_identity() {
     let mut yyds_catalog = yyds_catalog::Catalog::open_memory();
-    yyds_catalog
-        .ensure_schema(7, "table users { @@id: i64 }\n")
-        .expect("publish VOS schema");
-    let catalog = yyds_gateway::SqlCatalog::from_yyds_catalog(&yyds_catalog)
-        .expect("published identity");
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7)
-        .expect("catalog bind");
-    assert!(matches!(
-        bound,
-        yyds_gateway::SqlCatalogBoundStatement::Select(_)
-    ));
+    yyds_catalog.ensure_schema(7, "table users { @@id: i64 }\n").expect("publish VOS schema");
+    let catalog = yyds_gateway::SqlCatalog::from_yyds_catalog(&yyds_catalog).expect("published identity");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7).expect("catalog bind");
+    assert!(matches!(bound, yyds_gateway::SqlCatalogBoundStatement::Select(_)));
 }
 
 #[test]
@@ -64,11 +54,7 @@ fn sql_catalog_binding_prefers_published_resolved_contract() {
             canonical_path: vec!["users".into()],
             type_id: 1,
             kind: vos::contract::TypeContractKind::Table,
-            fields: vec![vos::contract::FieldIdentity {
-                canonical_name: "id".into(),
-                field_id: 1,
-                virtual_field_index: 0,
-            }],
+            fields: vec![vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 }],
         }],
     };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
@@ -141,12 +127,7 @@ fn sql_binding_rejects_non_select_and_unimplemented_clauses() {
 #[test]
 fn sql_catalog_binding_resolves_vos_type_and_field_identity() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64 }\n");
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT id, name FROM users WHERE id = 7",
-        &catalog,
-        7,
-    )
-    .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 7", &catalog, 7).expect("catalog bind");
     let yyds_gateway::SqlCatalogBoundStatement::Select(select) = bound;
     let source = select.source.expect("source");
     assert_eq!(source.name, "users");
@@ -164,14 +145,11 @@ fn sql_catalog_binding_resolves_vos_type_and_field_identity() {
 #[test]
 fn sql_catalog_binding_rejects_unknown_names_and_schema_versions() {
     let catalog = catalog("table users { @@id: i64 }\n");
-    let unknown_table = yyds_gateway::bind_sql_catalog("SELECT id FROM missing", &catalog, 7)
-        .expect_err("unknown table");
+    let unknown_table = yyds_gateway::bind_sql_catalog("SELECT id FROM missing", &catalog, 7).expect_err("unknown table");
     assert!(unknown_table.message.contains("unknown SQL table"));
-    let unknown_column = yyds_gateway::bind_sql_catalog("SELECT missing FROM users", &catalog, 7)
-        .expect_err("unknown column");
+    let unknown_column = yyds_gateway::bind_sql_catalog("SELECT missing FROM users", &catalog, 7).expect_err("unknown column");
     assert!(unknown_column.message.contains("unknown SQL column"));
-    let version = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 8)
-        .expect_err("schema version mismatch");
+    let version = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 8).expect_err("schema version mismatch");
     assert!(version.message.contains("schema version mismatch"));
 }
 
@@ -188,7 +166,6 @@ fn sql_catalog_binding_rejects_ambiguous_unqualified_columns() {
         }]
     })).expect("legacy snapshot");
     let catalog = yyds_gateway::SqlCatalog::from_snapshot(7, &snapshot).expect("gateway catalog");
-    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7)
-        .expect_err("ambiguous column");
+    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7).expect_err("ambiguous column");
     assert!(error.message.contains("ambiguous SQL column"));
 }

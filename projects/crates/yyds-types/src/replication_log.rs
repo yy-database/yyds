@@ -50,12 +50,7 @@ pub struct ReplicaLog {
 impl ReplicaLog {
     /// Creates an empty log under a validated replica placement.
     pub fn new(placement: ReplicaSet) -> Self {
-        Self {
-            placement,
-            entries: Vec::new(),
-            acknowledgements: BTreeMap::new(),
-            committed: LogIndex(0),
-        }
+        Self { placement, entries: Vec::new(), acknowledgements: BTreeMap::new(), committed: LogIndex(0) }
     }
 
     /// Appends a mutation under the current leader fence.
@@ -65,9 +60,7 @@ impl ReplicaLog {
         token: &FenceToken,
         payload: Vec<u8>,
     ) -> Result<LogIndex, ReplicationError> {
-        self.placement
-            .validate_fence(caller, token)
-            .map_err(ReplicationError::Fenced)?;
+        self.placement.validate_fence(caller, token).map_err(ReplicationError::Fenced)?;
         let index = LogIndex(
             self.entries
                 .len()
@@ -77,19 +70,12 @@ impl ReplicaLog {
                 .ok_or(ReplicationError::IndexExhausted)?,
         );
         self.entries.push(ReplicationEntry { index, term: self.placement.term(), payload });
-        self.acknowledgements
-            .entry(index)
-            .or_default()
-            .insert(self.placement.leader().clone());
+        self.acknowledgements.entry(index).or_default().insert(self.placement.leader().clone());
         Ok(index)
     }
 
     /// Acknowledges a replicated entry from a voter or learner member.
-    pub fn acknowledge(
-        &mut self,
-        replica: &ReplicaNodeId,
-        index: LogIndex,
-    ) -> Result<(), ReplicationError> {
+    pub fn acknowledge(&mut self, replica: &ReplicaNodeId, index: LogIndex) -> Result<(), ReplicationError> {
         if !self.placement.members().iter().any(|member| &member.node == replica) {
             return Err(ReplicationError::UnknownReplica(replica.clone()));
         }
@@ -116,13 +102,8 @@ impl ReplicaLog {
             .filter(|member| member.role == ReplicaRole::Voter)
             .map(|member| &member.node)
             .collect::<BTreeSet<_>>();
-        let observed = self
-            .acknowledgements
-            .get(&index)
-            .into_iter()
-            .flatten()
-            .filter(|replica| voters.contains(replica))
-            .count();
+        let observed =
+            self.acknowledgements.get(&index).into_iter().flatten().filter(|replica| voters.contains(replica)).count();
         let required = voters.len() / 2 + 1;
         if observed < required {
             return Err(ReplicationError::QuorumNotReached { required, observed });
@@ -146,4 +127,3 @@ impl ReplicaLog {
         &self.placement
     }
 }
-

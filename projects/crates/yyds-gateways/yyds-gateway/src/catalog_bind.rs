@@ -1,8 +1,8 @@
 //! SQL compatibility binding against a published YYDS VOS catalog.
 
 use crate::sql::{
-    bind_sql, SqlBoundExpression, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect,
-    SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundBinaryOperator, SqlFrontendError,
+    bind_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect,
+    SqlBoundStatement, SqlBoundUnaryOperator, SqlFrontendError,
 };
 
 /// A table identity exposed by the YYDS catalog to a gateway binder.
@@ -35,30 +35,22 @@ pub struct SqlCatalog {
 impl SqlCatalog {
     /// Builds a gateway view from the newest contract published by YYDS.
     pub fn from_yyds_catalog(catalog: &yyds_catalog::Catalog) -> Result<Self, SqlFrontendError> {
-        let schema = catalog
-            .schema()
-            .ok_or_else(|| catalog_error("YYDS catalog has no published schema"))?;
+        let schema = catalog.schema().ok_or_else(|| catalog_error("YYDS catalog has no published schema"))?;
         if let Some(contract) = catalog.resolved_contract() {
             return Self::from_resolved_contract(schema.version, contract);
         }
-        let identity = catalog
-            .identity()
-            .ok_or_else(|| catalog_error("YYDS catalog has no published identity snapshot"))?;
+        let identity = catalog.identity().ok_or_else(|| catalog_error("YYDS catalog has no published identity snapshot"))?;
         Self::from_snapshot(schema.version, identity)
     }
 
     /// Projects gateway table identities from a validated resolved contract.
-    pub fn from_resolved_contract(
-        schema_version: u32,
-        contract: &vos::ResolvedContract,
-    ) -> Result<Self, SqlFrontendError> {
+    pub fn from_resolved_contract(schema_version: u32, contract: &vos::ResolvedContract) -> Result<Self, SqlFrontendError> {
         if schema_version == 0 {
             return Err(catalog_error("catalog schema version must be nonzero"));
         }
         let artifact = contract.to_json().map_err(|_| catalog_error("resolved contract encode failed"))?;
-        vos::ResolvedContract::from_json(&artifact).map_err(|error| {
-            catalog_error(&format!("invalid resolved VOS contract {}: {}", error.code, error.message))
-        })?;
+        vos::ResolvedContract::from_json(&artifact)
+            .map_err(|error| catalog_error(&format!("invalid resolved VOS contract {}: {}", error.code, error.message)))?;
         let mut type_ids = std::collections::BTreeSet::new();
         let mut field_ids = std::collections::BTreeSet::new();
         let tables = contract
@@ -69,11 +61,8 @@ impl SqlCatalog {
                 if entry.type_id == 0 || !type_ids.insert(entry.type_id) {
                     return Err(catalog_error("invalid or duplicate catalog type identity"));
                 }
-                let name = entry
-                    .canonical_path
-                    .last()
-                    .cloned()
-                    .ok_or_else(|| catalog_error("catalog table has no canonical name"))?;
+                let name =
+                    entry.canonical_path.last().cloned().ok_or_else(|| catalog_error("catalog table has no canonical name"))?;
                 let fields = entry
                     .fields
                     .iter()
@@ -81,10 +70,7 @@ impl SqlCatalog {
                         if field.field_id == 0 || !field_ids.insert(field.field_id) {
                             return Err(catalog_error("invalid or duplicate catalog field identity"));
                         }
-                        Ok(SqlCatalogField {
-                            field_id: field.field_id,
-                            name: field.canonical_name.clone(),
-                        })
+                        Ok(SqlCatalogField { field_id: field.field_id, name: field.canonical_name.clone() })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(SqlCatalogTable { type_id: entry.type_id, name, fields })
@@ -120,10 +106,7 @@ impl SqlCatalog {
                 fields: entry
                     .fields
                     .iter()
-                    .map(|field| SqlCatalogField {
-                        field_id: field.field_id.0,
-                        name: field.current_name.clone(),
-                    })
+                    .map(|field| SqlCatalogField { field_id: field.field_id.0, name: field.current_name.clone() })
                     .collect(),
             })
             .collect();
@@ -238,24 +221,14 @@ pub fn bind_sql_catalog(
     }
 }
 
-fn bind_select(
-    select: SqlBoundSelect,
-    catalog: &SqlCatalog,
-) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
-    let source = select
-        .source
-        .as_deref()
-        .map(|name| find_table(catalog, name))
-        .transpose()?;
+fn bind_select(select: SqlBoundSelect, catalog: &SqlCatalog) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
+    let source = select.source.as_deref().map(|name| find_table(catalog, name)).transpose()?;
     let projections = select
         .projections
         .into_iter()
         .map(|projection| bind_projection(projection, source.as_ref(), catalog))
         .collect::<Result<Vec<_>, _>>()?;
-    let predicate = select
-        .predicate
-        .map(|expression| bind_expression(expression, source.as_ref(), catalog))
-        .transpose()?;
+    let predicate = select.predicate.map(|expression| bind_expression(expression, source.as_ref(), catalog)).transpose()?;
     Ok(SqlCatalogBoundSelect { source, projections, predicate })
 }
 
@@ -269,10 +242,9 @@ fn bind_projection(
             .cloned()
             .map(SqlCatalogBoundProjection::Star)
             .ok_or_else(|| catalog_error("SQL star projection requires a catalog table source")),
-        SqlBoundProjection::Expression { expression, alias } => Ok(SqlCatalogBoundProjection::Expression {
-            expression: bind_expression(expression, source, catalog)?,
-            alias,
-        }),
+        SqlBoundProjection::Expression { expression, alias } => {
+            Ok(SqlCatalogBoundProjection::Expression { expression: bind_expression(expression, source, catalog)?, alias })
+        }
     }
 }
 
@@ -319,11 +291,7 @@ fn find_field(
         .iter()
         .find(|candidate| candidate.type_id == source.type_id)
         .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
-    let matches = table
-        .fields
-        .iter()
-        .filter(|field| field.name == name)
-        .collect::<Vec<_>>();
+    let matches = table.fields.iter().filter(|field| field.name == name).collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Err(catalog_error(&format!("unknown SQL column: {name}"))),
         [field] => Ok(SqlCatalogBoundColumn {

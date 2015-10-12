@@ -4,8 +4,8 @@ use std::{
     io::{self, Read, Write},
     net::TcpStream,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -14,8 +14,8 @@ use yyds_execution::KeyValueExecutor;
 use yyds_types::{KeyValueResult, Namespace};
 
 use crate::{
-    bind::{BindError, bind, bind_mget},
-    resp::{Request, RequestLimits, decode_request},
+    bind::{bind, bind_mget, BindError},
+    resp::{decode_request, Request, RequestLimits},
 };
 
 /// Serves one bounded RESP2 connection with a 30-second I/O timeout.
@@ -182,7 +182,8 @@ fn respond(
         match bind_mget(&request.arguments, namespace) {
             Ok(commands) => match executor.execute_read_batch(&commands) {
                 Ok(results) => {
-                    if results.len() != commands.len() || results.iter().any(|result| !matches!(result, KeyValueResult::Get(_))) {
+                    if results.len() != commands.len() || results.iter().any(|result| !matches!(result, KeyValueResult::Get(_)))
+                    {
                         write_error(stream, "MGET executor returned an invalid read batch")?;
                         return Ok(true);
                     }
@@ -246,7 +247,14 @@ fn parse_database(bytes: &[u8]) -> Option<u8> {
 fn write_error(stream: &mut impl Write, message: &str) -> io::Result<()> {
     let sanitized = message
         .chars()
-        .map(|character| if matches!(character, '\r' | '\n') { ' ' } else { character })
+        .map(|character| {
+            if matches!(character, '\r' | '\n') {
+                ' '
+            }
+            else {
+                character
+            }
+        })
         .take(512)
         .collect::<String>();
     write!(stream, "-ERR {sanitized}\r\n")

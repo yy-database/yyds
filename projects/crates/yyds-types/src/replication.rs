@@ -146,11 +146,7 @@ impl ReplicaSet {
     }
 
     /// Validates a write caller against the current epoch, term, and leader.
-    pub fn validate_fence(
-        &self,
-        caller: &ReplicaNodeId,
-        token: &FenceToken,
-    ) -> Result<(), ReplicaError> {
+    pub fn validate_fence(&self, caller: &ReplicaNodeId, token: &FenceToken) -> Result<(), ReplicaError> {
         if token.epoch != self.epoch {
             return Err(ReplicaError::StaleEpoch { expected: self.epoch, found: token.epoch });
         }
@@ -164,22 +160,11 @@ impl ReplicaSet {
     }
 
     /// Advances leadership to a voter under a strictly newer term.
-    pub fn elect(
-        &self,
-        term: LeaderTerm,
-        leader: ReplicaNodeId,
-    ) -> Result<Self, ReplicaError> {
+    pub fn elect(&self, term: LeaderTerm, leader: ReplicaNodeId) -> Result<Self, ReplicaError> {
         if term <= self.term {
             return Err(ReplicaError::NonMonotonicTerm { current: self.term, found: term });
         }
-        let candidate = Self {
-            shard: self.shard.clone(),
-            epoch: self.epoch,
-            term,
-            leader,
-            members: self.members.clone(),
-        };
+        let candidate = Self { shard: self.shard.clone(), epoch: self.epoch, term, leader, members: self.members.clone() };
         candidate.validate()
     }
 }
-

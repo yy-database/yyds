@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
-use yyds_gateway_redis::bind::{BindError, bind, bind_mget};
+use yyds_gateway_redis::bind::{bind, bind_mget, BindError};
 use yyds_kv::MemoryShard;
 use yyds_types::{KeyValueResult, Namespace, ShardEpoch, ShardId, ShardMap};
 

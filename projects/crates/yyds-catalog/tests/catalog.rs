@@ -10,9 +10,7 @@ const VOS: &str = "table User {\n    @@id: uuid,\n}\n";
 fn ensure_schema_and_register_shard_in_memory() {
     let mut catalog = Catalog::open_memory();
     catalog.ensure_schema(1, VOS).expect("ensure");
-    catalog
-        .register_shard(ShardId("shard-0".into()))
-        .expect("register");
+    catalog.register_shard(ShardId("shard-0".into())).expect("register");
 
     let schema = catalog.schema().expect("schema");
     assert_eq!(schema.version, 1);
@@ -30,9 +28,7 @@ fn file_catalog_round_trip() {
     {
         let mut catalog = Catalog::open(&path).expect("open");
         catalog.ensure_schema(1, VOS).expect("ensure");
-        catalog
-            .register_shard(ShardId("shard-a".into()))
-            .expect("register");
+        catalog.register_shard(ShardId("shard-a".into())).expect("register");
         catalog.flush().expect("flush");
     }
 
@@ -70,9 +66,7 @@ fn routing_epoch_round_trips_and_requires_monotonic_publish() {
     let dir = create_folder().expect("tempdir");
     let path = catalog_path(dir.path().join("routing"));
     let mut catalog = Catalog::open(&path).expect("open");
-    catalog
-        .publish_routing(ShardEpoch(1), vec![ShardId("a".into()), ShardId("b".into())])
-        .expect("publish");
+    catalog.publish_routing(ShardEpoch(1), vec![ShardId("a".into()), ShardId("b".into())]).expect("publish");
     assert_eq!(catalog.routing().expect("routing").expect("map").epoch(), ShardEpoch(1));
     assert!(catalog.publish_routing(ShardEpoch(1), vec![ShardId("a".into())]).is_err());
     catalog.flush().expect("flush");
@@ -93,11 +87,7 @@ fn resolved_contract_round_trips_and_rejects_conflicting_publish() {
             canonical_path: vec!["T".into()],
             type_id: 1,
             kind: vos::contract::TypeContractKind::Class,
-            fields: vec![vos::contract::FieldIdentity {
-                canonical_name: "id".into(),
-                field_id: 1,
-                virtual_field_index: 0,
-            }],
+            fields: vec![vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 }],
         }],
     };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
@@ -127,14 +117,14 @@ fn legacy_identity() -> vos::ast::CatalogSnapshot {
                 "source_order": 0, "ty": { "Builtin": "Uuid" }, "attrs": ["Primary"]
             }]
         }]
-    })).expect("reviewed legacy identity")
+    }))
+    .expect("reviewed legacy identity")
 }
 
 fn legacy_v3_bytes(identity: &vos::ast::CatalogSnapshot) -> Vec<u8> {
     let schema = yyds_types::CatalogSchema { version: 7, document: VOS.into() };
-    let mut bytes = yyds_catalog::encode(
-        Some(&schema), Some(identity), Some(ShardEpoch(3)), &[ShardId("a".into())], None,
-    ).expect("legacy fields");
+    let mut bytes = yyds_catalog::encode(Some(&schema), Some(identity), Some(ShardEpoch(3)), &[ShardId("a".into())], None)
+        .expect("legacy fields");
     bytes.truncate(bytes.len() - 4);
     let offset = yyds_catalog::MAGIC.len();
     bytes[offset..offset + 4].copy_from_slice(&3u32.to_le_bytes());

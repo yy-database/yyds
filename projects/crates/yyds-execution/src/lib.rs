@@ -52,7 +52,8 @@ where
         if commands.iter().any(|command| command.action != KeyValueAction::Get) {
             return Err(Error::Unsupported("read batches accept only read actions"));
         }
-        let decisions = commands.iter().map(|command| self.routing.route(&command.namespace.0, &command.key)).collect::<Vec<_>>();
+        let decisions =
+            commands.iter().map(|command| self.routing.route(&command.namespace.0, &command.key)).collect::<Vec<_>>();
         let mut guards = HashMap::new();
         for shard_id in self.routing.shards() {
             if decisions.iter().any(|decision| &decision.shard == shard_id) {
@@ -60,15 +61,24 @@ where
                 guards.insert(shard_id.clone(), shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?);
             }
         }
-        commands.iter().zip(decisions).map(|(command, decision)| {
-            let shard = guards.get_mut(&decision.shard).ok_or(Error::Unsupported("batch shard is not locked"))?;
-            let key = Key::new(command.namespace.0.clone(), command.key.clone());
-            let value = shard.get(&key)?.map(|record| match record.value {
-                StoredValue::Inline(value) => Ok(value.0),
-                StoredValue::Object(_) => Err(Error::Unsupported("object values are not available through the local KV executor")),
-            }).transpose()?;
-            Ok(KeyValueResult::Get(value))
-        }).collect()
+        commands
+            .iter()
+            .zip(decisions)
+            .map(|(command, decision)| {
+                let shard = guards.get_mut(&decision.shard).ok_or(Error::Unsupported("batch shard is not locked"))?;
+                let key = Key::new(command.namespace.0.clone(), command.key.clone());
+                let value = shard
+                    .get(&key)?
+                    .map(|record| match record.value {
+                        StoredValue::Inline(value) => Ok(value.0),
+                        StoredValue::Object(_) => {
+                            Err(Error::Unsupported("object values are not available through the local KV executor"))
+                        }
+                    })
+                    .transpose()?;
+                Ok(KeyValueResult::Get(value))
+            })
+            .collect()
     }
 
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {

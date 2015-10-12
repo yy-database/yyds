@@ -1,4 +1,4 @@
-use yyds_types::{Node, Program, Type, Udf, UdfEffect, UdfPlacement, Value, lower_vos_udf};
+use yyds_types::{lower_vos_udf, Node, Program, Type, Udf, UdfEffect, UdfPlacement, Value};
 
 #[test]
 fn yyds_evaluates_a_manually_constructed_distributed_udf() {

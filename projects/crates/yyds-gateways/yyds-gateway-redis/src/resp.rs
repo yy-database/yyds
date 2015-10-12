@@ -82,7 +82,10 @@ pub fn decode_request(input: &[u8], limits: RequestLimits) -> Result<Option<Requ
 
 fn decode_bounded(input: &[u8], limits: RequestLimits) -> Result<Option<Request<'_>>, FrameError> {
     let mut offset = 0;
-    let Some(count) = read_length(input, &mut offset, b'*')? else { return Ok(None) };
+    let Some(count) = read_length(input, &mut offset, b'*')?
+    else {
+        return Ok(None);
+    };
     if count == 0 {
         return Err(FrameError::EmptyCommand);
     }
@@ -91,7 +94,10 @@ fn decode_bounded(input: &[u8], limits: RequestLimits) -> Result<Option<Request<
     }
     let mut arguments = Vec::new();
     for _ in 0..count {
-        let Some(length) = read_length(input, &mut offset, b'$')? else { return Ok(None) };
+        let Some(length) = read_length(input, &mut offset, b'$')?
+        else {
+            return Ok(None);
+        };
         if length > limits.max_bulk_bytes {
             return Err(FrameError::BulkTooLarge);
         }
@@ -113,7 +119,10 @@ fn decode_bounded(input: &[u8], limits: RequestLimits) -> Result<Option<Request<
 }
 
 fn read_length(input: &[u8], offset: &mut usize, marker: u8) -> Result<Option<usize>, FrameError> {
-    let Some(first) = input.get(*offset) else { return Ok(None) };
+    let Some(first) = input.get(*offset)
+    else {
+        return Ok(None);
+    };
     if *first != marker {
         return Err(FrameError::UnexpectedType);
     }
@@ -125,7 +134,10 @@ fn read_length(input: &[u8], offset: &mut usize, marker: u8) -> Result<Option<us
             if cursor == digits_start {
                 return Err(FrameError::InvalidLength);
             }
-            let Some(next) = input.get(cursor + 1) else { return Ok(None) };
+            let Some(next) = input.get(cursor + 1)
+            else {
+                return Ok(None);
+            };
             if *next != b'\n' {
                 return Err(FrameError::InvalidTerminator);
             }

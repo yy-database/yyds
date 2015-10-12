@@ -1,5 +1,5 @@
 use yyds_gateway_pgsql::wire::{
-    FrameError, StartupParameterError, StartupParameters, decode_message, decode_startup, encode_message,
+    decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters,
 };
 
 #[test]

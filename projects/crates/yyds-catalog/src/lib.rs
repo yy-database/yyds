@@ -5,5 +5,7 @@
 mod catalog;
 mod format;
 
-pub use crate::catalog::{catalog_path, is_catalog_path, Catalog};
-pub use crate::format::{decode, encode, MAGIC};
+pub use crate::{
+    catalog::{catalog_path, is_catalog_path, Catalog},
+    format::{decode, encode, MAGIC},
+};

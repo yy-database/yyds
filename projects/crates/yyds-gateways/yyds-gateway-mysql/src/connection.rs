@@ -4,14 +4,14 @@ use std::{
     io::{self, Read, Write},
     net::TcpStream,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };
 
-use crate::wire::{MAX_PACKET_PAYLOAD, PacketError, encode_packet};
-use yyds_gateway::{SqlSessionCommand, parse_session_command};
+use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
+use yyds_gateway::{parse_session_command, SqlSessionCommand};
 
 const SERVER_CAPABILITIES: u32 =
     0x0000_0001 | 0x0000_0004 | 0x0000_0008 | 0x0000_0200 | 0x0000_2000 | 0x0000_8000 | 0x0002_0000 | 0x0008_0000;

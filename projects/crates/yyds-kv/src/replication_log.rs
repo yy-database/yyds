@@ -31,7 +31,8 @@ impl DurableReplicationLog {
         if path.exists() {
             let bytes = fs::read(&path)?;
             decode(&path, &bytes)
-        } else {
+        }
+        else {
             if let Some(parent) = path.parent() {
                 if !parent.as_os_str().is_empty() {
                     fs::create_dir_all(parent)?;

@@ -6,12 +6,13 @@
 use std::{cell::RefCell, path::Path};
 
 use rusqlite::{
-    Connection, OpenFlags, params_from_iter,
+    params_from_iter,
     types::{ToSql, ToSqlOutput, ValueRef},
+    Connection, OpenFlags,
 };
 use sqlite_provider::{
-    CatalogColumn, CatalogSnapshot, CatalogTable, OpenOptions, SqliteCapabilities, SqliteError,
-    SqliteProvider, SqliteValue, StatementResult,
+    CatalogColumn, CatalogSnapshot, CatalogTable, OpenOptions, SqliteCapabilities, SqliteError, SqliteProvider, SqliteValue,
+    StatementResult,
 };
 
 /// Bundled upstream SQLite provider backed by `rusqlite`.
@@ -70,17 +71,11 @@ impl SqliteProvider for RusqliteProvider {
     }
 
     fn sqlite_version(&self) -> Result<String, SqliteError> {
-        self.connection
-            .borrow()
-            .query_row("SELECT sqlite_version()", [], |row| row.get(0))
-            .map_err(map_sqlite)
+        self.connection.borrow().query_row("SELECT sqlite_version()", [], |row| row.get(0)).map_err(map_sqlite)
     }
 
     fn source_id(&self) -> Result<String, SqliteError> {
-        self.connection
-            .borrow()
-            .query_row("SELECT sqlite_source_id()", [], |row| row.get(0))
-            .map_err(map_sqlite)
+        self.connection.borrow().query_row("SELECT sqlite_source_id()", [], |row| row.get(0)).map_err(map_sqlite)
     }
 
     fn execute_one(&self, sql: &str, params: &[SqliteValue]) -> Result<StatementResult, SqliteError> {
@@ -103,12 +98,7 @@ impl SqliteProvider for RusqliteProvider {
             }
         }
 
-        Ok(StatementResult {
-            columns,
-            rows,
-            changes: connection.changes(),
-            last_insert_rowid: connection.last_insert_rowid(),
-        })
+        Ok(StatementResult { columns, rows, changes: connection.changes(), last_insert_rowid: connection.last_insert_rowid() })
     }
 
     fn execute_batch(&self, sql: &str) -> Result<(), SqliteError> {
@@ -147,7 +137,8 @@ impl SqliteProvider for RusqliteProvider {
     }
 
     fn journal_mode(&self) -> Result<sqlite_provider::JournalMode, SqliteError> {
-        let mode: String = self.connection.borrow().query_row("PRAGMA journal_mode", [], |row| row.get(0)).map_err(map_sqlite)?;
+        let mode: String =
+            self.connection.borrow().query_row("PRAGMA journal_mode", [], |row| row.get(0)).map_err(map_sqlite)?;
         Ok(match mode.to_ascii_lowercase().as_str() {
             "delete" => sqlite_provider::JournalMode::Delete,
             "wal" => sqlite_provider::JournalMode::Wal,

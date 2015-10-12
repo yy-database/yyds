@@ -11,8 +11,7 @@ use yyds_execution::KeyValueExecutor;
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::wire::{
-    decode_kv_get, decode_kv_put, decode_schema_ensure, encode_kv_get_ok, encode_schema_ok, error_frame,
-    Frame, MessageType,
+    decode_kv_get, decode_kv_put, decode_schema_ensure, encode_kv_get_ok, encode_schema_ok, error_frame, Frame, MessageType,
 };
 
 /// Default namespace for YY-native protocol KV requests.
@@ -48,10 +47,7 @@ pub struct WireContext {
 
 impl WireContext {
     pub fn new(executor: Arc<dyn KeyValueExecutor>) -> Self {
-        Self {
-            executor,
-            catalog: std::sync::Mutex::new(None),
-        }
+        Self { executor, catalog: std::sync::Mutex::new(None) }
     }
 
     #[allow(dead_code)]
@@ -118,11 +114,7 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                     },
                     Err(_) => error_frame(id, KERNEL_CODE, "catalog lock poisoned"),
                 },
-                None => error_frame(
-                    id,
-                    UNSUPPORTED_CODE,
-                    "YYDS wire catalog is not wired up yet",
-                ),
+                None => error_frame(id, UNSUPPORTED_CODE, "YYDS wire catalog is not wired up yet"),
             }
         }
         MessageType::KvGet => {
@@ -136,9 +128,7 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                 action: KeyValueAction::Get,
             };
             match ctx.executor.execute(command) {
-                Ok(yyds_types::KeyValueResult::Get(value)) => {
-                    Frame::new(MessageType::KvGetOk, id, encode_kv_get_ok(value))
-                }
+                Ok(yyds_types::KeyValueResult::Get(value)) => Frame::new(MessageType::KvGetOk, id, encode_kv_get_ok(value)),
                 Ok(_) => error_frame(id, KERNEL_CODE, "executor returned unexpected result for Get"),
                 Err(error) => error_frame(id, KERNEL_CODE, error.to_string()),
             }
@@ -169,12 +159,8 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
         | MessageType::SchemaEnsureOk
         | MessageType::KvGetOk
         | MessageType::KvPutOk
-        | MessageType::Error => {
-            error_frame(id, PROTOCOL_CODE, "unexpected client message type")
-        }
-        MessageType::Unknown(code) => {
-            error_frame(id, PROTOCOL_CODE, format!("unknown msg_type {code}"))
-        }
+        | MessageType::Error => error_frame(id, PROTOCOL_CODE, "unexpected client message type"),
+        MessageType::Unknown(code) => error_frame(id, PROTOCOL_CODE, format!("unknown msg_type {code}")),
     }
 }
 
@@ -210,11 +196,7 @@ mod tests {
     fn kv_put_then_kv_get_roundtrip() {
         let ctx = test_ctx();
 
-        let put = Frame::new(
-            MessageType::KvPut,
-            10,
-            decode_kv_put_body("mykey", b"hello world"),
-        );
+        let put = Frame::new(MessageType::KvPut, 10, decode_kv_put_body("mykey", b"hello world"));
         let put_resp = dispatch(&ctx, &put);
         assert_eq!(put_resp.msg_type, MessageType::KvPutOk);
         assert_eq!(put_resp.request_id, 10);

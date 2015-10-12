@@ -1,9 +1,13 @@
-use std::io::{self, Write};
-use std::net::TcpListener;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    io::{self, Write},
+    net::TcpListener,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
-use yyds_gateway_redis::{DEFAULT_PORT, connection::serve_connection, resp::RequestLimits};
+use yyds_gateway_redis::{connection::serve_connection, resp::RequestLimits, DEFAULT_PORT};
 
 fn main() -> io::Result<()> {
     let mut arguments = std::env::args().skip(1);

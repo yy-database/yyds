@@ -279,7 +279,7 @@ fn replace_file(temp: &Path, destination: &Path) -> Result<()> {
 fn replace_file(temp: &Path, destination: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, ReplaceFileW,
+        MoveFileExW, ReplaceFileW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
     fn wide(path: &Path) -> Vec<u16> {
@@ -303,7 +303,12 @@ fn replace_file(temp: &Path, destination: &Path) -> Result<()> {
             MoveFileExW(temp_wide.as_ptr(), destination_wide.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
         }
     };
-    if result == 0 { Err(Error::Io(std::io::Error::last_os_error())) } else { Ok(()) }
+    if result == 0 {
+        Err(Error::Io(std::io::Error::last_os_error()))
+    }
+    else {
+        Ok(())
+    }
 }
 
 /// Compare-and-set helper built on top of [`KvStore`].

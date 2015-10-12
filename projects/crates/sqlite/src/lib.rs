@@ -12,15 +12,15 @@ mod schema;
 mod table;
 
 pub use crate::{
-    database::{SqliteDatabase, read_existing},
+    database::{read_existing, SqliteDatabase},
     engine::{SqliteEngine, SqliteQueryResult},
-    format::{MAGIC, blank_database, decode_library_version, validate_database, validate_header},
-    record::{RecordLimits, RecordValue, TextEncoding, decode_record, decode_varint},
-    schema::{SchemaObject, SchemaObjectKind, read_named_table, read_schema},
-    table::{TableLimits, TableRow, read_table},
+    format::{blank_database, decode_library_version, validate_database, validate_header, MAGIC},
+    record::{decode_record, decode_varint, RecordLimits, RecordValue, TextEncoding},
+    schema::{read_named_table, read_schema, SchemaObject, SchemaObjectKind},
+    table::{read_table, TableLimits, TableRow},
 };
 
-pub use sqlite_provider::{CONTRACT_VERSION, JournalMode, SqliteProvider, SqliteValue};
+pub use sqlite_provider::{JournalMode, SqliteProvider, SqliteValue, CONTRACT_VERSION};
 
 /// Adapter identifier used in logs and diagnostics.
 pub const BACKEND_ID: &str = "sqlite";
