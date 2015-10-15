@@ -9,7 +9,7 @@ use std::{
 use yyds_types::{Error, Result};
 
 use crate::{
-    format::{blank_database, stamp_library_version, validate_database},
+    format::{blank_database, decode_library_version, stamp_library_version, validate_database, ENGINE_LIBRARY_VERSION_NUMBER},
     read_named_table, read_schema, SchemaObject, TableLimits, TableRow,
 };
 
@@ -93,10 +93,9 @@ impl SqliteDatabase {
         Ok(1)
     }
 
-    /// Returns the YYDS SQLite engine version (`3.45.0` today).
+    /// Returns the SQLite library version stamped in this snapshot header.
     pub fn sqlite_version(&self) -> Result<String> {
-        validate_database(&self.pages)?;
-        Ok(rusqlite::version().to_string())
+        decode_library_version(&self.pages)
     }
 
     /// Rejects file writes until a transactional pager is available.
@@ -110,7 +109,7 @@ impl SqliteDatabase {
     /// Re-stamps the format-3 library version field with the YYDS engine version.
     pub fn restamp_engine_version(&mut self) -> Result<()> {
         validate_database(&self.pages)?;
-        stamp_library_version(&mut self.pages, rusqlite::version_number() as u32);
+        stamp_library_version(&mut self.pages, ENGINE_LIBRARY_VERSION_NUMBER);
         Ok(())
     }
 }
