@@ -1,7 +1,7 @@
 /**
  * `@yydb/yyds/node` — Node N-API facade.
  *
- * Browser code must use the default `@yydb/yyds` entry or `@yydb/yyds/wasm`.
+ * Browser hosts are not supported in this package yet.
  */
 
 export type { YydsBindings, NodeStatusBinding, ServiceBinding } from "../bindings.ts";

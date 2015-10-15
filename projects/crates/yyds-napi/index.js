@@ -310,37 +310,12 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const {
-  SqliteSnapshot,
-  yydsVersion,
-  ping,
-  NodeIdentityHandle,
-  NodeLeaseHandle,
-  LocalExecutorHandle,
-  RedisServiceHandle,
-  PgsqlServiceHandle,
-  MysqlServiceHandle,
-  WireServerHandle,
-  nodeInit,
-  nodeInspect,
-  nodeReadRuntimeStatus,
-  nodeWriteRuntimeStatus,
-  nodeRequestStop,
-  nodeStopRequested,
-  nodeClearRuntimeArtifacts,
-  nodeWaitUntilStopped,
-} = nativeBinding
+const { LocalExecutorHandle, MysqlServiceHandle, NodeIdentityHandle, NodeLeaseHandle, nodeInit, nodeInspect, nodeReadRuntimeStatus, nodeWriteRuntimeStatus, nodeRequestStop, nodeStopRequested, nodeClearRuntimeArtifacts, nodeWaitUntilStopped, PgsqlServiceHandle, RedisServiceHandle, SqliteSnapshot, WireServerHandle, yydsVersion, ping } = nativeBinding
 
-module.exports.SqliteSnapshot = SqliteSnapshot
-module.exports.yydsVersion = yydsVersion
-module.exports.ping = ping
+module.exports.LocalExecutorHandle = LocalExecutorHandle
+module.exports.MysqlServiceHandle = MysqlServiceHandle
 module.exports.NodeIdentityHandle = NodeIdentityHandle
 module.exports.NodeLeaseHandle = NodeLeaseHandle
-module.exports.LocalExecutorHandle = LocalExecutorHandle
-module.exports.RedisServiceHandle = RedisServiceHandle
-module.exports.PgsqlServiceHandle = PgsqlServiceHandle
-module.exports.MysqlServiceHandle = MysqlServiceHandle
-module.exports.WireServerHandle = WireServerHandle
 module.exports.nodeInit = nodeInit
 module.exports.nodeInspect = nodeInspect
 module.exports.nodeReadRuntimeStatus = nodeReadRuntimeStatus
@@ -349,3 +324,9 @@ module.exports.nodeRequestStop = nodeRequestStop
 module.exports.nodeStopRequested = nodeStopRequested
 module.exports.nodeClearRuntimeArtifacts = nodeClearRuntimeArtifacts
 module.exports.nodeWaitUntilStopped = nodeWaitUntilStopped
+module.exports.PgsqlServiceHandle = PgsqlServiceHandle
+module.exports.RedisServiceHandle = RedisServiceHandle
+module.exports.SqliteSnapshot = SqliteSnapshot
+module.exports.WireServerHandle = WireServerHandle
+module.exports.yydsVersion = yydsVersion
+module.exports.ping = ping

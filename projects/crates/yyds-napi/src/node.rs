@@ -1,12 +1,12 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
-use yyds_control::{NodeIdentity, NodeLease};
 use crate::node_runtime::{
     clear_runtime_artifacts, init_node, inspect_node, read_runtime_status, request_stop, stop_requested, wait_until_stopped,
     write_runtime_status, RuntimeStatus,
 };
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+use yyds_control::{NodeIdentity, NodeLease};
 
 /// Cluster and node identity for a YYDS data directory.
 #[napi]
@@ -64,10 +64,7 @@ pub fn node_inspect(data_dir: String) -> Result<NodeStatusJson> {
         ownership: snapshot.ownership,
         health: snapshot.health,
         identity: serde_json::to_string(&snapshot.identity).map_err(map_serde)?,
-        runtime: snapshot
-            .runtime
-            .map(|runtime| serde_json::to_string(&runtime).map_err(map_serde))
-            .transpose()?,
+        runtime: snapshot.runtime.map(|runtime| serde_json::to_string(&runtime).map_err(map_serde)).transpose()?,
     })
 }
 

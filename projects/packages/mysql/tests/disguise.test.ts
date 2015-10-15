@@ -97,7 +97,7 @@ function eof() {
 
 test("@yydb/mysql re-exports @yydb/yyds", async () => {
     const mysql = await import("../src/index.ts");
-    assert.equal(typeof mysql.initWasm, "function");
+    assert.equal(typeof mysql.loadYydsNative, "function");
 });
 
 test("@yydb/mysql node entry re-exports native loader", async () => {

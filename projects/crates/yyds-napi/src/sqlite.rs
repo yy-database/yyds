@@ -1,8 +1,6 @@
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
-use yyds_sqlite::{
-    read_named_table, read_schema, validate_database, SchemaObjectKind, TableLimits,
-};
+use yyds_sqlite::{read_named_table, read_schema, validate_database, SchemaObjectKind, TableLimits};
 
 /// Optional resource bounds for each schema or table scan.
 #[napi(object)]

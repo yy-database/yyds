@@ -34,7 +34,7 @@ function runCli(args: string[]) {
 
 test("@yydb/postgresql re-exports @yydb/yyds", async () => {
     const postgresql = await import("../src/index.ts");
-    assert.equal(typeof postgresql.initWasm, "function");
+    assert.equal(typeof postgresql.loadYydsNative, "function");
 });
 
 test("@yydb/postgresql node entry re-exports native loader", async () => {

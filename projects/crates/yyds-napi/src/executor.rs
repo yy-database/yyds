@@ -1,9 +1,9 @@
 use std::{path::PathBuf, sync::Arc};
 
+use crate::node_runtime::open_executor;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use yyds_execution::KeyValueExecutor;
-use crate::node_runtime::open_executor;
 
 /// Local key-value executor for one node directory.
 #[napi]

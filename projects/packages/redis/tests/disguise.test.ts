@@ -49,7 +49,7 @@ function runCli(args: string[]) {
 
 test("@yydb/redis re-exports @yydb/yyds", async () => {
     const redis = await import("../src/index.ts");
-    assert.equal(typeof redis.initWasm, "function");
+    assert.equal(typeof redis.loadYydsNative, "function");
 });
 
 test("@yydb/redis node entry re-exports native loader", async () => {

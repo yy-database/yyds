@@ -1,5 +1,4 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;

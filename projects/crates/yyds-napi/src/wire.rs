@@ -1,10 +1,8 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
+use crate::{wire_dispatch::WireContext, wire_serve::WireServer};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use crate::wire_dispatch::WireContext;
-use crate::wire_serve::WireServer;
 
 use crate::executor::LocalExecutorHandle;
 
@@ -44,4 +42,3 @@ impl WireServerHandle {
 fn missing() -> Error {
     Error::from_reason("wire server is not running")
 }
-

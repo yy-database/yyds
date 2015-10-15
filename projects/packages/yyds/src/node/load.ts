@@ -14,7 +14,7 @@ function bindingModule(): Record<string, unknown> {
 /** Load the platform-specific Node-API binding. */
 export function loadYydsNative(): YydsBindings {
     const binding = bindingModule();
-    return binding as YydsBindings;
+    return binding as unknown as YydsBindings;
 }
 
 /** Load the independent SQLite snapshot reader, not a YYDS execution session. */
