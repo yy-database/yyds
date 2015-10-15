@@ -1,71 +1,26 @@
 #!/usr/bin/env node
-import { SqliteConnection } from "../src/node.ts";
+import { readFileSync } from "node:fs";
 
-function formatCell(cell, nullValue) {
-    switch (cell.kind) {
-        case "null":
-            return nullValue;
-        case "integer":
-            return cell.value.toString();
-        case "real":
-            return String(cell.value);
-        case "text":
-            return cell.value;
-        case "blob":
-            return `X'${cell.value.toString("hex")}'`;
-    }
-}
+import { SqliteSnapshot } from "../src/node.ts";
 
-function csvCell(value) {
-    return /[",\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
-}
+const FORMAT_VERSION = "3.45.0";
 
-function printRows(result, options) {
-    const rows = result.rows.map((row) => row.map((cell) => formatCell(cell, options.nullValue)));
-    if (options.headers && result.columns.length > 0) rows.unshift(result.columns);
-    if (options.mode === "csv") {
-        for (const row of rows) console.log(row.map(csvCell).join(","));
-        return;
-    }
-    if (options.mode === "column") {
-        const widths = result.columns.map((name, index) =>
-            rows.reduce((width, row) => Math.max(width, row[index]?.length ?? 0), name.length),
-        );
-        for (const row of rows) {
-            console.log(
-                row
-                    .map((value, index) => {
-                        const numeric = result.rows.some(
-                            (source) =>
-                                source[index]?.kind === "integer" || source[index]?.kind === "real",
-                        );
-                        return numeric
-                            ? value.padStart(widths[index])
-                            : value.padEnd(widths[index]);
-                    })
-                    .join("  ")
-                    .trimEnd(),
-            );
-        }
-        return;
-    }
-    for (const row of rows) console.log(row.join(options.separator));
-}
-
-function runDotCommand(database, command) {
+function runDotCommand(snapshot, command) {
     if (command === ".tables") {
-        const tables = database.execute(
-            "SELECT name FROM sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        );
-        for (const [name] of tables.rows) console.log(name.value);
+        const tables = snapshot
+            .schema()
+            .filter((object) => (object.kind === "table" || object.kind === "view") && !object.name.startsWith("sqlite_"))
+            .map((object) => object.name)
+            .sort();
+        for (const name of tables) console.log(name);
         return;
     }
     if (command === ".schema") {
-        const schema = database.execute(
-            "SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY rowid",
-        );
-        for (const [sql] of schema.rows) {
-            const source = sql.value.trimEnd();
+        const statements = snapshot
+            .schema()
+            .filter((object) => object.sql && !object.name.startsWith("sqlite_"))
+            .map((object) => object.sql?.trimEnd() ?? "");
+        for (const source of statements) {
             console.log(source.endsWith(";") ? source : `${source};`);
         }
         return;
@@ -75,65 +30,25 @@ function runDotCommand(database, command) {
 
 function main(args) {
     if (args.length === 1 && ["--version", "-version"].includes(args[0])) {
-        const version = new SqliteConnection(":memory:").execute("SELECT sqlite_version()")
-            .rows[0][0];
-        console.log(`sqlite3 ${version.value} (YYDS bundled SQLite)`);
+        console.log(`sqlite3 ${FORMAT_VERSION} (YYDS pure-Rust format-3 reader)`);
         return;
     }
     if (args.length === 1 && ["--help", "-help"].includes(args[0])) {
         console.log(
-            "Usage: sqlite3 [OPTIONS] DATABASE SQL\nOptions: -readonly -header -noheader -separator SEP -nullvalue TEXT -csv -column\nSupported dot commands: .tables, .schema.",
+            "Usage: sqlite3 DATABASE COMMAND\nSupported commands: .tables, .schema\nThis CLI inspects on-disk main-file bytes only; SQL execution is not available.",
         );
         return;
     }
-    const options = {
-        readOnly: false,
-        headers: false,
-        separator: "|",
-        nullValue: "",
-        mode: "list",
-    };
-    while (args[0]?.startsWith("-")) {
-        const option = args.shift();
-        switch (option) {
-            case "-readonly":
-                options.readOnly = true;
-                break;
-            case "-header":
-                options.headers = true;
-                break;
-            case "-noheader":
-                options.headers = false;
-                break;
-            case "-csv":
-                options.mode = "csv";
-                break;
-            case "-column":
-                options.mode = "column";
-                break;
-            case "-separator":
-            case "-nullvalue": {
-                const value = args.shift();
-                if (value === undefined) throw new Error(`missing value for ${option}`);
-                if (option === "-separator") options.separator = value;
-                else options.nullValue = value;
-                break;
-            }
-            default:
-                throw new Error(`unsupported option '${option}'`);
-        }
-    }
     if (args.length !== 2 || args[0].startsWith("-") || args[0] === "") {
-        throw new Error("expected DATABASE and one SQL statement or supported dot command");
+        throw new Error("expected DATABASE and one supported dot command (.tables or .schema)");
     }
     const [path, input] = args;
-    const database = new SqliteConnection(path, { readOnly: options.readOnly });
-    if (input.trim().startsWith(".")) {
-        runDotCommand(database, input.trim());
-        return;
+    const snapshot = new SqliteSnapshot(readFileSync(path));
+    const command = input.trim();
+    if (!command.startsWith(".")) {
+        throw new Error("SQL execution is not available; use .tables or .schema");
     }
-    const result = database.execute(input);
-    printRows(result, options);
+    runDotCommand(snapshot, command);
 }
 
 try {

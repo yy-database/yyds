@@ -11,7 +11,6 @@ test("@yydb/sqlite default entry does not expose the YYDS engine", async () => {
 
 test("@yydb/sqlite node entry exposes the independent snapshot reader", async () => {
     const node = await import("../src/node.ts");
-    assert.equal(typeof node.SqliteConnection, "function");
     assert.equal(typeof node.SqliteSnapshot, "function");
     assert.equal("loadYydsNative" in node, false);
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,82 +19,38 @@ function run(...args: string[]) {
     return output;
 }
 
-test("SQLite CLI reports the bundled engine and rejects incomplete arguments", {
+test("SQLite CLI reports the snapshot reader and rejects unsupported input", {
     skip: !isYydsNativeInstalled(),
 }, () => {
     const version = run("--version");
     assert.equal(version.status, 0, version.stderr);
-    assert.match(version.stdout, /^sqlite3 \d+\.\d+\.\d+ \(YYDS bundled SQLite\)/);
-    assert.equal(run(":memory:").status, 1);
-    assert.equal(run(":memory:", "SELECT FROM").status, 1);
-    assert.equal(run(":memory:", ".not-supported").status, 1);
-    const missingDirectory = mkdtempSync(join(tmpdir(), "yyds-sqlite-readonly-missing-"));
-    assert.equal(run("-readonly", join(missingDirectory, "missing.sqlite"), "SELECT 1").status, 1);
-    assert.equal(run("--unknown", "SELECT 1").status, 1);
+    assert.match(version.stdout, /^sqlite3 3\.45\.0 \(YYDS pure-Rust format-3 reader\)/);
+    assert.equal(run("missing.sqlite").status, 1);
+    assert.equal(run("missing.sqlite", "SELECT 1").status, 1);
+    assert.equal(run("missing.sqlite", ".not-supported").status, 1);
+    assert.equal(run("--unknown").status, 1);
 });
 
-test("SQLite CLI executes SQL, dot commands, and writes standard SQLite files", {
+test("SQLite CLI lists schema from a reference database file", {
     skip: !isYydsNativeInstalled() || !process.env.YYDS_SQLITE_REFERENCE_PYTHON,
 }, () => {
-    const directory = mkdtempSync(join(tmpdir(), "yyds-sqlite-cli-engine-"));
-    const path = join(directory, "real.sqlite");
-    assert.equal(
-        run(path, "CREATE TABLE samples (id INTEGER PRIMARY KEY, value TEXT, payload BLOB)").status,
-        0,
-    );
-    assert.equal(run(path, "INSERT INTO samples VALUES (1, 'hello', X'00ff')").status, 0);
-    const query = run(path, "SELECT id, value, payload, NULL FROM samples");
-    assert.equal(query.status, 0, query.stderr);
-    assert.equal(query.stdout, "1|hello|X'00ff'|\n");
-    assert.equal(run(path, ".tables").stdout, "samples\n");
-    const readonly = run("-readonly", path, "SELECT value FROM samples");
-    assert.equal(readonly.status, 0, readonly.stderr);
-    assert.equal(readonly.stdout, "hello\n");
-    assert.equal(
-        run("-readonly", path, "INSERT INTO samples VALUES (2, 'blocked', X'')").status,
-        1,
-    );
-    assert.equal(
-        run(
-            "-header",
-            "-separator",
-            ",",
-            "-nullvalue",
-            "NULL",
-            path,
-            "SELECT id, value, NULL FROM samples",
-        ).stdout,
-        "id,value,NULL\n1,hello,NULL\n",
-    );
-    assert.equal(
-        run("-csv", path, "SELECT 'comma,value', 'say \"hi\"' ").stdout,
-        '"comma,value","say ""hi"""\n',
-    );
-    assert.equal(
-        run("-column", "-header", path, "SELECT id, value FROM samples").stdout,
-        "id  value\n 1  hello\n",
-    );
-    assert.equal(
-        run(path, ".schema").stdout,
-        "CREATE TABLE samples (id INTEGER PRIMARY KEY, value TEXT, payload BLOB);\n",
-    );
-    assert.equal(readFileSync(path).subarray(0, 16).toString("binary"), "SQLite format 3\0");
-
-    const check = spawnSync(
-        process.env.YYDS_SQLITE_REFERENCE_PYTHON!,
-        [
-            "-c",
-            `
+    const directory = mkdtempSync(join(tmpdir(), "yyds-sqlite-cli-snapshot-"));
+    const path = join(directory, "reference.sqlite");
+    const sql = "CREATE TABLE samples (id INTEGER PRIMARY KEY, value TEXT, payload BLOB)";
+    const script = `
 import sqlite3, sys
 with sqlite3.connect(sys.argv[1]) as db:
-    assert db.execute('select id, value, payload from samples').fetchone() == (1, 'hello', b'\\x00\\xff')
-    assert db.execute('pragma integrity_check').fetchone() == ('ok',)
-`,
-            path,
-        ],
-        { timeout: 10_000, encoding: "utf8" },
-    );
-    assert.ifError(check.error);
-    assert.equal(check.status, 0, check.stderr);
-    assert.equal(existsSync(`${path}-wal`), false);
+    db.execute(sys.argv[2])
+    db.execute("INSERT INTO samples VALUES (1, 'hello', X'00ff')")
+`;
+    const created = spawnSync(process.env.YYDS_SQLITE_REFERENCE_PYTHON!, ["-c", script, path, sql], {
+        timeout: 10_000,
+        encoding: "utf8",
+    });
+    assert.ifError(created.error);
+    assert.equal(created.status, 0, created.stderr);
+
+    assert.equal(run(path, ".tables").stdout, "samples\n");
+    assert.equal(run(path, ".schema").stdout, `${sql};\n`);
+    assert.equal(readFileSync(path).subarray(0, 16).toString("binary"), "SQLite format 3\0");
 });
