@@ -1,11 +1,21 @@
-//! Node N-API surface for YYDS.
+//! Node N-API surface for YYDS — orthogonal runtime blocks, not a bundled CLI.
 
 #![deny(clippy::all)]
 
 use napi_derive::napi;
 use yyds_types::version;
 
+mod executor;
+mod mysql;
+mod node;
+mod node_runtime;
+mod pgsql;
+mod redis;
 mod sqlite;
+mod wire;
+mod wire_dispatch;
+mod wire_protocol;
+mod wire_serve;
 
 /// Library version (matches `yyds-types::version()`).
 #[napi]

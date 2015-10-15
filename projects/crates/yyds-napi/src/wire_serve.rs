@@ -16,8 +16,8 @@ use base64::Engine;
 use sha1::{Digest, Sha1};
 
 use crate::{
-    wire::{decode_frame, read_frame, write_frame},
     wire_dispatch::{dispatch, WireContext},
+    wire_protocol::{decode_frame, read_frame, write_frame},
 };
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";

@@ -10,7 +10,7 @@ use yyds_catalog::Catalog;
 use yyds_execution::KeyValueExecutor;
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
-use crate::wire::{
+use crate::wire_protocol::{
     decode_kv_get, decode_kv_put, decode_schema_ensure, encode_kv_get_ok, encode_schema_ok, error_frame, Frame, MessageType,
 };
 

@@ -34,49 +34,75 @@ export interface SqliteTableRow {
   /** Record bytes after overflow assembly. */
   payload: Buffer
 }
-/** A SQLite query result value with its native storage class. */
-export interface SqliteResultValue {
-  /** SQLite storage class: null, integer, real, text, or blob. */
-  kind: string
-  /** Decimal signed integer when `kind` is integer. */
-  integer?: string
-  /** Floating point value when `kind` is real. */
-  real?: number
-  /** Text value when `kind` is text. */
-  text?: string
-  /** Lossless SQLite text bytes when the value is not valid UTF-8. */
-  textBytes?: Buffer
-  /** Binary value when `kind` is blob. */
-  blob?: Buffer
-}
-/** Result of executing one SQLite statement. */
-export interface SqliteQueryResult {
-  /** Column labels in result order. */
-  columns: Array<string>
-  /** Rows with lossless integer and binary values. */
-  rows: Array<Array<SqliteResultValue>>
-  /** Changed row count. */
-  changes: string
-  /** Last insert rowid as exact signed decimal text. */
-  lastInsertRowid: string
-}
-/** One SQLite bind parameter preserving its storage class and raw bytes. */
-export interface SqliteParameter {
-  /** SQLite storage class: null, integer, real, text, or blob. */
-  kind: string
-  /** Signed 64-bit integer as decimal text. */
-  integer?: string
-  /** Floating-point value. */
-  real?: number
-  /** Exact TEXT bytes, including non-UTF-8 data. */
-  text?: Buffer
-  /** Exact BLOB bytes. */
-  blob?: Buffer
+/** JSON shape returned by node inspection. */
+export interface NodeStatusJson {
+  directory: string
+  ownership: string
+  health: string
+  identity: string
+  runtime?: string
 }
 /** Library version (matches `yyds-types::version()`). */
 export declare function yydsVersion(): string
 /** Lightweight health probe for native binding smoke tests. */
 export declare function ping(): string
+/** Cluster and node identity for a YYDS data directory. */
+export declare class NodeIdentityHandle {
+  constructor(clusterId: string, nodeId: string)
+}
+/** Exclusive ownership of a node directory until released. */
+export declare class NodeLeaseHandle {
+  static acquire(dataDir: string, identity: NodeIdentityHandle): NodeLeaseHandle
+  dataDir(): string
+}
+/** Local key-value executor for one node directory. */
+export declare class LocalExecutorHandle {
+  constructor(dataDir: string)
+}
+/** Loopback Redis protocol listener bound to a node lease. */
+export declare class RedisServiceHandle {
+  constructor(lease: NodeLeaseHandle, port: number, executor: LocalExecutorHandle)
+  address(): string
+  isFinished(): boolean
+  stop(): void
+}
+/** Loopback PostgreSQL protocol listener bound to a node lease. */
+export declare class PgsqlServiceHandle {
+  constructor(lease: NodeLeaseHandle, port: number)
+  address(): string
+  isFinished(): boolean
+  stop(): void
+}
+/** Loopback MySQL protocol listener bound to a node lease. */
+export declare class MysqlServiceHandle {
+  constructor(lease: NodeLeaseHandle, port: number)
+  address(): string
+  isFinished(): boolean
+  stop(): void
+}
+/** Loopback `/wire` listener for the YY native protocol. */
+export declare class WireServerHandle {
+  constructor(port: number, executor: LocalExecutorHandle)
+  address(): string
+  isFinished(): boolean
+  stop(): void
+}
+/** Initializes a node directory and local shard storage. */
+export declare function nodeInit(dataDir: string, identity: NodeIdentityHandle): void
+/** Inspects node ownership and optional runtime status. */
+export declare function nodeInspect(dataDir: string): NodeStatusJson
+/** Reads validated runtime status when present. */
+export declare function nodeReadRuntimeStatus(dataDir: string): string | null
+/** Writes runtime status atomically into the node directory. */
+export declare function nodeWriteRuntimeStatus(dataDir: string, statusJson: string): void
+/** Creates a stop marker for the given runtime generation. */
+export declare function nodeRequestStop(dataDir: string, generation: string): void
+/** Returns whether a stop marker exists for the generation. */
+export declare function nodeStopRequested(dataDir: string, generation: string): boolean
+/** Removes runtime status and stop marker files. */
+export declare function nodeClearRuntimeArtifacts(dataDir: string, generation: string): void
+/** Waits until the node directory becomes available or the timeout elapses. */
+export declare function nodeWaitUntilStopped(dataDir: string, generation: string, timeoutMs: number): void
 /** Owned, read-only main-file bytes, independent of the YYDS cluster runtime. */
 export declare class SqliteSnapshot {
   /** Copies a validated snapshot, bounded to 256 MiB unless overridden. */
@@ -85,35 +111,4 @@ export declare class SqliteSnapshot {
   schema(limits?: SqliteReadLimits | undefined | null): Array<SqliteSchemaObject>
   /** Reads raw records from an ordinary rowid table, not a SQL projection. */
   table(name: string, limits?: SqliteReadLimits | undefined | null): Array<SqliteTableRow>
-}
-/** A real SQLite connection backed by upstream SQLite, independent of YYDS storage. */
-export declare class SqliteConnection {
-  /** Opens or creates a SQLite file, or opens an existing file read-only when requested. */
-  constructor(path: string, readOnly?: boolean | undefined | null)
-  /** Executes one statement through the SQLite engine. */
-  execute(sql: string): SqliteQueryResult
-  /** Executes one statement with SQLite-native positional bind parameters. */
-  executeWithParameters(sql: string, parameters: Array<SqliteParameter>): SqliteQueryResult
-  /** Executes a multi-statement SQLite batch and discards result rows. */
-  executeBatch(sql: string): void
-  /** Starts an immediate write transaction. */
-  beginImmediate(): void
-  /** Commits the active transaction. */
-  commit(): void
-  /** Rolls back the active transaction. */
-  rollback(): void
-  /** Creates a named savepoint. */
-  savepoint(name: string): void
-  /** Releases a named savepoint. */
-  releaseSavepoint(name: string): void
-  /** Rolls back to a named savepoint without releasing it. */
-  rollbackToSavepoint(name: string): void
-  /** Reports whether the connection is outside a transaction. */
-  isAutocommit(): boolean
-  /** Reports the observed SQLite journal mode. */
-  journalMode(): string
-  /** Performs a passive WAL checkpoint. */
-  checkpoint(): void
-  /** Returns SQLite's native engine source id. */
-  sourceId(): string
 }
