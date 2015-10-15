@@ -1,7 +1,7 @@
 {
     "name": "@yydb/yyds",
     "version": "0.0.1",
-    "description": "YYDS scripting runtime for TypeScript and Node.js",
+    "description": "Node.js facade, CLI, and native bindings for local YYDS nodes.",
     "license": "MPL-2.0",
         "type": "module",
     "sideEffects": false,
@@ -20,9 +20,18 @@
             "types": "./src/node/cluster.ts",
             "node": "./src/node/cluster.ts",
             "default": "./src/node/unsupported.ts"
+        },
+        "./node/runtime": {
+            "types": "./src/node/runtime.ts",
+            "node": "./src/node/runtime.ts",
+            "default": "./src/node/unsupported.ts"
         }
     },
+    "bin": {
+        "yyds": "./bin/yyds.mjs"
+    },
     "files": [
+        "bin",
         "src"
     ],
     "scripts": {

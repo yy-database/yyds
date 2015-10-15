@@ -6,35 +6,25 @@ import type { YydsSqliteBindings } from "./sqlite-bindings.ts";
 
 const require = createRequire(import.meta.url);
 
-function normalizeBinding(module: Record<string, unknown>): YydsBindings {
-    const binding = (module.default ?? module) as Record<string, unknown>;
-    return {
-        yydsVersion: () => String((binding.yydsVersion as () => string)()),
-        ping: () => String((binding.ping as () => string)()),
-    };
+function bindingModule(): Record<string, unknown> {
+    const module = require(resolvePlatformPackage()) as Record<string, unknown>;
+    return (module.default ?? module) as Record<string, unknown>;
 }
 
 /** Load the platform-specific Node-API binding. */
 export function loadYydsNative(): YydsBindings {
-    const specifier = resolvePlatformPackage();
-    return normalizeBinding(require(specifier) as Record<string, unknown>);
+    const binding = bindingModule();
+    return binding as YydsBindings;
 }
 
 /** Load the independent SQLite snapshot reader, not a YYDS execution session. */
 export function loadYydsSqliteNative(): YydsSqliteBindings {
-    const module = require(resolvePlatformPackage()) as Record<string, unknown>;
-    const binding = (module.default ?? module) as Record<string, unknown>;
-    if (
-        typeof binding.SqliteSnapshot !== "function" ||
-        typeof binding.SqliteConnection !== "function"
-    ) {
-        throw new Error(
-            "Native addon lacks the SQLite snapshot reader. Rebuild the native package.",
-        );
+    const binding = bindingModule();
+    if (typeof binding.SqliteSnapshot !== "function") {
+        throw new Error("Native addon lacks the SQLite snapshot reader. Rebuild the native package.");
     }
     return {
         SqliteSnapshot: binding.SqliteSnapshot as YydsSqliteBindings["SqliteSnapshot"],
-        SqliteConnection: binding.SqliteConnection as YydsSqliteBindings["SqliteConnection"],
     };
 }
 

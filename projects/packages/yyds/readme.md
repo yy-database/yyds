@@ -1,13 +1,39 @@
-# @yyds/yyds
+# @yydb/yyds
 
-TypeScript facade for the YYDS scripting runtime.
+Node.js facade for running a local YYDS node: native lifecycle blocks, a small CLI, and helpers used by disguise server entrypoints.
 
-- Browser / Worker: default export (`@yyds/yyds`) or `@yyds/yyds/wasm`
-- Node.js: `@yyds/yyds/node`
+## Exports
 
-Build native and WASM artifacts from the repo root:
+| Subpath | Use |
+|---------|-----|
+| `@yydb/yyds` / `@yydb/yyds/node` | Load native bindings, start or inspect a node |
+| `@yydb/yyds/node/cluster` | `launchYydsServer` for `redis-server`, `mysqld`, `postgres` |
+| `@yydb/yyds/node/runtime` | `runNodeStart`, `parseStartOptions` |
+
+The `yyds` binary provides `init`, `start`, `status`, and `stop`. Native addons for your platform are pulled in automatically as optional dependencies.
+
+## Example
+
+```ts
+import { runNodeStart } from "@yydb/yyds/node/runtime";
+
+await runNodeStart({
+  dataDir: "./node-data",
+  clusterId: "local",
+  nodeId: "node-1",
+  redisPort: 6379,
+});
+```
 
 ```bash
-pnpm build:napi
-pnpm build:wasm
+yyds init --data-dir ./node-data --cluster-id local --node-id node-1
+yyds start --data-dir ./node-data --cluster-id local --node-id node-1
+yyds status --data-dir ./node-data
+yyds stop --data-dir ./node-data
 ```
+
+## Related packages
+
+- [`@yydb/redis`](https://github.com/yy-database/yyds/tree/dev/projects/packages/redis) — Redis protocol disguise
+- [`@yydb/mysql`](https://github.com/yy-database/yyds/tree/dev/projects/packages/mysql) — MySQL protocol disguise
+- [`@yydb/postgresql`](https://github.com/yy-database/yyds/tree/dev/projects/packages/postgresql) — PostgreSQL protocol disguise

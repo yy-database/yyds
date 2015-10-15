@@ -1,56 +1,53 @@
-import { spawn } from "node:child_process";
+import type { StartNodeOptions } from "./runtime.ts";
+import { parseStartOptions, runNodeStart } from "./runtime.ts";
 
 export type YydsProtocol = "redis" | "mysql" | "postgresql";
 
-const portFlags: Record<YydsProtocol, string> = {
-    redis: "--redis-port",
-    mysql: "--mysql-port",
-    postgresql: "--pgsql-port",
-};
-const defaultPorts: Partial<Record<YydsProtocol, number>> = { mysql: 3306, postgresql: 5432 };
-
+/** Maps disguise-server `--port` flags to protocol-specific yyds start flags. */
 export function yydsStartArguments(protocol: YydsProtocol, args: string[]): string[] {
-    const result = ["start"];
-    let protocolPortProvided = false;
+    const portFlags: Record<YydsProtocol, string> = {
+        redis: "--redis-port",
+        mysql: "--mysql-port",
+        postgresql: "--pgsql-port",
+    };
+    const defaultPorts: Partial<Record<YydsProtocol, number>> = {
+        mysql: 3306,
+        postgresql: 5432,
+    };
+    const normalized: string[] = [];
+    let sawPort = false;
+
     for (let index = 0; index < args.length; index += 1) {
         const argument = args[index];
         if (["--port", "-p", "-P"].includes(argument)) {
-            const value = args[++index];
-            if (value === undefined || value.startsWith("-"))
+            const value = args[index + 1];
+            if (value === undefined || value.startsWith("--")) {
                 throw new Error(`missing port after ${argument}`);
-            result.push(portFlags[protocol], value);
-            protocolPortProvided = true;
-        } else {
-            result.push(argument);
-            if (argument === portFlags[protocol]) protocolPortProvided = true;
+            }
+            normalized.push(portFlags[protocol], value);
+            sawPort = true;
+            index += 1;
+            continue;
         }
+        normalized.push(argument);
     }
+
     const defaultPort = defaultPorts[protocol];
-    if (!protocolPortProvided && defaultPort !== undefined)
-        result.push(portFlags[protocol], String(defaultPort));
-    return result;
+    if (!sawPort && defaultPort !== undefined) {
+        normalized.push(portFlags[protocol], String(defaultPort));
+    }
+    return normalized;
 }
 
-export function launchYydsServer(protocol: YydsProtocol, args: string[]): Promise<number> {
-    const executable = process.env.YYDS_CLI_PATH || "yyds";
-    const child = spawn(executable, yydsStartArguments(protocol, args), {
-        stdio: "inherit",
-        windowsHide: true,
-    });
-    const forward = (signal: NodeJS.Signals) => child.kill(signal);
-    const onInterrupt = () => forward("SIGINT");
-    const onTerminate = () => forward("SIGTERM");
-    process.once("SIGINT", onInterrupt);
-    process.once("SIGTERM", onTerminate);
-
-    return new Promise((resolve, reject) => {
-        child.once("error", (error) =>
-            reject(new Error(`cannot start '${executable}': ${error.message}`)),
-        );
-        child.once("close", (code, signal) => {
-            process.removeListener("SIGINT", onInterrupt);
-            process.removeListener("SIGTERM", onTerminate);
-            resolve(code ?? (signal ? 1 : 0));
-        });
-    });
+/** Runs a node lifecycle in-process through orthogonal native blocks. */
+export async function launchYydsServer(protocol: YydsProtocol, args: string[]): Promise<number> {
+    try {
+        await runNodeStart(parseStartOptions(protocol, yydsStartArguments(protocol, args)));
+        return 0;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(message);
+    }
 }
+
+export type { StartNodeOptions };

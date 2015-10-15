@@ -26,39 +26,7 @@ export interface SqliteSnapshotBinding {
     table(name: string, limits?: SqliteReadLimits): SqliteTableRow[];
 }
 
-/** An independent SQLite reader hosted in the same native addon. */
+/** An independent pure-Rust SQLite snapshot reader hosted in the native addon. */
 export interface YydsSqliteBindings {
     SqliteSnapshot: new (bytes: Buffer, maxSnapshotBytes?: number) => SqliteSnapshotBinding;
-    SqliteConnection: new (path: string, readOnly?: boolean) => SqliteConnectionBinding;
-}
-
-export interface SqliteConnectionBinding {
-    execute(sql: string): SqliteQueryResultBinding;
-    executeWithParameters(sql: string, parameters: SqliteParameterBinding[]): SqliteQueryResultBinding;
-    executeBatch(sql: string): void;
-    sourceId(): string;
-}
-
-export interface SqliteParameterBinding {
-    kind: "null" | "integer" | "real" | "text" | "blob";
-    integer?: string;
-    real?: number;
-    text?: Buffer;
-    blob?: Buffer;
-}
-
-export interface SqliteQueryResultBinding {
-    columns: string[];
-    rows: SqliteResultValueBinding[][];
-    changes: string;
-    lastInsertRowid: string;
-}
-
-export interface SqliteResultValueBinding {
-    kind: "null" | "integer" | "real" | "text" | "blob";
-    integer?: string;
-    real?: number;
-    text?: string;
-    textBytes?: Buffer;
-    blob?: Buffer;
 }
