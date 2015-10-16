@@ -11,7 +11,10 @@ export { isYydsNativeInstalled, loadYydsNative, loadYydsSqliteNative } from "./l
 export type { StartNodeOptions } from "./runtime.ts";
 export { parseStartOptions, runNodeStart } from "./runtime.ts";
 export type {
+    SqliteDatabaseBinding,
+    SqliteDecodedRow,
     SqliteReadLimits,
+    SqliteRecordValue,
     SqliteSchemaObject,
     SqliteSnapshotBinding,
     SqliteTableRow,

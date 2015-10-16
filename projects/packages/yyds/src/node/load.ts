@@ -23,8 +23,16 @@ export function loadYydsSqliteNative(): YydsSqliteBindings {
     if (typeof binding.SqliteSnapshot !== "function") {
         throw new Error("Native addon lacks the SQLite snapshot reader. Rebuild the native package.");
     }
+    if (typeof binding.SqliteDatabase !== "function") {
+        throw new Error("Native addon lacks the SqliteDatabase class. Rebuild the native package.");
+    }
+    if (typeof binding.decodeRecord !== "function") {
+        throw new Error("Native addon lacks decodeRecord. Rebuild the native package.");
+    }
     return {
         SqliteSnapshot: binding.SqliteSnapshot as YydsSqliteBindings["SqliteSnapshot"],
+        SqliteDatabase: binding.SqliteDatabase as unknown as YydsSqliteBindings["SqliteDatabase"],
+        decodeRecord: binding.decodeRecord as YydsSqliteBindings["decodeRecord"],
     };
 }
 

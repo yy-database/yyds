@@ -310,7 +310,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { LocalExecutorHandle, MysqlServiceHandle, NodeIdentityHandle, NodeLeaseHandle, nodeInit, nodeInspect, nodeReadRuntimeStatus, nodeWriteRuntimeStatus, nodeRequestStop, nodeStopRequested, nodeClearRuntimeArtifacts, nodeWaitUntilStopped, PgsqlServiceHandle, RedisServiceHandle, SqliteSnapshot, WireServerHandle, yydsVersion, ping } = nativeBinding
+const { LocalExecutorHandle, MysqlServiceHandle, NodeIdentityHandle, NodeLeaseHandle, nodeInit, nodeInspect, nodeReadRuntimeStatus, nodeWriteRuntimeStatus, nodeRequestStop, nodeStopRequested, nodeClearRuntimeArtifacts, nodeWaitUntilStopped, PgsqlServiceHandle, RedisServiceHandle, SqliteSnapshot, SqliteDatabase, decodeRecord, WireServerHandle, yydsVersion, ping } = nativeBinding
 
 module.exports.LocalExecutorHandle = LocalExecutorHandle
 module.exports.MysqlServiceHandle = MysqlServiceHandle
@@ -327,6 +327,8 @@ module.exports.nodeWaitUntilStopped = nodeWaitUntilStopped
 module.exports.PgsqlServiceHandle = PgsqlServiceHandle
 module.exports.RedisServiceHandle = RedisServiceHandle
 module.exports.SqliteSnapshot = SqliteSnapshot
+module.exports.SqliteDatabase = SqliteDatabase
+module.exports.decodeRecord = decodeRecord
 module.exports.WireServerHandle = WireServerHandle
 module.exports.yydsVersion = yydsVersion
 module.exports.ping = ping

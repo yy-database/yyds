@@ -1,6 +1,13 @@
+#![allow(non_snake_case)]
+
+use std::path::PathBuf;
+
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
-use yyds_sqlite::{read_named_table, read_schema, validate_database, SchemaObjectKind, TableLimits};
+use yyds_sqlite::{
+    blank_database, decode_record, decode_library_version, read_existing, read_named_table, read_schema, validate_database,
+    RecordLimits, RecordValue, SchemaObjectKind, TableLimits, TextEncoding,
+};
 
 /// Optional resource bounds for each schema or table scan.
 #[napi(object)]
@@ -54,6 +61,130 @@ pub struct SqliteTableRow {
     pub rowid: BigInt,
     /// Record bytes after overflow assembly.
     pub payload: Buffer,
+}
+
+/// One typed, decoded SQLite record field.
+///
+/// `kind` is the SQLite storage class (`null`, `integer`, `real`, `text`, or `blob`).
+/// Exactly one of the `value_*` fields is populated per instance; `null` has no value.
+#[napi(object)]
+pub struct SqliteRecordValue {
+    /// SQLite storage-class label.
+    pub kind: String,
+    /// Integer 64-bit signed value, present only when `kind == "integer"`.
+    pub value_integer: Option<BigInt>,
+    /// IEEE-754 binary64 value, present only when `kind == "real"`.
+    pub value_real: Option<f64>,
+    /// Decoded text string, present only when `kind == "text"`.
+    pub value_text: Option<String>,
+    /// Opaque blob bytes, present only when `kind == "blob"`.
+    pub value_blob: Option<Buffer>,
+}
+
+/// A decoded SQLite row: rowid plus typed column values.
+#[napi(object)]
+pub struct SqliteDecodedRow {
+    /// Exact signed 64-bit SQLite rowid.
+    pub rowid: BigInt,
+    /// Decoded storage-class columns in physical record order.
+    pub columns: Vec<SqliteRecordValue>,
+}
+
+fn encode_encoding(name: Option<&str>) -> napi::Result<TextEncoding> {
+    match name {
+        None | Some("utf8") | Some("utf-8") | Some("UTF-8") => Ok(TextEncoding::Utf8),
+        Some("utf16le") | Some("utf-16le") | Some("UTF-16LE") => Ok(TextEncoding::Utf16Le),
+        Some("utf16be") | Some("utf-16be") | Some("UTF-16BE") => Ok(TextEncoding::Utf16Be),
+        Some(other) => Err(napi::Error::from_reason(format!(
+            "unsupported SQLite text encoding {other}; expected utf8, utf16le, or utf16be"
+        ))),
+    }
+}
+
+fn detect_encoding(bytes: &[u8]) -> napi::Result<TextEncoding> {
+    if bytes.len() < 64 {
+        return Err(napi::Error::from_reason("sqlite snapshot has no text encoding"));
+    }
+    match u32::from_be_bytes(bytes[56..60].try_into().unwrap()) {
+        1 => Ok(TextEncoding::Utf8),
+        2 => Ok(TextEncoding::Utf16Le),
+        3 => Ok(TextEncoding::Utf16Be),
+        _ => Err(napi::Error::from_reason("sqlite snapshot has unknown text encoding")),
+    }
+}
+
+fn record_value(value: RecordValue<'_>) -> SqliteRecordValue {
+    match value {
+        RecordValue::Null => SqliteRecordValue {
+            kind: "null".into(),
+            value_integer: None,
+            value_real: None,
+            value_text: None,
+            value_blob: None,
+        },
+        RecordValue::Integer(int) => SqliteRecordValue {
+            kind: "integer".into(),
+            value_integer: Some(BigInt::from(int)),
+            value_real: None,
+            value_text: None,
+            value_blob: None,
+        },
+        RecordValue::Real(real) => SqliteRecordValue {
+            kind: "real".into(),
+            value_integer: None,
+            value_real: Some(real),
+            value_text: None,
+            value_blob: None,
+        },
+        RecordValue::Text(text) => SqliteRecordValue {
+            kind: "text".into(),
+            value_integer: None,
+            value_real: None,
+            value_text: Some(text),
+            value_blob: None,
+        },
+        RecordValue::Blob(blob) => SqliteRecordValue {
+            kind: "blob".into(),
+            value_integer: None,
+            value_real: None,
+            value_text: None,
+            value_blob: Some(blob.to_vec().into()),
+        },
+    }
+}
+
+fn resolve_encoding_name(bytes: &[u8]) -> napi::Result<&'static str> {
+    if bytes.len() < 64 {
+        return Ok("utf8");
+    }
+    Ok(match u32::from_be_bytes(bytes[56..60].try_into().unwrap()) {
+        1 => "utf8",
+        2 => "utf16le",
+        3 => "utf16be",
+        _ => return Err(napi::Error::from_reason("sqlite snapshot has unknown text encoding")),
+    })
+}
+
+fn build_decoded_rows(
+    bytes: &[u8],
+    rows: Vec<yyds_sqlite::TableRow>,
+    limits: TableLimits,
+) -> napi::Result<Vec<SqliteDecodedRow>> {
+    let encoding = detect_encoding(bytes)?;
+    let record_limits = RecordLimits {
+        max_columns: 1024,
+        max_payload_bytes: limits.max_payload_bytes.max(1_048_576),
+    };
+    rows.into_iter()
+        .map(|row| {
+            decode_record(&row.payload, encoding, record_limits)
+                .map_err(native_error)
+                .map(|columns| SqliteDecodedRow {
+                    rowid: BigInt::from(row.rowid),
+                    columns: columns.into_iter().map(record_value).collect(),
+                })
+        })
+        .collect()
 }
 
 /// Owned, read-only main-file bytes, independent of the YYDS cluster runtime.
@@ -114,6 +245,162 @@ impl SqliteSnapshot {
             })
             .map_err(native_error)
     }
+
+    /// Reads decoded typed records from an ordinary rowid table.
+    #[napi]
+    pub fn tableDecoded(&self, name: String, limits: Option<SqliteReadLimits>) -> napi::Result<Vec<SqliteDecodedRow>> {
+        let resolved = SqliteReadLimits::resolve(limits);
+        let rows = read_named_table(&self.bytes, &name, resolved).map_err(native_error)?;
+        build_decoded_rows(&self.bytes, rows, resolved)
+    }
+
+    /// SQLite library version stamped in the snapshot header.
+    #[napi]
+    pub fn sqliteVersion(&self) -> napi::Result<String> {
+        decode_library_version(&self.bytes).map_err(native_error)
+    }
+
+    /// Returns the decoded text encoding label (`utf8`, `utf16le`, or `utf16be`).
+    #[napi]
+    pub fn encoding(&self) -> napi::Result<String> {
+        resolve_encoding_name(&self.bytes).map(|s| s.to_owned())
+    }
+
+    /// Health probe that re-validates the main-file format.
+    #[napi]
+    pub fn ping(&self) -> napi::Result<i32> {
+        validate_database(&self.bytes).map_err(native_error)?;
+        Ok(1)
+    }
+
+    /// Returns a view over the raw main-file bytes.
+    #[napi]
+    pub fn pages(&self) -> napi::Result<Buffer> {
+        Ok(self.bytes.clone().into())
+    }
+}
+
+/// A file-backed or in-memory SQLite snapshot handle.
+///
+/// This does not recover WAL or journal state and never executes SQL.
+#[napi]
+pub struct SqliteDatabase {
+    bytes: Vec<u8>,
+    path: Option<PathBuf>,
+}
+
+#[napi]
+impl SqliteDatabase {
+    /// Opens a blank in-memory SQLite format-3 snapshot.
+    #[napi(factory)]
+    pub fn openInMemory() -> napi::Result<Self> {
+        let bytes = blank_database().map_err(native_error)?;
+        Ok(Self { bytes, path: None })
+    }
+
+    /// Opens or creates a file-backed SQLite snapshot.
+    #[napi(factory)]
+    pub fn open(path: String) -> napi::Result<Self> {
+        let path_buf = PathBuf::from(&path);
+        if path_buf.exists() {
+            let bytes = read_existing(&path).map_err(native_error)?;
+            return Ok(Self { bytes, path: Some(path_buf) });
+        }
+        let bytes = blank_database().map_err(native_error)?;
+        Ok(Self { bytes, path: Some(path_buf) })
+    }
+
+    /// File path when file-backed, otherwise `null`.
+    #[napi]
+    pub fn path(&self) -> Option<String> {
+        self.path.as_ref().map(|p| p.display().to_string())
+    }
+
+    /// Health probe that re-validates the main-file format.
+    #[napi]
+    pub fn ping(&self) -> napi::Result<i32> {
+        validate_database(&self.bytes).map_err(native_error)?;
+        Ok(1)
+    }
+
+    /// SQLite library version stamped in the snapshot header.
+    #[napi]
+    pub fn sqliteVersion(&self) -> napi::Result<String> {
+        decode_library_version(&self.bytes).map_err(native_error)
+    }
+
+    /// Returns the decoded text encoding label (`utf8`, `utf16le`, or `utf16be`).
+    #[napi]
+    pub fn encoding(&self) -> napi::Result<String> {
+        resolve_encoding_name(&self.bytes).map(|s| s.to_owned())
+    }
+
+    /// Returns typed schema objects without parsing their SQL definitions.
+    #[napi]
+    pub fn schema(&self, limits: Option<SqliteReadLimits>) -> napi::Result<Vec<SqliteSchemaObject>> {
+        read_schema(&self.bytes, SqliteReadLimits::resolve(limits))
+            .map(|objects| {
+                objects
+                    .into_iter()
+                    .map(|object| SqliteSchemaObject {
+                        kind: match object.kind {
+                            SchemaObjectKind::Table => "table",
+                            SchemaObjectKind::Index => "index",
+                            SchemaObjectKind::View => "view",
+                            SchemaObjectKind::Trigger => "trigger",
+                        }
+                        .into(),
+                        name: object.name,
+                        table_name: object.table_name,
+                        root_page: object.root_page,
+                        sql: object.sql,
+                    })
+                    .collect()
+            })
+            .map_err(native_error)
+    }
+
+    /// Reads decoded typed records from an ordinary rowid table.
+    #[napi]
+    pub fn table(&self, name: String, limits: Option<SqliteReadLimits>) -> napi::Result<Vec<SqliteDecodedRow>> {
+        let resolved = SqliteReadLimits::resolve(limits);
+        let rows = read_named_table(&self.bytes, &name, resolved).map_err(native_error)?;
+        build_decoded_rows(&self.bytes, rows, resolved)
+    }
+
+    /// Reads raw records (undecoded payload) from an ordinary rowid table.
+    #[napi]
+    pub fn tableRaw(&self, name: String, limits: Option<SqliteReadLimits>) -> napi::Result<Vec<SqliteTableRow>> {
+        read_named_table(&self.bytes, &name, SqliteReadLimits::resolve(limits))
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| SqliteTableRow { rowid: BigInt::from(row.rowid), payload: row.payload.into() })
+                    .collect()
+            })
+            .map_err(native_error)
+    }
+
+    /// Returns a view over the raw main-file bytes.
+    #[napi]
+    pub fn pages(&self) -> napi::Result<Buffer> {
+        Ok(self.bytes.clone().into())
+    }
+}
+
+/// Decodes one SQLite record payload into typed storage-class values.
+///
+/// `encoding` defaults to `utf8`. Use the database header encoding when available
+/// (see `SqliteDatabase.encoding()` or `SqliteSnapshot.encoding()`).
+#[napi]
+pub fn decodeRecord(payload: Buffer, encoding: Option<String>) -> napi::Result<Vec<SqliteRecordValue>> {
+    let encoding = encode_encoding(encoding.as_deref())?;
+    let values = decode_record(
+        &payload,
+        encoding,
+        RecordLimits { max_columns: 1024, max_payload_bytes: payload.len().max(1_048_576) },
+    )
+    .map_err(native_error)?;
+    Ok(values.into_iter().map(record_value).collect())
 }
 
 fn native_error(error: yyds_types::Error) -> napi::Error {

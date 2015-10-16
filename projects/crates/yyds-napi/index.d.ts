@@ -49,6 +49,38 @@ export interface SqliteTableRow {
   /** Record bytes after overflow assembly. */
   payload: Buffer
 }
+/**
+ * One typed, decoded SQLite record field.
+ *
+ * `kind` is the SQLite storage class (`null`, `integer`, `real`, `text`, or `blob`).
+ * Exactly one of the `value_*` fields is populated per instance; `null` has no value.
+ */
+export interface SqliteRecordValue {
+  /** SQLite storage-class label. */
+  kind: string
+  /** Integer 64-bit signed value, present only when `kind == "integer"`. */
+  valueInteger?: bigint
+  /** IEEE-754 binary64 value, present only when `kind == "real"`. */
+  valueReal?: number
+  /** Decoded text string, present only when `kind == "text"`. */
+  valueText?: string
+  /** Opaque blob bytes, present only when `kind == "blob"`. */
+  valueBlob?: Buffer
+}
+/** A decoded SQLite row: rowid plus typed column values. */
+export interface SqliteDecodedRow {
+  /** Exact signed 64-bit SQLite rowid. */
+  rowid: bigint
+  /** Decoded storage-class columns in physical record order. */
+  columns: Array<SqliteRecordValue>
+}
+/**
+ * Decodes one SQLite record payload into typed storage-class values.
+ *
+ * `encoding` defaults to `utf8`. Use the database header encoding when available
+ * (see `SqliteDatabase.encoding()` or `SqliteSnapshot.encoding()`).
+ */
+export declare function decodeRecord(payload: Buffer, encoding?: string | undefined | null): Array<SqliteRecordValue>
 /** Library version (matches `yyds-types::version()`). */
 export declare function yydsVersion(): string
 /** Lightweight health probe for native binding smoke tests. */
@@ -95,6 +127,43 @@ export declare class SqliteSnapshot {
   schema(limits?: SqliteReadLimits | undefined | null): Array<SqliteSchemaObject>
   /** Reads raw records from an ordinary rowid table, not a SQL projection. */
   table(name: string, limits?: SqliteReadLimits | undefined | null): Array<SqliteTableRow>
+  /** Reads decoded typed records from an ordinary rowid table. */
+  tableDecoded(name: string, limits?: SqliteReadLimits | undefined | null): Array<SqliteDecodedRow>
+  /** SQLite library version stamped in the snapshot header. */
+  sqliteVersion(): string
+  /** Returns the decoded text encoding label (`utf8`, `utf16le`, or `utf16be`). */
+  encoding(): string
+  /** Health probe that re-validates the main-file format. */
+  ping(): number
+  /** Returns a view over the raw main-file bytes. */
+  pages(): Buffer
+}
+/**
+ * A file-backed or in-memory SQLite snapshot handle.
+ *
+ * This does not recover WAL or journal state and never executes SQL.
+ */
+export declare class SqliteDatabase {
+  /** Opens a blank in-memory SQLite format-3 snapshot. */
+  static openInMemory(): SqliteDatabase
+  /** Opens or creates a file-backed SQLite snapshot. */
+  static open(path: string): SqliteDatabase
+  /** File path when file-backed, otherwise `null`. */
+  path(): string | null
+  /** Health probe that re-validates the main-file format. */
+  ping(): number
+  /** SQLite library version stamped in the snapshot header. */
+  sqliteVersion(): string
+  /** Returns the decoded text encoding label (`utf8`, `utf16le`, or `utf16be`). */
+  encoding(): string
+  /** Returns typed schema objects without parsing their SQL definitions. */
+  schema(limits?: SqliteReadLimits | undefined | null): Array<SqliteSchemaObject>
+  /** Reads decoded typed records from an ordinary rowid table. */
+  table(name: string, limits?: SqliteReadLimits | undefined | null): Array<SqliteDecodedRow>
+  /** Reads raw records (undecoded payload) from an ordinary rowid table. */
+  tableRaw(name: string, limits?: SqliteReadLimits | undefined | null): Array<SqliteTableRow>
+  /** Returns a view over the raw main-file bytes. */
+  pages(): Buffer
 }
 /** Loopback `/wire` listener for the YY native protocol. */
 export declare class WireServerHandle {
