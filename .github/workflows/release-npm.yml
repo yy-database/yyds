@@ -37,16 +37,6 @@ jobs:
             pkg: yyds-linux-x64
             node_file: index.linux-x64-gnu.node
             lib: libyyds_napi.so
-          - os: macos-14
-            target: x86_64-apple-darwin
-            pkg: yyds-darwin-x64
-            node_file: index.darwin-x64.node
-            lib: libyyds_napi.dylib
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            pkg: yyds-darwin-arm64
-            node_file: index.darwin-arm64.node
-            lib: libyyds_napi.dylib
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -73,9 +63,48 @@ jobs:
           path: projects/packages/${{ matrix.pkg }}/lib/${{ matrix.node_file }}
           if-no-files-found: error
 
+  build-engine-macos:
+    name: engine macos arm64 + x64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install both macOS targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-latest-both
+      - name: Build and stage both dylibs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for spec in \
+              "aarch64-apple-darwin  yyds-darwin-arm64  index.darwin-arm64.node  libyyds_napi.dylib" \
+              "x86_64-apple-darwin    yyds-darwin-x64    index.darwin-x64.node    libyyds_napi.dylib"; do
+            read -r target pkg node_file lib <<< "$spec"
+            echo "=== Building $pkg ($target) ==="
+            cargo build -p yyds-napi --release --target "$target"
+            SRC="target/$target/release/$lib"
+            DEST="projects/packages/$pkg/lib/$node_file"
+            mkdir -p "$(dirname "$DEST")"
+            cp "$SRC" "$DEST"
+            chmod +x "$DEST" || true
+            ls -la "$DEST"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: engine-yyds-darwin-arm64
+          path: projects/packages/yyds-darwin-arm64/lib/index.darwin-arm64.node
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: engine-yyds-darwin-x64
+          path: projects/packages/yyds-darwin-x64/lib/index.darwin-x64.node
+          if-no-files-found: error
+
   publish-npm:
     name: publish npm
-    needs: build-engine
+    needs: [build-engine, build-engine-macos]
     runs-on: ubuntu-latest
     environment: NPM_PUBLISH
     permissions:
@@ -139,7 +168,7 @@ jobs:
 
   github-release:
     name: github release zips
-    needs: build-engine
+    needs: [build-engine, build-engine-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
