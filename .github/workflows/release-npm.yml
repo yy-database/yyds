@@ -129,6 +129,7 @@ jobs:
         with:
           pattern: engine-*
           path: _engines
+          merge-multiple: true
 
       - name: Resolve version from tag
         id: ver
@@ -180,6 +181,7 @@ jobs:
         with:
           pattern: engine-*
           path: _engines
+          merge-multiple: true
 
       - name: Upload zips to GitHub Release
         env:
