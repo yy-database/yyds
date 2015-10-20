@@ -57,6 +57,7 @@ function walkFiles(dir, acc = []) {
 
 function findEngine(bin) {
     const files = walkFiles(enginesDir);
+    console.log("[release] searched", enginesDir, ", found", files.length, "file(s):", files);
     return files.find((f) => path.basename(f) === bin);
 }
 

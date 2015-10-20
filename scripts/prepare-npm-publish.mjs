@@ -30,6 +30,7 @@ function walkFiles(dir, acc = []) {
 
 function findArtifact(basename) {
     const files = walkFiles(path.join(root, "_engines"));
+    console.log("[prepare] searched _engines, found", files.length, "file(s):", files);
     const hit = files.find((f) => path.basename(f) === basename);
     if (!hit) {
         throw new Error(`missing artifact ${basename} under _engines/`);
