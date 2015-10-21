@@ -96,10 +96,10 @@ function preparePackageJson(pkgDir) {
 }
 
 const platforms = [
-    ["yyds-win32-x64", "yyds-win32-x64-msvc.node"],
-    ["yyds-linux-x64", "yyds-linux-x64-gnu.node"],
-    ["yyds-darwin-x64", "yyds-darwin-x64.node"],
-    ["yyds-darwin-arm64", "yyds-darwin-arm64.node"],
+    ["yyds-win32-x64", "index.win32-x64-msvc.node"],
+    ["yyds-linux-x64", "index.linux-x64-gnu.node"],
+    ["yyds-darwin-x64", "index.darwin-x64.node"],
+    ["yyds-darwin-arm64", "index.darwin-arm64.node"],
 ];
 
 for (const [pkg, binding] of platforms) {

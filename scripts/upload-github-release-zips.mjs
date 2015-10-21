@@ -21,10 +21,10 @@ if (!repo) {
 }
 
 const packages = [
-    { pkg: "yyds-win32-x64", bin: "yyds-win32-x64-msvc.node" },
-    { pkg: "yyds-linux-x64", bin: "yyds-linux-x64-gnu.node" },
-    { pkg: "yyds-darwin-x64", bin: "yyds-darwin-x64.node" },
-    { pkg: "yyds-darwin-arm64", bin: "yyds-darwin-arm64.node" },
+    { pkg: "yyds-win32-x64", bin: "index.win32-x64-msvc.node" },
+    { pkg: "yyds-linux-x64", bin: "index.linux-x64-gnu.node" },
+    { pkg: "yyds-darwin-x64", bin: "index.darwin-x64.node" },
+    { pkg: "yyds-darwin-arm64", bin: "index.darwin-arm64.node" },
 ];
 
 function run(cmd, args, opts = {}) {
