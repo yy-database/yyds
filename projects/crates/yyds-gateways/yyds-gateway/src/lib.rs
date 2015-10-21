@@ -11,10 +11,18 @@ mod catalog_bind;
 mod config;
 mod kind;
 mod sql;
+mod sql_execute;
+mod sql_planner;
 
-pub use crate::catalog_bind::{
-    bind_sql_catalog, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundProjection,
-    SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable,
+pub use crate::{
+    catalog_bind::{
+        bind_sql_catalog, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundProjection,
+        SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable,
+    },
+    sql_execute::{
+        decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue,
+    },
+    sql_planner::{plan_select, plan_statement, SqlExecutionPlan},
 };
 
 pub use crate::{

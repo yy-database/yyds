@@ -169,3 +169,188 @@ fn sql_catalog_binding_rejects_ambiguous_unqualified_columns() {
     let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7).expect_err("ambiguous column");
     assert!(error.message.contains("ambiguous SQL column"));
 }
+
+// --- SQL → KV 执行层适配器 ---
+
+fn make_executor_with_row(
+    namespace: &str,
+    rowid: &[u8],
+    row_fields: &[(u64, &[u8])],
+) -> yyds_execution::LocalExecutor<yyds_kv::MemoryShard> {
+    use yyds_kv::{InlineValue, Key, KvStore, MemoryShard, StoredValue};
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+
+    let mut shard = MemoryShard::new();
+    let mut values = yyds_gateway::RowFieldValues::new();
+    for (field_id, bytes) in row_fields {
+        values.insert(*field_id, bytes.to_vec());
+    }
+    let row_bytes = yyds_gateway::encode_row(&values);
+    shard
+        .put(
+            Key::new(namespace, rowid.to_vec()),
+            StoredValue::Inline(InlineValue(row_bytes)),
+        )
+        .expect("put row");
+
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+}
+
+#[test]
+fn sql_select_pk_equality_executes_against_kv_adapter() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = make_executor_with_row(
+        "table:1",
+        b"42",
+        &[(1, b"42"), (2, b"alice"), (3, b"30")],
+    );
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 42", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        result.rows[0],
+        vec![
+            yyds_gateway::SqlValue::Number(42.0),
+            yyds_gateway::SqlValue::String("alice".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn sql_select_star_expands_all_fields() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_row(
+        "table:1",
+        b"1",
+        &[(1, b"1"), (2, b"bob")],
+    );
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users WHERE id = 1", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(result.rows[0].len(), 2);
+}
+
+#[test]
+fn sql_select_pk_string_literal_uses_string_rowid() {
+    let catalog = catalog("table users { @@id: utf8, score: i64 }\n");
+    let executor = make_executor_with_row(
+        "table:1",
+        b"alice",
+        &[(1, b"alice"), (2, b"100")],
+    );
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT score FROM users WHERE id = 'alice'", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+
+    assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::Number(100.0));
+}
+
+#[test]
+fn sql_select_missing_row_returns_empty_result() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    // namespace "table:1" 存在但 key "999" 没有
+    let executor = make_executor_with_row(
+        "table:1",
+        b"1",
+        &[(1, b"1"), (2, b"exist")],
+    );
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 999", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+
+    assert!(result.rows.is_empty());
+}
+
+#[test]
+fn sql_select_requires_pk_equality_predicate() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect_err("should reject pk-less query");
+    assert!(error.message.contains("requires") || error.message.contains("primary"));
+}
+
+#[test]
+fn sql_select_non_pk_equality_is_rejected() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE name = 'foo'", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect_err("non-pk equality needs scan");
+    assert!(error.message.contains("primary") || error.message.contains("primary-key"));
+}
+
+#[test]
+fn sql_select_and_extracts_pk_and_filters_on_remaining() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = make_executor_with_row(
+        "table:1",
+        b"5",
+        &[(1, b"5"), (2, b"carol"), (3, b"25")],
+    );
+
+    // AND predicate 包含 pk 等值 + 额外条件；plan 应只提 pk，额外条件作为 remaining
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users WHERE id = 5 AND age = 25",
+        &catalog,
+        7,
+    )
+    .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(plan.remaining_predicate.is_some(), "AND 的右侧应留在 remaining");
+
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    assert_eq!(result.rows.len(), 1);
+}
+
+#[test]
+fn sql_select_projects_binary_expression() {
+    let catalog = catalog("table users { @@id: i64, x: i64, y: i64 }\n");
+    let executor = make_executor_with_row(
+        "table:1",
+        b"1",
+        &[(1, b"1"), (2, b"10"), (3, b"3")],
+    );
+
+    // 先确认 Oak 支持哪些 projection 表达式
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT id + 1 AS inc FROM users WHERE id = 1",
+        &catalog,
+        7,
+    )
+    .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+
+    assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::Number(2.0));
+}
+
+#[test]
+fn row_field_values_round_trip_tlv() {
+    let mut row = yyds_gateway::RowFieldValues::new();
+    row.insert(1, b"42".to_vec());
+    row.insert(7, b"hello".to_vec());
+    let bytes = yyds_gateway::encode_row(&row);
+    let decoded = yyds_gateway::decode_row(&bytes).expect("decode");
+    assert_eq!(decoded.get(1), Some(b"42".as_slice()));
+    assert_eq!(decoded.get(7), Some(b"hello".as_slice()));
+    assert_eq!(decoded.get(99), None);
+}
