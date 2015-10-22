@@ -13,7 +13,7 @@ use std::{
 
 use yyds_control::NodeLease;
 
-use crate::connection::serve_cancellable;
+use crate::connection::{serve_cancellable, MysqlSqlRuntime};
 
 const MAX_CLIENTS: usize = 64;
 
@@ -27,7 +27,11 @@ pub struct MysqlService {
 
 impl MysqlService {
     /// Starts a listener without creating a node or cluster identity.
-    pub fn start(owner: Arc<NodeLease>, address: SocketAddr) -> io::Result<Self> {
+    pub fn start(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        runtime: Option<Arc<MysqlSqlRuntime>>,
+    ) -> io::Result<Self> {
         if !address.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -41,7 +45,7 @@ impl MysqlService {
         let signal = Arc::clone(&stopping);
         let worker = thread::Builder::new().name("yyds-mysql-listener".into()).spawn(move || {
             let _owner = owner;
-            listen(listener, signal)
+            listen(listener, signal, runtime)
         })?;
         Ok(Self { address, stopping, worker: Some(worker) })
     }
@@ -106,7 +110,7 @@ impl Drop for Clients {
     }
 }
 
-fn listen(listener: TcpListener, stopping: Arc<AtomicBool>) -> io::Result<()> {
+fn listen(listener: TcpListener, stopping: Arc<AtomicBool>, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<()> {
     let mut clients = Clients { workers: Vec::new(), stopping: Arc::clone(&stopping) };
     while !stopping.load(Ordering::Acquire) {
         clients.reap();
@@ -120,8 +124,9 @@ fn listen(listener: TcpListener, stopping: Arc<AtomicBool>) -> io::Result<()> {
                     continue;
                 }
                 let cancellation = Arc::clone(&stopping);
+                let runtime = runtime.clone();
                 let worker = thread::Builder::new().name("yyds-mysql-client".into()).spawn(move || {
-                    let _ = serve_cancellable(stream, cancellation);
+                    let _ = serve_cancellable(stream, cancellation, runtime);
                 })?;
                 clients.workers.push(worker);
             }

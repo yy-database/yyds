@@ -17,7 +17,7 @@ impl MysqlServiceHandle {
     #[napi(constructor)]
     pub fn start(lease: &NodeLeaseHandle, port: u16) -> Result<Self> {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let service = MysqlService::start(Arc::clone(&lease.inner), address).map_err(map_io)?;
+        let service = MysqlService::start(Arc::clone(&lease.inner), address, None).map_err(map_io)?;
         Ok(Self { inner: Some(service) })
     }
 

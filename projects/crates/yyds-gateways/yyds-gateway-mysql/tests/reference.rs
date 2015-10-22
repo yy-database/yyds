@@ -29,7 +29,7 @@ fn pymysql_connects_and_receives_explicit_unsupported_query_error() {
     let directory = owner_directory();
     let owner =
         Arc::new(NodeLease::acquire(&directory, NodeIdentity::new("reference-cluster", "reference-node").unwrap()).unwrap());
-    let service = MysqlService::start(owner, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let service = MysqlService::start(owner, "127.0.0.1:0".parse().unwrap(), None).unwrap();
     let port = service.address().port();
     let script = r#"
 import pymysql, sys

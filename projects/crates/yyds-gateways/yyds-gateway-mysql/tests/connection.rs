@@ -41,7 +41,7 @@ fn start_server() -> (TcpStream, thread::JoinHandle<()>) {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_connection(stream).unwrap();
+        serve_connection(stream, None).unwrap();
     });
     let client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
@@ -100,4 +100,225 @@ fn packet_codec_output_matches_connection_packet_decoder() {
     let packet = decode_packet(&frame, 1024).unwrap().unwrap();
     assert_eq!(packet.sequence, 9);
     assert_eq!(packet.payload, b"binary\0payload");
+}
+
+fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlCatalog;
+    use yyds_gateway_mysql::connection::{serve_connection, MysqlSqlRuntime};
+    use yyds_kv::{InlineValue, Key, KvStore, MemoryShard, StoredValue};
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let source = "table users { @@id: i64, name: utf8, age: i64 }\n";
+    let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::contract::TypeIdentity {
+            canonical_path: vec!["users".into()],
+            type_id: 1,
+            kind: vos::contract::TypeContractKind::Table,
+            fields: vec![
+                vos::contract::FieldIdentity {
+                    canonical_name: "id".into(),
+                    field_id: 1,
+                    virtual_field_index: 0,
+                },
+                vos::contract::FieldIdentity {
+                    canonical_name: "name".into(),
+                    field_id: 2,
+                    virtual_field_index: 1,
+                },
+                vos::contract::FieldIdentity {
+                    canonical_name: "age".into(),
+                    field_id: 3,
+                    virtual_field_index: 2,
+                },
+            ],
+        }],
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
+
+    let mut shard = MemoryShard::new();
+    // 预置 row: id=42, name=alice, age=30
+    let mut values = yyds_gateway::RowFieldValues::new();
+    values.insert(1, b"42".to_vec());
+    values.insert(2, b"alice".to_vec());
+    values.insert(3, b"30".to_vec());
+    let row_bytes = yyds_gateway::encode_row(&values);
+    shard
+        .put(
+            Key::new("table:1", b"42".to_vec()),
+            StoredValue::Inline(InlineValue(row_bytes)),
+        )
+        .expect("put row");
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards).expect("executor");
+
+    let runtime = Arc::new(MysqlSqlRuntime {
+        catalog,
+        schema_version: 7,
+        executor: Arc::new(executor),
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let rt = runtime;
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        serve_connection(stream, Some(rt)).unwrap();
+    });
+    let client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    (client, server)
+}
+
+fn read_packet_full(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).unwrap();
+    let length = usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+    let mut payload = vec![0; length];
+    stream.read_exact(&mut payload).unwrap();
+    (header[3], payload)
+}
+
+/// 解 MySQL length-encoded integer：返回 (value, consumed_bytes)
+fn read_lenenc(data: &[u8]) -> (u64, usize) {
+    let first = data[0];
+    match first {
+        0..=250 => (first as u64, 1),
+        251 => (0, 1), // NULL
+        252 => (u16::from_le_bytes([data[1], data[2]]) as u64, 3),
+        253 => (
+            u32::from_le_bytes([data[1], data[2], data[3], 0]) as u64,
+            4,
+        ),
+        254 => (u64::from_le_bytes([data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]]), 9),
+        _ => unreachable!(),
+    }
+}
+
+fn read_lenenc_str(data: &[u8]) -> (&[u8], usize) {
+    let (len, consumed) = read_lenenc(data);
+    if len == 0 && consumed == 1 && data[0] == 251 {
+        (&[], 1) // NULL
+    } else {
+        (&data[consumed..consumed + len as usize], consumed + len as usize)
+    }
+}
+
+#[test]
+fn mysql_select_with_runtime_returns_result_set() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    let (seq, ok) = read_packet_full(&mut client);
+    assert_eq!(seq, 2);
+    assert_eq!(ok[0], 0); // OK packet
+
+    // SET NAMES utf8mb4
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4").unwrap()).unwrap();
+    let (seq, ok) = read_packet_full(&mut client);
+    assert_eq!(seq, 1);
+    assert_eq!(ok[0], 0);
+
+    // SELECT id, name FROM users WHERE id = 42
+    client
+        .write_all(&encode_packet(0, b"\x03SELECT id, name FROM users WHERE id = 42").unwrap())
+        .unwrap();
+
+    // pkt 1: column count
+    let (mut seq, col_count_pkt) = read_packet_full(&mut client);
+    assert_eq!(seq, 1);
+    let (col_count, consumed) = read_lenenc(&col_count_pkt);
+    assert_eq!(col_count, 2);
+    assert_eq!(consumed, 1);
+
+    // pkt 2: column def for 'id'
+    let (_, col_def) = read_packet_full(&mut client);
+    // 跳过 "def" + schema + table + org_table，跳过 name 部分
+    // 简化：直接找 'id' 和 'name' 的 UTF-8 字节
+    let col_name = extract_column_name(&col_def);
+    assert_eq!(col_name, "id");
+
+    // pkt 3: column def for 'name'
+    let (_, col_def) = read_packet_full(&mut client);
+    let col_name = extract_column_name(&col_def);
+    assert_eq!(col_name, "name");
+
+    // pkt 4: EOF after columns
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // pkt 5: row [42, alice]
+    let (_, row_pkt) = read_packet_full(&mut client);
+    let (val1, c1) = read_lenenc_str(&row_pkt);
+    assert_eq!(val1, b"42");
+    let (val2, c2) = read_lenenc_str(&row_pkt[c1..]);
+    assert_eq!(val2, b"alice");
+    assert_eq!(c1 + c2, row_pkt.len());
+
+    // pkt 6: EOF after rows
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn mysql_select_missing_row_returns_empty_result_set() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4").unwrap()).unwrap();
+    let _ = read_packet_full(&mut client);
+
+    client
+        .write_all(&encode_packet(0, b"\x03SELECT id FROM users WHERE id = 999").unwrap())
+        .unwrap();
+
+    let (_, col_count_pkt) = read_packet_full(&mut client);
+    let (col_count, _) = read_lenenc(&col_count_pkt);
+    assert_eq!(col_count, 1);
+
+    let (_, col_def) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&col_def), "id");
+
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // 没有 row packet，直接 EOF
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+fn extract_column_name(col_def: &[u8]) -> String {
+    let mut cursor = 0usize;
+    // def
+    let (_, c) = read_lenenc(col_def);
+    cursor += c + 3; // "def"
+    // schema
+    let (_, c) = read_lenenc(&col_def[cursor..]);
+    cursor += c;
+    // table
+    let (_, c) = read_lenenc(&col_def[cursor..]);
+    cursor += c;
+    // org_table
+    let (_, c) = read_lenenc(&col_def[cursor..]);
+    cursor += c;
+    // name
+    let (name_bytes, c) = read_lenenc_str(&col_def[cursor..]);
+    String::from_utf8(name_bytes.to_vec()).unwrap_or_default()
 }

@@ -37,7 +37,7 @@ fn connect(address: SocketAddr) -> TcpStream {
 #[test]
 fn stop_interrupts_partial_startup_before_releasing_node_lease() {
     let (directory, owner) = make_owner();
-    let service = MysqlService::start(owner, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let service = MysqlService::start(owner, "127.0.0.1:0".parse().unwrap(), None).unwrap();
     let address = service.address();
     let mut client = connect(address);
     let mut header = [0; 4];
@@ -58,12 +58,12 @@ fn stop_interrupts_partial_startup_before_releasing_node_lease() {
 fn failed_bind_and_nonloopback_do_not_leak_node_lease() {
     let (directory, owner) = make_owner();
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
-    assert!(MysqlService::start(Arc::clone(&owner), occupied.local_addr().unwrap()).is_err());
+    assert!(MysqlService::start(Arc::clone(&owner), occupied.local_addr().unwrap(), None).is_err());
     assert_eq!(NodeLease::inspect(&directory).unwrap().ownership, LocalOwnership::Held);
     drop(owner);
 
     let (directory, owner) = make_owner();
-    let error = MysqlService::start(owner, "0.0.0.0:0".parse().unwrap()).unwrap_err();
+    let error = MysqlService::start(owner, "0.0.0.0:0".parse().unwrap(), None).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     assert_eq!(NodeLease::inspect(directory).unwrap().ownership, LocalOwnership::Available);
 }
@@ -71,8 +71,8 @@ fn failed_bind_and_nonloopback_do_not_leak_node_lease() {
 #[test]
 fn multiple_protocol_listeners_can_share_the_same_node_identity() {
     let (directory, owner) = make_owner();
-    let first = MysqlService::start(Arc::clone(&owner), "127.0.0.1:0".parse().unwrap()).unwrap();
-    let second = MysqlService::start(owner, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let first = MysqlService::start(Arc::clone(&owner), "127.0.0.1:0".parse().unwrap(), None).unwrap();
+    let second = MysqlService::start(owner, "127.0.0.1:0".parse().unwrap(), None).unwrap();
     drop(first);
     assert_eq!(NodeLease::inspect(&directory).unwrap().ownership, LocalOwnership::Held);
     drop(second);

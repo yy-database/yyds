@@ -1,4 +1,4 @@
-//! Bounded loopback MySQL protocol-v10 startup and explicit query rejection.
+//! Bounded loopback MySQL protocol-v10 startup and SQL execution.
 
 use std::{
     io::{self, Read, Write},
@@ -10,8 +10,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use yyds_execution::KeyValueExecutor;
+use yyds_gateway::{
+    bind_sql_catalog, execute_plan, plan_statement, parse_session_command, SqlCatalog, SqlResult,
+    SqlSessionCommand, SqlValue,
+};
+
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
-use yyds_gateway::{parse_session_command, SqlSessionCommand};
 
 const SERVER_CAPABILITIES: u32 =
     0x0000_0001 | 0x0000_0004 | 0x0000_0008 | 0x0000_0200 | 0x0000_2000 | 0x0000_8000 | 0x0002_0000 | 0x0008_0000;
@@ -23,8 +28,22 @@ const CLIENT_PLUGIN_AUTH_LENENC: u32 = 0x0020_0000;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
 const MAX_PACKET: usize = 1024 * 1024;
 
-/// Performs a loopback-only unauthenticated startup and rejects SQL explicitly.
-pub fn serve_connection(stream: TcpStream) -> io::Result<()> {
+/// Runtime dependencies injected into a MySQL connection so SQL SELECT can execute.
+#[derive(Debug)]
+pub struct MysqlSqlRuntime {
+    /// Bound YYDS catalog view used for SQL name resolution.
+    pub catalog: SqlCatalog,
+    /// Schema version expected by the gateway binder.
+    pub schema_version: u32,
+    /// KV execution plane.
+    pub executor: Arc<dyn KeyValueExecutor>,
+}
+
+/// Performs a loopback-only unauthenticated startup and executes SQL against the provided runtime.
+pub fn serve_connection(
+    stream: TcpStream,
+    runtime: Option<Arc<MysqlSqlRuntime>>,
+) -> io::Result<()> {
     if !stream.peer_addr()?.ip().is_loopback() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -33,11 +52,15 @@ pub fn serve_connection(stream: TcpStream) -> io::Result<()> {
     }
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    serve_session(stream)
+    serve_session(stream, runtime)
 }
 
 /// Serves a loopback session that can be interrupted by the owning node.
-pub fn serve_cancellable(stream: TcpStream, stopping: Arc<AtomicBool>) -> io::Result<()> {
+pub fn serve_cancellable(
+    stream: TcpStream,
+    stopping: Arc<AtomicBool>,
+    runtime: Option<Arc<MysqlSqlRuntime>>,
+) -> io::Result<()> {
     if !stream.peer_addr()?.ip().is_loopback() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -45,10 +68,13 @@ pub fn serve_cancellable(stream: TcpStream, stopping: Arc<AtomicBool>) -> io::Re
         ));
     }
     stream.set_nonblocking(true)?;
-    serve_session(CancellableSocket { stream, stopping })
+    serve_session(CancellableSocket { stream, stopping }, runtime)
 }
 
-fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
+fn serve_session(
+    mut stream: impl Read + Write,
+    runtime: Option<Arc<MysqlSqlRuntime>>,
+) -> io::Result<()> {
     write_packet(&mut stream, 0, &handshake())?;
     let response = match read_packet(&mut stream)? {
         Some((1, response)) => response,
@@ -92,13 +118,6 @@ fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
                     }
                 };
                 match parse_session_command(sql) {
-                    Err(_) => write_error(
-                        &mut stream,
-                        sequence.wrapping_add(1),
-                        1064,
-                        "42000",
-                        "Oak could not parse the SQL statement",
-                    )?,
                     Ok(Some(SqlSessionCommand::SetNames { character_set, .. }))
                         if !character_set.eq_ignore_ascii_case("utf8mb4") =>
                     {
@@ -114,13 +133,19 @@ fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
                     Ok(Some(SqlSessionCommand::SetNames { .. })) => {
                         write_error(&mut stream, sequence.wrapping_add(1), 1273, "HY000", "unsupported utf8mb4 collation")?;
                     }
-                    _ => write_error(
-                        &mut stream,
-                        sequence.wrapping_add(1),
-                        1235,
-                        "42000",
-                        "YYDS MySQL SQL execution is not implemented",
-                    )?,
+                    Ok(Some(SqlSessionCommand::Transaction(_))) => {
+                        write_ok(&mut stream, sequence.wrapping_add(1))?;
+                    }
+                    Ok(None) | Err(_) => match &runtime {
+                        Some(runtime) => execute_select(&mut stream, sequence.wrapping_add(1), sql, runtime)?,
+                        None => write_error(
+                            &mut stream,
+                            sequence.wrapping_add(1),
+                            1235,
+                            "42000",
+                            "YYDS MySQL SQL execution is not implemented (no SQL runtime)",
+                        )?,
+                    },
                 }
             }
             _ => write_error(&mut stream, sequence.wrapping_add(1), 1047, "08S01", "unsupported MySQL command")?,
@@ -265,6 +290,157 @@ fn write_error(stream: &mut impl Write, sequence: u8, code: u16, state: &str, me
     payload.extend_from_slice(state.as_bytes());
     payload.extend_from_slice(message.as_bytes());
     write_packet(stream, sequence, &payload)
+}
+
+/// 把一条 SQL SELECT 走完整的 bind → plan → execute → wire-result 路径。
+fn execute_select(
+    stream: &mut impl Write,
+    sequence: u8,
+    sql: &str,
+    runtime: &MysqlSqlRuntime,
+) -> io::Result<()> {
+    let bound = match bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version) {
+        Ok(bound) => bound,
+        Err(error) => {
+            write_error(
+                stream,
+                sequence,
+                1064,
+                "42000",
+                &format!("SQL bind error: {}", error.message),
+            )?;
+            return Ok(());
+        }
+    };
+    let plan = match plan_statement(bound, &runtime.catalog) {
+        Ok(plan) => plan,
+        Err(error) => {
+            write_error(
+                stream,
+                sequence,
+                1235,
+                "42000",
+                &format!("SQL plan error: {}", error.message),
+            )?;
+            return Ok(());
+        }
+    };
+    let result = match execute_plan(runtime.executor.as_ref(), &plan) {
+        Ok(result) => result,
+        Err(error) => {
+            write_error(
+                stream,
+                sequence,
+                5000,
+                "HY000",
+                &format!("SQL execution error: {}", error.message),
+            )?;
+            return Ok(());
+        }
+    };
+    write_result_set(stream, sequence, &result)
+}
+
+/// 把 SqlResult 编码成 MySQL text ResultSet 协议包。
+fn write_result_set(
+    stream: &mut impl Write,
+    mut sequence: u8,
+    result: &SqlResult,
+) -> io::Result<()> {
+    // 包 1: column count
+    let count = result.columns.len();
+    let mut col_count = Vec::new();
+    encode_length_encoded(&mut col_count, count as u64);
+    write_packet(stream, sequence, &col_count)?;
+    sequence = sequence.wrapping_add(1);
+
+    // 包 2..N: column definitions
+    for col in &result.columns {
+        let def = encode_column_definition(col);
+        write_packet(stream, sequence, &def)?;
+        sequence = sequence.wrapping_add(1);
+    }
+
+    // EOF after columns
+    write_eof(stream, sequence)?;
+    sequence = sequence.wrapping_add(1);
+
+    // Row packets
+    for row in &result.rows {
+        let mut payload = Vec::new();
+        for value in row {
+            encode_sql_value(&mut payload, value);
+        }
+        write_packet(stream, sequence, &payload)?;
+        sequence = sequence.wrapping_add(1);
+    }
+
+    // EOF after rows
+    write_eof(stream, sequence)
+}
+
+fn encode_column_definition(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_length_encoded(&mut out, b"def".len() as u64);
+    out.extend_from_slice(b"def");
+    encode_length_encoded(&mut out, 0); // schema
+    encode_length_encoded(&mut out, 0); // table
+    encode_length_encoded(&mut out, 0); // org_table
+    encode_length_encoded(&mut out, name.len() as u64);
+    out.extend_from_slice(name.as_bytes());
+    encode_length_encoded(&mut out, 0); // org_name
+    out.push(0x0C); // fixed length
+    out.extend_from_slice(&0x000C_u16.to_le_bytes()); // charset = utf8_bin
+    out.extend_from_slice(&255_u32.to_le_bytes()); // column_length
+    out.push(0xFB); // column_type = MYSQL_TYPE_STRING (简化)
+    out.extend_from_slice(&0_u16.to_le_bytes()); // flags
+    out.push(0); // decimals
+    out.extend_from_slice(&[0u8; 2]); // filler
+    out
+}
+
+fn encode_sql_value(out: &mut Vec<u8>, value: &SqlValue) {
+    match value {
+        SqlValue::Null => out.push(0xFB),
+        SqlValue::Number(n) => {
+            let text = format!("{n}");
+            encode_length_encoded(out, text.len() as u64);
+            out.extend_from_slice(text.as_bytes());
+        }
+        SqlValue::String(s) => {
+            encode_length_encoded(out, s.len() as u64);
+            out.extend_from_slice(s.as_bytes());
+        }
+        SqlValue::Boolean(b) => {
+            let text = if *b { "1" } else { "0" };
+            encode_length_encoded(out, text.len() as u64);
+            out.extend_from_slice(text.as_bytes());
+        }
+    }
+}
+
+fn encode_length_encoded(out: &mut Vec<u8>, value: u64) {
+    match value {
+        0..=250 => out.push(value as u8),
+        251 => out.extend_from_slice(&[252, 0, 0]),
+        252..=0xFFFF => {
+            out.push(252);
+            out.extend_from_slice(&(value as u16).to_le_bytes());
+        }
+        0x10000..=0xFFFF_FFFF => {
+            out.push(253);
+            out.extend_from_slice(&(value as u32).to_le_bytes());
+        }
+        _ => {
+            out.push(254);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+fn write_eof(stream: &mut impl Write, sequence: u8) -> io::Result<()> {
+    // 简化 EOF packet: 0xFE + 0x0000 (warnings) + 0x0200 (status: SERVER_STATUS_AUTOCOMMIT)
+    write_packet(stream, sequence, &[0xFE, 0x00, 0x00, 0x02, 0x00])
 }
 
 fn packet_error(error: PacketError) -> io::Error {

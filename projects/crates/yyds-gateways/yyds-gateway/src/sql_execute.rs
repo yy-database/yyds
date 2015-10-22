@@ -268,102 +268,42 @@ fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue) ->
     })
 }
 
+/// SQL LIKE 匹配。`%` 匹配 0+ 任意字符，`_` 匹配正好 1 个任意字符。
 fn like_match(haystack: &str, pattern: &str) -> bool {
-    // 简化版：先把 pattern 按 % 切成若干段；所有段都必须在 haystack 中按顺序出现。
-    // _ 当作单个任意字符。
-    let segments: Vec<&str> = pattern.split('%').collect();
-    if segments.is_empty() {
-        return haystack.is_empty();
-    }
-    let mut hay_pos = 0usize;
-    for (i, segment) in segments.iter().enumerate() {
-        let last = i == segments.len() - 1;
-        if segment.is_empty() {
-            if last {
-                return true;
-            }
-            continue;
-        }
-        if !match_segment(haystack, hay_pos, segment, last) {
-            return false;
-        }
-        // 把 hay_pos 推进到匹配段之后。
-        let advanced = find_segment_end(haystack, hay_pos, segment);
-        if let Some(pos) = advanced {
-            hay_pos = pos;
-        }
-        else {
-            return false;
-        }
-        // 吃掉 _ 对应的字符。
-        for ch in segment.chars() {
-            if ch == '_' {
-                hay_pos += 1;
-            }
-        }
-    }
-    true
-}
+    let haystack_chars: Vec<char> = haystack.chars().collect();
+    let pattern_chars: Vec<char> = pattern.chars().collect();
+    let n = haystack_chars.len();
+    let m = pattern_chars.len();
 
-fn match_segment(haystack: &str, start: usize, segment: &str, last: bool) -> bool {
-    let mut h = start;
-    // segment 里把 _ 当作一个任意字符占位，其他按字面匹配。
-    let mut seg_chars = segment.chars();
-    while let Some(seg) = seg_chars.next() {
-        match seg {
-            '_' => {
-                if h >= haystack.len() {
-                    return false;
+    // dp[i][j] = haystack[0..i] 能否匹配 pattern[0..j]
+    let mut dp = vec![vec![false; m + 1]; n + 1];
+    dp[0][0] = true;
+
+    // pattern 前缀全是 % 的情况
+    let mut j = 1;
+    while j <= m && pattern_chars[j - 1] == '%' {
+        dp[0][j] = true;
+        j += 1;
+    }
+
+    for i in 1..=n {
+        for j in 1..=m {
+            match pattern_chars[j - 1] {
+                '%' => {
+                    // % 可以跳过（用 dp[i][j-1]）或吃掉当前 haystack 字符（用 dp[i-1][j]）
+                    dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
                 }
-                // 下一个 seg 字符是下一个比对，_ 不做比对，只前进 h。
-                h += 1;
-            }
-            _ => {
-                // 从 h 起找 seg 这个字符。
-                // 如果是首段且不是 last（开头有 %），在 start 处匹配；否则必须从 h 起的任意位置。
-                let found = haystack[h..].find(seg);
-                match found {
-                    Some(idx) => h += idx,
-                    None => return false,
+                '_' => {
+                    // _ 必须正好吃掉一个字符
+                    dp[i][j] = dp[i - 1][j - 1];
                 }
-                if !haystack[h..].starts_with(seg) {
-                    return false;
+                p => {
+                    dp[i][j] = dp[i - 1][j - 1] && haystack_chars[i - 1] == p;
                 }
-                // 继续匹配 segment 剩余部分（但这里 segment 里可能有 _，所以递归）。
-                let rest = segment_after(segment, seg);
-                if !match_literal_tail(haystack, h + seg.len_utf8(), rest, last && segment == segment) {
-                    return false;
-                }
-                // 已经全匹配。
-                let _ = &mut seg_chars; // 忽略剩余
-                return true;
             }
         }
     }
-    // segment 全是 _，要求 haystack 至少够长。
-    let underscore_count = segment.chars().filter(|c| *c == '_').count();
-    h + underscore_count <= haystack.len()
-}
-
-fn segment_after(full: &str, head: char) -> &str {
-    let mut chars = full.chars();
-    while let Some(c) = chars.next() {
-        if c == head {
-            return chars.as_str();
-        }
-    }
-    ""
-}
-
-fn match_literal_tail(_haystack: &str, _from: usize, _rest: &str, _anchor_end: bool) -> bool {
-    // Like 简化版：只支持 pattern 里一个 %（或多个相邻的 % 合并）+ 可选的 _。
-    // 复杂嵌套（% + _ + %）返回 false 表示不完全匹配。
-    false
-}
-
-fn find_segment_end(_haystack: &str, _start: usize, _segment: &str) -> Option<usize> {
-    // 占位：上面的 match_segment 没用到它。
-    None
+    dp[n][m]
 }
 
 struct Cursor<'a> {
