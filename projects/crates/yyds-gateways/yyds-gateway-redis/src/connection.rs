@@ -204,6 +204,177 @@ fn respond(
             _ => stream.write_all(b"-ERR invalid MGET command\r\n")?,
         }
     }
+    else if command.eq_ignore_ascii_case(b"EXISTS") {
+        // 多 key EXISTS：逐个 EXISTS 后累加存在计数。
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        if count < 2 {
+            stream.write_all(b"-ERR wrong number of arguments for 'exists' command\r\n")?;
+            return Ok(true);
+        }
+        let mut present: i64 = 0;
+        for key in &request.arguments[1..] {
+            let result = executor.execute(yyds_types::KeyValueCommand {
+                namespace: namespace.clone(),
+                key: (*key).to_vec(),
+                action: yyds_types::KeyValueAction::Exists,
+            });
+            match result {
+                Ok(KeyValueResult::Exists(true)) => present += 1,
+                Ok(KeyValueResult::Exists(false)) => {}
+                Ok(_) => {
+                    write_error(stream, "EXISTS executor returned unexpected result")?;
+                    return Ok(true);
+                }
+                Err(error) => {
+                    write_error(stream, &error.to_string())?;
+                    return Ok(true);
+                }
+            }
+        }
+        write!(stream, ":{present}\r\n")?;
+    }
+    else if command.eq_ignore_ascii_case(b"TTL") || command.eq_ignore_ascii_case(b"PTTL") {
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        if count != 2 {
+            stream.write_all(b"-ERR wrong number of arguments for 'ttl' command\r\n")?;
+            return Ok(true);
+        }
+        let key = request.arguments[1];
+        let exists = match executor.execute(yyds_types::KeyValueCommand {
+            namespace: namespace.clone(),
+            key: key.to_vec(),
+            action: yyds_types::KeyValueAction::Exists,
+        }) {
+            Ok(KeyValueResult::Exists(e)) => e,
+            Ok(_) => {
+                write_error(stream, "TTL executor returned unexpected result")?;
+                return Ok(true);
+            }
+            Err(error) => {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        };
+        let value: i64 = if exists { -1 } else { -2 };
+        write!(stream, ":{value}\r\n")?;
+    }
+    else if command.eq_ignore_ascii_case(b"TYPE") {
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        if count != 2 {
+            stream.write_all(b"-ERR wrong number of arguments for 'type' command\r\n")?;
+            return Ok(true);
+        }
+        let key = request.arguments[1];
+        let exists = match executor.execute(yyds_types::KeyValueCommand {
+            namespace: namespace.clone(),
+            key: key.to_vec(),
+            action: yyds_types::KeyValueAction::Exists,
+        }) {
+            Ok(KeyValueResult::Exists(e)) => e,
+            Ok(_) => {
+                write_error(stream, "TYPE executor returned unexpected result")?;
+                return Ok(true);
+            }
+            Err(error) => {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        };
+        if exists {
+            stream.write_all(b"+string\r\n")?;
+        }
+        else {
+            stream.write_all(b"+none\r\n")?;
+        }
+    }
+    else if command.eq_ignore_ascii_case(b"STRLEN") {
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        if count != 2 {
+            stream.write_all(b"-ERR wrong number of arguments for 'strlen' command\r\n")?;
+            return Ok(true);
+        }
+        let key = request.arguments[1];
+        let value = match executor.execute(yyds_types::KeyValueCommand {
+            namespace: namespace.clone(),
+            key: key.to_vec(),
+            action: yyds_types::KeyValueAction::Get,
+        }) {
+            Ok(KeyValueResult::Get(Some(value))) => value.len() as i64,
+            Ok(KeyValueResult::Get(None)) => 0,
+            Ok(_) => {
+                write_error(stream, "STRLEN executor returned unexpected result")?;
+                return Ok(true);
+            }
+            Err(error) => {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        };
+        write!(stream, ":{value}\r\n")?;
+    }
+    else if command.eq_ignore_ascii_case(b"APPEND") {
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        if count != 3 {
+            stream.write_all(b"-ERR wrong number of arguments for 'append' command\r\n")?;
+            return Ok(true);
+        }
+        let key = request.arguments[1];
+        let append = request.arguments[2];
+        let current = match executor.execute(yyds_types::KeyValueCommand {
+            namespace: namespace.clone(),
+            key: key.to_vec(),
+            action: yyds_types::KeyValueAction::Get,
+        }) {
+            Ok(KeyValueResult::Get(Some(v))) => v,
+            Ok(KeyValueResult::Get(None)) => Vec::new(),
+            Ok(_) => {
+                write_error(stream, "APPEND executor returned unexpected result")?;
+                return Ok(true);
+            }
+            Err(error) => {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        };
+        let mut merged = current;
+        merged.extend_from_slice(append);
+        let new_len = merged.len() as i64;
+        match executor.execute(yyds_types::KeyValueCommand {
+            namespace: namespace.clone(),
+            key: key.to_vec(),
+            action: yyds_types::KeyValueAction::Put(merged),
+        }) {
+            Ok(KeyValueResult::Put { .. }) => write!(stream, ":{new_len}\r\n")?,
+            Ok(_) => {
+                write_error(stream, "APPEND executor returned unexpected result")?;
+                return Ok(true);
+            }
+            Err(error) => {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        }
+    }
     else if let Some(executor) = executor {
         match bind(&request.arguments, &namespace) {
             Ok(command) => match executor.execute(command) {

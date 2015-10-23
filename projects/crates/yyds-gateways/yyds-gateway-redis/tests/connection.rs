@@ -163,3 +163,86 @@ fn select_changes_the_namespace_for_the_connection() {
     worker.join().unwrap();
     assert_eq!(response, b"+OK\r\n+OK\r\n+OK\r\n+OK\r\n$3\r\none\r\n-ERR DB index is out of range\r\n");
 }
+
+fn executor_server() -> (TcpStream, std::thread::JoinHandle<()>) {
+    let shard = ShardId("local".into());
+    let executor = Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
+            HashMap::from([(shard, MemoryShard::new())]),
+        )
+        .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
+    });
+    let client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    (client, server)
+}
+
+#[test]
+fn ttl_and_type_mock_for_existing_and_missing_keys() {
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n*2\r\n$3\r\nTTL\r\n$7\r\nmissing\r\n*2\r\n$4\r\nTYPE\r\n$3\r\nkey\r\n*2\r\n$4\r\nTYPE\r\n$7\r\nmissing\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        response,
+        b"+OK\r\n:-1\r\n:-2\r\n+string\r\n+none\r\n"
+    );
+}
+
+#[test]
+fn strlen_returns_value_length_and_zero_for_missing() {
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nhello\r\n*2\r\n$6\r\nSTRLEN\r\n$3\r\nkey\r\n*2\r\n$6\r\nSTRLEN\r\n$7\r\nmissing\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+    assert_eq!(response, b"+OK\r\n:5\r\n:0\r\n");
+}
+
+#[test]
+fn append_creates_key_when_absent_and_merges_when_present() {
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*3\r\n$6\r\nAPPEND\r\n$3\r\nkey\r\n$3\r\none\r\n*3\r\n$6\r\nAPPEND\r\n$3\r\nkey\r\n$3\r\ntwo\r\n*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+    assert_eq!(response, b":3\r\n:6\r\n$6\r\nonetwo\r\n");
+}
+
+#[test]
+fn multi_key_exists_counts_present_and_absent() {
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*3\r\n$3\r\nSET\r\n$3\r\naaa\r\n$1\r\n1\r\n*3\r\n$3\r\nSET\r\n$3\r\nbbb\r\n$1\r\n2\r\n*4\r\n$6\r\nEXISTS\r\n$3\r\naaa\r\n$7\r\nmissing\r\n$3\r\nbbb\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+    assert_eq!(response, b"+OK\r\n+OK\r\n:2\r\n");
+}
