@@ -7,10 +7,13 @@ pub enum GatewayKind {
     Mysql,
     /// PostgreSQL wire disguise.
     Pgsql,
+    /// MongoDB wire disguise.
+    Mongo,
 }
 
 /// All supported gateway kinds in stable order.
-pub const ALL_GATEWAY_KINDS: [GatewayKind; 3] = [GatewayKind::Redis, GatewayKind::Mysql, GatewayKind::Pgsql];
+pub const ALL_GATEWAY_KINDS: [GatewayKind; 4] =
+    [GatewayKind::Redis, GatewayKind::Mysql, GatewayKind::Pgsql, GatewayKind::Mongo];
 
 impl GatewayKind {
     /// Stable gateway identifier used in logs and diagnostics.
@@ -19,6 +22,7 @@ impl GatewayKind {
             Self::Redis => "redis",
             Self::Mysql => "mysql",
             Self::Pgsql => "pgsql",
+            Self::Mongo => "mongo",
         }
     }
 
@@ -28,6 +32,7 @@ impl GatewayKind {
             Self::Redis => 6379,
             Self::Mysql => 3306,
             Self::Pgsql => 5432,
+            Self::Mongo => 27017,
         }
     }
 
@@ -37,6 +42,7 @@ impl GatewayKind {
             Self::Redis => "yyds-gateway-redis",
             Self::Mysql => "yyds-gateway-mysql",
             Self::Pgsql => "yyds-gateway-pgsql",
+            Self::Mongo => "yyds-gateway-mongo",
         }
     }
 }
