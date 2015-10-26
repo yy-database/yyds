@@ -98,7 +98,10 @@ fn sql_surface_is_parsed_by_oak_without_creating_a_gateway_planner() {
 #[test]
 fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
     let bound = bind_sql("SELECT id, 1 AS constant FROM users WHERE id = 7").expect("bind");
-    let SqlBoundStatement::Select(select) = bound;
+    let select = match bound {
+        SqlBoundStatement::Select(s) => s,
+        other => panic!("expected SqlBoundStatement::Select, got {other:?}"),
+    };
     assert_eq!(select.source.as_deref(), Some("users"));
     assert_eq!(select.projections.len(), 2);
     assert!(matches!(
@@ -119,8 +122,8 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
 }
 
 #[test]
-fn sql_binding_rejects_non_select_and_unimplemented_clauses() {
-    assert!(bind_sql("INSERT INTO users VALUES (1)").is_err());
+fn sql_binding_rejects_unimplemented_clauses_and_dml() {
+    assert!(bind_sql("CREATE TABLE users (id i64)").is_err());
     assert!(bind_sql("SELECT id FROM users ORDER BY id").is_err());
 }
 
@@ -128,7 +131,10 @@ fn sql_binding_rejects_non_select_and_unimplemented_clauses() {
 fn sql_catalog_binding_resolves_vos_type_and_field_identity() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64 }\n");
     let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 7", &catalog, 7).expect("catalog bind");
-    let yyds_gateway::SqlCatalogBoundStatement::Select(select) = bound;
+    let select = match bound {
+        yyds_gateway::SqlCatalogBoundStatement::Select(s) => s,
+        other => panic!("expected SqlCatalogBoundStatement::Select, got {other:?}"),
+    };
     let source = select.source.expect("source");
     assert_eq!(source.name, "users");
     assert_eq!(source.type_id, 1);
@@ -315,7 +321,11 @@ fn sql_select_and_extracts_pk_and_filters_on_remaining() {
     )
     .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    assert!(plan.remaining_predicate.is_some(), "AND 的右侧应留在 remaining");
+    let read_plan = match &plan {
+        yyds_gateway::SqlExecutionPlan::Read(p) => p,
+        other => panic!("expected Read plan, got {other:?}"),
+    };
+    assert!(read_plan.remaining_predicate.is_some(), "AND 的右侧应留在 remaining");
 
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
     assert_eq!(result.rows.len(), 1);

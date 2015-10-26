@@ -18,7 +18,7 @@ use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 use crate::{
     catalog_bind::SqlCatalogBoundExpression,
     sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError},
-    sql_planner::SqlExecutionPlan,
+    sql_planner::{DeletePlan, ReadPlan, SqlExecutionPlan, WritePlan},
 };
 
 /// SQL 查询的结果集。
@@ -131,11 +131,23 @@ pub fn decode_row(data: &[u8]) -> Result<RowFieldValues, SqlFrontendError> {
     Ok(row)
 }
 
-/// 执行一个已计划的 SELECT。
+/// 执行一个已计划的 SQL 语句。
+///
+/// SELECT 返回单行结果集（或空集）；INSERT/UPDATE/DELETE 返回空结果集，
+/// 影响行数的计数暂时通过 `executed` 字段表达。
 pub fn execute_plan(
     executor: &dyn KeyValueExecutor,
     plan: &SqlExecutionPlan,
 ) -> Result<SqlResult, SqlFrontendError> {
+    match plan {
+        SqlExecutionPlan::Read(read_plan) => execute_read(executor, read_plan),
+        SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, write_plan),
+        SqlExecutionPlan::Update(write_plan) => execute_update(executor, write_plan),
+        SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, delete_plan),
+    }
+}
+
+fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Get };
     let batch = executor
@@ -148,20 +160,18 @@ pub fn execute_plan(
         .ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
     let row_bytes = match result {
         yyds_types::KeyValueResult::Get(Some(bytes)) => bytes,
-        _ => return Ok(SqlResult { columns: plan_column_labels(plan), rows: Vec::new() }),
+        _ => return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new() }),
     };
     let row = decode_row(&row_bytes)?;
 
-    // 行级过滤。
     if let Some(ref predicate) = plan.remaining_predicate {
         let v = eval_expression(predicate, &row)?;
         if !truthy(&v) {
-            return Ok(SqlResult { columns: plan_column_labels(plan), rows: Vec::new() });
+            return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new() });
         }
     }
 
-    // 投影求值。
-    let columns = plan_column_labels(plan);
+    let columns = read_column_labels(plan);
     let mut row_values: Vec<SqlValue> = Vec::new();
     for (field_id, _) in &plan.projection_fields {
         row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
@@ -169,11 +179,68 @@ pub fn execute_plan(
     for (expr, _) in &plan.projection_expressions {
         row_values.push(eval_expression(expr, &row)?);
     }
-
     Ok(SqlResult { columns, rows: vec![row_values] })
 }
 
-fn plan_column_labels(plan: &SqlExecutionPlan) -> Vec<String> {
+fn execute_insert(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<SqlResult, SqlFrontendError> {
+    let row = write_plan_to_row(plan);
+    let bytes = encode_row(&row);
+    let namespace = Namespace(plan.namespace.clone());
+    let action = KeyValueAction::PutIfAbsent(bytes);
+    let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
+    let _result = executor
+        .execute(command)
+        .map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?;
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new() })
+}
+
+fn execute_update(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<SqlResult, SqlFrontendError> {
+    let namespace = Namespace(plan.namespace.clone());
+    let get_cmd = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Get };
+    let batch = executor
+        .execute_read_batch(&[get_cmd])
+        .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
+    let existing_bytes = match batch.into_iter().next() {
+        Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
+        _ => return Err(execute_error("UPDATE target row not found")),
+    };
+    let mut row = decode_row(&existing_bytes)?;
+    for field in &plan.fields {
+        row.insert(field.field_id, sql_value_to_bytes(&field.value));
+    }
+    let encoded = encode_row(&row);
+    let put_cmd = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
+    let _ = executor.execute(put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?;
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new() })
+}
+
+fn execute_delete(executor: &dyn KeyValueExecutor, plan: &DeletePlan) -> Result<SqlResult, SqlFrontendError> {
+    let namespace = Namespace(plan.namespace.clone());
+    let action = KeyValueAction::Delete;
+    let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
+    let _ = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?;
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new() })
+}
+
+fn write_plan_to_row(plan: &WritePlan) -> RowFieldValues {
+    let mut row = RowFieldValues::new();
+    for field in &plan.fields {
+        row.insert(field.field_id, sql_value_to_bytes(&field.value));
+    }
+    row
+}
+
+fn sql_value_to_bytes(lit: &SqlBoundLiteral) -> Vec<u8> {
+    // TLV 里的原始 bytes — 让 decode 侧的 from_row_bytes 推断类型。
+    match lit {
+        SqlBoundLiteral::Number(text) => text.as_bytes().to_vec(),
+        SqlBoundLiteral::String(text) => text.as_bytes().to_vec(),
+        SqlBoundLiteral::Boolean(v) => (if *v { "1" } else { "0" }).as_bytes().to_vec(),
+        SqlBoundLiteral::Null => Vec::new(),
+    }
+}
+
+fn read_column_labels(plan: &ReadPlan) -> Vec<String> {
     let mut labels = Vec::new();
     for (_, name) in &plan.projection_fields {
         labels.push(name.clone());

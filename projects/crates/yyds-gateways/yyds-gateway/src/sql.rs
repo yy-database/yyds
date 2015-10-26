@@ -73,6 +73,12 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
 pub enum SqlBoundStatement {
     /// One SQL SELECT request awaiting YYDS catalog binding.
     Select(SqlBoundSelect),
+    /// One SQL INSERT request awaiting YYDS catalog binding.
+    Insert(SqlBoundInsert),
+    /// One SQL UPDATE request awaiting YYDS catalog binding.
+    Update(SqlBoundUpdate),
+    /// One SQL DELETE request awaiting YYDS catalog binding.
+    Delete(SqlBoundDelete),
 }
 
 /// SQL SELECT request owned by the compatibility gateway.
@@ -82,6 +88,46 @@ pub struct SqlBoundSelect {
     pub source: Option<String>,
     /// Projection expressions in source order.
     pub projections: Vec<SqlBoundProjection>,
+    /// Optional SQL WHERE expression.
+    pub predicate: Option<SqlBoundExpression>,
+}
+
+/// SQL INSERT request owned by the compatibility gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundInsert {
+    /// Target table name.
+    pub table: String,
+    /// Optional explicit column list. When absent the catalog will infer order.
+    pub columns: Option<Vec<String>>,
+    /// Values to insert, in column-list order (or catalog order when no columns).
+    pub values: Vec<SqlBoundExpression>,
+}
+
+/// SQL UPDATE request owned by the compatibility gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundUpdate {
+    /// Target table name.
+    pub table: String,
+    /// Column → expression assignments in source order.
+    pub assignments: Vec<SqlBoundAssignment>,
+    /// Optional SQL WHERE expression.
+    pub predicate: Option<SqlBoundExpression>,
+}
+
+/// One SET column = expression binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundAssignment {
+    /// Column name as written by the client.
+    pub column: String,
+    /// Bound value expression.
+    pub value: SqlBoundExpression,
+}
+
+/// SQL DELETE request owned by the compatibility gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundDelete {
+    /// Target table name.
+    pub table: String,
     /// Optional SQL WHERE expression.
     pub predicate: Option<SqlBoundExpression>,
 }
@@ -205,7 +251,47 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 predicate: select.expr.as_ref().map(bind_expression).transpose()?,
             }))
         }
-        _ => Err(bind_error("SQL gateway binding currently accepts SELECT only")),
+        SqlStatement::Insert(insert) => {
+            let columns = if insert.columns.is_empty() {
+                None
+            } else {
+                Some(
+                    insert
+                        .columns
+                        .iter()
+                        .map(|id| normalize_identifier(id.name.as_ref()))
+                        .collect(),
+                )
+            };
+            let values = insert.values.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
+            Ok(SqlBoundStatement::Insert(SqlBoundInsert {
+                table: normalize_identifier(insert.table_name.name.name.as_ref()),
+                columns,
+                values,
+            }))
+        }
+        SqlStatement::Update(update) => {
+            let assignments = update
+                .assignments
+                .iter()
+                .map(|a| {
+                    Ok(SqlBoundAssignment {
+                        column: normalize_identifier(a.column.name.as_ref()),
+                        value: bind_expression(&a.value)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(SqlBoundStatement::Update(SqlBoundUpdate {
+                table: normalize_identifier(update.table_name.name.name.as_ref()),
+                assignments,
+                predicate: update.selection.as_ref().map(bind_expression).transpose()?,
+            }))
+        }
+        SqlStatement::Delete(delete) => Ok(SqlBoundStatement::Delete(SqlBoundDelete {
+            table: normalize_identifier(delete.table_name.name.name.as_ref()),
+            predicate: delete.selection.as_ref().map(bind_expression).transpose()?,
+        })),
+        _ => Err(bind_error("SQL gateway binding accepts SELECT/INSERT/UPDATE/DELETE only")),
     }
 }
 

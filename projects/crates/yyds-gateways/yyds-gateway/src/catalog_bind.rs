@@ -1,8 +1,9 @@
 //! SQL compatibility binding against a published YYDS VOS catalog.
 
 use crate::sql::{
-    bind_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect,
-    SqlBoundStatement, SqlBoundUnaryOperator, SqlFrontendError,
+    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundInsert,
+    SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundDelete, SqlBoundStatement,
+    SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
 };
 
 /// A table identity exposed by the YYDS catalog to a gateway binder.
@@ -196,11 +197,48 @@ pub struct SqlCatalogBoundSelect {
     pub predicate: Option<SqlCatalogBoundExpression>,
 }
 
+/// SQL INSERT request after catalog binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundInsert {
+    /// Target table identity.
+    pub table: SqlCatalogBoundTable,
+    /// Catalog fields in the order VALUES supplies them.
+    pub fields: Vec<SqlCatalogBoundColumn>,
+    /// Bound value expressions in the same order as `fields`.
+    pub values: Vec<SqlCatalogBoundExpression>,
+}
+
+/// SQL UPDATE request after catalog binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundUpdate {
+    /// Target table identity.
+    pub table: SqlCatalogBoundTable,
+    /// Catalog field → bound value assignments in source order.
+    pub assignments: Vec<(SqlCatalogBoundColumn, SqlCatalogBoundExpression)>,
+    /// Resolved optional predicate.
+    pub predicate: Option<SqlCatalogBoundExpression>,
+}
+
+/// SQL DELETE request after catalog binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundDelete {
+    /// Target table identity.
+    pub table: SqlCatalogBoundTable,
+    /// Resolved optional predicate.
+    pub predicate: Option<SqlCatalogBoundExpression>,
+}
+
 /// Gateway-owned SQL request after names are bound to a YYDS catalog revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlCatalogBoundStatement {
     /// One catalog-bound SELECT request awaiting distributed planning.
     Select(SqlCatalogBoundSelect),
+    /// One catalog-bound INSERT request awaiting planning.
+    Insert(SqlCatalogBoundInsert),
+    /// One catalog-bound UPDATE request awaiting planning.
+    Update(SqlCatalogBoundUpdate),
+    /// One catalog-bound DELETE request awaiting planning.
+    Delete(SqlCatalogBoundDelete),
 }
 
 /// Binds a parsed SQL surface to a specific catalog revision.
@@ -218,7 +256,74 @@ pub fn bind_sql_catalog(
     let statement = bind_sql(source)?;
     match statement {
         SqlBoundStatement::Select(select) => bind_select(select, catalog).map(SqlCatalogBoundStatement::Select),
+        SqlBoundStatement::Insert(insert) => bind_insert(insert, catalog).map(SqlCatalogBoundStatement::Insert),
+        SqlBoundStatement::Update(update) => bind_update(update, catalog).map(SqlCatalogBoundStatement::Update),
+        SqlBoundStatement::Delete(delete) => bind_delete(delete, catalog).map(SqlCatalogBoundStatement::Delete),
     }
+}
+
+fn bind_insert(insert: SqlBoundInsert, catalog: &SqlCatalog) -> Result<SqlCatalogBoundInsert, SqlFrontendError> {
+    let table = find_table(catalog, &insert.table)?;
+    let source = Some(table.clone());
+    let bound_fields = match insert.columns {
+        Some(cols) => cols
+            .iter()
+            .map(|name| find_field(name, source.as_ref(), catalog))
+            .collect::<Result<Vec<_>, _>>()?,
+        None => {
+            // INSERT INTO t VALUES (...) 无列名 → 按 catalog 字段顺序
+            let cat = catalog
+                .tables
+                .iter()
+                .find(|c| c.type_id == table.type_id)
+                .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+            cat.fields
+                .iter()
+                .map(|f| SqlCatalogBoundColumn {
+                    type_id: table.type_id,
+                    field_id: f.field_id,
+                    table_name: table.name.clone(),
+                    field_name: f.name.clone(),
+                })
+                .collect()
+        }
+    };
+    if bound_fields.len() != insert.values.len() {
+        return Err(catalog_error(&format!(
+            "INSERT column/value count mismatch: {} columns, {} values",
+            bound_fields.len(),
+            insert.values.len()
+        )));
+    }
+    let values = insert
+        .values
+        .into_iter()
+        .map(|v| bind_expression(v, source.as_ref(), catalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, values })
+}
+
+fn bind_update(update: SqlBoundUpdate, catalog: &SqlCatalog) -> Result<SqlCatalogBoundUpdate, SqlFrontendError> {
+    let table = find_table(catalog, &update.table)?;
+    let source = Some(table.clone());
+    let assignments = update
+        .assignments
+        .into_iter()
+        .map(|SqlBoundAssignment { column, value }| {
+            let field = find_field(&column, source.as_ref(), catalog)?;
+            let bound_value = bind_expression(value, source.as_ref(), catalog)?;
+            Ok((field, bound_value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let predicate = update.predicate.map(|p| bind_expression(p, source.as_ref(), catalog)).transpose()?;
+    Ok(SqlCatalogBoundUpdate { table, assignments, predicate })
+}
+
+fn bind_delete(delete: SqlBoundDelete, catalog: &SqlCatalog) -> Result<SqlCatalogBoundDelete, SqlFrontendError> {
+    let table = find_table(catalog, &delete.table)?;
+    let source = Some(table.clone());
+    let predicate = delete.predicate.map(|p| bind_expression(p, source.as_ref(), catalog)).transpose()?;
+    Ok(SqlCatalogBoundDelete { table, predicate })
 }
 
 fn bind_select(select: SqlBoundSelect, catalog: &SqlCatalog) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {

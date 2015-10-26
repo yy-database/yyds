@@ -13,8 +13,9 @@
 
 use crate::{
     catalog_bind::{
-        SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundProjection,
-        SqlCatalogBoundSelect, SqlCatalogBoundStatement,
+        SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
+        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundDelete,
+        SqlCatalogBoundUpdate,
     },
     sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlFrontendError},
 };
@@ -26,6 +27,9 @@ pub fn plan_statement(
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
     match statement {
         SqlCatalogBoundStatement::Select(select) => plan_select(select, catalog),
+        SqlCatalogBoundStatement::Insert(insert) => plan_insert(insert, catalog),
+        SqlCatalogBoundStatement::Update(update) => plan_update(update, catalog),
+        SqlCatalogBoundStatement::Delete(delete) => plan_delete(delete, catalog),
     }
 }
 
@@ -74,18 +78,102 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         }
     };
 
-    Ok(SqlExecutionPlan {
+    Ok(SqlExecutionPlan::Read(ReadPlan {
         namespace,
         rowid: rowid.expect("rowid is Some when pk_literal is Some"),
         projection_fields,
         projection_expressions,
         remaining_predicate,
-    })
+    }))
 }
 
-/// 已计划好的 SELECT，可以直接翻译为 KeyValueCommand。
+/// 计划一个 INSERT。要求 VALUES 里第一个值是主键 literal。
+pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    let table = find_table(catalog, insert.table.type_id)?;
+    let namespace = format!("table:{}", table.type_id);
+
+    let pk_bound = insert.fields.first().ok_or_else(|| planner_error("INSERT has no fields"))?;
+    let pk_value = insert.values.first().ok_or_else(|| planner_error("INSERT has no values"))?;
+    let rowid = literal_from_expression(pk_value)?;
+    let rowid_bytes = pk_literal_to_rowid(&rowid)?;
+
+    let mut write_fields = Vec::with_capacity(insert.fields.len());
+    for (field, value) in insert.fields.iter().zip(insert.values.iter()) {
+        let lit = literal_from_expression(value)?;
+        write_fields.push(WriteField { field_id: field.field_id, value: lit });
+        let _ = pk_bound;
+    }
+    Ok(SqlExecutionPlan::Insert(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields }))
+}
+
+/// 计划一个 UPDATE。要求 WHERE pk = literal。
+pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    let table = find_table(catalog, update.table.type_id)?;
+    let namespace = format!("table:{}", table.type_id);
+    let pk_field = primary_key_of(table)?;
+
+    let rowid = match update.predicate {
+        None => return Err(planner_error("UPDATE requires WHERE with `pk = literal`")),
+        Some(expr) => {
+            let (pk_literal, _) = extract_pk_equality(expr, pk_field.field_id)?;
+            pk_literal.ok_or_else(|| planner_error(&format!("UPDATE WHERE must contain `{} = literal`", pk_field.name)))?
+        }
+    };
+    let rowid_bytes = pk_literal_to_rowid(&rowid)?;
+
+    let mut write_fields = Vec::new();
+    for (field, value_expr) in &update.assignments {
+        let lit = literal_from_expression(value_expr)?;
+        write_fields.push(WriteField { field_id: field.field_id, value: lit });
+    }
+    Ok(SqlExecutionPlan::Update(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields }))
+}
+
+/// 计划一个 DELETE。要求 WHERE pk = literal。
+pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    let table = find_table(catalog, delete.table.type_id)?;
+    let namespace = format!("table:{}", table.type_id);
+    let pk_field = primary_key_of(table)?;
+
+    let rowid = match delete.predicate {
+        None => return Err(planner_error("DELETE requires WHERE with `pk = literal`")),
+        Some(expr) => {
+            let (pk_literal, _) = extract_pk_equality(expr, pk_field.field_id)?;
+            pk_literal.ok_or_else(|| planner_error(&format!("DELETE WHERE must contain `{} = literal`", pk_field.name)))?
+        }
+    };
+    let rowid_bytes = pk_literal_to_rowid(&rowid)?;
+    Ok(SqlExecutionPlan::Delete(DeletePlan { namespace, rowid: rowid_bytes }))
+}
+
+/// 从 bound expression 里提取 literal。目前 INSERT/UPDATE 的值必须是 literal。
+fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundLiteral, SqlFrontendError> {
+    match expr {
+        SqlCatalogBoundExpression::Literal(lit) => Ok(lit.clone()),
+        SqlCatalogBoundExpression::Column(col) => Err(planner_error(&format!(
+            "SQL gateway write values must be literals; column reference `{}` is not supported in this first step",
+            col.field_name
+        ))),
+        _ => Err(planner_error("SQL gateway write values must be simple literals")),
+    }
+}
+
+/// 已计划好的 SQL 操作，可以直接翻译为 KeyValueCommand。
 #[derive(Debug, Clone)]
-pub struct SqlExecutionPlan {
+pub enum SqlExecutionPlan {
+    /// SELECT — namespace + rowid + 投影 + 剩余过滤。
+    Read(ReadPlan),
+    /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
+    Insert(WritePlan),
+    /// UPDATE — 先 Get + 再 Put（WHERE pk=literal 必须存在）。
+    Update(WritePlan),
+    /// DELETE — Delete（WHERE pk=literal 必须存在）。
+    Delete(DeletePlan),
+}
+
+/// SELECT 执行计划。
+#[derive(Debug, Clone)]
+pub struct ReadPlan {
     /// namespace 标签，形如 `table:{type_id}`。
     pub namespace: String,
     /// 要读取的 row 的主键值 bytes。
@@ -96,6 +184,33 @@ pub struct SqlExecutionPlan {
     pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
     /// 从原 WHERE 里剥掉主键等值后剩下的表达式；`None` 表示没有剩余。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+}
+
+/// INSERT / UPDATE 执行计划。payload 由 execute 层做 TLV 编码。
+#[derive(Debug, Clone)]
+pub struct WritePlan {
+    /// namespace 标签。
+    pub namespace: String,
+    /// 要写入的 row 的主键值 bytes。
+    pub rowid: Vec<u8>,
+    /// INSERT 时提供所有字段值；UPDATE 时提供要 SET 的字段。
+    pub fields: Vec<WriteField>,
+}
+
+/// 一个要写入的字段。
+#[derive(Debug, Clone)]
+pub struct WriteField {
+    /// field_id。
+    pub field_id: u64,
+    /// 要写入的值（必须是 Literal，复杂表达式暂不支持）。
+    pub value: SqlBoundLiteral,
+}
+
+/// DELETE 执行计划。
+#[derive(Debug, Clone)]
+pub struct DeletePlan {
+    pub namespace: String,
+    pub rowid: Vec<u8>,
 }
 
 fn extract_pk_equality(
