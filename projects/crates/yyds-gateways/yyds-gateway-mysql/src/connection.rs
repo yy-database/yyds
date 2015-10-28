@@ -12,7 +12,7 @@ use std::{
 
 use yyds_execution::KeyValueExecutor;
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, plan_statement, parse_session_command, SqlCatalog, SqlResult,
+    bind_sql_catalog, execute_plan, plan_statement, parse_session_command, SqlCatalog, SqlExecutionPlan, SqlResult,
     SqlSessionCommand, SqlValue,
 };
 
@@ -137,7 +137,7 @@ fn serve_session(
                         write_ok(&mut stream, sequence.wrapping_add(1))?;
                     }
                     Ok(None) | Err(_) => match &runtime {
-                        Some(runtime) => execute_select(&mut stream, sequence.wrapping_add(1), sql, runtime)?,
+                        Some(runtime) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, runtime)?,
                         None => write_error(
                             &mut stream,
                             sequence.wrapping_add(1),
@@ -292,8 +292,9 @@ fn write_error(stream: &mut impl Write, sequence: u8, code: u16, state: &str, me
     write_packet(stream, sequence, &payload)
 }
 
-/// 把一条 SQL SELECT 走完整的 bind → plan → execute → wire-result 路径。
-fn execute_select(
+/// 把一条 SQL 走完整的 bind → plan → execute → wire 路径。
+/// 根据 plan variant 分发：SELECT → ResultSet；INSERT/UPDATE/DELETE → OK(AffectedRows=1)。
+fn execute_sql(
     stream: &mut impl Write,
     sequence: u8,
     sql: &str,
@@ -325,6 +326,9 @@ fn execute_select(
             return Ok(());
         }
     };
+
+    // DML 写操作 —— 先 execute 再回 OK packet
+    let is_write = !matches!(plan, SqlExecutionPlan::Read(_));
     let result = match execute_plan(runtime.executor.as_ref(), &plan) {
         Ok(result) => result,
         Err(error) => {
@@ -338,7 +342,21 @@ fn execute_select(
             return Ok(());
         }
     };
+    if is_write {
+        write_ok_with_affected(stream, sequence, 1)?;
+        return Ok(());
+    }
     write_result_set(stream, sequence, &result)
+}
+
+/// 带 affected_rows 的 MySQL OK packet（INSERT/UPDATE/DELETE）。
+fn write_ok_with_affected(stream: &mut impl Write, sequence: u8, affected: u64) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(11);
+    payload.push(0x00); // OK identifier
+    encode_length_encoded(&mut payload, affected);
+    payload.extend_from_slice(&0_u64.to_le_bytes()); // last_insert_id = 0
+    payload.extend_from_slice(&0x0002_u16.to_le_bytes()); // status flags (AUTOCOMMIT)
+    write_packet(stream, sequence, &payload)
 }
 
 /// 把 SqlResult 编码成 MySQL text ResultSet 协议包。
