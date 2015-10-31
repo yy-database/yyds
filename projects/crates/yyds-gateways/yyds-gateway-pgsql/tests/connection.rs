@@ -41,7 +41,7 @@ fn start_server() -> (TcpStream, thread::JoinHandle<()>) {
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_connection(stream).unwrap();
+        serve_connection(stream, None).unwrap();
     });
     let mut client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();

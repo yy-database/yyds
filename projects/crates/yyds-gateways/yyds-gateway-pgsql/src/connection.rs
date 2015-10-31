@@ -11,7 +11,11 @@ use std::{
 };
 
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
-use yyds_gateway::{parse_session_command, SqlSessionCommand, SqlTransactionAction};
+use yyds_execution::KeyValueExecutor;
+use yyds_gateway::{
+    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan,
+    SqlSessionCommand, SqlTransactionAction, SqlValue,
+};
 
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
@@ -21,10 +25,21 @@ const MAX_STARTUP_FRAME: usize = 64 * 1024;
 const MAX_MESSAGE_FRAME: usize = 16 * 1024 * 1024;
 static NEXT_SECRET: AtomicU32 = AtomicU32::new(1);
 
+/// Injects YYDS SQL execution into PostgreSQL SimpleQuery.
+#[derive(Debug)]
+pub struct PgsqlSqlRuntime {
+    /// Bound YYDS catalog view used for SQL name resolution.
+    pub catalog: SqlCatalog,
+    /// Schema version expected by the gateway binder.
+    pub schema_version: u32,
+    /// KV execution plane.
+    pub executor: Arc<dyn KeyValueExecutor>,
+}
+
 /// Establishes an unauthenticated protocol-v3 session, then rejects unsupported SQL explicitly.
 ///
 /// The caller must restrict the peer to loopback until authentication and TLS are implemented.
-pub fn serve_connection(stream: TcpStream) -> io::Result<()> {
+pub fn serve_connection(stream: TcpStream, runtime: Option<Arc<PgsqlSqlRuntime>>) -> io::Result<()> {
     if !stream.peer_addr()?.ip().is_loopback() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -33,11 +48,15 @@ pub fn serve_connection(stream: TcpStream) -> io::Result<()> {
     }
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    serve_session(stream)
+    serve_session(stream, runtime)
 }
 
 /// Serves a loopback session with cooperative service-stop cancellation.
-pub fn serve_cancellable(stream: TcpStream, stopping: Arc<AtomicBool>) -> io::Result<()> {
+pub fn serve_cancellable(
+    stream: TcpStream,
+    stopping: Arc<AtomicBool>,
+    runtime: Option<Arc<PgsqlSqlRuntime>>,
+) -> io::Result<()> {
     if !stream.peer_addr()?.ip().is_loopback() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -45,10 +64,10 @@ pub fn serve_cancellable(stream: TcpStream, stopping: Arc<AtomicBool>) -> io::Re
         ));
     }
     stream.set_nonblocking(true)?;
-    serve_session(CancellableSocket { stream, stopping })
+    serve_session(CancellableSocket { stream, stopping }, runtime)
 }
 
-fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
+fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRuntime>>) -> io::Result<()> {
     let mut pending = Vec::new();
     let mut transaction_status = TransactionStatus::Idle;
     let parameters = loop {
@@ -106,7 +125,7 @@ fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
                     transaction_status.fail();
                 }
                 else if let Ok(sql) = std::str::from_utf8(sql_bytes) {
-                    handle_simple_query(&mut stream, sql, &mut transaction_status)?;
+                    handle_simple_query(&mut stream, sql, &mut transaction_status, runtime.as_deref())?;
                 }
                 else {
                     write_error_response(&mut stream, "22021", "query is not valid UTF-8")?;
@@ -145,7 +164,12 @@ impl TransactionStatus {
     }
 }
 
-fn handle_simple_query(stream: &mut impl Write, sql: &str, status: &mut TransactionStatus) -> io::Result<()> {
+fn handle_simple_query(
+    stream: &mut impl Write,
+    sql: &str,
+    status: &mut TransactionStatus,
+    runtime: Option<&PgsqlSqlRuntime>,
+) -> io::Result<()> {
     match parse_session_command(sql) {
         Err(_) => {
             status.fail();
@@ -182,9 +206,114 @@ fn handle_simple_query(stream: &mut impl Write, sql: &str, status: &mut Transact
                     "current transaction is aborted, commands ignored until end of transaction block",
                 );
             }
-            status.fail();
-            write_error_response(stream, "0A000", "PostgreSQL query execution is not implemented")
+            match runtime {
+                Some(rt) => execute_simple_query(stream, sql, rt, status),
+                None => {
+                    status.fail();
+                    write_error_response(stream, "0A000", "PostgreSQL query execution is not implemented (no SQL runtime)")
+                }
+            }
         }
+    }
+}
+
+/// SimpleQuery 的 SQL bind → plan → execute 路径。
+fn execute_simple_query(
+    stream: &mut impl Write,
+    sql: &str,
+    runtime: &PgsqlSqlRuntime,
+    status: &mut TransactionStatus,
+) -> io::Result<()> {
+    let bound = match bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version) {
+        Ok(b) => b,
+        Err(error) => {
+            status.fail();
+            return write_error_response(stream, "42P01", &format!("SQL bind error: {}", error.message));
+        }
+    };
+    let plan = match plan_statement(bound, &runtime.catalog) {
+        Ok(p) => p,
+        Err(error) => {
+            status.fail();
+            return write_error_response(stream, "42883", &format!("SQL plan error: {}", error.message));
+        }
+    };
+    let is_read = matches!(&plan, SqlExecutionPlan::Read(_));
+    let result = match execute_plan(runtime.executor.as_ref(), &plan) {
+        Ok(r) => r,
+        Err(error) => {
+            status.fail();
+            return write_error_response(stream, "58P01", &format!("SQL execution error: {}", error.message));
+        }
+    };
+    if is_read {
+        write_row_description(stream, &result.columns)?;
+        for row in &result.rows {
+            write_data_row(stream, row)?;
+        }
+        write_command_complete(stream, &format!("SELECT {}", result.rows.len()))?;
+    }
+    else {
+        let tag = match &plan {
+            SqlExecutionPlan::Insert(_) => "INSERT 0 1",
+            SqlExecutionPlan::Update(_) => "UPDATE 1",
+            SqlExecutionPlan::Delete(_) => "DELETE 1",
+            SqlExecutionPlan::Read(_) => unreachable!(),
+        };
+        write_command_complete(stream, tag)?;
+    }
+    Ok(())
+}
+
+/// PostgreSQL RowDescription message ('T') — name only，所有列 text 格式。
+fn write_row_description(stream: &mut impl Write, columns: &[String]) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(64);
+    payload.push(b'T');
+    let mut body = Vec::with_capacity(48);
+    body.extend_from_slice(&(columns.len() as i16).to_be_bytes());
+    for col in columns {
+        body.extend_from_slice(col.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0_i32.to_be_bytes()); // table_oid = 0
+        body.extend_from_slice(&0_i16.to_be_bytes()); // column_attr = 0
+        body.extend_from_slice(&0_i32.to_be_bytes()); // type_oid = unspecified
+        body.extend_from_slice(&(-1_i16).to_be_bytes()); // type_size = variable
+        body.extend_from_slice(&(-1_i32).to_be_bytes()); // type_mod = -1
+        body.extend_from_slice(&0_i16.to_be_bytes()); // format_code = text
+    }
+    payload.extend_from_slice(&(body.len() as i32 + 4).to_be_bytes());
+    payload.extend_from_slice(&body);
+    stream.write_all(&payload)
+}
+
+/// PostgreSQL DataRow message ('D') — text encoding for each column value。
+fn write_data_row(stream: &mut impl Write, row: &[SqlValue]) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(64);
+    payload.push(b'D');
+    let mut body = Vec::with_capacity(48);
+    body.extend_from_slice(&(row.len() as i16).to_be_bytes());
+    for value in row {
+        match value {
+            SqlValue::Null => body.extend_from_slice(&(-1_i32).to_be_bytes()),
+            other => {
+                let text = sql_value_to_pg_text(other);
+                let bytes = text.as_bytes();
+                body.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                body.extend_from_slice(bytes);
+            }
+        }
+    }
+    payload.extend_from_slice(&(body.len() as i32 + 4).to_be_bytes());
+    payload.extend_from_slice(&body);
+    stream.write_all(&payload)
+}
+
+fn sql_value_to_pg_text(value: &SqlValue) -> String {
+    match value {
+        SqlValue::Number(n) => format!("{n}"),
+        SqlValue::String(s) => s.clone(),
+        SqlValue::Boolean(b) => if *b { "t".into() } else { "f".into() },
+        SqlValue::Null => unreachable!(),
     }
 }
 

@@ -12,8 +12,9 @@ use std::{
 };
 
 use yyds_control::NodeLease;
+use yyds_execution::KeyValueExecutor;
 
-use crate::connection::serve_cancellable;
+use crate::connection::{serve_cancellable, PgsqlSqlRuntime};
 
 const MAX_CLIENTS: usize = 64;
 
@@ -28,6 +29,26 @@ pub struct PgsqlService {
 impl PgsqlService {
     /// Starts a listener without creating a node or cluster identity.
     pub fn start(owner: Arc<NodeLease>, address: SocketAddr) -> io::Result<Self> {
+        Self::start_inner(owner, address, None)
+    }
+
+    /// Starts a listener with a YYDS SQL runtime for SELECT + DML execution.
+    pub fn start_with_executor(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        executor: Arc<dyn KeyValueExecutor>,
+        catalog: yyds_gateway::SqlCatalog,
+        schema_version: u32,
+    ) -> io::Result<Self> {
+        let runtime = Arc::new(PgsqlSqlRuntime { catalog, executor, schema_version });
+        Self::start_inner(owner, address, Some(runtime))
+    }
+
+    fn start_inner(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        runtime: Option<Arc<PgsqlSqlRuntime>>,
+    ) -> io::Result<Self> {
         if !address.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -39,9 +60,10 @@ impl PgsqlService {
         let address = listener.local_addr()?;
         let stopping = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&stopping);
+        let runtime_for_listen = runtime.clone();
         let worker = thread::Builder::new().name("yyds-pgsql-listener".into()).spawn(move || {
             let _owner = owner;
-            listen(listener, signal)
+            listen(listener, signal, runtime_for_listen)
         })?;
         Ok(Self { address, stopping, worker: Some(worker) })
     }
@@ -106,7 +128,7 @@ impl Drop for Clients {
     }
 }
 
-fn listen(listener: TcpListener, stopping: Arc<AtomicBool>) -> io::Result<()> {
+fn listen(listener: TcpListener, stopping: Arc<AtomicBool>, runtime: Option<Arc<PgsqlSqlRuntime>>) -> io::Result<()> {
     let mut clients = Clients { workers: Vec::new(), stopping: Arc::clone(&stopping) };
     while !stopping.load(Ordering::Acquire) {
         clients.reap();
@@ -120,8 +142,9 @@ fn listen(listener: TcpListener, stopping: Arc<AtomicBool>) -> io::Result<()> {
                     continue;
                 }
                 let cancellation = Arc::clone(&stopping);
+                let rt = runtime.clone();
                 let worker = thread::Builder::new().name("yyds-pgsql-client".into()).spawn(move || {
-                    let _ = serve_cancellable(stream, cancellation);
+                    let _ = serve_cancellable(stream, cancellation, rt);
                 })?;
                 clients.workers.push(worker);
             }
