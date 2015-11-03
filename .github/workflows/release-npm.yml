@@ -11,6 +11,12 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override semver (defaults to tag version or package.json)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
