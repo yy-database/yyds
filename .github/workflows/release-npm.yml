@@ -142,9 +142,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # workflow_dispatch 可直接传 version 输入
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            version="${{ github.event.inputs.version }}"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "publishing version $version (workflow_dispatch input)"
+            exit 0
+          fi
           tag="${GITHUB_REF_NAME}"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
-            echo "expected semver tag like v1.2.3, got: $tag" >&2
+            echo "expected semver tag like v1.2.3, got: $tag (neither tag nor workflow_dispatch version input)" >&2
             exit 1
           fi
           version="${tag#v}"
