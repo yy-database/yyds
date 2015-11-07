@@ -106,10 +106,7 @@ where
         read_exact(stream, &mut body)?;
     }
 
-    Ok(Some(Frame {
-        header: MsgHeader { total_length, request_id, response_to, opcode },
-        body,
-    }))
+    Ok(Some(Frame { header: MsgHeader { total_length, request_id, response_to, opcode }, body }))
 }
 
 /// Writes one OP_MSG response frame to the given stream.

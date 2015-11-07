@@ -196,12 +196,7 @@ fn make_executor_with_row(
         values.insert(*field_id, bytes.to_vec());
     }
     let row_bytes = yyds_gateway::encode_row(&values);
-    shard
-        .put(
-            Key::new(namespace, rowid.to_vec()),
-            StoredValue::Inline(InlineValue(row_bytes)),
-        )
-        .expect("put row");
+    shard.put(Key::new(namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(row_bytes))).expect("put row");
 
     let mut shards = std::collections::HashMap::new();
     shards.insert(shard_id, shard);
@@ -211,14 +206,9 @@ fn make_executor_with_row(
 #[test]
 fn sql_select_pk_equality_executes_against_kv_adapter() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
-    let executor = make_executor_with_row(
-        "table:1",
-        b"42",
-        &[(1, b"42"), (2, b"alice"), (3, b"30")],
-    );
+    let executor = make_executor_with_row("table:1", b"42", &[(1, b"42"), (2, b"alice"), (3, b"30")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 42", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 42", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
 
@@ -226,24 +216,16 @@ fn sql_select_pk_equality_executes_against_kv_adapter() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(
         result.rows[0],
-        vec![
-            yyds_gateway::SqlValue::Number(42.0),
-            yyds_gateway::SqlValue::String("alice".to_string()),
-        ]
+        vec![yyds_gateway::SqlValue::Number(42.0), yyds_gateway::SqlValue::String("alice".to_string()),]
     );
 }
 
 #[test]
 fn sql_select_star_expands_all_fields() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let executor = make_executor_with_row(
-        "table:1",
-        b"1",
-        &[(1, b"1"), (2, b"bob")],
-    );
+    let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"bob")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users WHERE id = 1", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users WHERE id = 1", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
 
@@ -254,14 +236,10 @@ fn sql_select_star_expands_all_fields() {
 #[test]
 fn sql_select_pk_string_literal_uses_string_rowid() {
     let catalog = catalog("table users { @@id: utf8, score: i64 }\n");
-    let executor = make_executor_with_row(
-        "table:1",
-        b"alice",
-        &[(1, b"alice"), (2, b"100")],
-    );
+    let executor = make_executor_with_row("table:1", b"alice", &[(1, b"alice"), (2, b"100")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT score FROM users WHERE id = 'alice'", &catalog, 7)
-        .expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT score FROM users WHERE id = 'alice'", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
 
@@ -272,14 +250,9 @@ fn sql_select_pk_string_literal_uses_string_rowid() {
 fn sql_select_missing_row_returns_empty_result() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     // namespace "table:1" 存在但 key "999" 没有
-    let executor = make_executor_with_row(
-        "table:1",
-        b"1",
-        &[(1, b"1"), (2, b"exist")],
-    );
+    let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"exist")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 999", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 999", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
 
@@ -307,19 +280,11 @@ fn sql_select_non_pk_equality_is_rejected() {
 #[test]
 fn sql_select_and_extracts_pk_and_filters_on_remaining() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
-    let executor = make_executor_with_row(
-        "table:1",
-        b"5",
-        &[(1, b"5"), (2, b"carol"), (3, b"25")],
-    );
+    let executor = make_executor_with_row("table:1", b"5", &[(1, b"5"), (2, b"carol"), (3, b"25")]);
 
     // AND predicate 包含 pk 等值 + 额外条件；plan 应只提 pk，额外条件作为 remaining
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT name, age FROM users WHERE id = 5 AND age = 25",
-        &catalog,
-        7,
-    )
-    .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 5 AND age = 25", &catalog, 7)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let read_plan = match &plan {
         yyds_gateway::SqlExecutionPlan::Read(p) => p,
@@ -334,19 +299,11 @@ fn sql_select_and_extracts_pk_and_filters_on_remaining() {
 #[test]
 fn sql_select_projects_binary_expression() {
     let catalog = catalog("table users { @@id: i64, x: i64, y: i64 }\n");
-    let executor = make_executor_with_row(
-        "table:1",
-        b"1",
-        &[(1, b"1"), (2, b"10"), (3, b"3")],
-    );
+    let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"10"), (3, b"3")]);
 
     // 先确认 Oak 支持哪些 projection 表达式
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT id + 1 AS inc FROM users WHERE id = 1",
-        &catalog,
-        7,
-    )
-    .expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id + 1 AS inc FROM users WHERE id = 1", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
 
@@ -387,87 +344,61 @@ fn sql_insert_then_select_round_trip() {
 
     // INSERT INTO users VALUES (7, 'alice', 30)
     // Oak 解析后 INSERT VALUES 第一个值是 pk literal = 7
-    let bound = yyds_gateway::bind_sql_catalog(
-        "INSERT INTO users VALUES (7, 'alice', 30)",
-        &catalog,
-        7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (7, 'alice', 30)", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     yyds_gateway::execute_plan(&executor, &plan).expect("insert executes");
 
     // SELECT 出来验证
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT id, name, age FROM users WHERE id = 7",
-        &catalog,
-        7,
-    ).expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id, name, age FROM users WHERE id = 7", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after insert");
 
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string(), "age".to_string()]);
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0], vec![
-        yyds_gateway::SqlValue::Number(7.0),
-        yyds_gateway::SqlValue::String("alice".into()),
-        yyds_gateway::SqlValue::Number(30.0),
-    ]);
+    assert_eq!(
+        result.rows[0],
+        vec![
+            yyds_gateway::SqlValue::Number(7.0),
+            yyds_gateway::SqlValue::String("alice".into()),
+            yyds_gateway::SqlValue::Number(30.0),
+        ]
+    );
 }
 
 #[test]
 fn sql_update_then_select_round_trip() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     // 预置 row: id=9, name=original, age=20
-    let executor = make_executor_with_row("table:1", b"9", &[
-        (1, b"9"), (2, b"original"), (3, b"20"),
-    ]);
+    let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
 
     // UPDATE users SET name='updated', age=99 WHERE id = 9
-    let bound = yyds_gateway::bind_sql_catalog(
-        "UPDATE users SET name = 'updated', age = 99 WHERE id = 9",
-        &catalog,
-        7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated', age = 99 WHERE id = 9", &catalog, 7)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     yyds_gateway::execute_plan(&executor, &plan).expect("update executes");
 
     // SELECT 验证
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT name, age FROM users WHERE id = 9",
-        &catalog,
-        7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after update");
 
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0], vec![
-        yyds_gateway::SqlValue::String("updated".into()),
-        yyds_gateway::SqlValue::Number(99.0),
-    ]);
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::String("updated".into()), yyds_gateway::SqlValue::Number(99.0),]);
 }
 
 #[test]
 fn sql_delete_removes_row() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let executor = make_executor_with_row("table:1", b"55", &[
-        (1, b"55"), (2, b"victim"),
-    ]);
+    let executor = make_executor_with_row("table:1", b"55", &[(1, b"55"), (2, b"victim")]);
 
     // DELETE FROM users WHERE id = 55
-    let bound = yyds_gateway::bind_sql_catalog(
-        "DELETE FROM users WHERE id = 55",
-        &catalog,
-        7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     yyds_gateway::execute_plan(&executor, &plan).expect("delete executes");
 
     // SELECT 验证空
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT name FROM users WHERE id = 55",
-        &catalog,
-        7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after delete");
     assert!(result.rows.is_empty());
@@ -478,11 +409,8 @@ fn sql_insert_columns_explicit_order_is_rejected_by_oak() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     // Oak SQL parser 当前只支持 `INSERT INTO t VALUES (...)`，不支持显式列顺序。
     // catalog_bind.rs 里留了按 catalog 字段顺序填充的路径，等 Oak parser 扩展后启用。
-    let error = yyds_gateway::bind_sql_catalog(
-        "INSERT INTO users (age, @@id, name) VALUES (25, 11, 'bob')",
-        &catalog,
-        7,
-    ).expect_err("explicit column INSERT not supported yet");
+    let error = yyds_gateway::bind_sql_catalog("INSERT INTO users (age, @@id, name) VALUES (25, 11, 'bob')", &catalog, 7)
+        .expect_err("explicit column INSERT not supported yet");
     assert!(error.message.contains("column/value") || error.message.contains("values"));
 }
 
@@ -491,9 +419,5 @@ fn sql_insert_pk_must_be_first_value() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     // VALUES 第一个必须是 pk literal — 如果 Oak 把 "1" 当作 name 值也会在 planner 层报错
     // 这里只是验证 planner 接受正确的形式
-    let _bound = yyds_gateway::bind_sql_catalog(
-        "INSERT INTO users VALUES (1, 'one')",
-        &catalog,
-        7,
-    ).expect("insert bind");
+    let _bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (1, 'one')", &catalog, 7).expect("insert bind");
 }

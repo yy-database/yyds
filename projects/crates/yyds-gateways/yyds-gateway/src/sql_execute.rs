@@ -135,10 +135,7 @@ pub fn decode_row(data: &[u8]) -> Result<RowFieldValues, SqlFrontendError> {
 ///
 /// SELECT 返回单行结果集（或空集）；INSERT/UPDATE/DELETE 返回空结果集，
 /// 影响行数的计数暂时通过 `executed` 字段表达。
-pub fn execute_plan(
-    executor: &dyn KeyValueExecutor,
-    plan: &SqlExecutionPlan,
-) -> Result<SqlResult, SqlFrontendError> {
+pub fn execute_plan(executor: &dyn KeyValueExecutor, plan: &SqlExecutionPlan) -> Result<SqlResult, SqlFrontendError> {
     match plan {
         SqlExecutionPlan::Read(read_plan) => execute_read(executor, read_plan),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, write_plan),
@@ -154,10 +151,7 @@ fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlR
         .execute_read_batch(&[command])
         .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
 
-    let result = batch
-        .into_iter()
-        .next()
-        .ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
+    let result = batch.into_iter().next().ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
     let row_bytes = match result {
         yyds_types::KeyValueResult::Get(Some(bytes)) => bytes,
         _ => return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new() }),
@@ -188,9 +182,7 @@ fn execute_insert(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<S
     let namespace = Namespace(plan.namespace.clone());
     let action = KeyValueAction::PutIfAbsent(bytes);
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
-    let _result = executor
-        .execute(command)
-        .map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?;
+    let _result = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?;
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new() })
 }
 
@@ -262,9 +254,9 @@ fn truthy(v: &SqlValue) -> bool {
 
 fn eval_expression(expr: &SqlCatalogBoundExpression, row: &RowFieldValues) -> Result<SqlValue, SqlFrontendError> {
     Ok(match expr {
-        SqlCatalogBoundExpression::Column(col) => row
-            .value(col.field_id)
-            .ok_or_else(|| execute_error(&format!("column {} not present in row", col.field_name)))?,
+        SqlCatalogBoundExpression::Column(col) => {
+            row.value(col.field_id).ok_or_else(|| execute_error(&format!("column {} not present in row", col.field_name)))?
+        }
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Unary { operator, expression } => {
             let inner = eval_expression(expression, row)?;

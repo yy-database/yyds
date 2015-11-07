@@ -24,11 +24,7 @@ use crate::{
 ///
 /// `cancellation` is polled after every frame so a listener shutdown can
 /// interrupt idle connections.
-pub fn serve_cancellable(
-    stream: TcpStream,
-    limits: FrameLimits,
-    cancellation: Arc<AtomicBool>,
-) -> io::Result<()> {
+pub fn serve_cancellable(stream: TcpStream, limits: FrameLimits, cancellation: Arc<AtomicBool>) -> io::Result<()> {
     serve_inner(stream, limits, cancellation, None)
 }
 

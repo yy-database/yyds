@@ -27,11 +27,7 @@ pub struct MysqlService {
 
 impl MysqlService {
     /// Starts a listener without creating a node or cluster identity.
-    pub fn start(
-        owner: Arc<NodeLease>,
-        address: SocketAddr,
-        runtime: Option<Arc<MysqlSqlRuntime>>,
-    ) -> io::Result<Self> {
+    pub fn start(owner: Arc<NodeLease>, address: SocketAddr, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<Self> {
         if !address.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,

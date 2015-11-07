@@ -44,11 +44,7 @@ impl PgsqlService {
         Self::start_inner(owner, address, Some(runtime))
     }
 
-    fn start_inner(
-        owner: Arc<NodeLease>,
-        address: SocketAddr,
-        runtime: Option<Arc<PgsqlSqlRuntime>>,
-    ) -> io::Result<Self> {
+    fn start_inner(owner: Arc<NodeLease>, address: SocketAddr, runtime: Option<Arc<PgsqlSqlRuntime>>) -> io::Result<Self> {
         if !address.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,

@@ -1,7 +1,6 @@
 #![allow(non_snake_case)]
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
@@ -9,7 +8,7 @@ use yyds_catalog::Catalog;
 use yyds_execution::KeyValueExecutor;
 use yyds_gateway::{bind_sql_catalog, execute_plan, plan_statement, SqlCatalog, SqlExecutionPlan, SqlValue};
 use yyds_sqlite::{
-    blank_database, decode_record, decode_library_version, read_existing, read_named_table, read_schema, validate_database,
+    blank_database, decode_library_version, decode_record, read_existing, read_named_table, read_schema, validate_database,
     RecordLimits, RecordValue, SchemaObjectKind, TableLimits, TextEncoding,
 };
 
@@ -119,13 +118,9 @@ fn detect_encoding(bytes: &[u8]) -> napi::Result<TextEncoding> {
 
 fn record_value(value: RecordValue<'_>) -> SqliteRecordValue {
     match value {
-        RecordValue::Null => SqliteRecordValue {
-            kind: "null".into(),
-            value_integer: None,
-            value_real: None,
-            value_text: None,
-            value_blob: None,
-        },
+        RecordValue::Null => {
+            SqliteRecordValue { kind: "null".into(), value_integer: None, value_real: None, value_text: None, value_blob: None }
+        }
         RecordValue::Integer(int) => SqliteRecordValue {
             kind: "integer".into(),
             value_integer: Some(BigInt::from(int)),
@@ -175,18 +170,13 @@ fn build_decoded_rows(
     limits: TableLimits,
 ) -> napi::Result<Vec<SqliteDecodedRow>> {
     let encoding = detect_encoding(bytes)?;
-    let record_limits = RecordLimits {
-        max_columns: 1024,
-        max_payload_bytes: limits.max_payload_bytes.max(1_048_576),
-    };
+    let record_limits = RecordLimits { max_columns: 1024, max_payload_bytes: limits.max_payload_bytes.max(1_048_576) };
     rows.into_iter()
         .map(|row| {
-            decode_record(&row.payload, encoding, record_limits)
-                .map_err(native_error)
-                .map(|columns| SqliteDecodedRow {
-                    rowid: BigInt::from(row.rowid),
-                    columns: columns.into_iter().map(record_value).collect(),
-                })
+            decode_record(&row.payload, encoding, record_limits).map_err(native_error).map(|columns| SqliteDecodedRow {
+                rowid: BigInt::from(row.rowid),
+                columns: columns.into_iter().map(record_value).collect(),
+            })
         })
         .collect()
 }
@@ -403,8 +393,8 @@ impl SqliteDatabase {
     pub fn bindSqlRuntime(&mut self, data_dir: String, catalog_path: String) -> napi::Result<()> {
         let executor = crate::node_runtime::open_executor(PathBuf::from(&data_dir).as_path())
             .map_err(|msg| napi::Error::from_reason(format!("open executor: {msg}")))?;
-        let yyds_catalog = Catalog::open(&catalog_path)
-            .map_err(|msg| napi::Error::from_reason(format!("open catalog: {msg}")))?;
+        let yyds_catalog =
+            Catalog::open(&catalog_path).map_err(|msg| napi::Error::from_reason(format!("open catalog: {msg}")))?;
         let cat = SqlCatalog::from_yyds_catalog(&yyds_catalog)
             .map_err(|error| napi::Error::from_reason(format!("invalid YYDS catalog: {}", error.message)))?;
         self.runtime = Some(Arc::new(SqliteRuntime { executor, catalog: cat }));
@@ -418,7 +408,9 @@ impl SqliteDatabase {
     /// [`Self::bindSqlRuntime`].
     #[napi]
     pub fn execute(&self, sql: String) -> napi::Result<SqliteExecuteResult> {
-        let runtime = self.runtime.as_ref()
+        let runtime = self
+            .runtime
+            .as_ref()
             .ok_or_else(|| napi::Error::from_reason("SqliteDatabase has no SQL runtime bound; call bindSqlRuntime first"))?;
 
         let bound = bind_sql_catalog(&sql, &runtime.catalog, runtime.catalog.schema_version())
@@ -433,9 +425,7 @@ impl SqliteDatabase {
         if is_read {
             Ok(SqliteExecuteResult {
                 columns: result.columns,
-                rows: result.rows.into_iter()
-                    .map(|row| row.into_iter().map(sql_value_to_record).collect())
-                    .collect(),
+                rows: result.rows.into_iter().map(|row| row.into_iter().map(sql_value_to_record).collect()).collect(),
                 changes: BigInt::from(0i64),
             })
         }
@@ -452,12 +442,9 @@ impl SqliteDatabase {
 #[napi]
 pub fn decodeRecord(payload: Buffer, encoding: Option<String>) -> napi::Result<Vec<SqliteRecordValue>> {
     let encoding = encode_encoding(encoding.as_deref())?;
-    let values = decode_record(
-        &payload,
-        encoding,
-        RecordLimits { max_columns: 1024, max_payload_bytes: payload.len().max(1_048_576) },
-    )
-    .map_err(native_error)?;
+    let values =
+        decode_record(&payload, encoding, RecordLimits { max_columns: 1024, max_payload_bytes: payload.len().max(1_048_576) })
+            .map_err(native_error)?;
     Ok(values.into_iter().map(record_value).collect())
 }
 
@@ -484,13 +471,9 @@ struct SqliteRuntime {
 
 fn sql_value_to_record(value: SqlValue) -> SqliteRecordValue {
     match value {
-        SqlValue::Null => SqliteRecordValue {
-            kind: "null".into(),
-            value_integer: None,
-            value_real: None,
-            value_text: None,
-            value_blob: None,
-        },
+        SqlValue::Null => {
+            SqliteRecordValue { kind: "null".into(), value_integer: None, value_real: None, value_text: None, value_blob: None }
+        }
         SqlValue::Number(n) => {
             if n.fract() == 0.0 {
                 SqliteRecordValue {

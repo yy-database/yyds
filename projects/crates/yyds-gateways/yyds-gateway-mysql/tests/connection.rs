@@ -119,21 +119,9 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
             type_id: 1,
             kind: vos::contract::TypeContractKind::Table,
             fields: vec![
-                vos::contract::FieldIdentity {
-                    canonical_name: "id".into(),
-                    field_id: 1,
-                    virtual_field_index: 0,
-                },
-                vos::contract::FieldIdentity {
-                    canonical_name: "name".into(),
-                    field_id: 2,
-                    virtual_field_index: 1,
-                },
-                vos::contract::FieldIdentity {
-                    canonical_name: "age".into(),
-                    field_id: 3,
-                    virtual_field_index: 2,
-                },
+                vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
+                vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+                vos::contract::FieldIdentity { canonical_name: "age".into(), field_id: 3, virtual_field_index: 2 },
             ],
         }],
     };
@@ -147,12 +135,7 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     values.insert(2, b"alice".to_vec());
     values.insert(3, b"30".to_vec());
     let row_bytes = yyds_gateway::encode_row(&values);
-    shard
-        .put(
-            Key::new("table:1", b"42".to_vec()),
-            StoredValue::Inline(InlineValue(row_bytes)),
-        )
-        .expect("put row");
+    shard.put(Key::new("table:1", b"42".to_vec()), StoredValue::Inline(InlineValue(row_bytes))).expect("put row");
 
     let epoch = ShardEpoch(1);
     let shard_id = ShardId("s1".into());
@@ -161,11 +144,7 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     shards.insert(shard_id, shard);
     let executor = LocalExecutor::new(routing, shards).expect("executor");
 
-    let runtime = Arc::new(MysqlSqlRuntime {
-        catalog,
-        schema_version: 7,
-        executor: Arc::new(executor),
-    });
+    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -195,10 +174,7 @@ fn read_lenenc(data: &[u8]) -> (u64, usize) {
         0..=250 => (first as u64, 1),
         251 => (0, 1), // NULL
         252 => (u16::from_le_bytes([data[1], data[2]]) as u64, 3),
-        253 => (
-            u32::from_le_bytes([data[1], data[2], data[3], 0]) as u64,
-            4,
-        ),
+        253 => (u32::from_le_bytes([data[1], data[2], data[3], 0]) as u64, 4),
         254 => (u64::from_le_bytes([data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]]), 9),
         _ => unreachable!(),
     }
@@ -208,7 +184,8 @@ fn read_lenenc_str(data: &[u8]) -> (&[u8], usize) {
     let (len, consumed) = read_lenenc(data);
     if len == 0 && consumed == 1 && data[0] == 251 {
         (&[], 1) // NULL
-    } else {
+    }
+    else {
         (&data[consumed..consumed + len as usize], consumed + len as usize)
     }
 }
@@ -230,9 +207,7 @@ fn mysql_select_with_runtime_returns_result_set() {
     assert_eq!(ok[0], 0);
 
     // SELECT id, name FROM users WHERE id = 42
-    client
-        .write_all(&encode_packet(0, b"\x03SELECT id, name FROM users WHERE id = 42").unwrap())
-        .unwrap();
+    client.write_all(&encode_packet(0, b"\x03SELECT id, name FROM users WHERE id = 42").unwrap()).unwrap();
 
     // pkt 1: column count
     let (mut seq, col_count_pkt) = read_packet_full(&mut client);
@@ -282,9 +257,7 @@ fn mysql_select_missing_row_returns_empty_result_set() {
     client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4").unwrap()).unwrap();
     let _ = read_packet_full(&mut client);
 
-    client
-        .write_all(&encode_packet(0, b"\x03SELECT id FROM users WHERE id = 999").unwrap())
-        .unwrap();
+    client.write_all(&encode_packet(0, b"\x03SELECT id FROM users WHERE id = 999").unwrap()).unwrap();
 
     let (_, col_count_pkt) = read_packet_full(&mut client);
     let (col_count, _) = read_lenenc(&col_count_pkt);
@@ -309,7 +282,7 @@ fn extract_column_name(col_def: &[u8]) -> String {
     // def
     let (_, c) = read_lenenc(col_def);
     cursor += c + 3; // "def"
-    // schema
+                     // schema
     let (_, c) = read_lenenc(&col_def[cursor..]);
     cursor += c;
     // table

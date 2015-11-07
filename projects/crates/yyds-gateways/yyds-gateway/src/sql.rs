@@ -254,14 +254,9 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
         SqlStatement::Insert(insert) => {
             let columns = if insert.columns.is_empty() {
                 None
-            } else {
-                Some(
-                    insert
-                        .columns
-                        .iter()
-                        .map(|id| normalize_identifier(id.name.as_ref()))
-                        .collect(),
-                )
+            }
+            else {
+                Some(insert.columns.iter().map(|id| normalize_identifier(id.name.as_ref())).collect())
             };
             let values = insert.values.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             Ok(SqlBoundStatement::Insert(SqlBoundInsert {

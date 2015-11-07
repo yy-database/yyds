@@ -13,18 +13,14 @@
 
 use crate::{
     catalog_bind::{
-        SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
-        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundDelete,
-        SqlCatalogBoundUpdate,
+        SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
+        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundUpdate,
     },
     sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlFrontendError},
 };
 
 /// 翻译一份 catalog-bound statement 为可执行计划。
-pub fn plan_statement(
-    statement: SqlCatalogBoundStatement,
-    catalog: &SqlCatalog,
-) -> Result<SqlExecutionPlan, SqlFrontendError> {
+pub fn plan_statement(statement: SqlCatalogBoundStatement, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
     match statement {
         SqlCatalogBoundStatement::Select(select) => plan_select(select, catalog),
         SqlCatalogBoundStatement::Insert(insert) => plan_insert(insert, catalog),
@@ -55,7 +51,8 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
                     projection_fields.push((col.field_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
                 }
                 else {
-                    projection_expressions.push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
+                    projection_expressions
+                        .push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
                 }
             }
         }
@@ -218,15 +215,18 @@ fn extract_pk_equality(
     pk_field_id: u64,
 ) -> Result<(Option<SqlBoundLiteral>, Option<SqlCatalogBoundExpression>), SqlFrontendError> {
     match predicate {
-        SqlCatalogBoundExpression::Binary {
-            left,
-            operator: SqlBoundBinaryOperator::Equal,
-            right,
-        } => {
+        SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::Equal, right } => {
             let (maybe_col, maybe_literal) = match (&*left, &*right) {
-                (SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit)) => (col.clone(), Some(lit.clone())),
-                (SqlCatalogBoundExpression::Literal(lit), SqlCatalogBoundExpression::Column(col)) => (col.clone(), Some(lit.clone())),
-                _ => (SqlCatalogBoundColumn { type_id: 0, field_id: 0, table_name: String::new(), field_name: String::new() }, None),
+                (SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit)) => {
+                    (col.clone(), Some(lit.clone()))
+                }
+                (SqlCatalogBoundExpression::Literal(lit), SqlCatalogBoundExpression::Column(col)) => {
+                    (col.clone(), Some(lit.clone()))
+                }
+                _ => (
+                    SqlCatalogBoundColumn { type_id: 0, field_id: 0, table_name: String::new(), field_name: String::new() },
+                    None,
+                ),
             };
             if maybe_col.field_id == pk_field_id {
                 if let Some(lit) = maybe_literal {
@@ -234,44 +234,42 @@ fn extract_pk_equality(
                 }
             }
             // 不是 pk 等值，整个 predicate 留在 remaining
-            return Ok((None, Some(SqlCatalogBoundExpression::Binary {
-                left,
-                operator: SqlBoundBinaryOperator::Equal,
-                right,
-            })));
+            return Ok((
+                None,
+                Some(SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::Equal, right }),
+            ));
         }
         // AND 拆成两棵子树分别处理。两边都提出一个 pk 等值 —— 但这种情况已经由 first-match 覆盖，
         // 真正的目标是：如果 AND 的一边提取出了 pk 等值，另一边就是 remaining。
-        SqlCatalogBoundExpression::Binary {
-            left,
-            operator: SqlBoundBinaryOperator::And,
-            right,
-        } => {
+        SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::And, right } => {
             let (left_pk, left_remaining) = extract_pk_equality(*left, pk_field_id)?;
             let (right_pk, right_remaining) = extract_pk_equality(*right, pk_field_id)?;
             match (left_pk, right_pk) {
                 (Some(_), Some(_)) => Err(planner_error("conflicting primary-key equality inside AND")),
                 (Some(lit), None) => Ok((Some(lit), left_remaining.or(right_remaining))),
                 (None, Some(lit)) => Ok((Some(lit), right_remaining.or(left_remaining))),
-                (None, None) => Ok((None, Some(SqlCatalogBoundExpression::Binary {
-                    left: Box::new(
-                        left_remaining.unwrap_or_else(|| SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
-                            type_id: 0,
-                            field_id: 0,
-                            table_name: String::new(),
-                            field_name: String::new(),
+                (None, None) => Ok((
+                    None,
+                    Some(SqlCatalogBoundExpression::Binary {
+                        left: Box::new(left_remaining.unwrap_or_else(|| {
+                            SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
+                                type_id: 0,
+                                field_id: 0,
+                                table_name: String::new(),
+                                field_name: String::new(),
+                            })
                         })),
-                    ),
-                    operator: SqlBoundBinaryOperator::And,
-                    right: Box::new(
-                        right_remaining.unwrap_or_else(|| SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
-                            type_id: 0,
-                            field_id: 0,
-                            table_name: String::new(),
-                            field_name: String::new(),
+                        operator: SqlBoundBinaryOperator::And,
+                        right: Box::new(right_remaining.unwrap_or_else(|| {
+                            SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
+                                type_id: 0,
+                                field_id: 0,
+                                table_name: String::new(),
+                                field_name: String::new(),
+                            })
                         })),
-                    ),
-                }))),
+                    }),
+                )),
             }
         }
         other => Ok((None, Some(other))),

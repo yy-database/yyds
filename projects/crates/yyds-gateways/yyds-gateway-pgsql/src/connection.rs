@@ -13,8 +13,8 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::KeyValueExecutor;
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan,
-    SqlSessionCommand, SqlTransactionAction, SqlValue,
+    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan, SqlSessionCommand,
+    SqlTransactionAction, SqlValue,
 };
 
 const PROTOCOL_V3: u32 = 196_608;
@@ -312,7 +312,14 @@ fn sql_value_to_pg_text(value: &SqlValue) -> String {
     match value {
         SqlValue::Number(n) => format!("{n}"),
         SqlValue::String(s) => s.clone(),
-        SqlValue::Boolean(b) => if *b { "t".into() } else { "f".into() },
+        SqlValue::Boolean(b) => {
+            if *b {
+                "t".into()
+            }
+            else {
+                "f".into()
+            }
+        }
         SqlValue::Null => unreachable!(),
     }
 }

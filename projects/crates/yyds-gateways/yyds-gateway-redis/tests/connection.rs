@@ -196,10 +196,7 @@ fn ttl_and_type_mock_for_existing_and_missing_keys() {
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
-    assert_eq!(
-        response,
-        b"+OK\r\n:-1\r\n:-2\r\n+string\r\n+none\r\n"
-    );
+    assert_eq!(response, b"+OK\r\n:-1\r\n:-2\r\n+string\r\n+none\r\n");
 }
 
 #[test]

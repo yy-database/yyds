@@ -19,9 +19,7 @@ pub use crate::{
         bind_sql_catalog, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundProjection,
         SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable,
     },
-    sql_execute::{
-        decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue,
-    },
+    sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
     sql_planner::{plan_select, plan_statement, SqlExecutionPlan},
 };
 

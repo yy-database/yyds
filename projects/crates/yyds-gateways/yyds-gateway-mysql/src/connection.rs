@@ -12,7 +12,7 @@ use std::{
 
 use yyds_execution::KeyValueExecutor;
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, plan_statement, parse_session_command, SqlCatalog, SqlExecutionPlan, SqlResult,
+    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan, SqlResult,
     SqlSessionCommand, SqlValue,
 };
 
@@ -40,10 +40,7 @@ pub struct MysqlSqlRuntime {
 }
 
 /// Performs a loopback-only unauthenticated startup and executes SQL against the provided runtime.
-pub fn serve_connection(
-    stream: TcpStream,
-    runtime: Option<Arc<MysqlSqlRuntime>>,
-) -> io::Result<()> {
+pub fn serve_connection(stream: TcpStream, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<()> {
     if !stream.peer_addr()?.ip().is_loopback() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -71,10 +68,7 @@ pub fn serve_cancellable(
     serve_session(CancellableSocket { stream, stopping }, runtime)
 }
 
-fn serve_session(
-    mut stream: impl Read + Write,
-    runtime: Option<Arc<MysqlSqlRuntime>>,
-) -> io::Result<()> {
+fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<()> {
     write_packet(&mut stream, 0, &handshake())?;
     let response = match read_packet(&mut stream)? {
         Some((1, response)) => response,
@@ -294,35 +288,18 @@ fn write_error(stream: &mut impl Write, sequence: u8, code: u16, state: &str, me
 
 /// 把一条 SQL 走完整的 bind → plan → execute → wire 路径。
 /// 根据 plan variant 分发：SELECT → ResultSet；INSERT/UPDATE/DELETE → OK(AffectedRows=1)。
-fn execute_sql(
-    stream: &mut impl Write,
-    sequence: u8,
-    sql: &str,
-    runtime: &MysqlSqlRuntime,
-) -> io::Result<()> {
+fn execute_sql(stream: &mut impl Write, sequence: u8, sql: &str, runtime: &MysqlSqlRuntime) -> io::Result<()> {
     let bound = match bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version) {
         Ok(bound) => bound,
         Err(error) => {
-            write_error(
-                stream,
-                sequence,
-                1064,
-                "42000",
-                &format!("SQL bind error: {}", error.message),
-            )?;
+            write_error(stream, sequence, 1064, "42000", &format!("SQL bind error: {}", error.message))?;
             return Ok(());
         }
     };
     let plan = match plan_statement(bound, &runtime.catalog) {
         Ok(plan) => plan,
         Err(error) => {
-            write_error(
-                stream,
-                sequence,
-                1235,
-                "42000",
-                &format!("SQL plan error: {}", error.message),
-            )?;
+            write_error(stream, sequence, 1235, "42000", &format!("SQL plan error: {}", error.message))?;
             return Ok(());
         }
     };
@@ -332,13 +309,7 @@ fn execute_sql(
     let result = match execute_plan(runtime.executor.as_ref(), &plan) {
         Ok(result) => result,
         Err(error) => {
-            write_error(
-                stream,
-                sequence,
-                5000,
-                "HY000",
-                &format!("SQL execution error: {}", error.message),
-            )?;
+            write_error(stream, sequence, 5000, "HY000", &format!("SQL execution error: {}", error.message))?;
             return Ok(());
         }
     };
@@ -360,11 +331,7 @@ fn write_ok_with_affected(stream: &mut impl Write, sequence: u8, affected: u64) 
 }
 
 /// 把 SqlResult 编码成 MySQL text ResultSet 协议包。
-fn write_result_set(
-    stream: &mut impl Write,
-    mut sequence: u8,
-    result: &SqlResult,
-) -> io::Result<()> {
+fn write_result_set(stream: &mut impl Write, mut sequence: u8, result: &SqlResult) -> io::Result<()> {
     // 包 1: column count
     let count = result.columns.len();
     let mut col_count = Vec::new();

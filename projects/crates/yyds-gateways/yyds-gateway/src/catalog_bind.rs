@@ -1,9 +1,8 @@
 //! SQL compatibility binding against a published YYDS VOS catalog.
 
 use crate::sql::{
-    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundInsert,
-    SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundDelete, SqlBoundStatement,
-    SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
+    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundLiteral,
+    SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
 };
 
 /// A table identity exposed by the YYDS catalog to a gateway binder.
@@ -266,10 +265,7 @@ fn bind_insert(insert: SqlBoundInsert, catalog: &SqlCatalog) -> Result<SqlCatalo
     let table = find_table(catalog, &insert.table)?;
     let source = Some(table.clone());
     let bound_fields = match insert.columns {
-        Some(cols) => cols
-            .iter()
-            .map(|name| find_field(name, source.as_ref(), catalog))
-            .collect::<Result<Vec<_>, _>>()?,
+        Some(cols) => cols.iter().map(|name| find_field(name, source.as_ref(), catalog)).collect::<Result<Vec<_>, _>>()?,
         None => {
             // INSERT INTO t VALUES (...) 无列名 → 按 catalog 字段顺序
             let cat = catalog
@@ -295,11 +291,8 @@ fn bind_insert(insert: SqlBoundInsert, catalog: &SqlCatalog) -> Result<SqlCatalo
             insert.values.len()
         )));
     }
-    let values = insert
-        .values
-        .into_iter()
-        .map(|v| bind_expression(v, source.as_ref(), catalog))
-        .collect::<Result<Vec<_>, _>>()?;
+    let values =
+        insert.values.into_iter().map(|v| bind_expression(v, source.as_ref(), catalog)).collect::<Result<Vec<_>, _>>()?;
     Ok(SqlCatalogBoundInsert { table, fields: bound_fields, values })
 }
 
