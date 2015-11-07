@@ -1,6 +1,6 @@
 {
     "name": "@yydb/sqlite",
-    "version": "0.0.4",
+    "version": "0.0.5",
     "description": "Bounded read-only SQLite format-3 snapshot reader, independent of YYDS storage.",
     "license": "MPL-2.0",
         "type": "module",
