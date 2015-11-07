@@ -1,9 +1,13 @@
 #![allow(non_snake_case)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
+use yyds_catalog::Catalog;
+use yyds_execution::KeyValueExecutor;
+use yyds_gateway::{bind_sql_catalog, execute_plan, plan_statement, SqlCatalog, SqlExecutionPlan, SqlValue};
 use yyds_sqlite::{
     blank_database, decode_record, decode_library_version, read_existing, read_named_table, read_schema, validate_database,
     RecordLimits, RecordValue, SchemaObjectKind, TableLimits, TextEncoding,
@@ -282,11 +286,15 @@ impl SqliteSnapshot {
 
 /// A file-backed or in-memory SQLite snapshot handle.
 ///
-/// This does not recover WAL or journal state and never executes SQL.
+/// This does not recover WAL or journal state. Without a bound SQL runtime,
+/// SqliteDatabase is read-only and never executes SQL. Bind an executor + catalog
+/// via [`Self::bindSqlRuntime`] to enable SELECT + INSERT/UPDATE/DELETE through
+/// the YYDS SQL planner and KV execution plane.
 #[napi]
 pub struct SqliteDatabase {
     bytes: Vec<u8>,
     path: Option<PathBuf>,
+    runtime: Option<Arc<SqliteRuntime>>,
 }
 
 #[napi]
@@ -295,7 +303,7 @@ impl SqliteDatabase {
     #[napi(factory)]
     pub fn openInMemory() -> napi::Result<Self> {
         let bytes = blank_database().map_err(native_error)?;
-        Ok(Self { bytes, path: None })
+        Ok(Self { bytes, path: None, runtime: None })
     }
 
     /// Opens or creates a file-backed SQLite snapshot.
@@ -304,10 +312,10 @@ impl SqliteDatabase {
         let path_buf = PathBuf::from(&path);
         if path_buf.exists() {
             let bytes = read_existing(&path).map_err(native_error)?;
-            return Ok(Self { bytes, path: Some(path_buf) });
+            return Ok(Self { bytes, path: Some(path_buf), runtime: None });
         }
         let bytes = blank_database().map_err(native_error)?;
-        Ok(Self { bytes, path: Some(path_buf) })
+        Ok(Self { bytes, path: Some(path_buf), runtime: None })
     }
 
     /// File path when file-backed, otherwise `null`.
@@ -385,6 +393,56 @@ impl SqliteDatabase {
     pub fn pages(&self) -> napi::Result<Buffer> {
         Ok(self.bytes.clone().into())
     }
+
+    /// Binds a YYDS executor + catalog, enabling SELECT + INSERT/UPDATE/DELETE
+    /// through the YYDS SQL planner and KV execution plane.
+    ///
+    /// `data_dir` 是 YYDS node 数据目录（含 local-0.yykv）。`catalog_path` 是
+    /// `.yyds` catalog 文件路径。两者通常由同一个 YYDS node 产生。
+    #[napi]
+    pub fn bindSqlRuntime(&mut self, data_dir: String, catalog_path: String) -> napi::Result<()> {
+        let executor = crate::node_runtime::open_executor(PathBuf::from(&data_dir).as_path())
+            .map_err(|msg| napi::Error::from_reason(format!("open executor: {msg}")))?;
+        let yyds_catalog = Catalog::open(&catalog_path)
+            .map_err(|msg| napi::Error::from_reason(format!("open catalog: {msg}")))?;
+        let cat = SqlCatalog::from_yyds_catalog(&yyds_catalog)
+            .map_err(|error| napi::Error::from_reason(format!("invalid YYDS catalog: {}", error.message)))?;
+        self.runtime = Some(Arc::new(SqliteRuntime { executor, catalog: cat }));
+        Ok(())
+    }
+
+    /// Executes one SQL statement through the YYDS planner.
+    ///
+    /// Only `WHERE pk = literal` predicates are supported. INSERT VALUES must
+    /// start with the primary key literal. Requires a runtime bound via
+    /// [`Self::bindSqlRuntime`].
+    #[napi]
+    pub fn execute(&self, sql: String) -> napi::Result<SqliteExecuteResult> {
+        let runtime = self.runtime.as_ref()
+            .ok_or_else(|| napi::Error::from_reason("SqliteDatabase has no SQL runtime bound; call bindSqlRuntime first"))?;
+
+        let bound = bind_sql_catalog(&sql, &runtime.catalog, runtime.catalog.schema_version())
+            .map_err(|error| napi::Error::from_reason(format!("SQL bind error: {}", error.message)))?;
+        let plan = plan_statement(bound, &runtime.catalog)
+            .map_err(|error| napi::Error::from_reason(format!("SQL plan error: {}", error.message)))?;
+
+        let is_read = matches!(&plan, SqlExecutionPlan::Read(_));
+        let result = execute_plan(runtime.executor.as_ref(), &plan)
+            .map_err(|error| napi::Error::from_reason(format!("SQL execution error: {}", error.message)))?;
+
+        if is_read {
+            Ok(SqliteExecuteResult {
+                columns: result.columns,
+                rows: result.rows.into_iter()
+                    .map(|row| row.into_iter().map(sql_value_to_record).collect())
+                    .collect(),
+                changes: BigInt::from(0i64),
+            })
+        }
+        else {
+            Ok(SqliteExecuteResult { columns: Vec::new(), rows: Vec::new(), changes: BigInt::from(1i64) })
+        }
+    }
 }
 
 /// Decodes one SQLite record payload into typed storage-class values.
@@ -405,4 +463,67 @@ pub fn decodeRecord(payload: Buffer, encoding: Option<String>) -> napi::Result<V
 
 fn native_error(error: yyds_types::Error) -> napi::Error {
     napi::Error::from_reason(error.to_string())
+}
+
+/// SQL 执行结果：SELECT 返回列+行，DML 返回 changes。
+#[napi(object)]
+pub struct SqliteExecuteResult {
+    /// SELECT 返回：列名；DML 返回空数组。
+    pub columns: Vec<String>,
+    /// SELECT 返回：按 columns 顺序的行值；DML 返回空数组。
+    pub rows: Vec<Vec<SqliteRecordValue>>,
+    /// INSERT/UPDATE/DELETE 影响行数；SELECT 为 0。
+    pub changes: BigInt,
+}
+
+/// 注入到 SqliteDatabase 的 YYDS SQL 执行 runtime。
+struct SqliteRuntime {
+    executor: Arc<dyn KeyValueExecutor>,
+    catalog: SqlCatalog,
+}
+
+fn sql_value_to_record(value: SqlValue) -> SqliteRecordValue {
+    match value {
+        SqlValue::Null => SqliteRecordValue {
+            kind: "null".into(),
+            value_integer: None,
+            value_real: None,
+            value_text: None,
+            value_blob: None,
+        },
+        SqlValue::Number(n) => {
+            if n.fract() == 0.0 {
+                SqliteRecordValue {
+                    kind: "integer".into(),
+                    value_integer: Some(BigInt::from(n as i64)),
+                    value_real: None,
+                    value_text: None,
+                    value_blob: None,
+                }
+            }
+            else {
+                SqliteRecordValue {
+                    kind: "real".into(),
+                    value_integer: None,
+                    value_real: Some(n),
+                    value_text: None,
+                    value_blob: None,
+                }
+            }
+        }
+        SqlValue::String(s) => SqliteRecordValue {
+            kind: "text".into(),
+            value_integer: None,
+            value_real: None,
+            value_text: Some(s),
+            value_blob: None,
+        },
+        SqlValue::Boolean(b) => SqliteRecordValue {
+            kind: "integer".into(),
+            value_integer: Some(BigInt::from(if b { 1i64 } else { 0 })),
+            value_real: None,
+            value_text: None,
+            value_blob: None,
+        },
+    }
 }
