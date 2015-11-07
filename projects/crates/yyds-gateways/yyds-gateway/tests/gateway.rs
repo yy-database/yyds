@@ -364,3 +364,136 @@ fn row_field_values_round_trip_tlv() {
     assert_eq!(decoded.get(7), Some(b"hello".as_slice()));
     assert_eq!(decoded.get(99), None);
 }
+
+// --- DML round-trip (INSERT / UPDATE / DELETE) ---
+
+/// 构造一个**空** executor — 用于测试 INSERT 后 SELECT / UPDATE / DELETE。
+fn empty_executor() -> yyds_execution::LocalExecutor<yyds_kv::MemoryShard> {
+    use yyds_kv::MemoryShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, MemoryShard::new());
+    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+}
+
+#[test]
+fn sql_insert_then_select_round_trip() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = empty_executor();
+
+    // INSERT INTO users VALUES (7, 'alice', 30)
+    // Oak 解析后 INSERT VALUES 第一个值是 pk literal = 7
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users VALUES (7, 'alice', 30)",
+        &catalog,
+        7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    yyds_gateway::execute_plan(&executor, &plan).expect("insert executes");
+
+    // SELECT 出来验证
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT id, name, age FROM users WHERE id = 7",
+        &catalog,
+        7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after insert");
+
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string(), "age".to_string()]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0], vec![
+        yyds_gateway::SqlValue::Number(7.0),
+        yyds_gateway::SqlValue::String("alice".into()),
+        yyds_gateway::SqlValue::Number(30.0),
+    ]);
+}
+
+#[test]
+fn sql_update_then_select_round_trip() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    // 预置 row: id=9, name=original, age=20
+    let executor = make_executor_with_row("table:1", b"9", &[
+        (1, b"9"), (2, b"original"), (3, b"20"),
+    ]);
+
+    // UPDATE users SET name='updated', age=99 WHERE id = 9
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated', age = 99 WHERE id = 9",
+        &catalog,
+        7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    yyds_gateway::execute_plan(&executor, &plan).expect("update executes");
+
+    // SELECT 验证
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users WHERE id = 9",
+        &catalog,
+        7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after update");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0], vec![
+        yyds_gateway::SqlValue::String("updated".into()),
+        yyds_gateway::SqlValue::Number(99.0),
+    ]);
+}
+
+#[test]
+fn sql_delete_removes_row() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_row("table:1", b"55", &[
+        (1, b"55"), (2, b"victim"),
+    ]);
+
+    // DELETE FROM users WHERE id = 55
+    let bound = yyds_gateway::bind_sql_catalog(
+        "DELETE FROM users WHERE id = 55",
+        &catalog,
+        7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    yyds_gateway::execute_plan(&executor, &plan).expect("delete executes");
+
+    // SELECT 验证空
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name FROM users WHERE id = 55",
+        &catalog,
+        7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after delete");
+    assert!(result.rows.is_empty());
+}
+
+#[test]
+fn sql_insert_columns_explicit_order_is_rejected_by_oak() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    // Oak SQL parser 当前只支持 `INSERT INTO t VALUES (...)`，不支持显式列顺序。
+    // catalog_bind.rs 里留了按 catalog 字段顺序填充的路径，等 Oak parser 扩展后启用。
+    let error = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (age, @@id, name) VALUES (25, 11, 'bob')",
+        &catalog,
+        7,
+    ).expect_err("explicit column INSERT not supported yet");
+    assert!(error.message.contains("column/value") || error.message.contains("values"));
+}
+
+#[test]
+fn sql_insert_pk_must_be_first_value() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    // VALUES 第一个必须是 pk literal — 如果 Oak 把 "1" 当作 name 值也会在 planner 层报错
+    // 这里只是验证 planner 接受正确的形式
+    let _bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users VALUES (1, 'one')",
+        &catalog,
+        7,
+    ).expect("insert bind");
+}
