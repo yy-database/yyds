@@ -1,5 +1,5 @@
 /// Opaque tenant / namespace boundary for a distributed YYDS deployment.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Namespace(pub String);
 
 /// Identifies one `.yykv` shard owned by a node.

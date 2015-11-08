@@ -1,7 +1,7 @@
 use yyds_types::Namespace;
 
 /// Logical key inside one shard. Namespaces partition tenant data without SQL schemas.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Key {
     /// Tenant or table-group boundary.
     pub namespace: Namespace,

@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     fs::{self, OpenOptions},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
 };
 
-use yyds_types::{Error, Result};
+use yyds_types::{Error, Namespace, Result};
 
 use crate::{Key, Record, StoredValue};
 
@@ -21,12 +21,19 @@ pub trait KvStore {
 
     /// Deletes `key` when present. Returns whether a record was removed.
     fn delete(&mut self, key: &Key) -> Result<bool>;
+
+    /// Ordered prefix scan within one namespace.
+    ///
+    /// Returns up to `limit` records whose key bytes start with `prefix` and compare greater
+    /// than `after` (exclusive cursor, empty means no cursor). `limit` of `0` means no cap.
+    /// Results are sorted by key bytes ascending.
+    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, limit: usize) -> Result<Vec<Record>>;
 }
 
 /// In-memory shard used by unit tests and early integrations.
 #[derive(Debug, Default)]
 pub struct MemoryShard {
-    records: std::collections::HashMap<Key, Record>,
+    records: BTreeMap<Key, Record>,
     next_revision: u64,
 }
 
@@ -53,13 +60,17 @@ impl KvStore for MemoryShard {
     fn delete(&mut self, key: &Key) -> Result<bool> {
         Ok(self.records.remove(key).is_some())
     }
+
+    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
+        Ok(collect_scan(&self.records, namespace, prefix, after, limit))
+    }
 }
 
 /// File-backed shard using the native `.yykv` snapshot format.
 #[derive(Debug)]
 pub struct FileShard {
     path: PathBuf,
-    records: HashMap<Key, Record>,
+    records: BTreeMap<Key, Record>,
     next_revision: u64,
 }
 
@@ -77,7 +88,7 @@ impl FileShard {
                     fs::create_dir_all(parent)?;
                 }
             }
-            let shard = Self { path, records: HashMap::new(), next_revision: 0 };
+            let shard = Self { path, records: BTreeMap::new(), next_revision: 0 };
             shard.persist()?;
             Ok(shard)
         }
@@ -150,19 +161,48 @@ impl KvStore for FileShard {
         }
         Ok(true)
     }
+
+    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
+        Ok(collect_scan(&self.records, namespace, prefix, after, limit))
+    }
+}
+
+/// Shared scan logic: filter by namespace, prefix-match, exclusive cursor, limit.
+fn collect_scan(
+    records: &BTreeMap<Key, Record>,
+    namespace: &Namespace,
+    prefix: &[u8],
+    after: Option<&[u8]>,
+    limit: usize,
+) -> Vec<Record> {
+    let mut out = Vec::new();
+    for (key, record) in records {
+        if key.namespace != *namespace {
+            continue;
+        }
+        if !key.bytes.starts_with(prefix) {
+            continue;
+        }
+        if let Some(after_bytes) = after {
+            if key.bytes.as_slice() <= after_bytes {
+                continue;
+            }
+        }
+        out.push(record.clone());
+        if limit > 0 && out.len() >= limit {
+            break;
+        }
+    }
+    out
 }
 
 fn encode(shard: &FileShard) -> Result<Vec<u8>> {
-    let mut records: Vec<&Record> = shard.records.values().collect();
-    records.sort_by(|left, right| {
-        left.key.namespace.0.cmp(&right.key.namespace.0).then_with(|| left.key.bytes.cmp(&right.key.bytes))
-    });
-
     let mut bytes = Vec::new();
     bytes.write_all(MAGIC)?;
     bytes.write_all(&shard.next_revision.to_le_bytes())?;
-    write_count(&mut bytes, records.len())?;
-    for record in records {
+    write_count(&mut bytes, shard.records.len())?;
+    // BTreeMap iteration already yields namespace-then-bytes order — no manual sort needed.
+    for record in shard.records.values() {
         write_bytes(&mut bytes, record.key.namespace.0.as_bytes())?;
         write_bytes(&mut bytes, &record.key.bytes)?;
         bytes.write_all(&record.revision.to_le_bytes())?;
@@ -189,7 +229,7 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<FileShard> {
     }
     let next_revision = read_u64(&mut cursor)?;
     let count = read_u32(&mut cursor)? as usize;
-    let mut records = HashMap::with_capacity(count);
+    let mut records = BTreeMap::new();
     let mut revisions = HashSet::with_capacity(count);
     for _ in 0..count {
         let namespace = String::from_utf8(read_bytes(&mut cursor)?).map_err(|_| Error::Corrupt("shard namespace utf8"))?;
