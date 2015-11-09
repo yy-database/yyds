@@ -13,12 +13,12 @@
 use std::collections::BTreeMap;
 
 use yyds_execution::KeyValueExecutor;
-use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
+use yyds_types::{KeyValueAction, KeyValueCommand, KeyValueResult, Namespace};
 
 use crate::{
     catalog_bind::SqlCatalogBoundExpression,
     sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError},
-    sql_planner::{DeletePlan, ReadPlan, SqlExecutionPlan, WritePlan},
+    sql_planner::{DeletePlan, ReadPlan, ScanPlan, SqlExecutionPlan, WritePlan},
 };
 
 /// SQL 查询的结果集。
@@ -138,6 +138,7 @@ pub fn decode_row(data: &[u8]) -> Result<RowFieldValues, SqlFrontendError> {
 pub fn execute_plan(executor: &dyn KeyValueExecutor, plan: &SqlExecutionPlan) -> Result<SqlResult, SqlFrontendError> {
     match plan {
         SqlExecutionPlan::Read(read_plan) => execute_read(executor, read_plan),
+        SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, scan_plan),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, write_plan),
         SqlExecutionPlan::Update(write_plan) => execute_update(executor, write_plan),
         SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, delete_plan),
@@ -174,6 +175,36 @@ fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlR
         row_values.push(eval_expression(expr, &row)?);
     }
     Ok(SqlResult { columns, rows: vec![row_values] })
+}
+
+fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlResult, SqlFrontendError> {
+    let namespace = Namespace(plan.namespace.clone());
+    let scanned = executor
+        .execute_scan(&namespace, &plan.rowid_prefix, plan.rowid_after.as_deref(), plan.limit)
+        .map_err(|e| execute_error(&format!("KeyValueExecutor.scan failed: {e}")))?;
+
+    let columns = scan_column_labels(plan);
+    let mut rows: Vec<Vec<SqlValue>> = Vec::new();
+    for (_rowid, value_bytes) in scanned {
+        let row = decode_row(&value_bytes)?;
+
+        if let Some(ref predicate) = plan.remaining_predicate {
+            let v = eval_expression(predicate, &row)?;
+            if !truthy(&v) {
+                continue;
+            }
+        }
+
+        let mut row_values: Vec<SqlValue> = Vec::new();
+        for (field_id, _) in &plan.projection_fields {
+            row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
+        }
+        for (expr, _) in &plan.projection_expressions {
+            row_values.push(eval_expression(expr, &row)?);
+        }
+        rows.push(row_values);
+    }
+    Ok(SqlResult { columns, rows })
 }
 
 fn execute_insert(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<SqlResult, SqlFrontendError> {
@@ -233,6 +264,17 @@ fn sql_value_to_bytes(lit: &SqlBoundLiteral) -> Vec<u8> {
 }
 
 fn read_column_labels(plan: &ReadPlan) -> Vec<String> {
+    let mut labels = Vec::new();
+    for (_, name) in &plan.projection_fields {
+        labels.push(name.clone());
+    }
+    for (_, name) in &plan.projection_expressions {
+        labels.push(name.clone());
+    }
+    labels
+}
+
+fn scan_column_labels(plan: &ScanPlan) -> Vec<String> {
     let mut labels = Vec::new();
     for (_, name) in &plan.projection_fields {
         labels.push(name.clone());

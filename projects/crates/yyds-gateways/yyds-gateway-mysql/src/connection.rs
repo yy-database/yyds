@@ -305,7 +305,7 @@ fn execute_sql(stream: &mut impl Write, sequence: u8, sql: &str, runtime: &Mysql
     };
 
     // DML 写操作 —— 先 execute 再回 OK packet
-    let is_write = !matches!(plan, SqlExecutionPlan::Read(_));
+    let is_write = !matches!(plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_));
     let result = match execute_plan(runtime.executor.as_ref(), &plan) {
         Ok(result) => result,
         Err(error) => {

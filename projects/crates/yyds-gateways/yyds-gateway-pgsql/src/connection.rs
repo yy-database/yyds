@@ -238,7 +238,7 @@ fn execute_simple_query(
             return write_error_response(stream, "42883", &format!("SQL plan error: {}", error.message));
         }
     };
-    let is_read = matches!(&plan, SqlExecutionPlan::Read(_));
+    let is_read = matches!(&plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_));
     let result = match execute_plan(runtime.executor.as_ref(), &plan) {
         Ok(r) => r,
         Err(error) => {
@@ -258,7 +258,7 @@ fn execute_simple_query(
             SqlExecutionPlan::Insert(_) => "INSERT 0 1",
             SqlExecutionPlan::Update(_) => "UPDATE 1",
             SqlExecutionPlan::Delete(_) => "DELETE 1",
-            SqlExecutionPlan::Read(_) => unreachable!(),
+            SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) => unreachable!(),
         };
         write_command_complete(stream, tag)?;
     }

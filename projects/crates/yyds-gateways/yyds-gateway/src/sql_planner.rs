@@ -64,20 +64,24 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         Some(expr) => extract_pk_equality(expr, pk_field.field_id)?,
     };
 
-    let rowid = match pk_literal {
-        Some(lit) => Some(pk_literal_to_rowid(&lit)?),
-        None => {
-            return Err(planner_error(&format!(
-                "SQL gateway currently requires `{} = <literal>` in WHERE to extract a row key; \
-                 range conditions or non-primary-key equality need a scan operator not present in KeyValueExecutor",
-                pk_field.name
-            )));
-        }
-    };
+    if let Some(lit) = pk_literal {
+        let rowid = pk_literal_to_rowid(&lit)?;
+        return Ok(SqlExecutionPlan::Read(ReadPlan {
+            namespace,
+            rowid,
+            projection_fields,
+            projection_expressions,
+            remaining_predicate,
+        }));
+    }
 
-    Ok(SqlExecutionPlan::Read(ReadPlan {
+    // 没有主键等值 —— 生成扫描计划。第一版 prefix / after / limit 全部默认值；
+    // 未来可以从 WHERE 的 range 条件里提取 prefix / after，从 LIMIT 里提取 limit。
+    Ok(SqlExecutionPlan::Scan(ScanPlan {
         namespace,
-        rowid: rowid.expect("rowid is Some when pk_literal is Some"),
+        rowid_prefix: Vec::new(),
+        rowid_after: None,
+        limit: 0,
         projection_fields,
         projection_expressions,
         remaining_predicate,
@@ -160,6 +164,8 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
 pub enum SqlExecutionPlan {
     /// SELECT — namespace + rowid + 投影 + 剩余过滤。
     Read(ReadPlan),
+    /// SELECT — namespace scan + 投影 + 行级过滤（没有主键等值时走这条路）。
+    Scan(ScanPlan),
     /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
     Insert(WritePlan),
     /// UPDATE — 先 Get + 再 Put（WHERE pk=literal 必须存在）。
@@ -180,6 +186,25 @@ pub struct ReadPlan {
     /// 投影里需要在 row 上做表达式求值的那些：(expression, display_name)。
     pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
     /// 从原 WHERE 里剥掉主键等值后剩下的表达式；`None` 表示没有剩余。
+    pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+}
+
+/// SELECT 多行扫描执行计划。
+#[derive(Debug, Clone)]
+pub struct ScanPlan {
+    /// namespace 标签，形如 `table:{type_id}`。
+    pub namespace: String,
+    /// rowid 前缀 bytes；空 = 整个 namespace 全扫。
+    pub rowid_prefix: Vec<u8>,
+    /// exclusive cursor —— 跳过所有 `rowid <= after` 的记录。
+    pub rowid_after: Option<Vec<u8>>,
+    /// 0 = 无上限。
+    pub limit: usize,
+    /// 投影里直接映射到 catalog 字段的那些列：(field_id, display_name)。
+    pub projection_fields: Vec<(u64, String)>,
+    /// 投影里需要在 row 上做表达式求值的那些：(expression, display_name)。
+    pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
+    /// 行级过滤表达式；`None` 表示不过滤。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
 }
 

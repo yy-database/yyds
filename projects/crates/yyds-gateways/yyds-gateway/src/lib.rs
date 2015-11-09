@@ -20,7 +20,7 @@ pub use crate::{
         SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable,
     },
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
-    sql_planner::{plan_select, plan_statement, SqlExecutionPlan},
+    sql_planner::{plan_select, plan_statement, ReadPlan, ScanPlan, SqlExecutionPlan},
 };
 
 pub use crate::{

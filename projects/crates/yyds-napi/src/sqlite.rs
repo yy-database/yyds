@@ -418,7 +418,7 @@ impl SqliteDatabase {
         let plan = plan_statement(bound, &runtime.catalog)
             .map_err(|error| napi::Error::from_reason(format!("SQL plan error: {}", error.message)))?;
 
-        let is_read = matches!(&plan, SqlExecutionPlan::Read(_));
+        let is_read = matches!(&plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_));
         let result = execute_plan(runtime.executor.as_ref(), &plan)
             .map_err(|error| napi::Error::from_reason(format!("SQL execution error: {}", error.message)))?;
 

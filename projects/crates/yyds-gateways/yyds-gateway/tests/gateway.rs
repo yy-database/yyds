@@ -260,21 +260,36 @@ fn sql_select_missing_row_returns_empty_result() {
 }
 
 #[test]
-fn sql_select_requires_pk_equality_predicate() {
+fn sql_select_without_pk_generates_scan_plan() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
-        .expect_err("should reject pk-less query");
-    assert!(error.message.contains("requires") || error.message.contains("primary"));
+        .expect("pk-less query should now produce a scan plan");
+    match plan {
+        yyds_gateway::SqlExecutionPlan::Scan(scan) => {
+            assert_eq!(scan.namespace, "table:1");
+            assert!(scan.rowid_prefix.is_empty());
+            assert!(scan.rowid_after.is_none());
+            assert_eq!(scan.limit, 0);
+            assert!(scan.remaining_predicate.is_none());
+        }
+        other => panic!("expected Scan plan, got {other:?}"),
+    }
 }
 
 #[test]
-fn sql_select_non_pk_equality_is_rejected() {
+fn sql_select_non_pk_equality_becomes_scan_with_remaining_predicate() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE name = 'foo'", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE name = 'foo'", &catalog, 7)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
-        .expect_err("non-pk equality needs scan");
-    assert!(error.message.contains("primary") || error.message.contains("primary-key"));
+        .expect("non-pk equality should produce scan plan with remaining predicate");
+    match plan {
+        yyds_gateway::SqlExecutionPlan::Scan(scan) => {
+            assert_eq!(scan.namespace, "table:1");
+            assert!(scan.remaining_predicate.is_some()); // name = 'foo' stays as row-level filter
+        }
+        other => panic!("expected Scan plan, got {other:?}"),
+    }
 }
 
 #[test]
