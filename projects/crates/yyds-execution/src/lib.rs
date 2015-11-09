@@ -5,7 +5,7 @@
 use std::{collections::HashMap, fmt::Debug, sync::Mutex};
 
 use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
-use yyds_types::{Error, KeyValueAction, KeyValueCommand, KeyValueResult, ShardId, ShardMap};
+use yyds_types::{Error, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, ShardId, ShardMap};
 
 /// Execution surface consumed by protocol adapters.
 pub trait KeyValueExecutor: Debug + Send + Sync {
@@ -16,6 +16,20 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// Executors without an atomic read contract must reject the request.
     fn execute_read_batch(&self, _commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
         Err(Error::Unsupported("atomic batch reads are not implemented by this executor"))
+    }
+
+    /// Ordered prefix scan across all mounted shards for one namespace.
+    ///
+    /// Returns up to `limit` (key_bytes, inline_value_bytes) pairs whose key bytes start with
+    /// `prefix`, compare greater than `after` (exclusive), sorted by key bytes ascending.
+    fn execute_scan(
+        &self,
+        _namespace: &Namespace,
+        _prefix: &[u8],
+        _after: Option<&[u8]>,
+        _limit: usize,
+    ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Unsupported("scan is not implemented by this executor"))
     }
 }
 
@@ -79,6 +93,37 @@ where
                 Ok(KeyValueResult::Get(value))
             })
             .collect()
+    }
+
+    fn execute_scan(
+        &self,
+        namespace: &Namespace,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        // Collect results from every mounted shard (a process-local merge of multi-shard scan).
+        // Each shard yields ordered records; we merge them sorted by key bytes.
+        let mut shard_results: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+        for shard_id in self.routing.shards() {
+            let shard = self.shards.get(shard_id).ok_or(Error::Unsupported("shard not mounted"))?;
+            let guard = shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?;
+            let records = guard.scan(namespace, prefix, after, 0)?; // per-shard unlimited; merge applies global limit
+            let mut flat = Vec::with_capacity(records.len());
+            for record in records {
+                let inline = match record.value {
+                    StoredValue::Inline(value) => value.0,
+                    StoredValue::Object(_) => {
+                        return Err(Error::Unsupported("object values are not available through scan"));
+                    }
+                };
+                flat.push((record.key.bytes, inline));
+            }
+            shard_results.push(flat);
+        }
+
+        // K-way merge — each shard's slice is already sorted by key bytes.
+        Ok(merge_sorted(&shard_results, limit))
     }
 
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
@@ -178,4 +223,36 @@ fn parse_integer(bytes: &[u8]) -> yyds_types::Result<i64> {
         return Err(Error::InvalidIntegerValue);
     }
     Ok(value)
+}
+
+/// K-way merge of already-sorted slices, returning up to `limit` pairs keyed by key bytes.
+fn merge_sorted(slices: &[Vec<(Vec<u8>, Vec<u8>)>], limit: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+    if slices.is_empty() {
+        return Vec::new();
+    }
+    let mut cursors: Vec<usize> = vec![0; slices.len()];
+    let mut out: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    loop {
+        let mut best_idx: Option<usize> = None;
+        for (i, slice) in slices.iter().enumerate() {
+            if cursors[i] < slice.len() {
+                match best_idx {
+                    None => best_idx = Some(i),
+                    Some(best) if slice[cursors[i]].0 < slices[best][cursors[best]].0 => best_idx = Some(i),
+                    _ => {}
+                }
+            }
+        }
+        match best_idx {
+            None => break,
+            Some(i) => {
+                out.push(slices[i][cursors[i]].clone());
+                cursors[i] += 1;
+                if limit > 0 && out.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
