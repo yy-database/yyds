@@ -5,6 +5,7 @@ use std::{
 };
 
 use yyds_kv::{FileShard, InlineValue, Key, KvStore, ObjectRef, StoredValue};
+use yyds_types::Namespace;
 
 fn temp_path(label: &str) -> PathBuf {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -89,5 +90,45 @@ fn failed_snapshot_publication_preserves_records_and_revision() {
     assert_eq!(record.value, replacement);
     assert_eq!(record.revision, 2);
     drop(reopened);
+    cleanup(&path);
+}
+
+#[test]
+fn file_shard_scans_ordered_records_in_one_namespace() {
+    let path = temp_path("fs-scan");
+    let mut shard = FileShard::open(&path).expect("open");
+    for &k in &[b"z" as &[u8], b"a", b"m"] {
+        shard.put(Key::new("ns", k), StoredValue::Inline(InlineValue(k.to_vec()))).unwrap();
+    }
+    drop(shard);
+
+    let shard = FileShard::open(&path).expect("reopen");
+    let results = shard.scan(&Namespace("ns".into()), b"", None, 0).unwrap();
+    let keys: Vec<&[u8]> = results.iter().map(|r| r.key.bytes.as_slice()).collect();
+    assert_eq!(keys, vec![b"a", b"m", b"z"]);
+    cleanup(&path);
+}
+
+#[test]
+fn file_shard_scan_prefix_and_cursor() {
+    let path = temp_path("fs-prefix");
+    let mut shard = FileShard::open(&path).expect("open");
+    for &k in &[b"10" as &[u8], b"11", b"20", b"21", b"30"] {
+        shard.put(Key::new("t", k), StoredValue::Inline(InlineValue(k.to_vec()))).unwrap();
+    }
+    drop(shard);
+
+    let shard = FileShard::open(&path).expect("reopen");
+    // prefix "1" — should be 10, 11
+    let mut r = shard.scan(&Namespace("t".into()), b"1", None, 0).unwrap();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0].key.bytes, b"10".to_vec());
+    // after "20" exclusive — should skip 10, 11, 20, 21 → only 30
+    r = shard.scan(&Namespace("t".into()), b"", Some(b"21"), 0).unwrap();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].key.bytes, b"30".to_vec());
+    // limit 1 — first only
+    r = shard.scan(&Namespace("t".into()), b"", None, 1).unwrap();
+    assert_eq!(r.len(), 1);
     cleanup(&path);
 }
