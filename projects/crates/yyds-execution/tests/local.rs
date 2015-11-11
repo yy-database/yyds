@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use boost_fs::temp::create_folder;
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
-use yyds_kv::FileShard;
+use yyds_kv::{FileShard, InlineValue, Key, KvStore, MemoryShard, StoredValue};
 use yyds_types::{KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, ShardEpoch, ShardId, ShardMap};
 
 fn command(action: KeyValueAction, key: &[u8]) -> KeyValueCommand {
@@ -179,4 +179,64 @@ fn get_delete_is_atomic_under_competing_readers() {
     );
     assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::GetDelete(None))).count(), 7);
     assert_eq!(executor.execute(command(KeyValueAction::Get, b"once")).unwrap(), KeyValueResult::Get(None));
+}
+
+#[test]
+fn scan_merges_multiple_shards_into_globally_sorted_order() {
+    // Construct two MemoryShards with deliberately interleaved keys to prove K-way merge.
+    let shard_a_id = ShardId("shard-a".into());
+    let shard_b_id = ShardId("shard-b".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_a_id.clone(), shard_b_id.clone()]).unwrap();
+
+    // shard_a holds "z" and "1" (two extremes)
+    let mut shard_a = MemoryShard::new();
+    shard_a.put(Key::new("n", b"z"), StoredValue::Inline(InlineValue(b"Z".to_vec()))).unwrap();
+    shard_a.put(Key::new("n", b"1"), StoredValue::Inline(InlineValue(b"ONE".to_vec()))).unwrap();
+    // shard_b holds "m" and "3"
+    let mut shard_b = MemoryShard::new();
+    shard_b.put(Key::new("n", b"m"), StoredValue::Inline(InlineValue(b"M".to_vec()))).unwrap();
+    shard_b.put(Key::new("n", b"3"), StoredValue::Inline(InlineValue(b"THREE".to_vec()))).unwrap();
+
+    let shards = HashMap::from([(shard_a_id, shard_a), (shard_b_id, shard_b)]);
+    let executor = LocalExecutor::new(routing, shards).unwrap();
+
+    let results = executor.execute_scan(&Namespace("n".into()), b"", None, 0).unwrap();
+    let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
+    // K-way merge should produce globally sorted order regardless of which shard holds which key
+    assert_eq!(keys, vec![b"1", b"3", b"m", b"z"]);
+}
+
+#[test]
+fn scan_applies_prefix_after_and_limit_globally() {
+    let shard_a_id = ShardId("shard-a".into());
+    let shard_b_id = ShardId("shard-b".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_a_id.clone(), shard_b_id.clone()]).unwrap();
+
+    let mut shard_a = MemoryShard::new();
+    for &k in &[b"a-10" as &[u8], b"a-20", b"b-30"] {
+        shard_a.put(Key::new("t", k), StoredValue::Inline(InlineValue(k.to_vec()))).unwrap();
+    }
+    let mut shard_b = MemoryShard::new();
+    for &k in &[b"a-11" as &[u8], b"a-30", b"b-40"] {
+        shard_b.put(Key::new("t", k), StoredValue::Inline(InlineValue(k.to_vec()))).unwrap();
+    }
+
+    let shards = HashMap::from([(shard_a_id, shard_a), (shard_b_id, shard_b)]);
+    let executor = LocalExecutor::new(routing, shards).unwrap();
+
+    // prefix "a-" should merge a-10, a-11, a-20, a-30
+    let r = executor.execute_scan(&Namespace("t".into()), b"a-", None, 0).unwrap();
+    assert_eq!(r.len(), 4);
+    let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
+    assert_eq!(keys, vec![b"a-10", b"a-11", b"a-20", b"a-30"]);
+
+    // after "a-11" exclusive: a-20, a-30 only
+    let r = executor.execute_scan(&Namespace("t".into()), b"a-", Some(b"a-11"), 0).unwrap();
+    let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
+    assert_eq!(keys, vec![b"a-20", b"a-30"]);
+
+    // limit 2 on full scan: first two globally
+    let r = executor.execute_scan(&Namespace("t".into()), b"", None, 2).unwrap();
+    let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
+    assert_eq!(keys, vec![b"a-10", b"a-11"]);
 }
