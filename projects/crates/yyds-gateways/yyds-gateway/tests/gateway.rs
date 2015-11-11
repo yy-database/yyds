@@ -352,6 +352,34 @@ fn empty_executor() -> yyds_execution::LocalExecutor<yyds_kv::MemoryShard> {
     yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
 }
 
+fn make_executor_with_rows(
+    namespace: &str,
+    rows: &[(&[u8], &[(u64, &[u8])])],
+) -> yyds_execution::LocalExecutor<yyds_kv::MemoryShard> {
+    use yyds_kv::{InlineValue, Key, KvStore, MemoryShard, StoredValue};
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+
+    let mut shard = MemoryShard::new();
+    for (rowid, fields) in rows {
+        let mut values = yyds_gateway::RowFieldValues::new();
+        for (field_id, bytes) in *fields {
+            values.insert(*field_id, bytes.to_vec());
+        }
+        let row_bytes = yyds_gateway::encode_row(&values);
+        shard
+            .put(Key::new(namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(row_bytes)))
+            .expect("put row");
+    }
+
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+}
+
 #[test]
 fn sql_insert_then_select_round_trip() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
@@ -435,4 +463,92 @@ fn sql_insert_pk_must_be_first_value() {
     // VALUES 第一个必须是 pk literal — 如果 Oak 把 "1" 当作 name 值也会在 planner 层报错
     // 这里只是验证 planner 接受正确的形式
     let _bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (1, 'one')", &catalog, 7).expect("insert bind");
+}
+
+#[test]
+fn sql_select_star_from_table_scans_all_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    // 预置三行 — id=1/alice, id=2/bob, id=3/carol
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"carol")]),
+        ],
+    );
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users", &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    // 确认走 Scan 路径
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(result.rows.len(), 3);
+    let ids: Vec<f64> = result.rows.iter().map(|row| match &row[0] {
+        yyds_gateway::SqlValue::Number(n) => *n,
+        other => panic!("expected number, got {other:?}"),
+    }).collect();
+    assert_eq!(ids, vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn sql_scan_applies_remaining_predicate_from_non_pk_equality() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"alice")]),
+        ],
+    );
+
+    // WHERE name = 'alice' — 不是 pk 等值，planner 输出 ScanPlan 带 remaining_predicate
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE name = 'alice'", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+
+    assert_eq!(result.rows.len(), 2);
+    // alice 在 id=1 和 id=3 两行
+    let ids: Vec<f64> = result.rows.iter().map(|row| match &row[0] {
+        yyds_gateway::SqlValue::Number(n) => *n,
+        other => panic!("expected number, got {other:?}"),
+    }).collect();
+    assert!(ids.contains(&1.0));
+    assert!(ids.contains(&3.0));
+    assert_eq!(ids.len(), 2);
+}
+
+#[test]
+fn sql_insert_multiple_then_select_star_returns_all() {
+    let catalog = catalog("table items { @@id: i64, sku: utf8 }\n");
+    let executor = empty_executor();
+
+    // 连续 INSERT 三行 — 全部写入同一个 executor
+    for sql in &[
+        "INSERT INTO items VALUES (1, 'A1')",
+        "INSERT INTO items VALUES (2, 'B2')",
+        "INSERT INTO items VALUES (3, 'C3')",
+    ] {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+    }
+
+    // SELECT * 验证 scan 路径返回所有三行
+    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM items", &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("scan");
+
+    assert_eq!(result.rows.len(), 3);
+    let ids: Vec<f64> = result.rows.iter().map(|row| match &row[0] {
+        yyds_gateway::SqlValue::Number(n) => *n,
+        other => panic!("expected number, got {other:?}"),
+    }).collect();
+    assert_eq!(ids, vec![1.0, 2.0, 3.0]);
 }
