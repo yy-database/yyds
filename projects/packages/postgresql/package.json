@@ -1,6 +1,6 @@
 {
     "name": "@yydb/postgresql",
-    "version": "0.0.5",
+    "version": "0.0.6",
     "description": "Pretend you installed PostgreSQL. YYDS scripting runtime underneath.",
     "license": "MPL-2.0",
         "type": "module",
