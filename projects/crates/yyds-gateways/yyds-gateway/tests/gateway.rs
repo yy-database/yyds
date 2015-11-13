@@ -552,3 +552,126 @@ fn sql_insert_multiple_then_select_star_returns_all() {
     }).collect();
     assert_eq!(ids, vec![1.0, 2.0, 3.0]);
 }
+
+#[test]
+fn sql_select_pk_greater_pushes_after_cursor() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"carol")]),
+        ],
+    );
+
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id > 1", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(s) => {
+            assert_eq!(s.rowid_after.as_deref(), Some(b"1".as_ref()));
+            assert!(s.rowid_before.is_none());
+            assert_eq!(s.limit, 0);
+        }
+        other => panic!("expected Scan, got {other:?}"),
+    }
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    assert_eq!(result.rows.len(), 2);
+    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    assert_eq!(ids, vec![2.0, 3.0]);
+}
+
+#[test]
+fn sql_select_pk_less_pushes_before_cursor() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"carol")]),
+        ],
+    );
+
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id < 3", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(s) => {
+            assert!(s.rowid_after.is_none());
+            assert_eq!(s.rowid_before.as_deref(), Some(b"3".as_ref()));
+        }
+        other => panic!("expected Scan, got {other:?}"),
+    }
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    assert_eq!(result.rows.len(), 2);
+    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    assert_eq!(ids, vec![1.0, 2.0]);
+}
+
+#[test]
+fn sql_select_pk_range_after_and_before_together() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"carol")]),
+            (b"4", &[(1, b"4"), (2, b"dan")]),
+        ],
+    );
+
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id > 1 AND id < 4", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(s) => {
+            assert_eq!(s.rowid_after.as_deref(), Some(b"1".as_ref()));
+            assert_eq!(s.rowid_before.as_deref(), Some(b"4".as_ref()));
+        }
+        other => panic!("expected Scan, got {other:?}"),
+    }
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    assert_eq!(result.rows.len(), 2);
+    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    assert_eq!(ids, vec![2.0, 3.0]);
+}
+
+#[test]
+fn sql_limit_pushes_down_to_scan() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"carol")]),
+            (b"4", &[(1, b"4"), (2, b"dan")]),
+            (b"5", &[(1, b"5"), (2, b"eve")]),
+        ],
+    );
+
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users LIMIT 3", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(s) => {
+            assert_eq!(s.limit, 3);
+        }
+        other => panic!("expected Scan, got {other:?}"),
+    }
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    assert_eq!(result.rows.len(), 3);
+    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    assert_eq!(ids, vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn sql_select_pk_like_prefix_pushes_rowid_prefix() {
+    // oak_sql parser upstream issue: LIKE is not parsed into select.expr yet.
+    // This test is frozen pending oak-sql gaining LIKE support.
+    // Planner-side LIKE prefix extraction logic is implemented in extract_pk_range
+    // under `SqlBoundBinaryOperator::Like` and will activate once the parser feeds it.
+}

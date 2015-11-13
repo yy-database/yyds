@@ -266,6 +266,7 @@ fn extract_pk_range(
     ),
     SqlFrontendError,
 > {
+
     match predicate {
         // AND 拆分 — 两侧分别提取，再合并。
         SqlCatalogBoundExpression::Binary {
@@ -285,6 +286,9 @@ fn extract_pk_range(
 
         // 所有其他 Binary 表达式 —— 尝试识别 pk 条件。
         SqlCatalogBoundExpression::Binary { left, operator, right } => {
+
+
+
             match (operator, *left, *right) {
                 // pk = literal
                 (SqlBoundBinaryOperator::Equal, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
@@ -331,6 +335,7 @@ fn extract_pk_range(
                 (SqlBoundBinaryOperator::Like, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
                     if col.field_id == pk_field_id =>
                 {
+
                     let prefix = match &lit {
                         SqlBoundLiteral::String(s) if s.ends_with('%') && !s.ends_with("%%") => {
                             s[..s.len() - 1].as_bytes().to_vec()

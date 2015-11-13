@@ -240,6 +240,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     }
     match &root.statements[0] {
         SqlStatement::Select(select) => {
+
             if !select.joins.is_empty()
                 || select.group_by.is_some()
                 || select.having.is_some()
