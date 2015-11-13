@@ -103,7 +103,7 @@ fn file_shard_scans_ordered_records_in_one_namespace() {
     drop(shard);
 
     let shard = FileShard::open(&path).expect("reopen");
-    let results = shard.scan(&Namespace("ns".into()), b"", None, 0).unwrap();
+    let results = shard.scan(&Namespace("ns".into()), b"", None, None, 0).unwrap();
     let keys: Vec<&[u8]> = results.iter().map(|r| r.key.bytes.as_slice()).collect();
     assert_eq!(keys, vec![b"a", b"m", b"z"]);
     cleanup(&path);
@@ -120,15 +120,15 @@ fn file_shard_scan_prefix_and_cursor() {
 
     let shard = FileShard::open(&path).expect("reopen");
     // prefix "1" — should be 10, 11
-    let mut r = shard.scan(&Namespace("t".into()), b"1", None, 0).unwrap();
+    let mut r = shard.scan(&Namespace("t".into()), b"1", None, None, 0).unwrap();
     assert_eq!(r.len(), 2);
     assert_eq!(r[0].key.bytes, b"10".to_vec());
     // after "20" exclusive — should skip 10, 11, 20, 21 → only 30
-    r = shard.scan(&Namespace("t".into()), b"", Some(b"21"), 0).unwrap();
+    r = shard.scan(&Namespace("t".into()), b"", Some(b"21"), None, 0).unwrap();
     assert_eq!(r.len(), 1);
     assert_eq!(r[0].key.bytes, b"30".to_vec());
     // limit 1 — first only
-    r = shard.scan(&Namespace("t".into()), b"", None, 1).unwrap();
+    r = shard.scan(&Namespace("t".into()), b"", None, None, 1).unwrap();
     assert_eq!(r.len(), 1);
     cleanup(&path);
 }

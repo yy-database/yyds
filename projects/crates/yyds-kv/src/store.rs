@@ -25,9 +25,9 @@ pub trait KvStore {
     /// Ordered prefix scan within one namespace.
     ///
     /// Returns up to `limit` records whose key bytes start with `prefix` and compare greater
-    /// than `after` (exclusive cursor, empty means no cursor). `limit` of `0` means no cap.
-    /// Results are sorted by key bytes ascending.
-    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, limit: usize) -> Result<Vec<Record>>;
+    /// exclusive lower cursor; `before` is the exclusive upper cursor. `limit` of `0`
+    /// means no cap. Results are sorted by key bytes ascending.
+    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, before: Option<&[u8]>, limit: usize) -> Result<Vec<Record>>;
 }
 
 /// In-memory shard used by unit tests and early integrations.
@@ -61,12 +61,12 @@ impl KvStore for MemoryShard {
         Ok(self.records.remove(key).is_some())
     }
 
-    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
-        Ok(collect_scan(&self.records, namespace, prefix, after, limit))
+    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, before: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
+        Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
     }
 }
 
-/// File-backed shard using the native `.yykv` snapshot format.
+/// File-backed shard storing one namespace.using the native `.yykv` snapshot format.
 #[derive(Debug)]
 pub struct FileShard {
     path: PathBuf,
@@ -162,17 +162,18 @@ impl KvStore for FileShard {
         Ok(true)
     }
 
-    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
-        Ok(collect_scan(&self.records, namespace, prefix, after, limit))
+    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, before: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
+        Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
     }
 }
 
-/// Shared scan logic: filter by namespace, prefix-match, exclusive cursor, limit.
+/// Shared scan logic: filter by namespace, prefix-match, exclusive cursors (after/before), limit.
 fn collect_scan(
     records: &BTreeMap<Key, Record>,
     namespace: &Namespace,
     prefix: &[u8],
     after: Option<&[u8]>,
+    before: Option<&[u8]>,
     limit: usize,
 ) -> Vec<Record> {
     let mut out = Vec::new();
@@ -185,6 +186,11 @@ fn collect_scan(
         }
         if let Some(after_bytes) = after {
             if key.bytes.as_slice() <= after_bytes {
+                continue;
+            }
+        }
+        if let Some(before_bytes) = before {
+            if key.bytes.as_slice() >= before_bytes {
                 continue;
             }
         }

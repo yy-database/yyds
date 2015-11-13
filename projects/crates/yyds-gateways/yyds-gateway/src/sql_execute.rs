@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use yyds_execution::KeyValueExecutor;
-use yyds_types::{KeyValueAction, KeyValueCommand, KeyValueResult, Namespace};
+use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
     catalog_bind::SqlCatalogBoundExpression,
@@ -180,7 +180,7 @@ fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlR
 fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
     let scanned = executor
-        .execute_scan(&namespace, &plan.rowid_prefix, plan.rowid_after.as_deref(), plan.limit)
+        .execute_scan(&namespace, &plan.rowid_prefix, plan.rowid_after.as_deref(), plan.rowid_before.as_deref(), plan.limit)
         .map_err(|e| execute_error(&format!("KeyValueExecutor.scan failed: {e}")))?;
 
     let columns = scan_column_labels(plan);

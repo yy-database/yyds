@@ -32,7 +32,7 @@ fn scan_returns_all_records_in_namespace_ordered_by_key() {
         shard.put(Key::new("users", k.as_bytes()), StoredValue::Inline(InlineValue(v.clone()))).unwrap();
     }
 
-    let results = shard.scan(&ns, b"", None, 0).unwrap();
+    let results = shard.scan(&ns, b"", None, None, 0).unwrap();
     let keys: Vec<&[u8]> = results.iter().map(|r| r.key.bytes.as_slice()).collect();
     assert_eq!(keys, vec![b"alice".as_slice(), b"bob", b"carol"]);
     assert_eq!(results.len(), 3);
@@ -46,7 +46,7 @@ fn scan_prefix_filters_to_matching_keys() {
         shard.put(Key::new("table:7", k), StoredValue::Inline(InlineValue(k.to_vec()))).unwrap();
     }
 
-    let results = shard.scan(&ns, b"1", None, 0).unwrap();
+    let results = shard.scan(&ns, b"1", None, None, 0).unwrap();
     let keys: Vec<&[u8]> = results.iter().map(|r| r.key.bytes.as_slice()).collect();
     assert_eq!(keys, vec![b"10", b"11"]);
 }
@@ -59,7 +59,7 @@ fn scan_after_is_exclusive_cursor() {
         shard.put(Key::new("n", k), StoredValue::Inline(InlineValue(k.to_vec()))).unwrap();
     }
 
-    let results = shard.scan(&ns, b"", Some(b"1"), 0).unwrap();
+    let results = shard.scan(&ns, b"", Some(b"1"), None, 0).unwrap();
     let keys: Vec<&[u8]> = results.iter().map(|r| r.key.bytes.as_slice()).collect();
     assert_eq!(keys, vec![b"2", b"3"]);
 }
@@ -72,7 +72,7 @@ fn scan_limit_caps_results() {
         shard.put(Key::new("n", k), StoredValue::Inline(InlineValue(k.to_vec()))).unwrap();
     }
 
-    let results = shard.scan(&ns, b"", None, 2).unwrap();
+    let results = shard.scan(&ns, b"", None, None, 2).unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -82,8 +82,8 @@ fn scan_isolated_between_namespaces() {
     shard.put(Key::new("a", b"1"), StoredValue::Inline(InlineValue(b"v1".to_vec()))).unwrap();
     shard.put(Key::new("b", b"1"), StoredValue::Inline(InlineValue(b"v2".to_vec()))).unwrap();
 
-    let a = shard.scan(&Namespace("a".into()), b"", None, 0).unwrap();
-    let b = shard.scan(&Namespace("b".into()), b"", None, 0).unwrap();
+    let a = shard.scan(&Namespace("a".into()), b"", None, None, 0).unwrap();
+    let b = shard.scan(&Namespace("b".into()), b"", None, None, 0).unwrap();
     assert_eq!(a.len(), 1);
     assert_eq!(a[0].key.namespace.0, "a");
     assert_eq!(b.len(), 1);
@@ -94,6 +94,6 @@ fn scan_isolated_between_namespaces() {
 fn scan_empty_namespace_returns_nothing() {
     let mut shard = MemoryShard::new();
     shard.put(Key::new("used", b"x"), StoredValue::Inline(InlineValue(b"y".to_vec()))).unwrap();
-    let results = shard.scan(&Namespace("unused".into()), b"", None, 0).unwrap();
+    let results = shard.scan(&Namespace("unused".into()), b"", None, None, 0).unwrap();
     assert!(results.is_empty());
 }

@@ -194,6 +194,10 @@ pub struct SqlCatalogBoundSelect {
     pub projections: Vec<SqlCatalogBoundProjection>,
     /// Resolved optional predicate.
     pub predicate: Option<SqlCatalogBoundExpression>,
+    /// Optional LIMIT count, propagated from the gateway binder.
+    pub limit: Option<usize>,
+    /// Optional OFFSET count, propagated from the gateway binder.
+    pub offset: Option<usize>,
 }
 
 /// SQL INSERT request after catalog binding.
@@ -327,7 +331,7 @@ fn bind_select(select: SqlBoundSelect, catalog: &SqlCatalog) -> Result<SqlCatalo
         .map(|projection| bind_projection(projection, source.as_ref(), catalog))
         .collect::<Result<Vec<_>, _>>()?;
     let predicate = select.predicate.map(|expression| bind_expression(expression, source.as_ref(), catalog)).transpose()?;
-    Ok(SqlCatalogBoundSelect { source, projections, predicate })
+    Ok(SqlCatalogBoundSelect { source, projections, predicate, limit: select.limit, offset: select.offset })
 }
 
 fn bind_projection(

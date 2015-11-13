@@ -21,12 +21,14 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// Ordered prefix scan across all mounted shards for one namespace.
     ///
     /// Returns up to `limit` (key_bytes, inline_value_bytes) pairs whose key bytes start with
-    /// `prefix`, compare greater than `after` (exclusive), sorted by key bytes ascending.
+    /// `prefix`, compare greater than `after` (exclusive), less than `before` (exclusive), sorted
+    /// by key bytes ascending.
     fn execute_scan(
         &self,
         _namespace: &Namespace,
         _prefix: &[u8],
         _after: Option<&[u8]>,
+        _before: Option<&[u8]>,
         _limit: usize,
     ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         Err(Error::Unsupported("scan is not implemented by this executor"))
@@ -100,6 +102,7 @@ where
         namespace: &Namespace,
         prefix: &[u8],
         after: Option<&[u8]>,
+        before: Option<&[u8]>,
         limit: usize,
     ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         // Collect results from every mounted shard (a process-local merge of multi-shard scan).
@@ -108,7 +111,7 @@ where
         for shard_id in self.routing.shards() {
             let shard = self.shards.get(shard_id).ok_or(Error::Unsupported("shard not mounted"))?;
             let guard = shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?;
-            let records = guard.scan(namespace, prefix, after, 0)?; // per-shard unlimited; merge applies global limit
+            let records = guard.scan(namespace, prefix, after, before, 0)?; // per-shard unlimited; merge applies global limit
             let mut flat = Vec::with_capacity(records.len());
             for record in records {
                 let inline = match record.value {

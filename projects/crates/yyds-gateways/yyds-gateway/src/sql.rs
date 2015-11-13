@@ -90,6 +90,10 @@ pub struct SqlBoundSelect {
     pub projections: Vec<SqlBoundProjection>,
     /// Optional SQL WHERE expression.
     pub predicate: Option<SqlBoundExpression>,
+    /// Optional SQL LIMIT count (parsed from the LIMIT clause's literal).
+    pub limit: Option<usize>,
+    /// Optional SQL OFFSET count (parsed from the LIMIT ... OFFSET clause).
+    pub offset: Option<usize>,
 }
 
 /// SQL INSERT request owned by the compatibility gateway.
@@ -240,15 +244,24 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 || select.group_by.is_some()
                 || select.having.is_some()
                 || select.order_by.is_some()
-                || select.limit.is_some()
             {
                 return Err(bind_error("SQL SELECT clauses are not in the gateway binding subset"));
             }
             let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
+            let (limit, offset) = match &select.limit {
+                Some(clause) => {
+                    let n = extract_u64(&clause.limit).ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))? as usize;
+                    let off = clause.offset.as_ref().and_then(|e| extract_u64(e)).map(|v| v as usize);
+                    (Some(n), off)
+                }
+                None => (None, None),
+            };
             Ok(SqlBoundStatement::Select(SqlBoundSelect {
                 source: select.from.as_ref().map(|table| normalize_identifier(table.name.name.as_ref())),
                 projections,
                 predicate: select.expr.as_ref().map(bind_expression).transpose()?,
+                limit,
+                offset,
             }))
         }
         SqlStatement::Insert(insert) => {
@@ -349,6 +362,15 @@ fn bind_binary_operator(operator: BinaryOperator) -> Result<SqlBoundBinaryOperat
 
 fn bind_error(message: &str) -> SqlFrontendError {
     SqlFrontendError { message: message.into() }
+}
+
+/// Extracts a non-negative integer from an Oak SQL expression — only accepts
+/// `Literal::Number` with a valid `u64` spelling.
+fn extract_u64(expr: &Expression) -> Option<u64> {
+    match expr {
+        Expression::Literal(Literal::Number(n, _)) => n.parse::<u64>().ok(),
+        _ => None,
+    }
 }
 
 fn normalize_identifier(name: &str) -> String {

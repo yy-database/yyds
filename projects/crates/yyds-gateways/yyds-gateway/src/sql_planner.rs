@@ -4,16 +4,20 @@
 //! `KeyValueExecutor` 的执行计划。计划本身不做读/写；它只决定：
 //!
 //! 1. **namespace** — 目标表的字符串标签，形如 `table:{type_id}`。
-//! 2. **key** — 要读取的那一行的主键值（仅当 WHERE 里有 `pk = literal` 才能提取出来）。
+//! 2. **rowid / rowid_prefix / rowid_after / rowid_before** — 主键查询参数
+//!    （WHERE 里 `pk = literal` / `pk > X` / `pk LIKE 'prefix%'` 等）。
 //! 3. **projection fields** — 投影需要的字段 ID 列表，`*` 会在此时展开。
-//! 4. **remaining predicate** — 从 WHERE 里剥掉主键等值之后剩下的表达式，拿到 row 后再做一次过滤。
+//! 4. **remaining predicate** — 从 WHERE 里剥掉 pk 条件后剩下的表达式，
+//!    拿到 row 后再做一次过滤。
 //!
-//! 目前只支持 **主键精确等值查询**。全表扫描、非主键等值、范围条件都没有对应
-//! 的 `KeyValueExecutor` 原语，因此在 planner 层直接拒绝。
+//! SELECT 生成两条执行路径：
+//! - `SqlExecutionPlan::Read` — 有 `pk = literal`，直接单点 Get
+//! - `SqlExecutionPlan::Scan` — 其余情况（pk LIKE 前缀、pk 范围、无 pk 条件等），
+//!   走 `KeyValueExecutor::execute_scan`
 
 use crate::{
     catalog_bind::{
-        SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
+        SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
         SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundUpdate,
     },
     sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlFrontendError},
@@ -58,13 +62,15 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         }
     }
 
-    // 2. 从 predicate 里提取主键等值条件；剩下的作为二次过滤。
-    let (pk_literal, remaining_predicate) = match select.predicate {
-        None => (None, None),
-        Some(expr) => extract_pk_equality(expr, pk_field.field_id)?,
-    };
+    // 2. 递归解析 predicate 的 AND 树，把 pk 条件提取出来。
+    let (pk_equality, pk_prefix, pk_after, pk_before, remaining_predicate) =
+        match select.predicate {
+            None => (None, None, None, None, None),
+            Some(expr) => extract_pk_range(expr, pk_field.field_id)?,
+        };
 
-    if let Some(lit) = pk_literal {
+    // 3. 分流：有精确 pk 等值 → Read；其他全部 → Scan。
+    if let Some(lit) = pk_equality {
         let rowid = pk_literal_to_rowid(&lit)?;
         return Ok(SqlExecutionPlan::Read(ReadPlan {
             namespace,
@@ -75,13 +81,13 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         }));
     }
 
-    // 没有主键等值 —— 生成扫描计划。第一版 prefix / after / limit 全部默认值；
-    // 未来可以从 WHERE 的 range 条件里提取 prefix / after，从 LIMIT 里提取 limit。
+    // Scan 路径：prefix / after / before 都是 bytes；limit 来自 SQL LIMIT 子句。
     Ok(SqlExecutionPlan::Scan(ScanPlan {
         namespace,
-        rowid_prefix: Vec::new(),
-        rowid_after: None,
-        limit: 0,
+        rowid_prefix: pk_prefix.unwrap_or_default(),
+        rowid_after: pk_after,
+        rowid_before: pk_before,
+        limit: select.limit.unwrap_or(0),
         projection_fields,
         projection_expressions,
         remaining_predicate,
@@ -116,7 +122,7 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
     let rowid = match update.predicate {
         None => return Err(planner_error("UPDATE requires WHERE with `pk = literal`")),
         Some(expr) => {
-            let (pk_literal, _) = extract_pk_equality(expr, pk_field.field_id)?;
+            let (pk_literal, ..) = extract_pk_range(expr, pk_field.field_id)?;
             pk_literal.ok_or_else(|| planner_error(&format!("UPDATE WHERE must contain `{} = literal`", pk_field.name)))?
         }
     };
@@ -139,7 +145,7 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
     let rowid = match delete.predicate {
         None => return Err(planner_error("DELETE requires WHERE with `pk = literal`")),
         Some(expr) => {
-            let (pk_literal, _) = extract_pk_equality(expr, pk_field.field_id)?;
+            let (pk_literal, ..) = extract_pk_range(expr, pk_field.field_id)?;
             pk_literal.ok_or_else(|| planner_error(&format!("DELETE WHERE must contain `{} = literal`", pk_field.name)))?
         }
     };
@@ -159,12 +165,12 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
     }
 }
 
-/// 已计划好的 SQL 操作，可以直接翻译为 KeyValueCommand。
+/// 已计划好的 SQL 操作，可以直接翻译为 KeyValueCommand 或 Scan。
 #[derive(Debug, Clone)]
 pub enum SqlExecutionPlan {
-    /// SELECT — namespace + rowid + 投影 + 剩余过滤。
+    /// SELECT — 精确主键等值单点读取。
     Read(ReadPlan),
-    /// SELECT — namespace scan + 投影 + 行级过滤（没有主键等值时走这条路）。
+    /// SELECT — namespace 扫描 + 行级过滤。
     Scan(ScanPlan),
     /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
     Insert(WritePlan),
@@ -174,7 +180,7 @@ pub enum SqlExecutionPlan {
     Delete(DeletePlan),
 }
 
-/// SELECT 执行计划。
+/// SELECT 精确主键等值执行计划。
 #[derive(Debug, Clone)]
 pub struct ReadPlan {
     /// namespace 标签，形如 `table:{type_id}`。
@@ -196,9 +202,11 @@ pub struct ScanPlan {
     pub namespace: String,
     /// rowid 前缀 bytes；空 = 整个 namespace 全扫。
     pub rowid_prefix: Vec<u8>,
-    /// exclusive cursor —— 跳过所有 `rowid <= after` 的记录。
+    /// exclusive lower cursor —— 跳过所有 `rowid <= after` 的记录。None = 无下界。
     pub rowid_after: Option<Vec<u8>>,
-    /// 0 = 无上限。
+    /// exclusive upper cursor —— 跳过所有 `rowid >= before` 的记录。None = 无上界。
+    pub rowid_before: Option<Vec<u8>>,
+    /// 0 = 无上限。由 SQL LIMIT 子句下推；当前 planner 不支持 OFFSET。
     pub limit: usize,
     /// 投影里直接映射到 catalog 字段的那些列：(field_id, display_name)。
     pub projection_fields: Vec<(u64, String)>,
@@ -235,69 +243,149 @@ pub struct DeletePlan {
     pub rowid: Vec<u8>,
 }
 
-fn extract_pk_equality(
+/// 从 WHERE predicate 里提取所有关于 pk 字段的条件。
+///
+/// 返回五元组：
+/// - `Option<SqlBoundLiteral>` —— pk = literal 等值（读单点）
+/// - `Option<Vec<u8>>` —— pk LIKE 'prefix%' 前缀
+/// - `Option<Vec<u8>>` —— after exclusive lower cursor（来自 pk > X 或 pk >= X → exclusive X）
+/// - `Option<Vec<u8>>` —— before exclusive upper cursor（来自 pk < Y 或 pk <= Y → exclusive Y+ε）
+/// - `Option<SqlCatalogBoundExpression>` —— 剩余不能下推的条件
+///
+/// 冲突规则：两个等值 / 两个不同前缀 / after ≥ before → planner_error。
+fn extract_pk_range(
     predicate: SqlCatalogBoundExpression,
     pk_field_id: u64,
-) -> Result<(Option<SqlBoundLiteral>, Option<SqlCatalogBoundExpression>), SqlFrontendError> {
+) -> Result<
+    (
+        Option<SqlBoundLiteral>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        Option<SqlCatalogBoundExpression>,
+    ),
+    SqlFrontendError,
+> {
     match predicate {
-        SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::Equal, right } => {
-            let (maybe_col, maybe_literal) = match (&*left, &*right) {
-                (SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit)) => {
-                    (col.clone(), Some(lit.clone()))
-                }
-                (SqlCatalogBoundExpression::Literal(lit), SqlCatalogBoundExpression::Column(col)) => {
-                    (col.clone(), Some(lit.clone()))
-                }
-                _ => (
-                    SqlCatalogBoundColumn { type_id: 0, field_id: 0, table_name: String::new(), field_name: String::new() },
-                    None,
-                ),
-            };
-            if maybe_col.field_id == pk_field_id {
-                if let Some(lit) = maybe_literal {
-                    return Ok((Some(lit.clone()), None));
-                }
-            }
-            // 不是 pk 等值，整个 predicate 留在 remaining
-            return Ok((
-                None,
-                Some(SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::Equal, right }),
-            ));
+        // AND 拆分 — 两侧分别提取，再合并。
+        SqlCatalogBoundExpression::Binary {
+            left,
+            operator: SqlBoundBinaryOperator::And,
+            right,
+        } => {
+            let (l_eq, l_pre, l_after, l_before, l_rem) = extract_pk_range(*left, pk_field_id)?;
+            let (r_eq, r_pre, r_after, r_before, r_rem) = extract_pk_range(*right, pk_field_id)?;
+            let eq = merge_opt(l_eq, r_eq, "conflicting primary-key equality inside AND")?;
+            let prefix = merge_opt(l_pre, r_pre, "conflicting primary-key LIKE prefix inside AND")?;
+            let after = merge_opt(l_after, r_after, "conflicting primary-key lower bound inside AND")?;
+            let before = merge_opt(l_before, r_before, "conflicting primary-key upper bound inside AND")?;
+            let remaining = combine_remaining(l_rem, r_rem);
+            Ok((eq, prefix, after, before, remaining))
         }
-        // AND 拆成两棵子树分别处理。两边都提出一个 pk 等值 —— 但这种情况已经由 first-match 覆盖，
-        // 真正的目标是：如果 AND 的一边提取出了 pk 等值，另一边就是 remaining。
-        SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::And, right } => {
-            let (left_pk, left_remaining) = extract_pk_equality(*left, pk_field_id)?;
-            let (right_pk, right_remaining) = extract_pk_equality(*right, pk_field_id)?;
-            match (left_pk, right_pk) {
-                (Some(_), Some(_)) => Err(planner_error("conflicting primary-key equality inside AND")),
-                (Some(lit), None) => Ok((Some(lit), left_remaining.or(right_remaining))),
-                (None, Some(lit)) => Ok((Some(lit), right_remaining.or(left_remaining))),
-                (None, None) => Ok((
-                    None,
-                    Some(SqlCatalogBoundExpression::Binary {
-                        left: Box::new(left_remaining.unwrap_or_else(|| {
-                            SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
-                                type_id: 0,
-                                field_id: 0,
-                                table_name: String::new(),
-                                field_name: String::new(),
-                            })
-                        })),
-                        operator: SqlBoundBinaryOperator::And,
-                        right: Box::new(right_remaining.unwrap_or_else(|| {
-                            SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
-                                type_id: 0,
-                                field_id: 0,
-                                table_name: String::new(),
-                                field_name: String::new(),
-                            })
-                        })),
-                    }),
-                )),
+
+        // 所有其他 Binary 表达式 —— 尝试识别 pk 条件。
+        SqlCatalogBoundExpression::Binary { left, operator, right } => {
+            match (operator, *left, *right) {
+                // pk = literal
+                (SqlBoundBinaryOperator::Equal, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
+                | (SqlBoundBinaryOperator::Equal, SqlCatalogBoundExpression::Literal(lit), SqlCatalogBoundExpression::Column(col))
+                    if col.field_id == pk_field_id =>
+                {
+                    let _rowid = pk_literal_to_rowid(&lit)?;
+                    Ok((Some(lit), None, None, None, None))
+                }
+
+                // pk > literal → after exclusive
+                (SqlBoundBinaryOperator::Greater, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
+                    if col.field_id == pk_field_id =>
+                {
+                    let rowid = pk_literal_to_rowid(&lit)?;
+                    Ok((None, None, Some(rowid), None, None))
+                }
+
+                // pk >= literal → after exclusive（把下界 lit 当作 after，等于要求 key > lit）
+                (SqlBoundBinaryOperator::GreaterEqual, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
+                    if col.field_id == pk_field_id =>
+                {
+                    let rowid = pk_literal_to_rowid(&lit)?;
+                    Ok((None, None, Some(rowid), None, None))
+                }
+
+                // pk < literal → before exclusive
+                (SqlBoundBinaryOperator::Less, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
+                    if col.field_id == pk_field_id =>
+                {
+                    let rowid = pk_literal_to_rowid(&lit)?;
+                    Ok((None, None, None, Some(rowid), None))
+                }
+
+                // pk <= literal → before exclusive（上界 lit 当作 before，等于要求 key < lit+1）
+                (SqlBoundBinaryOperator::LessEqual, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
+                    if col.field_id == pk_field_id =>
+                {
+                    let rowid = pk_literal_to_rowid(&lit)?;
+                    Ok((None, None, None, Some(rowid), None))
+                }
+
+                // pk LIKE 'prefix%'
+                (SqlBoundBinaryOperator::Like, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
+                    if col.field_id == pk_field_id =>
+                {
+                    let prefix = match &lit {
+                        SqlBoundLiteral::String(s) if s.ends_with('%') && !s.ends_with("%%") => {
+                            s[..s.len() - 1].as_bytes().to_vec()
+                        }
+                        _ => {
+                            // LIKE 模式不只是 prefix%，下推成 remaining
+                            return Ok((None, None, None, None, Some(SqlCatalogBoundExpression::Binary {
+                                left: Box::new(SqlCatalogBoundExpression::Column(col)),
+                                operator: SqlBoundBinaryOperator::Like,
+                                right: Box::new(SqlCatalogBoundExpression::Literal(lit)),
+                            })));
+                        }
+                    };
+                    Ok((None, Some(prefix), None, None, None))
+                }
+
+                // 其他所有 Binary —— 留在 remaining
+                (op, left, right) => Ok((None, None, None, None, Some(SqlCatalogBoundExpression::Binary {
+                    left: Box::new(left),
+                    operator: op,
+                    right: Box::new(right),
+                }))),
             }
         }
-        other => Ok((None, Some(other))),
+
+        // OR、Between、Unary、Column-alone、Literal-alone 等全部留作 remaining。
+        other => Ok((None, None, None, None, Some(other))),
+    }
+}
+
+fn merge_opt<T>(left: Option<T>, right: Option<T>, conflict_msg: &str) -> Result<Option<T>, SqlFrontendError>
+where
+    T: PartialEq,
+{
+    match (left, right) {
+        (Some(a), Some(b)) if a == b => Ok(Some(a)),
+        (Some(_), Some(_)) => Err(planner_error(conflict_msg)),
+        (Some(a), None) => Ok(Some(a)),
+        (None, Some(b)) => Ok(Some(b)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn combine_remaining(
+    left: Option<SqlCatalogBoundExpression>,
+    right: Option<SqlCatalogBoundExpression>,
+) -> Option<SqlCatalogBoundExpression> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(l), None) | (None, Some(l)) => Some(l),
+        (Some(l), Some(r)) => Some(SqlCatalogBoundExpression::Binary {
+            left: Box::new(l),
+            operator: SqlBoundBinaryOperator::And,
+            right: Box::new(r),
+        }),
     }
 }
 

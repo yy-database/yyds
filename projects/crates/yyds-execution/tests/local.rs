@@ -200,7 +200,7 @@ fn scan_merges_multiple_shards_into_globally_sorted_order() {
     let shards = HashMap::from([(shard_a_id, shard_a), (shard_b_id, shard_b)]);
     let executor = LocalExecutor::new(routing, shards).unwrap();
 
-    let results = executor.execute_scan(&Namespace("n".into()), b"", None, 0).unwrap();
+    let results = executor.execute_scan(&Namespace("n".into()), b"", None, None, 0).unwrap();
     let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
     // K-way merge should produce globally sorted order regardless of which shard holds which key
     assert_eq!(keys, vec![b"1", b"3", b"m", b"z"]);
@@ -225,18 +225,18 @@ fn scan_applies_prefix_after_and_limit_globally() {
     let executor = LocalExecutor::new(routing, shards).unwrap();
 
     // prefix "a-" should merge a-10, a-11, a-20, a-30
-    let r = executor.execute_scan(&Namespace("t".into()), b"a-", None, 0).unwrap();
+    let r = executor.execute_scan(&Namespace("t".into()), b"a-", None, None, 0).unwrap();
     assert_eq!(r.len(), 4);
     let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
     assert_eq!(keys, vec![b"a-10", b"a-11", b"a-20", b"a-30"]);
 
     // after "a-11" exclusive: a-20, a-30 only
-    let r = executor.execute_scan(&Namespace("t".into()), b"a-", Some(b"a-11"), 0).unwrap();
+    let r = executor.execute_scan(&Namespace("t".into()), b"a-", Some(b"a-11"), None, 0).unwrap();
     let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
     assert_eq!(keys, vec![b"a-20", b"a-30"]);
 
     // limit 2 on full scan: first two globally
-    let r = executor.execute_scan(&Namespace("t".into()), b"", None, 2).unwrap();
+    let r = executor.execute_scan(&Namespace("t".into()), b"", None, None, 2).unwrap();
     let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
     assert_eq!(keys, vec![b"a-10", b"a-11"]);
 }
