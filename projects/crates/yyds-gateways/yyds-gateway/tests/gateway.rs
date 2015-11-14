@@ -670,8 +670,125 @@ fn sql_limit_pushes_down_to_scan() {
 
 #[test]
 fn sql_select_pk_like_prefix_pushes_rowid_prefix() {
-    // oak_sql parser upstream issue: LIKE is not parsed into select.expr yet.
-    // This test is frozen pending oak-sql gaining LIKE support.
-    // Planner-side LIKE prefix extraction logic is implemented in extract_pk_range
-    // under `SqlBoundBinaryOperator::Like` and will activate once the parser feeds it.
+    let catalog = catalog("table users { @@id: utf8, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"alice", &[(1, b"alice"), (2, b"alice wang")]),
+            (b"bob", &[(1, b"bob"), (2, b"bob smith")]),
+            (b"carol", &[(1, b"carol"), (2, b"carol lee")]),
+            (b"apple", &[(1, b"apple"), (2, b"apple pie")]),
+            (b"apply", &[(1, b"apply"), (2, b"apply patch")]),
+        ],
+    );
+
+    // LIKE 'app%' on pk → rowid_prefix = b"app" → scan pushes prefix
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id LIKE 'app%'", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(s) => {
+            assert_eq!(&s.rowid_prefix, b"app", "LIKE prefix should push rowid_prefix");
+        }
+        other => panic!("expected Scan for LIKE, got {other:?}"),
+    }
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let ids: Vec<String> = result.rows.iter().map(|r| {
+        if let yyds_gateway::SqlValue::String(s) = &r[0] { s.to_string() }
+        else { panic!() }
+    }).collect();
+    assert_eq!(ids, vec!["apple".to_string(), "apply".to_string()]);
 }
+
+#[test]
+fn sql_select_pk_between_extracts_range() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"carol")]),
+            (b"4", &[(1, b"4"), (2, b"dan")]),
+            (b"5", &[(1, b"5"), (2, b"eve")]),
+        ],
+    );
+
+    // 显式 AND：id >= 2 AND id <= 4
+    // GreaterEqual(2) → after 必须 exclusive：key > (2-1) = key > 1 → after=b"1"
+    // LessEqual(4) → before 必须 exclusive：key < (4+1) = key < 5 → before=b"5"
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id >= 2 AND id <= 4", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(s) => {
+            assert_eq!(s.rowid_after.as_deref(), Some(b"1".as_ref()));
+            assert_eq!(s.rowid_before.as_deref(), Some(b"5".as_ref()));
+        }
+        other => panic!("expected Scan, got {other:?}"),
+    }
+
+    // BETWEEN 2 AND 4 → 展开同上
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id BETWEEN 2 AND 4", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(s) => {
+            assert_eq!(s.rowid_after.as_deref(), Some(b"1".as_ref()));
+            assert_eq!(s.rowid_before.as_deref(), Some(b"5".as_ref()));
+        }
+        other => panic!("expected Scan for BETWEEN, got {other:?}"),
+    }
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    assert_eq!(result.rows.len(), 3);
+}
+
+// ===== parser probes =====
+
+/// 直接用 yyds_gateway::parse_sql 看 AST，诊断 oak_sql parser 对各 WHERE 语法到底产啥。
+fn probe_ast(sql: &str) -> String {
+    let root = yyds_gateway::parse_sql(sql).unwrap_or_else(|e| panic!("parse fail {sql}: {e:?}"));
+    let sel = match &root.statements[0] {
+        oak_sql::ast::SqlStatement::Select(s) => s,
+        _ => panic!("not select"),
+    };
+    format!("{:?}", sel.expr)
+}
+
+#[test]
+fn probe_parser_basic_binary_ops() {
+    let bin = "Some(Binary";
+    assert!(probe_ast("SELECT * FROM t WHERE id = 1")   .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id > 1")  .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id >= 1")  .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id < 1")   .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id <= 1") .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id != 1")  .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE a = 1 AND b = 2").starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE a = 1 OR b = 2") .starts_with(bin));
+}
+
+#[test]
+fn probe_parser_between_in_like_is_null() {
+    let v = probe_ast("SELECT * FROM t WHERE id BETWEEN 1 AND 10");
+    eprintln!("BETWEEN → {v}");
+
+    let v = probe_ast("SELECT * FROM t WHERE id IN (1, 2, 3)");
+    eprintln!("IN → {v}");
+
+    let v = probe_ast("SELECT * FROM t WHERE name LIKE 'apple-%'");
+    eprintln!("LIKE → {v}");
+
+    let v = probe_ast("SELECT * FROM t WHERE name IS NULL");
+    eprintln!("IS NULL → {v}");
+
+    eprintln!("---");
+    // 用纯 infix 验证 LIKE/IN/IS token 是否被 lexer 正确识别
+    // 如果 = 能产 Binary 但 LIKE 只产 Identifier，说明 infix 层没接上
+    let v_eq = probe_ast("SELECT * FROM t WHERE id = 1");
+    eprintln!("EQ → {v_eq}");
+    let v_like = probe_ast("SELECT * FROM t WHERE name LIKE 'x'");
+    eprintln!("LIKE2 → {v_like}");
+}
+
+// raw_children probe 已删——lexer bug 定位完毕，补 keyword 表后重跑 BETWEEN/IN/LIKE/IS NULL probe 验证

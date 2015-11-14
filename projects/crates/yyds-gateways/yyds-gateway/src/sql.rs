@@ -338,6 +338,30 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             },
             expression: Box::new(bind_expression(expr)?),
         }),
+        Expression::Between { expr, low, high, negated, .. } => {
+            if *negated {
+                return Err(bind_error("NOT BETWEEN is not supported yet"));
+            }
+            // Expand BETWEEN into `expr >= low AND expr <= high`
+            let e = bind_expression(expr)?;
+            let lo = bind_expression(low)?;
+            let hi = bind_expression(high)?;
+            let left = SqlBoundExpression::Binary {
+                left: Box::new(e.clone()),
+                operator: SqlBoundBinaryOperator::GreaterEqual,
+                right: Box::new(lo),
+            };
+            let right = SqlBoundExpression::Binary {
+                left: Box::new(e),
+                operator: SqlBoundBinaryOperator::LessEqual,
+                right: Box::new(hi),
+            };
+            Ok(SqlBoundExpression::Binary {
+                left: Box::new(left),
+                operator: SqlBoundBinaryOperator::And,
+                right: Box::new(right),
+            })
+        }
         _ => Err(bind_error("SQL expression is outside the gateway binding subset")),
     }
 }

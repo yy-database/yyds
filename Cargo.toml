@@ -39,3 +39,8 @@ napi-build = "2"
 [profile.release]
 lto = true
 panic = "abort"
+
+# Vendored oak-sql with SQL keyword fixes (LIKE/BETWEEN/IN/IS) and Pratt precedence adjustments.
+# Upstream rev 49eaa0bc missing these keyword tokens in the lexer table, blocking basic SQL WHERE syntax.
+[patch."https://github.com/yggdrasil-language/oaks.git"]
+oak-sql = { path = "vendor/oak-sql" }

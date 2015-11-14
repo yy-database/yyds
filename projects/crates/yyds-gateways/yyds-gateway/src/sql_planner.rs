@@ -307,12 +307,12 @@ fn extract_pk_range(
                     Ok((None, None, Some(rowid), None, None))
                 }
 
-                // pk >= literal → after exclusive（把下界 lit 当作 after，等于要求 key > lit）
+                // pk >= literal → after exclusive：key > (lit-1) 等价于 key >= lit
                 (SqlBoundBinaryOperator::GreaterEqual, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
                     if col.field_id == pk_field_id =>
                 {
                     let rowid = pk_literal_to_rowid(&lit)?;
-                    Ok((None, None, Some(rowid), None, None))
+                    Ok((None, None, Some(rowid_decrement(&rowid)), None, None))
                 }
 
                 // pk < literal → before exclusive
@@ -323,12 +323,12 @@ fn extract_pk_range(
                     Ok((None, None, None, Some(rowid), None))
                 }
 
-                // pk <= literal → before exclusive（上界 lit 当作 before，等于要求 key < lit+1）
+                // pk <= literal → before exclusive：key < (lit+1) 等价于 key <= lit
                 (SqlBoundBinaryOperator::LessEqual, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
                     if col.field_id == pk_field_id =>
                 {
                     let rowid = pk_literal_to_rowid(&lit)?;
-                    Ok((None, None, None, Some(rowid), None))
+                    Ok((None, None, None, Some(rowid_increment(&rowid)), None))
                 }
 
                 // pk LIKE 'prefix%'
@@ -400,6 +400,37 @@ fn pk_literal_to_rowid(literal: &SqlBoundLiteral) -> Result<Vec<u8>, SqlFrontend
         SqlBoundLiteral::String(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::Boolean(value) => Ok((if *value { "1" } else { "0" }).as_bytes().to_vec()),
         SqlBoundLiteral::Null => Err(planner_error("primary key must not be NULL")),
+    }
+}
+
+/// rowid + 1 并转为 bytes。用于把 inclusive upper bound 转为 exclusive before。
+fn rowid_increment(rowid: &[u8]) -> Vec<u8> {
+    let s = String::from_utf8_lossy(rowid);
+    match s.parse::<u128>() {
+        Ok(n) => (n + 1).to_string().into_bytes(),
+        Err(_) => {
+            let mut v = rowid.to_vec();
+            if let Some(last) = v.last_mut() {
+                *last = last.saturating_add(1);
+            }
+            v
+        }
+    }
+}
+
+/// rowid - 1 并转为 bytes。用于把 inclusive lower bound 转为 exclusive after。
+fn rowid_decrement(rowid: &[u8]) -> Vec<u8> {
+    let s = String::from_utf8_lossy(rowid);
+    match s.parse::<u128>() {
+        Ok(0) => rowid.to_vec(),
+        Ok(n) => (n - 1).to_string().into_bytes(),
+        Err(_) => {
+            let mut v = rowid.to_vec();
+            if let Some(last) = v.last_mut() {
+                *last = last.saturating_sub(1);
+            }
+            v
+        }
     }
 }
 
