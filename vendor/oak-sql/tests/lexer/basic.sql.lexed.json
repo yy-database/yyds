@@ -1,0 +1,6361 @@
+{
+    "success": true,
+    "count": 1059,
+    "tokens": [
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 65,
+            "end": 71
+        },
+        {
+            "kind": "Database",
+            "text": "DATABASE",
+            "start": 72,
+            "end": 80
+        },
+        {
+            "kind": "If",
+            "text": "IF",
+            "start": 81,
+            "end": 83
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 84,
+            "end": 87
+        },
+        {
+            "kind": "Exists",
+            "text": "EXISTS",
+            "start": 88,
+            "end": 94
+        },
+        {
+            "kind": "Identifier_",
+            "text": "test_db",
+            "start": 95,
+            "end": 102
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 102,
+            "end": 103
+        },
+        {
+            "kind": "Identifier_",
+            "text": "USE",
+            "start": 104,
+            "end": 107
+        },
+        {
+            "kind": "Identifier_",
+            "text": "test_db",
+            "start": 108,
+            "end": 115
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 115,
+            "end": 116
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 135,
+            "end": 141
+        },
+        {
+            "kind": "Table",
+            "text": "TABLE",
+            "start": 142,
+            "end": 147
+        },
+        {
+            "kind": "Identifier_",
+            "text": "users",
+            "start": 148,
+            "end": 153
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 154,
+            "end": 155
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 160,
+            "end": 162
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 163,
+            "end": 166
+        },
+        {
+            "kind": "Primary",
+            "text": "PRIMARY",
+            "start": 167,
+            "end": 174
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 175,
+            "end": 178
+        },
+        {
+            "kind": "AutoIncrement",
+            "text": "AUTO_INCREMENT",
+            "start": 179,
+            "end": 193
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 193,
+            "end": 194
+        },
+        {
+            "kind": "Identifier_",
+            "text": "username",
+            "start": 199,
+            "end": 207
+        },
+        {
+            "kind": "Varchar",
+            "text": "VARCHAR",
+            "start": 208,
+            "end": 215
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 215,
+            "end": 216
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "50",
+            "start": 216,
+            "end": 218
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 218,
+            "end": 219
+        },
+        {
+            "kind": "Unique",
+            "text": "UNIQUE",
+            "start": 220,
+            "end": 226
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 227,
+            "end": 230
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 231,
+            "end": 235
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 235,
+            "end": 236
+        },
+        {
+            "kind": "Identifier_",
+            "text": "email",
+            "start": 241,
+            "end": 246
+        },
+        {
+            "kind": "Varchar",
+            "text": "VARCHAR",
+            "start": 247,
+            "end": 254
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 254,
+            "end": 255
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "100",
+            "start": 255,
+            "end": 258
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 258,
+            "end": 259
+        },
+        {
+            "kind": "Unique",
+            "text": "UNIQUE",
+            "start": 260,
+            "end": 266
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 267,
+            "end": 270
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 271,
+            "end": 275
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 275,
+            "end": 276
+        },
+        {
+            "kind": "Identifier_",
+            "text": "password_hash",
+            "start": 281,
+            "end": 294
+        },
+        {
+            "kind": "Varchar",
+            "text": "VARCHAR",
+            "start": 295,
+            "end": 302
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 302,
+            "end": 303
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "255",
+            "start": 303,
+            "end": 306
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 306,
+            "end": 307
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 308,
+            "end": 311
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 312,
+            "end": 316
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 316,
+            "end": 317
+        },
+        {
+            "kind": "Identifier_",
+            "text": "first_name",
+            "start": 322,
+            "end": 332
+        },
+        {
+            "kind": "Varchar",
+            "text": "VARCHAR",
+            "start": 333,
+            "end": 340
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 340,
+            "end": 341
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "50",
+            "start": 341,
+            "end": 343
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 343,
+            "end": 344
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 344,
+            "end": 345
+        },
+        {
+            "kind": "Identifier_",
+            "text": "last_name",
+            "start": 350,
+            "end": 359
+        },
+        {
+            "kind": "Varchar",
+            "text": "VARCHAR",
+            "start": 360,
+            "end": 367
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 367,
+            "end": 368
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "50",
+            "start": 368,
+            "end": 370
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 370,
+            "end": 371
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 371,
+            "end": 372
+        },
+        {
+            "kind": "Identifier_",
+            "text": "date_of_birth",
+            "start": 377,
+            "end": 390
+        },
+        {
+            "kind": "Date",
+            "text": "DATE",
+            "start": 391,
+            "end": 395
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 395,
+            "end": 396
+        },
+        {
+            "kind": "Identifier_",
+            "text": "is_active",
+            "start": 401,
+            "end": 410
+        },
+        {
+            "kind": "Boolean",
+            "text": "BOOLEAN",
+            "start": 411,
+            "end": 418
+        },
+        {
+            "kind": "Default",
+            "text": "DEFAULT",
+            "start": 419,
+            "end": 426
+        },
+        {
+            "kind": "True",
+            "text": "TRUE",
+            "start": 427,
+            "end": 431
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 431,
+            "end": 432
+        },
+        {
+            "kind": "Identifier_",
+            "text": "created_at",
+            "start": 437,
+            "end": 447
+        },
+        {
+            "kind": "Timestamp",
+            "text": "TIMESTAMP",
+            "start": 448,
+            "end": 457
+        },
+        {
+            "kind": "Default",
+            "text": "DEFAULT",
+            "start": 458,
+            "end": 465
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CURRENT_TIMESTAMP",
+            "start": 466,
+            "end": 483
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 483,
+            "end": 484
+        },
+        {
+            "kind": "Identifier_",
+            "text": "updated_at",
+            "start": 489,
+            "end": 499
+        },
+        {
+            "kind": "Timestamp",
+            "text": "TIMESTAMP",
+            "start": 500,
+            "end": 509
+        },
+        {
+            "kind": "Default",
+            "text": "DEFAULT",
+            "start": 510,
+            "end": 517
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CURRENT_TIMESTAMP",
+            "start": 518,
+            "end": 535
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 536,
+            "end": 538
+        },
+        {
+            "kind": "Update",
+            "text": "UPDATE",
+            "start": 539,
+            "end": 545
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CURRENT_TIMESTAMP",
+            "start": 546,
+            "end": 563
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 564,
+            "end": 565
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 565,
+            "end": 566
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 568,
+            "end": 574
+        },
+        {
+            "kind": "Table",
+            "text": "TABLE",
+            "start": 575,
+            "end": 580
+        },
+        {
+            "kind": "Identifier_",
+            "text": "categories",
+            "start": 581,
+            "end": 591
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 592,
+            "end": 593
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 598,
+            "end": 600
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 601,
+            "end": 604
+        },
+        {
+            "kind": "Primary",
+            "text": "PRIMARY",
+            "start": 605,
+            "end": 612
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 613,
+            "end": 616
+        },
+        {
+            "kind": "AutoIncrement",
+            "text": "AUTO_INCREMENT",
+            "start": 617,
+            "end": 631
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 631,
+            "end": 632
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 637,
+            "end": 641
+        },
+        {
+            "kind": "Varchar",
+            "text": "VARCHAR",
+            "start": 642,
+            "end": 649
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 649,
+            "end": 650
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "100",
+            "start": 650,
+            "end": 653
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 653,
+            "end": 654
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 655,
+            "end": 658
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 659,
+            "end": 663
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 663,
+            "end": 664
+        },
+        {
+            "kind": "Identifier_",
+            "text": "description",
+            "start": 669,
+            "end": 680
+        },
+        {
+            "kind": "Text",
+            "text": "TEXT",
+            "start": 681,
+            "end": 685
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 685,
+            "end": 686
+        },
+        {
+            "kind": "Identifier_",
+            "text": "parent_id",
+            "start": 691,
+            "end": 700
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 701,
+            "end": 704
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 704,
+            "end": 705
+        },
+        {
+            "kind": "Foreign",
+            "text": "FOREIGN",
+            "start": 710,
+            "end": 717
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 718,
+            "end": 721
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 722,
+            "end": 723
+        },
+        {
+            "kind": "Identifier_",
+            "text": "parent_id",
+            "start": 723,
+            "end": 732
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 732,
+            "end": 733
+        },
+        {
+            "kind": "References",
+            "text": "REFERENCES",
+            "start": 734,
+            "end": 744
+        },
+        {
+            "kind": "Identifier_",
+            "text": "categories",
+            "start": 745,
+            "end": 755
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 755,
+            "end": 756
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 756,
+            "end": 758
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 758,
+            "end": 759
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 760,
+            "end": 762
+        },
+        {
+            "kind": "Delete",
+            "text": "DELETE",
+            "start": 763,
+            "end": 769
+        },
+        {
+            "kind": "Set",
+            "text": "SET",
+            "start": 770,
+            "end": 773
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 774,
+            "end": 778
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 779,
+            "end": 780
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 780,
+            "end": 781
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 783,
+            "end": 789
+        },
+        {
+            "kind": "Table",
+            "text": "TABLE",
+            "start": 790,
+            "end": 795
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 796,
+            "end": 804
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 805,
+            "end": 806
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 811,
+            "end": 813
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 814,
+            "end": 817
+        },
+        {
+            "kind": "Primary",
+            "text": "PRIMARY",
+            "start": 818,
+            "end": 825
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 826,
+            "end": 829
+        },
+        {
+            "kind": "AutoIncrement",
+            "text": "AUTO_INCREMENT",
+            "start": 830,
+            "end": 844
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 844,
+            "end": 845
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 850,
+            "end": 854
+        },
+        {
+            "kind": "Varchar",
+            "text": "VARCHAR",
+            "start": 855,
+            "end": 862
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 862,
+            "end": 863
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "200",
+            "start": 863,
+            "end": 866
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 866,
+            "end": 867
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 868,
+            "end": 871
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 872,
+            "end": 876
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 876,
+            "end": 877
+        },
+        {
+            "kind": "Identifier_",
+            "text": "description",
+            "start": 882,
+            "end": 893
+        },
+        {
+            "kind": "Text",
+            "text": "TEXT",
+            "start": 894,
+            "end": 898
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 898,
+            "end": 899
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 904,
+            "end": 909
+        },
+        {
+            "kind": "Decimal",
+            "text": "DECIMAL",
+            "start": 910,
+            "end": 917
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 917,
+            "end": 918
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "10",
+            "start": 918,
+            "end": 920
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 920,
+            "end": 921
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 922,
+            "end": 923
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 923,
+            "end": 924
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 925,
+            "end": 928
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 929,
+            "end": 933
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 933,
+            "end": 934
+        },
+        {
+            "kind": "Identifier_",
+            "text": "stock_quantity",
+            "start": 939,
+            "end": 953
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 954,
+            "end": 957
+        },
+        {
+            "kind": "Default",
+            "text": "DEFAULT",
+            "start": 958,
+            "end": 965
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "0",
+            "start": 966,
+            "end": 967
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 967,
+            "end": 968
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 973,
+            "end": 984
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 985,
+            "end": 988
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 988,
+            "end": 989
+        },
+        {
+            "kind": "Identifier_",
+            "text": "created_by",
+            "start": 994,
+            "end": 1004
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 1005,
+            "end": 1008
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1008,
+            "end": 1009
+        },
+        {
+            "kind": "Identifier_",
+            "text": "created_at",
+            "start": 1014,
+            "end": 1024
+        },
+        {
+            "kind": "Timestamp",
+            "text": "TIMESTAMP",
+            "start": 1025,
+            "end": 1034
+        },
+        {
+            "kind": "Default",
+            "text": "DEFAULT",
+            "start": 1035,
+            "end": 1042
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CURRENT_TIMESTAMP",
+            "start": 1043,
+            "end": 1060
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1060,
+            "end": 1061
+        },
+        {
+            "kind": "Foreign",
+            "text": "FOREIGN",
+            "start": 1066,
+            "end": 1073
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 1074,
+            "end": 1077
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1078,
+            "end": 1079
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 1079,
+            "end": 1090
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1090,
+            "end": 1091
+        },
+        {
+            "kind": "References",
+            "text": "REFERENCES",
+            "start": 1092,
+            "end": 1102
+        },
+        {
+            "kind": "Identifier_",
+            "text": "categories",
+            "start": 1103,
+            "end": 1113
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1113,
+            "end": 1114
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 1114,
+            "end": 1116
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1116,
+            "end": 1117
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 1118,
+            "end": 1120
+        },
+        {
+            "kind": "Delete",
+            "text": "DELETE",
+            "start": 1121,
+            "end": 1127
+        },
+        {
+            "kind": "Set",
+            "text": "SET",
+            "start": 1128,
+            "end": 1131
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1132,
+            "end": 1136
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1136,
+            "end": 1137
+        },
+        {
+            "kind": "Foreign",
+            "text": "FOREIGN",
+            "start": 1142,
+            "end": 1149
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 1150,
+            "end": 1153
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1154,
+            "end": 1155
+        },
+        {
+            "kind": "Identifier_",
+            "text": "created_by",
+            "start": 1155,
+            "end": 1165
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1165,
+            "end": 1166
+        },
+        {
+            "kind": "References",
+            "text": "REFERENCES",
+            "start": 1167,
+            "end": 1177
+        },
+        {
+            "kind": "Identifier_",
+            "text": "users",
+            "start": 1178,
+            "end": 1183
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1183,
+            "end": 1184
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 1184,
+            "end": 1186
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1186,
+            "end": 1187
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 1188,
+            "end": 1190
+        },
+        {
+            "kind": "Delete",
+            "text": "DELETE",
+            "start": 1191,
+            "end": 1197
+        },
+        {
+            "kind": "Set",
+            "text": "SET",
+            "start": 1198,
+            "end": 1201
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1202,
+            "end": 1206
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1206,
+            "end": 1207
+        },
+        {
+            "kind": "Index",
+            "text": "INDEX",
+            "start": 1212,
+            "end": 1217
+        },
+        {
+            "kind": "Identifier_",
+            "text": "idx_price",
+            "start": 1218,
+            "end": 1227
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1228,
+            "end": 1229
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 1229,
+            "end": 1234
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1234,
+            "end": 1235
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1235,
+            "end": 1236
+        },
+        {
+            "kind": "Index",
+            "text": "INDEX",
+            "start": 1241,
+            "end": 1246
+        },
+        {
+            "kind": "Identifier_",
+            "text": "idx_category",
+            "start": 1247,
+            "end": 1259
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1260,
+            "end": 1261
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 1261,
+            "end": 1272
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1272,
+            "end": 1273
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1273,
+            "end": 1274
+        },
+        {
+            "kind": "Index",
+            "text": "INDEX",
+            "start": 1279,
+            "end": 1284
+        },
+        {
+            "kind": "Identifier_",
+            "text": "idx_name",
+            "start": 1285,
+            "end": 1293
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1294,
+            "end": 1295
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 1295,
+            "end": 1299
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1299,
+            "end": 1300
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1301,
+            "end": 1302
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 1302,
+            "end": 1303
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 1305,
+            "end": 1311
+        },
+        {
+            "kind": "Table",
+            "text": "TABLE",
+            "start": 1312,
+            "end": 1317
+        },
+        {
+            "kind": "Identifier_",
+            "text": "orders",
+            "start": 1318,
+            "end": 1324
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1325,
+            "end": 1326
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 1331,
+            "end": 1333
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 1334,
+            "end": 1337
+        },
+        {
+            "kind": "Primary",
+            "text": "PRIMARY",
+            "start": 1338,
+            "end": 1345
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 1346,
+            "end": 1349
+        },
+        {
+            "kind": "AutoIncrement",
+            "text": "AUTO_INCREMENT",
+            "start": 1350,
+            "end": 1364
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1364,
+            "end": 1365
+        },
+        {
+            "kind": "Identifier_",
+            "text": "user_id",
+            "start": 1370,
+            "end": 1377
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 1378,
+            "end": 1381
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 1382,
+            "end": 1385
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1386,
+            "end": 1390
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1390,
+            "end": 1391
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_amount",
+            "start": 1396,
+            "end": 1408
+        },
+        {
+            "kind": "Decimal",
+            "text": "DECIMAL",
+            "start": 1409,
+            "end": 1416
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1416,
+            "end": 1417
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "10",
+            "start": 1417,
+            "end": 1419
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1419,
+            "end": 1420
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 1421,
+            "end": 1422
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1422,
+            "end": 1423
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 1424,
+            "end": 1427
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1428,
+            "end": 1432
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1432,
+            "end": 1433
+        },
+        {
+            "kind": "Identifier_",
+            "text": "status",
+            "start": 1438,
+            "end": 1444
+        },
+        {
+            "kind": "Identifier_",
+            "text": "ENUM",
+            "start": 1445,
+            "end": 1449
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1449,
+            "end": 1450
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'pending'",
+            "start": 1450,
+            "end": 1459
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1459,
+            "end": 1460
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'processing'",
+            "start": 1461,
+            "end": 1473
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1473,
+            "end": 1474
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'shipped'",
+            "start": 1475,
+            "end": 1484
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1484,
+            "end": 1485
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'delivered'",
+            "start": 1486,
+            "end": 1497
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1497,
+            "end": 1498
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'cancelled'",
+            "start": 1499,
+            "end": 1510
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1510,
+            "end": 1511
+        },
+        {
+            "kind": "Default",
+            "text": "DEFAULT",
+            "start": 1512,
+            "end": 1519
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'pending'",
+            "start": 1520,
+            "end": 1529
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1529,
+            "end": 1530
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_date",
+            "start": 1535,
+            "end": 1545
+        },
+        {
+            "kind": "Timestamp",
+            "text": "TIMESTAMP",
+            "start": 1546,
+            "end": 1555
+        },
+        {
+            "kind": "Default",
+            "text": "DEFAULT",
+            "start": 1556,
+            "end": 1563
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CURRENT_TIMESTAMP",
+            "start": 1564,
+            "end": 1581
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1581,
+            "end": 1582
+        },
+        {
+            "kind": "Identifier_",
+            "text": "shipping_address",
+            "start": 1587,
+            "end": 1603
+        },
+        {
+            "kind": "Text",
+            "text": "TEXT",
+            "start": 1604,
+            "end": 1608
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1608,
+            "end": 1609
+        },
+        {
+            "kind": "Foreign",
+            "text": "FOREIGN",
+            "start": 1614,
+            "end": 1621
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 1622,
+            "end": 1625
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1626,
+            "end": 1627
+        },
+        {
+            "kind": "Identifier_",
+            "text": "user_id",
+            "start": 1627,
+            "end": 1634
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1634,
+            "end": 1635
+        },
+        {
+            "kind": "References",
+            "text": "REFERENCES",
+            "start": 1636,
+            "end": 1646
+        },
+        {
+            "kind": "Identifier_",
+            "text": "users",
+            "start": 1647,
+            "end": 1652
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1652,
+            "end": 1653
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 1653,
+            "end": 1655
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1655,
+            "end": 1656
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 1657,
+            "end": 1659
+        },
+        {
+            "kind": "Delete",
+            "text": "DELETE",
+            "start": 1660,
+            "end": 1666
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CASCADE",
+            "start": 1667,
+            "end": 1674
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1675,
+            "end": 1676
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 1676,
+            "end": 1677
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 1679,
+            "end": 1685
+        },
+        {
+            "kind": "Table",
+            "text": "TABLE",
+            "start": 1686,
+            "end": 1691
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_items",
+            "start": 1692,
+            "end": 1703
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1704,
+            "end": 1705
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 1710,
+            "end": 1712
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 1713,
+            "end": 1716
+        },
+        {
+            "kind": "Primary",
+            "text": "PRIMARY",
+            "start": 1717,
+            "end": 1724
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 1725,
+            "end": 1728
+        },
+        {
+            "kind": "AutoIncrement",
+            "text": "AUTO_INCREMENT",
+            "start": 1729,
+            "end": 1743
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1743,
+            "end": 1744
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_id",
+            "start": 1749,
+            "end": 1757
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 1758,
+            "end": 1761
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 1762,
+            "end": 1765
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1766,
+            "end": 1770
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1770,
+            "end": 1771
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_id",
+            "start": 1776,
+            "end": 1786
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 1787,
+            "end": 1790
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 1791,
+            "end": 1794
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1795,
+            "end": 1799
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1799,
+            "end": 1800
+        },
+        {
+            "kind": "Identifier_",
+            "text": "quantity",
+            "start": 1805,
+            "end": 1813
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 1814,
+            "end": 1817
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 1818,
+            "end": 1821
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1822,
+            "end": 1826
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1826,
+            "end": 1827
+        },
+        {
+            "kind": "Identifier_",
+            "text": "unit_price",
+            "start": 1832,
+            "end": 1842
+        },
+        {
+            "kind": "Decimal",
+            "text": "DECIMAL",
+            "start": 1843,
+            "end": 1850
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1850,
+            "end": 1851
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "10",
+            "start": 1851,
+            "end": 1853
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1853,
+            "end": 1854
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 1855,
+            "end": 1856
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1856,
+            "end": 1857
+        },
+        {
+            "kind": "Not",
+            "text": "NOT",
+            "start": 1858,
+            "end": 1861
+        },
+        {
+            "kind": "Null",
+            "text": "NULL",
+            "start": 1862,
+            "end": 1866
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1866,
+            "end": 1867
+        },
+        {
+            "kind": "Foreign",
+            "text": "FOREIGN",
+            "start": 1872,
+            "end": 1879
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 1880,
+            "end": 1883
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1884,
+            "end": 1885
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_id",
+            "start": 1885,
+            "end": 1893
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1893,
+            "end": 1894
+        },
+        {
+            "kind": "References",
+            "text": "REFERENCES",
+            "start": 1895,
+            "end": 1905
+        },
+        {
+            "kind": "Identifier_",
+            "text": "orders",
+            "start": 1906,
+            "end": 1912
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1912,
+            "end": 1913
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 1913,
+            "end": 1915
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1915,
+            "end": 1916
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 1917,
+            "end": 1919
+        },
+        {
+            "kind": "Delete",
+            "text": "DELETE",
+            "start": 1920,
+            "end": 1926
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CASCADE",
+            "start": 1927,
+            "end": 1934
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 1934,
+            "end": 1935
+        },
+        {
+            "kind": "Foreign",
+            "text": "FOREIGN",
+            "start": 1940,
+            "end": 1947
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 1948,
+            "end": 1951
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1952,
+            "end": 1953
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_id",
+            "start": 1953,
+            "end": 1963
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1963,
+            "end": 1964
+        },
+        {
+            "kind": "References",
+            "text": "REFERENCES",
+            "start": 1965,
+            "end": 1975
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 1976,
+            "end": 1984
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 1984,
+            "end": 1985
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 1985,
+            "end": 1987
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 1987,
+            "end": 1988
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 1989,
+            "end": 1991
+        },
+        {
+            "kind": "Delete",
+            "text": "DELETE",
+            "start": 1992,
+            "end": 1998
+        },
+        {
+            "kind": "Identifier_",
+            "text": "CASCADE",
+            "start": 1999,
+            "end": 2006
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2006,
+            "end": 2007
+        },
+        {
+            "kind": "Unique",
+            "text": "UNIQUE",
+            "start": 2012,
+            "end": 2018
+        },
+        {
+            "kind": "Key",
+            "text": "KEY",
+            "start": 2019,
+            "end": 2022
+        },
+        {
+            "kind": "Identifier_",
+            "text": "unique_order_product",
+            "start": 2023,
+            "end": 2043
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2044,
+            "end": 2045
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_id",
+            "start": 2045,
+            "end": 2053
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2053,
+            "end": 2054
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_id",
+            "start": 2055,
+            "end": 2065
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2065,
+            "end": 2066
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2067,
+            "end": 2068
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 2068,
+            "end": 2069
+        },
+        {
+            "kind": "Insert",
+            "text": "INSERT",
+            "start": 2093,
+            "end": 2099
+        },
+        {
+            "kind": "Into",
+            "text": "INTO",
+            "start": 2100,
+            "end": 2104
+        },
+        {
+            "kind": "Identifier_",
+            "text": "users",
+            "start": 2105,
+            "end": 2110
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2111,
+            "end": 2112
+        },
+        {
+            "kind": "Identifier_",
+            "text": "username",
+            "start": 2112,
+            "end": 2120
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2120,
+            "end": 2121
+        },
+        {
+            "kind": "Identifier_",
+            "text": "email",
+            "start": 2122,
+            "end": 2127
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2127,
+            "end": 2128
+        },
+        {
+            "kind": "Identifier_",
+            "text": "password_hash",
+            "start": 2129,
+            "end": 2142
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2142,
+            "end": 2143
+        },
+        {
+            "kind": "Identifier_",
+            "text": "first_name",
+            "start": 2144,
+            "end": 2154
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2154,
+            "end": 2155
+        },
+        {
+            "kind": "Identifier_",
+            "text": "last_name",
+            "start": 2156,
+            "end": 2165
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2165,
+            "end": 2166
+        },
+        {
+            "kind": "Identifier_",
+            "text": "date_of_birth",
+            "start": 2167,
+            "end": 2180
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2180,
+            "end": 2181
+        },
+        {
+            "kind": "Values",
+            "text": "VALUES",
+            "start": 2182,
+            "end": 2188
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2189,
+            "end": 2190
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'john_doe'",
+            "start": 2190,
+            "end": 2200
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2200,
+            "end": 2201
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'john@example.com'",
+            "start": 2202,
+            "end": 2220
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2220,
+            "end": 2221
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'hashed_password_1'",
+            "start": 2222,
+            "end": 2241
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2241,
+            "end": 2242
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'John'",
+            "start": 2243,
+            "end": 2249
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2249,
+            "end": 2250
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Doe'",
+            "start": 2251,
+            "end": 2256
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2256,
+            "end": 2257
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'1990-05-15'",
+            "start": 2258,
+            "end": 2270
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2270,
+            "end": 2271
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2271,
+            "end": 2272
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2273,
+            "end": 2274
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'jane_smith'",
+            "start": 2274,
+            "end": 2286
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2286,
+            "end": 2287
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'jane@example.com'",
+            "start": 2288,
+            "end": 2306
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2306,
+            "end": 2307
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'hashed_password_2'",
+            "start": 2308,
+            "end": 2327
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2327,
+            "end": 2328
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Jane'",
+            "start": 2329,
+            "end": 2335
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2335,
+            "end": 2336
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Smith'",
+            "start": 2337,
+            "end": 2344
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2344,
+            "end": 2345
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'1985-08-22'",
+            "start": 2346,
+            "end": 2358
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2358,
+            "end": 2359
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2359,
+            "end": 2360
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2361,
+            "end": 2362
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'bob_wilson'",
+            "start": 2362,
+            "end": 2374
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2374,
+            "end": 2375
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'bob@example.com'",
+            "start": 2376,
+            "end": 2393
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2393,
+            "end": 2394
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'hashed_password_3'",
+            "start": 2395,
+            "end": 2414
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2414,
+            "end": 2415
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Bob'",
+            "start": 2416,
+            "end": 2421
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2421,
+            "end": 2422
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Wilson'",
+            "start": 2423,
+            "end": 2431
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2431,
+            "end": 2432
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'1992-12-03'",
+            "start": 2433,
+            "end": 2445
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2445,
+            "end": 2446
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 2446,
+            "end": 2447
+        },
+        {
+            "kind": "Insert",
+            "text": "INSERT",
+            "start": 2449,
+            "end": 2455
+        },
+        {
+            "kind": "Into",
+            "text": "INTO",
+            "start": 2456,
+            "end": 2460
+        },
+        {
+            "kind": "Identifier_",
+            "text": "categories",
+            "start": 2461,
+            "end": 2471
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2472,
+            "end": 2473
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 2473,
+            "end": 2477
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2477,
+            "end": 2478
+        },
+        {
+            "kind": "Identifier_",
+            "text": "description",
+            "start": 2479,
+            "end": 2490
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2490,
+            "end": 2491
+        },
+        {
+            "kind": "Values",
+            "text": "VALUES",
+            "start": 2492,
+            "end": 2498
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2499,
+            "end": 2500
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Electronics'",
+            "start": 2500,
+            "end": 2513
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2513,
+            "end": 2514
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Electronic devices and accessories'",
+            "start": 2515,
+            "end": 2551
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2551,
+            "end": 2552
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2552,
+            "end": 2553
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2554,
+            "end": 2555
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Books'",
+            "start": 2555,
+            "end": 2562
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2562,
+            "end": 2563
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Physical and digital books'",
+            "start": 2564,
+            "end": 2592
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2592,
+            "end": 2593
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2593,
+            "end": 2594
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2595,
+            "end": 2596
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Clothing'",
+            "start": 2596,
+            "end": 2606
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2606,
+            "end": 2607
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Apparel and fashion items'",
+            "start": 2608,
+            "end": 2635
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2635,
+            "end": 2636
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2636,
+            "end": 2637
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2638,
+            "end": 2639
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Home & Garden'",
+            "start": 2639,
+            "end": 2654
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2654,
+            "end": 2655
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Home improvement and gardening supplies'",
+            "start": 2656,
+            "end": 2697
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2697,
+            "end": 2698
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 2698,
+            "end": 2699
+        },
+        {
+            "kind": "Insert",
+            "text": "INSERT",
+            "start": 2701,
+            "end": 2707
+        },
+        {
+            "kind": "Into",
+            "text": "INTO",
+            "start": 2708,
+            "end": 2712
+        },
+        {
+            "kind": "Identifier_",
+            "text": "categories",
+            "start": 2713,
+            "end": 2723
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2724,
+            "end": 2725
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 2725,
+            "end": 2729
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2729,
+            "end": 2730
+        },
+        {
+            "kind": "Identifier_",
+            "text": "description",
+            "start": 2731,
+            "end": 2742
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2742,
+            "end": 2743
+        },
+        {
+            "kind": "Identifier_",
+            "text": "parent_id",
+            "start": 2744,
+            "end": 2753
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2753,
+            "end": 2754
+        },
+        {
+            "kind": "Values",
+            "text": "VALUES",
+            "start": 2755,
+            "end": 2761
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2762,
+            "end": 2763
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Smartphones'",
+            "start": 2763,
+            "end": 2776
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2776,
+            "end": 2777
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Mobile phones and accessories'",
+            "start": 2778,
+            "end": 2809
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2809,
+            "end": 2810
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "1",
+            "start": 2811,
+            "end": 2812
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2812,
+            "end": 2813
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2813,
+            "end": 2814
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2815,
+            "end": 2816
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Laptops'",
+            "start": 2816,
+            "end": 2825
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2825,
+            "end": 2826
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Portable computers'",
+            "start": 2827,
+            "end": 2847
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2847,
+            "end": 2848
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "1",
+            "start": 2849,
+            "end": 2850
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2850,
+            "end": 2851
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2851,
+            "end": 2852
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2853,
+            "end": 2854
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Fiction'",
+            "start": 2854,
+            "end": 2863
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2863,
+            "end": 2864
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Fiction books and novels'",
+            "start": 2865,
+            "end": 2891
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2891,
+            "end": 2892
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 2893,
+            "end": 2894
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2894,
+            "end": 2895
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2895,
+            "end": 2896
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2897,
+            "end": 2898
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Non-Fiction'",
+            "start": 2898,
+            "end": 2911
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2911,
+            "end": 2912
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Educational and reference books'",
+            "start": 2913,
+            "end": 2946
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2946,
+            "end": 2947
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 2948,
+            "end": 2949
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 2949,
+            "end": 2950
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 2950,
+            "end": 2951
+        },
+        {
+            "kind": "Insert",
+            "text": "INSERT",
+            "start": 2953,
+            "end": 2959
+        },
+        {
+            "kind": "Into",
+            "text": "INTO",
+            "start": 2960,
+            "end": 2964
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 2965,
+            "end": 2973
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 2974,
+            "end": 2975
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 2975,
+            "end": 2979
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2979,
+            "end": 2980
+        },
+        {
+            "kind": "Identifier_",
+            "text": "description",
+            "start": 2981,
+            "end": 2992
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2992,
+            "end": 2993
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 2994,
+            "end": 2999
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 2999,
+            "end": 3000
+        },
+        {
+            "kind": "Identifier_",
+            "text": "stock_quantity",
+            "start": 3001,
+            "end": 3015
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3015,
+            "end": 3016
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 3017,
+            "end": 3028
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3028,
+            "end": 3029
+        },
+        {
+            "kind": "Identifier_",
+            "text": "created_by",
+            "start": 3030,
+            "end": 3040
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3040,
+            "end": 3041
+        },
+        {
+            "kind": "Values",
+            "text": "VALUES",
+            "start": 3042,
+            "end": 3048
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3049,
+            "end": 3050
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'iPhone 15'",
+            "start": 3050,
+            "end": 3061
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3061,
+            "end": 3062
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Latest Apple smartphone'",
+            "start": 3063,
+            "end": 3088
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3088,
+            "end": 3089
+        },
+        {
+            "kind": "FloatLiteral",
+            "text": "999.99",
+            "start": 3090,
+            "end": 3096
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3096,
+            "end": 3097
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "50",
+            "start": 3098,
+            "end": 3100
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3100,
+            "end": 3101
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "5",
+            "start": 3102,
+            "end": 3103
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3103,
+            "end": 3104
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "1",
+            "start": 3105,
+            "end": 3106
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3106,
+            "end": 3107
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3107,
+            "end": 3108
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3109,
+            "end": 3110
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Samsung Galaxy S24'",
+            "start": 3110,
+            "end": 3130
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3130,
+            "end": 3131
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Android flagship phone'",
+            "start": 3132,
+            "end": 3156
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3156,
+            "end": 3157
+        },
+        {
+            "kind": "FloatLiteral",
+            "text": "899.99",
+            "start": 3158,
+            "end": 3164
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3164,
+            "end": 3165
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "30",
+            "start": 3166,
+            "end": 3168
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3168,
+            "end": 3169
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "5",
+            "start": 3170,
+            "end": 3171
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3171,
+            "end": 3172
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "1",
+            "start": 3173,
+            "end": 3174
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3174,
+            "end": 3175
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3175,
+            "end": 3176
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3177,
+            "end": 3178
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'MacBook Pro'",
+            "start": 3178,
+            "end": 3191
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3191,
+            "end": 3192
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'16-inch laptop with M3 chip'",
+            "start": 3193,
+            "end": 3222
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3222,
+            "end": 3223
+        },
+        {
+            "kind": "FloatLiteral",
+            "text": "2499.99",
+            "start": 3224,
+            "end": 3231
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3231,
+            "end": 3232
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "15",
+            "start": 3233,
+            "end": 3235
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3235,
+            "end": 3236
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "6",
+            "start": 3237,
+            "end": 3238
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3238,
+            "end": 3239
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 3240,
+            "end": 3241
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3241,
+            "end": 3242
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3242,
+            "end": 3243
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3244,
+            "end": 3245
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'The Great Gatsby'",
+            "start": 3245,
+            "end": 3263
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3263,
+            "end": 3264
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Classic American novel'",
+            "start": 3265,
+            "end": 3289
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3289,
+            "end": 3290
+        },
+        {
+            "kind": "FloatLiteral",
+            "text": "12.99",
+            "start": 3291,
+            "end": 3296
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3296,
+            "end": 3297
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "100",
+            "start": 3298,
+            "end": 3301
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3301,
+            "end": 3302
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "7",
+            "start": 3303,
+            "end": 3304
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3304,
+            "end": 3305
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "3",
+            "start": 3306,
+            "end": 3307
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3307,
+            "end": 3308
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3308,
+            "end": 3309
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3310,
+            "end": 3311
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Clean Code'",
+            "start": 3311,
+            "end": 3323
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3323,
+            "end": 3324
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'Programming best practices'",
+            "start": 3325,
+            "end": 3353
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3353,
+            "end": 3354
+        },
+        {
+            "kind": "FloatLiteral",
+            "text": "45.99",
+            "start": 3355,
+            "end": 3360
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3360,
+            "end": 3361
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "25",
+            "start": 3362,
+            "end": 3364
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3364,
+            "end": 3365
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "8",
+            "start": 3366,
+            "end": 3367
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3367,
+            "end": 3368
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 3369,
+            "end": 3370
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3370,
+            "end": 3371
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 3371,
+            "end": 3372
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 3414,
+            "end": 3420
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3426,
+            "end": 3427
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3427,
+            "end": 3428
+        },
+        {
+            "kind": "Identifier_",
+            "text": "username",
+            "start": 3428,
+            "end": 3436
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3436,
+            "end": 3437
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3442,
+            "end": 3443
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3443,
+            "end": 3444
+        },
+        {
+            "kind": "Identifier_",
+            "text": "email",
+            "start": 3444,
+            "end": 3449
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3449,
+            "end": 3450
+        },
+        {
+            "kind": "Identifier_",
+            "text": "COUNT",
+            "start": 3455,
+            "end": 3460
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3460,
+            "end": 3461
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 3461,
+            "end": 3462
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3462,
+            "end": 3463
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 3463,
+            "end": 3465
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3465,
+            "end": 3466
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 3467,
+            "end": 3469
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_count",
+            "start": 3470,
+            "end": 3481
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3481,
+            "end": 3482
+        },
+        {
+            "kind": "Identifier_",
+            "text": "SUM",
+            "start": 3487,
+            "end": 3490
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3490,
+            "end": 3491
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 3491,
+            "end": 3492
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3492,
+            "end": 3493
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_amount",
+            "start": 3493,
+            "end": 3505
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3505,
+            "end": 3506
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 3507,
+            "end": 3509
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_spent",
+            "start": 3510,
+            "end": 3521
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 3522,
+            "end": 3526
+        },
+        {
+            "kind": "Identifier_",
+            "text": "users",
+            "start": 3527,
+            "end": 3532
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3533,
+            "end": 3534
+        },
+        {
+            "kind": "Left",
+            "text": "LEFT",
+            "start": 3535,
+            "end": 3539
+        },
+        {
+            "kind": "Join",
+            "text": "JOIN",
+            "start": 3540,
+            "end": 3544
+        },
+        {
+            "kind": "Identifier_",
+            "text": "orders",
+            "start": 3545,
+            "end": 3551
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 3552,
+            "end": 3553
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 3554,
+            "end": 3556
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3557,
+            "end": 3558
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3558,
+            "end": 3559
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 3559,
+            "end": 3561
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 3562,
+            "end": 3563
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 3564,
+            "end": 3565
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3565,
+            "end": 3566
+        },
+        {
+            "kind": "Identifier_",
+            "text": "user_id",
+            "start": 3566,
+            "end": 3573
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 3574,
+            "end": 3579
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3580,
+            "end": 3581
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3581,
+            "end": 3582
+        },
+        {
+            "kind": "Identifier_",
+            "text": "is_active",
+            "start": 3582,
+            "end": 3591
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 3592,
+            "end": 3593
+        },
+        {
+            "kind": "True",
+            "text": "TRUE",
+            "start": 3594,
+            "end": 3598
+        },
+        {
+            "kind": "Group",
+            "text": "GROUP",
+            "start": 3599,
+            "end": 3604
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 3605,
+            "end": 3607
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3608,
+            "end": 3609
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3609,
+            "end": 3610
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 3610,
+            "end": 3612
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3612,
+            "end": 3613
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3614,
+            "end": 3615
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3615,
+            "end": 3616
+        },
+        {
+            "kind": "Identifier_",
+            "text": "username",
+            "start": 3616,
+            "end": 3624
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3624,
+            "end": 3625
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 3626,
+            "end": 3627
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3627,
+            "end": 3628
+        },
+        {
+            "kind": "Identifier_",
+            "text": "email",
+            "start": 3628,
+            "end": 3633
+        },
+        {
+            "kind": "Having",
+            "text": "HAVING",
+            "start": 3634,
+            "end": 3640
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_spent",
+            "start": 3641,
+            "end": 3652
+        },
+        {
+            "kind": "Greater",
+            "text": ">",
+            "start": 3653,
+            "end": 3654
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "100",
+            "start": 3655,
+            "end": 3658
+        },
+        {
+            "kind": "Order",
+            "text": "ORDER",
+            "start": 3659,
+            "end": 3664
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 3665,
+            "end": 3667
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_spent",
+            "start": 3668,
+            "end": 3679
+        },
+        {
+            "kind": "Desc",
+            "text": "DESC",
+            "start": 3680,
+            "end": 3684
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 3684,
+            "end": 3685
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 3707,
+            "end": 3713
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 3719,
+            "end": 3720
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3720,
+            "end": 3721
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 3721,
+            "end": 3725
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3725,
+            "end": 3726
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 3731,
+            "end": 3732
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3732,
+            "end": 3733
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 3733,
+            "end": 3738
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3738,
+            "end": 3739
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 3744,
+            "end": 3745
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3745,
+            "end": 3746
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 3746,
+            "end": 3750
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 3751,
+            "end": 3753
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_name",
+            "start": 3754,
+            "end": 3767
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 3768,
+            "end": 3772
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 3773,
+            "end": 3781
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 3782,
+            "end": 3783
+        },
+        {
+            "kind": "Join",
+            "text": "JOIN",
+            "start": 3784,
+            "end": 3788
+        },
+        {
+            "kind": "Identifier_",
+            "text": "categories",
+            "start": 3789,
+            "end": 3799
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 3800,
+            "end": 3801
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 3802,
+            "end": 3804
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 3805,
+            "end": 3806
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3806,
+            "end": 3807
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 3807,
+            "end": 3818
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 3819,
+            "end": 3820
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 3821,
+            "end": 3822
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3822,
+            "end": 3823
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 3823,
+            "end": 3825
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 3826,
+            "end": 3831
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 3832,
+            "end": 3833
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3833,
+            "end": 3834
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 3834,
+            "end": 3839
+        },
+        {
+            "kind": "Greater",
+            "text": ">",
+            "start": 3840,
+            "end": 3841
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3842,
+            "end": 3843
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 3848,
+            "end": 3854
+        },
+        {
+            "kind": "Identifier_",
+            "text": "AVG",
+            "start": 3855,
+            "end": 3858
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 3858,
+            "end": 3859
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 3859,
+            "end": 3864
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3864,
+            "end": 3865
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 3871,
+            "end": 3875
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 3876,
+            "end": 3884
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 3890,
+            "end": 3895
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 3896,
+            "end": 3907
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 3908,
+            "end": 3909
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 3910,
+            "end": 3911
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 3911,
+            "end": 3912
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 3912,
+            "end": 3923
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 3924,
+            "end": 3925
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 3925,
+            "end": 3926
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 3948,
+            "end": 3954
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 3960,
+            "end": 3964
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3964,
+            "end": 3965
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 3970,
+            "end": 3975
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3975,
+            "end": 3976
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 3981,
+            "end": 3992
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 3992,
+            "end": 3993
+        },
+        {
+            "kind": "Identifier_",
+            "text": "ROW_NUMBER",
+            "start": 3998,
+            "end": 4008
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4008,
+            "end": 4009
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4009,
+            "end": 4010
+        },
+        {
+            "kind": "Identifier_",
+            "text": "OVER",
+            "start": 4011,
+            "end": 4015
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4016,
+            "end": 4017
+        },
+        {
+            "kind": "Identifier_",
+            "text": "PARTITION",
+            "start": 4017,
+            "end": 4026
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 4027,
+            "end": 4029
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 4030,
+            "end": 4041
+        },
+        {
+            "kind": "Order",
+            "text": "ORDER",
+            "start": 4042,
+            "end": 4047
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 4048,
+            "end": 4050
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 4051,
+            "end": 4056
+        },
+        {
+            "kind": "Desc",
+            "text": "DESC",
+            "start": 4057,
+            "end": 4061
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4061,
+            "end": 4062
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4063,
+            "end": 4065
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price_rank",
+            "start": 4066,
+            "end": 4076
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4076,
+            "end": 4077
+        },
+        {
+            "kind": "Identifier_",
+            "text": "AVG",
+            "start": 4082,
+            "end": 4085
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4085,
+            "end": 4086
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 4086,
+            "end": 4091
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4091,
+            "end": 4092
+        },
+        {
+            "kind": "Identifier_",
+            "text": "OVER",
+            "start": 4093,
+            "end": 4097
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4098,
+            "end": 4099
+        },
+        {
+            "kind": "Identifier_",
+            "text": "PARTITION",
+            "start": 4099,
+            "end": 4108
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 4109,
+            "end": 4111
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 4112,
+            "end": 4123
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4123,
+            "end": 4124
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4125,
+            "end": 4127
+        },
+        {
+            "kind": "Identifier_",
+            "text": "avg_category_price",
+            "start": 4128,
+            "end": 4146
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4146,
+            "end": 4147
+        },
+        {
+            "kind": "Identifier_",
+            "text": "LAG",
+            "start": 4152,
+            "end": 4155
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4155,
+            "end": 4156
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 4156,
+            "end": 4161
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4161,
+            "end": 4162
+        },
+        {
+            "kind": "Identifier_",
+            "text": "OVER",
+            "start": 4163,
+            "end": 4167
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4168,
+            "end": 4169
+        },
+        {
+            "kind": "Order",
+            "text": "ORDER",
+            "start": 4169,
+            "end": 4174
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 4175,
+            "end": 4177
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 4178,
+            "end": 4183
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4183,
+            "end": 4184
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4185,
+            "end": 4187
+        },
+        {
+            "kind": "Identifier_",
+            "text": "previous_price",
+            "start": 4188,
+            "end": 4202
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 4203,
+            "end": 4207
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 4208,
+            "end": 4216
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 4216,
+            "end": 4217
+        },
+        {
+            "kind": "Identifier_",
+            "text": "WITH",
+            "start": 4252,
+            "end": 4256
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_stats",
+            "start": 4257,
+            "end": 4271
+        },
+        {
+            "kind": "As",
+            "text": "AS",
+            "start": 4272,
+            "end": 4274
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4275,
+            "end": 4276
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 4281,
+            "end": 4287
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 4297,
+            "end": 4298
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4298,
+            "end": 4299
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 4299,
+            "end": 4301
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4301,
+            "end": 4302
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 4311,
+            "end": 4312
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4312,
+            "end": 4313
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 4313,
+            "end": 4317
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4317,
+            "end": 4318
+        },
+        {
+            "kind": "Identifier_",
+            "text": "COUNT",
+            "start": 4327,
+            "end": 4332
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4332,
+            "end": 4333
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 4333,
+            "end": 4334
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4334,
+            "end": 4335
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 4335,
+            "end": 4337
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4337,
+            "end": 4338
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4339,
+            "end": 4341
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_count",
+            "start": 4342,
+            "end": 4355
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4355,
+            "end": 4356
+        },
+        {
+            "kind": "Identifier_",
+            "text": "AVG",
+            "start": 4365,
+            "end": 4368
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4368,
+            "end": 4369
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 4369,
+            "end": 4370
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4370,
+            "end": 4371
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 4371,
+            "end": 4376
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4376,
+            "end": 4377
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4378,
+            "end": 4380
+        },
+        {
+            "kind": "Identifier_",
+            "text": "avg_price",
+            "start": 4381,
+            "end": 4390
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4390,
+            "end": 4391
+        },
+        {
+            "kind": "Max",
+            "text": "MAX",
+            "start": 4400,
+            "end": 4403
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4403,
+            "end": 4404
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 4404,
+            "end": 4405
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4405,
+            "end": 4406
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 4406,
+            "end": 4411
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4411,
+            "end": 4412
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4413,
+            "end": 4415
+        },
+        {
+            "kind": "Identifier_",
+            "text": "max_price",
+            "start": 4416,
+            "end": 4425
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4425,
+            "end": 4426
+        },
+        {
+            "kind": "Identifier_",
+            "text": "MIN",
+            "start": 4435,
+            "end": 4438
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4438,
+            "end": 4439
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 4439,
+            "end": 4440
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4440,
+            "end": 4441
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 4441,
+            "end": 4446
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4446,
+            "end": 4447
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4448,
+            "end": 4450
+        },
+        {
+            "kind": "Identifier_",
+            "text": "min_price",
+            "start": 4451,
+            "end": 4460
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 4465,
+            "end": 4469
+        },
+        {
+            "kind": "Identifier_",
+            "text": "categories",
+            "start": 4470,
+            "end": 4480
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 4481,
+            "end": 4482
+        },
+        {
+            "kind": "Left",
+            "text": "LEFT",
+            "start": 4487,
+            "end": 4491
+        },
+        {
+            "kind": "Join",
+            "text": "JOIN",
+            "start": 4492,
+            "end": 4496
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 4497,
+            "end": 4505
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 4506,
+            "end": 4507
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 4508,
+            "end": 4510
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 4511,
+            "end": 4512
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4512,
+            "end": 4513
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 4513,
+            "end": 4515
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 4516,
+            "end": 4517
+        },
+        {
+            "kind": "Identifier_",
+            "text": "p",
+            "start": 4518,
+            "end": 4519
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4519,
+            "end": 4520
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_id",
+            "start": 4520,
+            "end": 4531
+        },
+        {
+            "kind": "Group",
+            "text": "GROUP",
+            "start": 4536,
+            "end": 4541
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 4542,
+            "end": 4544
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 4545,
+            "end": 4546
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4546,
+            "end": 4547
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 4547,
+            "end": 4549
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4549,
+            "end": 4550
+        },
+        {
+            "kind": "Identifier_",
+            "text": "c",
+            "start": 4551,
+            "end": 4552
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 4552,
+            "end": 4553
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 4553,
+            "end": 4557
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4558,
+            "end": 4559
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 4560,
+            "end": 4566
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 4572,
+            "end": 4576
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4576,
+            "end": 4577
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_count",
+            "start": 4582,
+            "end": 4595
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4595,
+            "end": 4596
+        },
+        {
+            "kind": "Identifier_",
+            "text": "ROUND",
+            "start": 4601,
+            "end": 4606
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4606,
+            "end": 4607
+        },
+        {
+            "kind": "Identifier_",
+            "text": "avg_price",
+            "start": 4607,
+            "end": 4616
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4616,
+            "end": 4617
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "2",
+            "start": 4618,
+            "end": 4619
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4619,
+            "end": 4620
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 4621,
+            "end": 4623
+        },
+        {
+            "kind": "Identifier_",
+            "text": "avg_price",
+            "start": 4624,
+            "end": 4633
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4633,
+            "end": 4634
+        },
+        {
+            "kind": "Identifier_",
+            "text": "max_price",
+            "start": 4639,
+            "end": 4648
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 4648,
+            "end": 4649
+        },
+        {
+            "kind": "Identifier_",
+            "text": "min_price",
+            "start": 4654,
+            "end": 4663
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 4664,
+            "end": 4668
+        },
+        {
+            "kind": "Identifier_",
+            "text": "category_stats",
+            "start": 4669,
+            "end": 4683
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 4684,
+            "end": 4689
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_count",
+            "start": 4690,
+            "end": 4703
+        },
+        {
+            "kind": "Greater",
+            "text": ">",
+            "start": 4704,
+            "end": 4705
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "0",
+            "start": 4706,
+            "end": 4707
+        },
+        {
+            "kind": "Order",
+            "text": "ORDER",
+            "start": 4708,
+            "end": 4713
+        },
+        {
+            "kind": "By",
+            "text": "BY",
+            "start": 4714,
+            "end": 4716
+        },
+        {
+            "kind": "Identifier_",
+            "text": "avg_price",
+            "start": 4717,
+            "end": 4726
+        },
+        {
+            "kind": "Desc",
+            "text": "DESC",
+            "start": 4727,
+            "end": 4731
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 4731,
+            "end": 4732
+        },
+        {
+            "kind": "Update",
+            "text": "UPDATE",
+            "start": 4755,
+            "end": 4761
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 4762,
+            "end": 4770
+        },
+        {
+            "kind": "Set",
+            "text": "SET",
+            "start": 4772,
+            "end": 4775
+        },
+        {
+            "kind": "Identifier_",
+            "text": "stock_quantity",
+            "start": 4776,
+            "end": 4790
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 4791,
+            "end": 4792
+        },
+        {
+            "kind": "Identifier_",
+            "text": "stock_quantity",
+            "start": 4793,
+            "end": 4807
+        },
+        {
+            "kind": "Minus",
+            "text": "-",
+            "start": 4808,
+            "end": 4809
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "1",
+            "start": 4810,
+            "end": 4811
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 4813,
+            "end": 4818
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 4819,
+            "end": 4821
+        },
+        {
+            "kind": "Identifier_",
+            "text": "IN",
+            "start": 4822,
+            "end": 4824
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4825,
+            "end": 4826
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 4831,
+            "end": 4837
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_id",
+            "start": 4838,
+            "end": 4848
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 4854,
+            "end": 4858
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_items",
+            "start": 4859,
+            "end": 4870
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 4876,
+            "end": 4881
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_id",
+            "start": 4882,
+            "end": 4890
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 4891,
+            "end": 4892
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "1",
+            "start": 4893,
+            "end": 4894
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 4895,
+            "end": 4896
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 4896,
+            "end": 4897
+        },
+        {
+            "kind": "Delete",
+            "text": "DELETE",
+            "start": 4925,
+            "end": 4931
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 4932,
+            "end": 4936
+        },
+        {
+            "kind": "Identifier_",
+            "text": "orders",
+            "start": 4937,
+            "end": 4943
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 4945,
+            "end": 4950
+        },
+        {
+            "kind": "Identifier_",
+            "text": "status",
+            "start": 4951,
+            "end": 4957
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 4958,
+            "end": 4959
+        },
+        {
+            "kind": "StringLiteral",
+            "text": "'cancelled'",
+            "start": 4960,
+            "end": 4971
+        },
+        {
+            "kind": "And",
+            "text": "AND",
+            "start": 4973,
+            "end": 4976
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_date",
+            "start": 4977,
+            "end": 4987
+        },
+        {
+            "kind": "Less",
+            "text": "<",
+            "start": 4988,
+            "end": 4989
+        },
+        {
+            "kind": "Identifier_",
+            "text": "DATE_SUB",
+            "start": 4990,
+            "end": 4998
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 4998,
+            "end": 4999
+        },
+        {
+            "kind": "Identifier_",
+            "text": "NOW",
+            "start": 4999,
+            "end": 5002
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5002,
+            "end": 5003
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5003,
+            "end": 5004
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5004,
+            "end": 5005
+        },
+        {
+            "kind": "Identifier_",
+            "text": "INTERVAL",
+            "start": 5006,
+            "end": 5014
+        },
+        {
+            "kind": "NumberLiteral",
+            "text": "30",
+            "start": 5015,
+            "end": 5017
+        },
+        {
+            "kind": "Identifier_",
+            "text": "DAY",
+            "start": 5018,
+            "end": 5021
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5021,
+            "end": 5022
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5022,
+            "end": 5023
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 5043,
+            "end": 5049
+        },
+        {
+            "kind": "Index",
+            "text": "INDEX",
+            "start": 5050,
+            "end": 5055
+        },
+        {
+            "kind": "Identifier_",
+            "text": "idx_user_email",
+            "start": 5056,
+            "end": 5070
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 5071,
+            "end": 5073
+        },
+        {
+            "kind": "Identifier_",
+            "text": "users",
+            "start": 5074,
+            "end": 5079
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5079,
+            "end": 5080
+        },
+        {
+            "kind": "Identifier_",
+            "text": "email",
+            "start": 5080,
+            "end": 5085
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5085,
+            "end": 5086
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5086,
+            "end": 5087
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 5088,
+            "end": 5094
+        },
+        {
+            "kind": "Index",
+            "text": "INDEX",
+            "start": 5095,
+            "end": 5100
+        },
+        {
+            "kind": "Identifier_",
+            "text": "idx_product_name_price",
+            "start": 5101,
+            "end": 5123
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 5124,
+            "end": 5126
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 5127,
+            "end": 5135
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5135,
+            "end": 5136
+        },
+        {
+            "kind": "Identifier_",
+            "text": "name",
+            "start": 5136,
+            "end": 5140
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5140,
+            "end": 5141
+        },
+        {
+            "kind": "Identifier_",
+            "text": "price",
+            "start": 5142,
+            "end": 5147
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5147,
+            "end": 5148
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5148,
+            "end": 5149
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 5150,
+            "end": 5156
+        },
+        {
+            "kind": "Index",
+            "text": "INDEX",
+            "start": 5157,
+            "end": 5162
+        },
+        {
+            "kind": "Identifier_",
+            "text": "idx_order_status_date",
+            "start": 5163,
+            "end": 5184
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 5185,
+            "end": 5187
+        },
+        {
+            "kind": "Identifier_",
+            "text": "orders",
+            "start": 5188,
+            "end": 5194
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5194,
+            "end": 5195
+        },
+        {
+            "kind": "Identifier_",
+            "text": "status",
+            "start": 5195,
+            "end": 5201
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5201,
+            "end": 5202
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_date",
+            "start": 5203,
+            "end": 5213
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5213,
+            "end": 5214
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5214,
+            "end": 5215
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 5232,
+            "end": 5238
+        },
+        {
+            "kind": "View",
+            "text": "VIEW",
+            "start": 5239,
+            "end": 5243
+        },
+        {
+            "kind": "Identifier_",
+            "text": "active_user_orders",
+            "start": 5244,
+            "end": 5262
+        },
+        {
+            "kind": "As",
+            "text": "AS",
+            "start": 5263,
+            "end": 5265
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 5266,
+            "end": 5272
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 5278,
+            "end": 5279
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5279,
+            "end": 5280
+        },
+        {
+            "kind": "Identifier_",
+            "text": "username",
+            "start": 5280,
+            "end": 5288
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5288,
+            "end": 5289
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 5294,
+            "end": 5295
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5295,
+            "end": 5296
+        },
+        {
+            "kind": "Identifier_",
+            "text": "email",
+            "start": 5296,
+            "end": 5301
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5301,
+            "end": 5302
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 5307,
+            "end": 5308
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5308,
+            "end": 5309
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 5309,
+            "end": 5311
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 5312,
+            "end": 5314
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_id",
+            "start": 5315,
+            "end": 5323
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5323,
+            "end": 5324
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 5329,
+            "end": 5330
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5330,
+            "end": 5331
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_amount",
+            "start": 5331,
+            "end": 5343
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5343,
+            "end": 5344
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 5349,
+            "end": 5350
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5350,
+            "end": 5351
+        },
+        {
+            "kind": "Identifier_",
+            "text": "status",
+            "start": 5351,
+            "end": 5357
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5357,
+            "end": 5358
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 5363,
+            "end": 5364
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5364,
+            "end": 5365
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_date",
+            "start": 5365,
+            "end": 5375
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 5376,
+            "end": 5380
+        },
+        {
+            "kind": "Identifier_",
+            "text": "users",
+            "start": 5381,
+            "end": 5386
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 5387,
+            "end": 5388
+        },
+        {
+            "kind": "Join",
+            "text": "JOIN",
+            "start": 5389,
+            "end": 5393
+        },
+        {
+            "kind": "Identifier_",
+            "text": "orders",
+            "start": 5394,
+            "end": 5400
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 5401,
+            "end": 5402
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 5403,
+            "end": 5405
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 5406,
+            "end": 5407
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5407,
+            "end": 5408
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 5408,
+            "end": 5410
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 5411,
+            "end": 5412
+        },
+        {
+            "kind": "Identifier_",
+            "text": "o",
+            "start": 5413,
+            "end": 5414
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5414,
+            "end": 5415
+        },
+        {
+            "kind": "Identifier_",
+            "text": "user_id",
+            "start": 5415,
+            "end": 5422
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 5423,
+            "end": 5428
+        },
+        {
+            "kind": "Identifier_",
+            "text": "u",
+            "start": 5429,
+            "end": 5430
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5430,
+            "end": 5431
+        },
+        {
+            "kind": "Identifier_",
+            "text": "is_active",
+            "start": 5431,
+            "end": 5440
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 5441,
+            "end": 5442
+        },
+        {
+            "kind": "True",
+            "text": "TRUE",
+            "start": 5443,
+            "end": 5447
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5447,
+            "end": 5448
+        },
+        {
+            "kind": "Delimiter",
+            "text": "DELIMITER",
+            "start": 5470,
+            "end": 5479
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 5480,
+            "end": 5481
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 5481,
+            "end": 5482
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 5483,
+            "end": 5489
+        },
+        {
+            "kind": "Identifier_",
+            "text": "PROCEDURE",
+            "start": 5490,
+            "end": 5499
+        },
+        {
+            "kind": "Identifier_",
+            "text": "GetUserOrderSummary",
+            "start": 5500,
+            "end": 5519
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5519,
+            "end": 5520
+        },
+        {
+            "kind": "Identifier_",
+            "text": "IN",
+            "start": 5520,
+            "end": 5522
+        },
+        {
+            "kind": "Identifier_",
+            "text": "user_id",
+            "start": 5523,
+            "end": 5530
+        },
+        {
+            "kind": "Int",
+            "text": "INT",
+            "start": 5531,
+            "end": 5534
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5534,
+            "end": 5535
+        },
+        {
+            "kind": "Begin",
+            "text": "BEGIN",
+            "start": 5536,
+            "end": 5541
+        },
+        {
+            "kind": "Select",
+            "text": "SELECT",
+            "start": 5546,
+            "end": 5552
+        },
+        {
+            "kind": "Identifier_",
+            "text": "COUNT",
+            "start": 5562,
+            "end": 5567
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5567,
+            "end": 5568
+        },
+        {
+            "kind": "Star",
+            "text": "*",
+            "start": 5568,
+            "end": 5569
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5569,
+            "end": 5570
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 5571,
+            "end": 5573
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_orders",
+            "start": 5574,
+            "end": 5586
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5586,
+            "end": 5587
+        },
+        {
+            "kind": "Identifier_",
+            "text": "SUM",
+            "start": 5596,
+            "end": 5599
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5599,
+            "end": 5600
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_amount",
+            "start": 5600,
+            "end": 5612
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5612,
+            "end": 5613
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 5614,
+            "end": 5616
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_spent",
+            "start": 5617,
+            "end": 5628
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5628,
+            "end": 5629
+        },
+        {
+            "kind": "Identifier_",
+            "text": "AVG",
+            "start": 5638,
+            "end": 5641
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5641,
+            "end": 5642
+        },
+        {
+            "kind": "Identifier_",
+            "text": "total_amount",
+            "start": 5642,
+            "end": 5654
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5654,
+            "end": 5655
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 5656,
+            "end": 5658
+        },
+        {
+            "kind": "Identifier_",
+            "text": "avg_order_value",
+            "start": 5659,
+            "end": 5674
+        },
+        {
+            "kind": "Comma",
+            "text": ",",
+            "start": 5674,
+            "end": 5675
+        },
+        {
+            "kind": "Max",
+            "text": "MAX",
+            "start": 5684,
+            "end": 5687
+        },
+        {
+            "kind": "LeftParen",
+            "text": "(",
+            "start": 5687,
+            "end": 5688
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_date",
+            "start": 5688,
+            "end": 5698
+        },
+        {
+            "kind": "RightParen",
+            "text": ")",
+            "start": 5698,
+            "end": 5699
+        },
+        {
+            "kind": "As",
+            "text": "as",
+            "start": 5700,
+            "end": 5702
+        },
+        {
+            "kind": "Identifier_",
+            "text": "last_order_date",
+            "start": 5703,
+            "end": 5718
+        },
+        {
+            "kind": "From",
+            "text": "FROM",
+            "start": 5723,
+            "end": 5727
+        },
+        {
+            "kind": "Identifier_",
+            "text": "orders",
+            "start": 5728,
+            "end": 5734
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 5740,
+            "end": 5745
+        },
+        {
+            "kind": "Identifier_",
+            "text": "user_id",
+            "start": 5746,
+            "end": 5753
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 5754,
+            "end": 5755
+        },
+        {
+            "kind": "Identifier_",
+            "text": "user_id",
+            "start": 5756,
+            "end": 5763
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5763,
+            "end": 5764
+        },
+        {
+            "kind": "End",
+            "text": "END",
+            "start": 5765,
+            "end": 5768
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 5769,
+            "end": 5770
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 5770,
+            "end": 5771
+        },
+        {
+            "kind": "Delimiter",
+            "text": "DELIMITER",
+            "start": 5772,
+            "end": 5781
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5782,
+            "end": 5783
+        },
+        {
+            "kind": "Delimiter",
+            "text": "DELIMITER",
+            "start": 5796,
+            "end": 5805
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 5806,
+            "end": 5807
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 5807,
+            "end": 5808
+        },
+        {
+            "kind": "Create",
+            "text": "CREATE",
+            "start": 5809,
+            "end": 5815
+        },
+        {
+            "kind": "Trigger",
+            "text": "TRIGGER",
+            "start": 5816,
+            "end": 5823
+        },
+        {
+            "kind": "Identifier_",
+            "text": "update_product_stock",
+            "start": 5824,
+            "end": 5844
+        },
+        {
+            "kind": "After",
+            "text": "AFTER",
+            "start": 5846,
+            "end": 5851
+        },
+        {
+            "kind": "Insert",
+            "text": "INSERT",
+            "start": 5852,
+            "end": 5858
+        },
+        {
+            "kind": "On",
+            "text": "ON",
+            "start": 5859,
+            "end": 5861
+        },
+        {
+            "kind": "Identifier_",
+            "text": "order_items",
+            "start": 5862,
+            "end": 5873
+        },
+        {
+            "kind": "For",
+            "text": "FOR",
+            "start": 5874,
+            "end": 5877
+        },
+        {
+            "kind": "Each",
+            "text": "EACH",
+            "start": 5878,
+            "end": 5882
+        },
+        {
+            "kind": "Row",
+            "text": "ROW",
+            "start": 5883,
+            "end": 5886
+        },
+        {
+            "kind": "Begin",
+            "text": "BEGIN",
+            "start": 5887,
+            "end": 5892
+        },
+        {
+            "kind": "Update",
+            "text": "UPDATE",
+            "start": 5897,
+            "end": 5903
+        },
+        {
+            "kind": "Identifier_",
+            "text": "products",
+            "start": 5904,
+            "end": 5912
+        },
+        {
+            "kind": "Set",
+            "text": "SET",
+            "start": 5918,
+            "end": 5921
+        },
+        {
+            "kind": "Identifier_",
+            "text": "stock_quantity",
+            "start": 5922,
+            "end": 5936
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 5937,
+            "end": 5938
+        },
+        {
+            "kind": "Identifier_",
+            "text": "stock_quantity",
+            "start": 5939,
+            "end": 5953
+        },
+        {
+            "kind": "Minus",
+            "text": "-",
+            "start": 5954,
+            "end": 5955
+        },
+        {
+            "kind": "Identifier_",
+            "text": "NEW",
+            "start": 5956,
+            "end": 5959
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5959,
+            "end": 5960
+        },
+        {
+            "kind": "Identifier_",
+            "text": "quantity",
+            "start": 5960,
+            "end": 5968
+        },
+        {
+            "kind": "Where",
+            "text": "WHERE",
+            "start": 5974,
+            "end": 5979
+        },
+        {
+            "kind": "Identifier_",
+            "text": "id",
+            "start": 5980,
+            "end": 5982
+        },
+        {
+            "kind": "Equal",
+            "text": "=",
+            "start": 5983,
+            "end": 5984
+        },
+        {
+            "kind": "Identifier_",
+            "text": "NEW",
+            "start": 5985,
+            "end": 5988
+        },
+        {
+            "kind": "Dot",
+            "text": ".",
+            "start": 5988,
+            "end": 5989
+        },
+        {
+            "kind": "Identifier_",
+            "text": "product_id",
+            "start": 5989,
+            "end": 5999
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 5999,
+            "end": 6000
+        },
+        {
+            "kind": "End",
+            "text": "END",
+            "start": 6001,
+            "end": 6004
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 6005,
+            "end": 6006
+        },
+        {
+            "kind": "Slash",
+            "text": "/",
+            "start": 6006,
+            "end": 6007
+        },
+        {
+            "kind": "Delimiter",
+            "text": "DELIMITER",
+            "start": 6008,
+            "end": 6017
+        },
+        {
+            "kind": "Semicolon",
+            "text": ";",
+            "start": 6018,
+            "end": 6019
+        },
+        {
+            "kind": "Eof",
+            "text": "",
+            "start": 6019,
+            "end": 6019
+        }
+    ],
+    "errors": []
+}
