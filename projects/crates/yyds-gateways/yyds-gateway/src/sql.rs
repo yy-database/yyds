@@ -362,6 +362,33 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 right: Box::new(right),
             })
         }
+        Expression::InList { expr, list, negated, .. } => {
+            if *negated {
+                return Err(bind_error("NOT IN is not supported yet"));
+            }
+            // Expand IN into `expr = v1 OR expr = v2 OR ... OR expr = vN`
+            if list.is_empty() {
+                return Err(bind_error("IN list must not be empty"));
+            }
+            let bound_expr = bind_expression(expr)?;
+            let mut or_tree: Option<SqlBoundExpression> = None;
+            for item in list {
+                let eq = SqlBoundExpression::Binary {
+                    left: Box::new(bound_expr.clone()),
+                    operator: SqlBoundBinaryOperator::Equal,
+                    right: Box::new(bind_expression(item)?),
+                };
+                or_tree = match or_tree {
+                    None => Some(eq),
+                    Some(acc) => Some(SqlBoundExpression::Binary {
+                        left: Box::new(acc),
+                        operator: SqlBoundBinaryOperator::Or,
+                        right: Box::new(eq),
+                    }),
+                };
+            }
+            Ok(or_tree.unwrap())
+        }
         _ => Err(bind_error("SQL expression is outside the gateway binding subset")),
     }
 }

@@ -15,16 +15,23 @@ impl<'config> SqlBuilder<'config> {
     fn build_expression_with_precedence<'a>(&self, node: RedNode<'a, SqlLanguage>, source: &SourceText, min_precedence: u8) -> Result<Expression, OakError> {
         let children = node.children().collect::<Vec<_>>();
 
-        // Handle parentheses
+        // Handle parentheses — only unwrap when there is a single inner expression.
+        // Multiple comma-separated expressions (e.g. IN lists `(1,2,3)`) must fall
+        // through to build_primary_expression which detects LeftParen + expr_children > 1
+        // and routes to build_vector.
         if children.len() >= 3 {
             if let (RedTree::Leaf(l), RedTree::Leaf(r)) = (&children[0], &children[children.len() - 1]) {
                 if l.kind == SqlTokenType::LeftParen && r.kind == SqlTokenType::RightParen {
-                    // This is a parenthesized expression.
-                    // We need to find the inner expression node.
-                    for child in &children[1..children.len() - 1] {
-                        if let RedTree::Node(n) = child {
-                            if n.green.kind == SqlElementType::Expression {
-                                return self.build_expression_with_precedence(n.clone(), source, 0);
+                    let expr_count = children[1..children.len() - 1]
+                        .iter()
+                        .filter(|c| matches!(c, RedTree::Node(n) if n.green.kind == SqlElementType::Expression))
+                        .count();
+                    if expr_count == 1 {
+                        for child in &children[1..children.len() - 1] {
+                            if let RedTree::Node(n) = child {
+                                if n.green.kind == SqlElementType::Expression {
+                                    return self.build_expression_with_precedence(n.clone(), source, 0);
+                                }
                             }
                         }
                     }
@@ -141,10 +148,16 @@ impl<'config> SqlBuilder<'config> {
     }
 
     fn build_primary_expression<'a>(&self, node: RedNode<'a, SqlLanguage>, source: &SourceText) -> Result<Expression, OakError> {
+        // Count expression children — LeftParen with multiple (comma-separated) children
+        // is a Vector; a single Expression child is a plain grouped expression.
+        let expr_children = node.children().filter(|c| matches!(c, RedTree::Node(n) if n.green.kind == SqlElementType::Expression)).count();
         for child in node.children() {
             match child {
                 RedTree::Leaf(t) => {
                     if t.kind == SqlTokenType::LeftBracket {
+                        return self.build_vector(node.clone(), source);
+                    }
+                    if t.kind == SqlTokenType::LeftParen && expr_children > 1 {
                         return self.build_vector(node.clone(), source);
                     }
                     if let Ok(expr) = self.build_primary_expression_from_leaf(&t, source) {

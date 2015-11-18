@@ -63,7 +63,12 @@ impl<'config> Pratt<SqlLanguage> for SqlParser<'config> {
             }
             Some(LeftParen) => {
                 state.bump();
-                PrattParser::parse(state, 0, self);
+                while state.not_at_end() && state.peek_kind() != Some(RightParen) {
+                    PrattParser::parse(state, 0, self);
+                    if !state.eat(Comma) {
+                        break;
+                    }
+                }
                 state.expect(RightParen).ok();
                 state.finish_at(cp, SqlElementType::Expression)
             }

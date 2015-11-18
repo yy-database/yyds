@@ -743,7 +743,36 @@ fn sql_select_pk_between_extracts_range() {
     assert_eq!(result.rows.len(), 3);
 }
 
-// ===== parser probes =====
+#[test]
+fn sql_select_pk_in_list_filters_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            (b"1", &[(1, b"1"), (2, b"alice")]),
+            (b"2", &[(1, b"2"), (2, b"bob")]),
+            (b"3", &[(1, b"3"), (2, b"carol")]),
+            (b"4", &[(1, b"4"), (2, b"dan")]),
+            (b"5", &[(1, b"5"), (2, b"eve")]),
+        ],
+    );
+
+    // id IN (2, 4, 5) — 展开成 OR 树，走 Scan + remaining_predicate
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id IN (2, 4, 5)", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
+    match &plan {
+        yyds_gateway::SqlExecutionPlan::Scan(_) => { /* IN 不做 pushdown，走 Scan */ }
+        other => panic!("expected Scan for IN, got {other:?}"),
+    }
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    assert_eq!(result.rows.len(), 3);
+    let ids: Vec<f64> = result.rows.iter().map(|r| match &r[0] {
+        yyds_gateway::SqlValue::Number(n) => *n,
+        other => panic!("expected Number, got {other:?}"),
+    }).collect();
+    assert!(ids.contains(&2.0) && ids.contains(&4.0) && ids.contains(&5.0));
+}
 
 /// 直接用 yyds_gateway::parse_sql 看 AST，诊断 oak_sql parser 对各 WHERE 语法到底产啥。
 fn probe_ast(sql: &str) -> String {
