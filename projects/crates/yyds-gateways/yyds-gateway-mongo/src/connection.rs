@@ -63,7 +63,7 @@ fn serve_inner(
             None => crate::generic_error_body("unknown"),
         };
 
-        if let Err(error) = write_frame(&mut stream, frame.header.request_id, 0, &body) {
+        if let Err(error) = write_frame(&mut stream, 0, frame.header.request_id, &body) {
             tracing_command_error(error);
             return Ok(());
         }

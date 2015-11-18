@@ -28,17 +28,42 @@ pub const DEFAULT_PORT: u16 = GATEWAY_KIND.default_port();
 /// MongoDB driver can establish a connection and inspect wire version.
 pub fn handle_command(command_name: &str) -> Result<Vec<u8>> {
     match command_name {
-        "hello" | "isMaster" => {
-            let reply = format!(
-                r#"{{"isWritablePrimary":true,"maxWireVersion":17,"minWireVersion":0,"msg":"ok","buildInfo":{{"version":"yyds-mongo-disguise {}"}}}}"#,
-                version_label()
-            );
-            Ok(reply.into_bytes())
-        }
-        "ping" => Ok(br#"{"ok":1}"#.to_vec()),
+        "hello" | "isMaster" => Ok(build_hello_bson()),
+        "ping" => Ok(build_ok_bson(1)),
         other if other.is_empty() => Err(Error::Unsupported("empty mongo command")),
         _other => Err(Error::Unsupported("unsupported mongo command")),
     }
+}
+
+fn build_hello_bson() -> Vec<u8> {
+    let mut doc = Vec::new();
+    doc.extend_from_slice(&0_u32.to_le_bytes()); // placeholder
+    // isWritablePrimary: bool true
+    doc.push(0x08); doc.extend_from_slice(b"isWritablePrimary\x00"); doc.push(1);
+    // maxWireVersion: int32 17
+    doc.push(0x10); doc.extend_from_slice(b"maxWireVersion\x00"); doc.extend_from_slice(&17_i32.to_le_bytes());
+    // minWireVersion: int32 0
+    doc.push(0x10); doc.extend_from_slice(b"minWireVersion\x00"); doc.extend_from_slice(&0_i32.to_le_bytes());
+    // ok: double 1.0
+    doc.push(0x01); doc.extend_from_slice(b"ok\x00"); doc.extend_from_slice(&1.0_f64.to_le_bytes());
+    // terminator
+    doc.push(0);
+    let len = doc.len() as u32;
+    doc[0..4].copy_from_slice(&len.to_le_bytes());
+    doc
+}
+
+fn build_ok_bson(ok: i32) -> Vec<u8> {
+    let mut doc = Vec::new();
+    doc.extend_from_slice(&0_u32.to_le_bytes()); // placeholder
+    // ok: double (Mongo 惯例用 double)
+    doc.push(0x01); doc.extend_from_slice(b"ok\x00");
+    let v = if ok >= 1 { 1.0_f64 } else { 0.0_f64 };
+    doc.extend_from_slice(&v.to_le_bytes());
+    doc.push(0);
+    let len = doc.len() as u32;
+    doc[0..4].copy_from_slice(&len.to_le_bytes());
+    doc
 }
 
 /// Banner shown when a disguise server starts.
@@ -61,7 +86,8 @@ pub fn command_name_from_frame(frame: &Frame) -> Option<&'static str> {
     // Read BSON document length
     let doc_len = u32::from_le_bytes(cursor.get(..4)?.try_into().ok()?) as usize;
     cursor = cursor.get(4..)?;
-    if doc_len < 5 || doc_len > cursor.len() {
+    // doc_len includes the 4-byte length field itself which we just skipped.
+    if doc_len < 5 || doc_len.saturating_sub(4) > cursor.len() {
         return None;
     }
     // Skip the first element's type byte (0x10 = int32, 0x01 = double, etc.)
