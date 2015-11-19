@@ -43,23 +43,40 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
     // 1. 从投影里收集字段，同时把 Star 展开。
     let mut projection_fields: Vec<(u64, String)> = Vec::new();
     let mut projection_expressions: Vec<(SqlCatalogBoundExpression, String)> = Vec::new();
+    let mut has_aggregate = false;
+    let mut has_non_aggregate = false;
     for projection in &select.projections {
         match projection {
             SqlCatalogBoundProjection::Star(_) => {
+                has_non_aggregate = true;
                 for field in &table.fields {
                     projection_fields.push((field.field_id, field.name.clone()));
                 }
             }
             SqlCatalogBoundProjection::Expression { expression, alias } => {
-                if let SqlCatalogBoundExpression::Column(col) = expression {
-                    projection_fields.push((col.field_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
-                }
-                else {
-                    projection_expressions
-                        .push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
+                match expression {
+                    SqlCatalogBoundExpression::Column(col) => {
+                        has_non_aggregate = true;
+                        projection_fields.push((col.field_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
+                    }
+                    SqlCatalogBoundExpression::Function { .. } => {
+                        has_aggregate = true;
+                        projection_expressions
+                            .push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
+                    }
+                    other => {
+                        has_non_aggregate = true;
+                        projection_expressions
+                            .push((other.clone(), alias.clone().unwrap_or_else(|| expression_default_label(other))));
+                    }
                 }
             }
         }
+    }
+
+    // 混合聚合 + 非聚合（无 GROUP BY）→ 拒绝。
+    if has_aggregate && has_non_aggregate {
+        return Err(planner_error("cannot mix aggregate and non-aggregate projections without GROUP BY"));
     }
 
     // 2. 递归解析 predicate 的 AND 树，把 pk 条件提取出来。
@@ -82,10 +99,10 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
     }
 
     // Scan 路径：prefix / after / before 都是 bytes。
-    // ORDER BY 存在时 kv-scan 不设 limit（要全量 scan 后才好 sort），
-    // 把 LIMIT/OFFSET 推迟给 execute 层在 sort 后应用。
+    // ORDER BY 或聚合存在时 kv-scan 不设 limit（要全量 scan 后才好 sort/aggregate），
+    // 把 LIMIT/OFFSET 推迟给 execute 层在 sort/aggregate 后应用。
     let has_order_by = select.order_by.is_some();
-    let kv_limit = if has_order_by { 0 } else { select.limit.unwrap_or(0) };
+    let kv_limit = if has_order_by || has_aggregate { 0 } else { select.limit.unwrap_or(0) };
     let limit_after_sort = if has_order_by { select.limit.unwrap_or(0) } else { 0 };
     let offset_after_sort = if has_order_by { select.offset.unwrap_or(0) } else { 0 };
 
@@ -101,6 +118,7 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         order_by: select.order_by,
         limit_after_sort,
         offset_after_sort,
+        has_aggregate,
     }))
 }
 
@@ -232,6 +250,9 @@ pub struct ScanPlan {
     pub limit_after_sort: usize,
     /// 排序 / 聚合之后才应用的 OFFSET。默认 0。
     pub offset_after_sort: usize,
+    /// True when any projection expression is an aggregate function
+    /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce exactly one result row.
+    pub has_aggregate: bool,
 }
 
 /// INSERT / UPDATE 执行计划。payload 由 execute 层做 TLV 编码。

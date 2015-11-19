@@ -148,6 +148,12 @@ impl<'config> SqlBuilder<'config> {
     }
 
     fn build_primary_expression<'a>(&self, node: RedNode<'a, SqlLanguage>, source: &SourceText) -> Result<Expression, OakError> {
+        // Dispatch on node kind FIRST — FunctionCall nodes may have Identifier children
+        // that would otherwise be picked up first by the child loop below.
+        if node.green.kind == SqlElementType::FunctionCall {
+            return self.build_function_call(node, source);
+        }
+
         // Count expression children — LeftParen with multiple (comma-separated) children
         // is a Vector; a single Expression child is a plain grouped expression.
         let expr_children = node.children().filter(|c| matches!(c, RedTree::Node(n) if n.green.kind == SqlElementType::Expression)).count();

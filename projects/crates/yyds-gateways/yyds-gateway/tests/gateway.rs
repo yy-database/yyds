@@ -412,6 +412,68 @@ fn sql_insert_then_select_round_trip() {
 }
 
 #[test]
+fn sql_aggregate_functions_count_sum_avg_max_min() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = empty_executor();
+
+    // Insert three rows: (7, alice, 30), (11, bob, 25), (13, carol, 35)
+    for (id, name, age) in [(7i64, "alice", 30i64), (11, "bob", 25), (13, "carol", 35)] {
+        let sql = format!("INSERT INTO users VALUES ({id}, '{name}', {age})");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+    }
+
+    // COUNT(*) → 3
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec COUNT(*)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(3.0)]);
+
+    // COUNT(age) WHERE age > 28 → alice(30) + carol(35) = 2
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users WHERE age > 28", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec COUNT(col) WHERE");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(2.0)]);
+
+    // SUM(age) → 30 + 25 + 35 = 90
+    let bound = yyds_gateway::bind_sql_catalog("SELECT SUM(age) FROM users", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec SUM");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(90.0)]);
+
+    // AVG(age) → 90 / 3 = 30
+    let bound = yyds_gateway::bind_sql_catalog("SELECT AVG(age) FROM users", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec AVG");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(30.0)]);
+
+    // MAX(age) → 35
+    let bound = yyds_gateway::bind_sql_catalog("SELECT MAX(age) FROM users", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec MAX");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(35.0)]);
+
+    // MIN(age) → 25
+    let bound = yyds_gateway::bind_sql_catalog("SELECT MIN(age) FROM users", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec MIN");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(25.0)]);
+}
+
+#[test]
+fn sql_aggregate_rejects_mixed_aggregate_nonaggregate() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let result = yyds_gateway::bind_sql_catalog("SELECT id, COUNT(*) FROM users", &catalog, 7);
+    assert!(result.is_ok());
+    let bound = result.unwrap();
+    let err = yyds_gateway::plan_statement(bound, &catalog).expect_err("planner should reject mixed");
+    let err_debug = format!("{err:?}");
+    assert!(err_debug.contains("cannot mix aggregate and non-aggregate"));
+}
+
+#[test]
 fn sql_update_then_select_round_trip() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     // 预置 row: id=9, name=original, age=20

@@ -17,7 +17,7 @@ use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
     catalog_bind::SqlCatalogBoundExpression,
-    sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError},
+    sql::{SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError},
     sql_planner::{DeletePlan, ReadPlan, ScanPlan, SqlExecutionPlan, WritePlan},
 };
 
@@ -188,6 +188,8 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
     // 单通道：一次 scan 收集所有 (sort_key, row_values)，然后 sort → offset → limit。
     // 当 order_by 不存在时 sort_key=None，保持 kv-store 扫描顺序。
     let mut staged: Vec<(Option<SqlValue>, Vec<SqlValue>)> = Vec::new();
+    // 聚合需要访问原始 row（不能只保留 row_values），所以并行收集 rows。
+    let mut all_rows: Vec<RowFieldValues> = Vec::new();
     for (_rowid, value_bytes) in scanned {
         let row = decode_row(&value_bytes)?;
 
@@ -196,6 +198,11 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             if !truthy(&v) {
                 continue;
             }
+        }
+
+        if plan.has_aggregate {
+            all_rows.push(row);
+            continue;
         }
 
         let sort_key = match &plan.order_by {
@@ -211,6 +218,15 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             row_values.push(eval_expression(expr, &row)?);
         }
         staged.push((sort_key, row_values));
+    }
+
+    // —— 聚合路径 ——
+    if plan.has_aggregate {
+        let mut result_row: Vec<SqlValue> = Vec::new();
+        for (expr, _) in &plan.projection_expressions {
+            result_row.push(eval_aggregate(expr, &all_rows)?);
+        }
+        return Ok(SqlResult { columns, rows: vec![result_row] });
     }
 
     // Sort if ORDER BY present.
@@ -322,6 +338,81 @@ fn truthy(v: &SqlValue) -> bool {
         SqlValue::Number(n) => *n != 0.0,
         SqlValue::String(s) => !s.is_empty(),
         SqlValue::Null => false,
+    }
+}
+
+/// 对一个聚合函数在所有收集到的行上求值，返回单个 SqlValue。
+fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> Result<SqlValue, SqlFrontendError> {
+    let (name, args) = match expr {
+        SqlCatalogBoundExpression::Function { name, args } => (name.clone(), args.clone()),
+        _ => return Err(execute_error(&format!("eval_aggregate: non-Function expression encountered: {expr:?}"))),
+    };
+
+    let agg = SqlAggregateFunction::from_name(&name)
+        .ok_or_else(|| execute_error(&format!("unknown aggregate function: {name}")))?;
+
+    match agg {
+        SqlAggregateFunction::COUNT => {
+            if args.is_empty() {
+                // COUNT(*) — total row count after filter.
+                Ok(SqlValue::Number(rows.len() as f64))
+            }
+            else {
+                // COUNT(col) — count rows where col is not NULL.
+                let mut non_null: usize = 0;
+                for row in rows {
+                    let v = eval_expression(&args[0], row)?;
+                    if !matches!(v, SqlValue::Null) {
+                        non_null += 1;
+                    }
+                }
+                Ok(SqlValue::Number(non_null as f64))
+            }
+        }
+        SqlAggregateFunction::SUM => {
+            let mut sum: f64 = 0.0;
+            let mut any_non_null = false;
+            for row in rows {
+                let v = eval_expression(&args[0], row)?;
+                if let SqlValue::Number(n) = v {
+                    sum += n;
+                    any_non_null = true;
+                }
+            }
+            if any_non_null { Ok(SqlValue::Number(sum)) } else { Ok(SqlValue::Null) }
+        }
+        SqlAggregateFunction::AVG => {
+            let mut sum: f64 = 0.0;
+            let mut count: usize = 0;
+            for row in rows {
+                let v = eval_expression(&args[0], row)?;
+                if let SqlValue::Number(n) = v {
+                    sum += n;
+                    count += 1;
+                }
+            }
+            if count > 0 { Ok(SqlValue::Number(sum / count as f64)) } else { Ok(SqlValue::Null) }
+        }
+        SqlAggregateFunction::MAX => {
+            let mut max: Option<f64> = None;
+            for row in rows {
+                let v = eval_expression(&args[0], row)?;
+                if let SqlValue::Number(n) = v {
+                    max = Some(match max { Some(m) => n.max(m), None => n });
+                }
+            }
+            Ok(max.map(SqlValue::Number).unwrap_or(SqlValue::Null))
+        }
+        SqlAggregateFunction::MIN => {
+            let mut min: Option<f64> = None;
+            for row in rows {
+                let v = eval_expression(&args[0], row)?;
+                if let SqlValue::Number(n) = v {
+                    min = Some(match min { Some(m) => n.min(m), None => n });
+                }
+            }
+            Ok(min.map(SqlValue::Number).unwrap_or(SqlValue::Null))
+        }
     }
 }
 
