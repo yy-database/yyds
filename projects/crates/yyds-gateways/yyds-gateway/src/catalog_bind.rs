@@ -2,7 +2,7 @@
 
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundLiteral,
-    SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
+    SqlBoundOrderByItem, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
 };
 
 /// A table identity exposed by the YYDS catalog to a gateway binder.
@@ -198,6 +198,8 @@ pub struct SqlCatalogBoundSelect {
     pub limit: Option<usize>,
     /// Optional OFFSET count, propagated from the gateway binder.
     pub offset: Option<usize>,
+    /// Optional ORDER BY item, propagated from the gateway binder.
+    pub order_by: Option<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>,
 }
 
 /// SQL INSERT request after catalog binding.
@@ -331,7 +333,11 @@ fn bind_select(select: SqlBoundSelect, catalog: &SqlCatalog) -> Result<SqlCatalo
         .map(|projection| bind_projection(projection, source.as_ref(), catalog))
         .collect::<Result<Vec<_>, _>>()?;
     let predicate = select.predicate.map(|expression| bind_expression(expression, source.as_ref(), catalog)).transpose()?;
-    Ok(SqlCatalogBoundSelect { source, projections, predicate, limit: select.limit, offset: select.offset })
+    let order_by = match select.order_by {
+        Some(item) => Some((bind_expression(item.expr, source.as_ref(), catalog)?, item.direction)),
+        None => None,
+    };
+    Ok(SqlCatalogBoundSelect { source, projections, predicate, limit: select.limit, offset: select.offset, order_by })
 }
 
 fn bind_projection(

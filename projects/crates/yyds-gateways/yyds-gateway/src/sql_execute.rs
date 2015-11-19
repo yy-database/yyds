@@ -204,6 +204,39 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         }
         rows.push(row_values);
     }
+
+    if let Some((ref sort_expr, ref direction)) = plan.order_by {
+        let mut staged: Vec<(Option<SqlValue>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
+        for (_rowid, value_bytes) in executor.execute_scan(
+            &namespace, &plan.rowid_prefix, plan.rowid_after.as_deref(),
+            plan.rowid_before.as_deref(), 0,
+        ).map_err(|e| execute_error(&format!("scan for ORDER BY failed: {e}")))? {
+            let row = decode_row(&value_bytes)?;
+            if let Some(ref predicate) = plan.remaining_predicate {
+                let v = eval_expression(predicate, &row)?;
+                if !truthy(&v) { continue; }
+            }
+            let sort_key = Some(eval_expression(sort_expr, &row)?);
+            let mut row_values: Vec<SqlValue> = Vec::new();
+            for (field_id, _) in &plan.projection_fields {
+                row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
+            }
+            for (expr, _) in &plan.projection_expressions {
+                row_values.push(eval_expression(expr, &row)?);
+            }
+            staged.push((sort_key, row_values));
+        }
+        let dir = direction.clone();
+        staged.sort_by(move |a, b| {
+            let ord = compare_values(a.0.as_ref(), b.0.as_ref());
+            match dir {
+                crate::sql::SqlBoundOrderDirection::Asc => ord,
+                crate::sql::SqlBoundOrderDirection::Desc => ord.reverse(),
+            }
+        });
+        rows = staged.into_iter().map(|(_, r)| r).collect();
+    }
+
     Ok(SqlResult { columns, rows })
 }
 
@@ -462,4 +495,20 @@ impl<'a> Cursor<'a> {
 
 fn execute_error(message: &str) -> SqlFrontendError {
     SqlFrontendError { message: message.into() }
+}
+
+/// NULLs sort last (standard SQL behavior). Mixed types collate equal.
+fn compare_values(a: Option<&SqlValue>, b: Option<&SqlValue>) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (None, None) | (Some(SqlValue::Null), Some(SqlValue::Null)) => Ordering::Equal,
+        (None | Some(SqlValue::Null), Some(_)) => Ordering::Greater,
+        (Some(_), None | Some(SqlValue::Null)) => Ordering::Less,
+        (Some(x), Some(y)) => match (x, y) {
+            (SqlValue::Number(n1), SqlValue::Number(n2)) => n1.partial_cmp(n2).unwrap_or(Ordering::Equal),
+            (SqlValue::String(s1), SqlValue::String(s2)) => s1.cmp(s2),
+            (SqlValue::Boolean(b1), SqlValue::Boolean(b2)) => b1.cmp(b2),
+            _ => Ordering::Equal,
+        },
+    }
 }

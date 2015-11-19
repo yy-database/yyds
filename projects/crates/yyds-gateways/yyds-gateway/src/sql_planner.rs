@@ -20,7 +20,7 @@ use crate::{
         SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
         SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundUpdate,
     },
-    sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlFrontendError},
+    sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlFrontendError},
 };
 
 /// 翻译一份 catalog-bound statement 为可执行计划。
@@ -91,6 +91,7 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         projection_fields,
         projection_expressions,
         remaining_predicate,
+        order_by: select.order_by,
     }))
 }
 
@@ -214,6 +215,8 @@ pub struct ScanPlan {
     pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
     /// 行级过滤表达式；`None` 表示不过滤。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+    /// 可选 ORDER BY 字段；scan 全部 rows 后由 execute 层内存排序。
+    pub order_by: Option<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>,
 }
 
 /// INSERT / UPDATE 执行计划。payload 由 execute 层做 TLV 编码。

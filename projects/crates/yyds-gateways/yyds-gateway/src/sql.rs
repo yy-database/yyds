@@ -94,6 +94,23 @@ pub struct SqlBoundSelect {
     pub limit: Option<usize>,
     /// Optional SQL OFFSET count (parsed from the LIMIT ... OFFSET clause).
     pub offset: Option<usize>,
+    /// Optional SQL ORDER BY clause. Gateway currently supports at most one
+    /// sort item — multi-column ordering is not implemented yet.
+    pub order_by: Option<SqlBoundOrderByItem>,
+}
+
+/// One SQL ORDER BY item — expression + direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundOrderByItem {
+    pub expr: SqlBoundExpression,
+    pub direction: SqlBoundOrderDirection,
+}
+
+/// Sort direction for ORDER BY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlBoundOrderDirection {
+    Asc,
+    Desc,
 }
 
 /// SQL INSERT request owned by the compatibility gateway.
@@ -241,11 +258,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     match &root.statements[0] {
         SqlStatement::Select(select) => {
 
-            if !select.joins.is_empty()
-                || select.group_by.is_some()
-                || select.having.is_some()
-                || select.order_by.is_some()
-            {
+            if !select.joins.is_empty() || select.group_by.is_some() || select.having.is_some() {
                 return Err(bind_error("SQL SELECT clauses are not in the gateway binding subset"));
             }
             let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
@@ -257,12 +270,28 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 }
                 None => (None, None),
             };
+            let order_by = match &select.order_by {
+                Some(clause) if clause.items.len() == 1 => {
+                    let item = &clause.items[0];
+                    let expr = bind_expression(&item.expr)?;
+                    let direction = match item.direction {
+                        oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
+                        oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
+                    };
+                    Some(SqlBoundOrderByItem { expr, direction })
+                }
+                Some(clause) if clause.items.len() > 1 => {
+                    return Err(bind_error("multi-column ORDER BY is not supported yet"));
+                }
+                _ => None,
+            };
             Ok(SqlBoundStatement::Select(SqlBoundSelect {
                 source: select.from.as_ref().map(|table| normalize_identifier(table.name.name.as_ref())),
                 projections,
                 predicate: select.expr.as_ref().map(bind_expression).transpose()?,
                 limit,
                 offset,
+                order_by,
             }))
         }
         SqlStatement::Insert(insert) => {

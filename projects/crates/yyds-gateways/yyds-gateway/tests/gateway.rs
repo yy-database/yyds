@@ -124,7 +124,9 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
 #[test]
 fn sql_binding_rejects_unimplemented_clauses_and_dml() {
     assert!(bind_sql("CREATE TABLE users (id i64)").is_err());
-    assert!(bind_sql("SELECT id FROM users ORDER BY id").is_err());
+    assert!(bind_sql("SELECT id FROM users GROUP BY id").is_err());
+    assert!(bind_sql("SELECT id FROM users HAVING id > 0").is_err());
+    assert!(bind_sql("SELECT * FROM a JOIN b ON a.id = b.id").is_err());
 }
 
 #[test]
@@ -821,3 +823,73 @@ fn probe_parser_between_in_like_is_null() {
 }
 
 // raw_children probe 已删——lexer bug 定位完毕，补 keyword 表后重跑 BETWEEN/IN/LIKE/IS NULL probe 验证
+
+// ===== planner capability probes =====
+
+#[test]
+fn probe_planner_supports_order_by() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let result = yyds_gateway::bind_sql_catalog("SELECT id FROM users ORDER BY id", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
+    match result {
+        Ok(_) => eprintln!("ORDER BY: supported ✅"),
+        Err(e) => eprintln!("ORDER BY: blocked ❌ — {e:?}"),
+    }
+}
+
+#[test]
+fn probe_planner_supports_group_by() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let result = yyds_gateway::bind_sql_catalog("SELECT name FROM users GROUP BY name", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
+    match result {
+        Ok(_) => eprintln!("GROUP BY: supported ✅"),
+        Err(e) => eprintln!("GROUP BY: blocked ❌ — {e:?}"),
+    }
+}
+
+#[test]
+fn probe_planner_supports_distinct() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let result = yyds_gateway::bind_sql_catalog("SELECT DISTINCT name FROM users", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
+    match result {
+        Ok(_) => eprintln!("DISTINCT: supported ✅"),
+        Err(e) => eprintln!("DISTINCT: blocked ❌ — {e:?}"),
+    }
+}
+
+#[test]
+fn probe_planner_supports_aggregates() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let queries = [
+        "SELECT COUNT(*) FROM users",
+        "SELECT MAX(id) FROM users",
+        "SELECT SUM(id) FROM users",
+        "SELECT AVG(id) FROM users",
+    ];
+    for q in &queries {
+        let r = yyds_gateway::bind_sql_catalog(q, &catalog, 7)
+            .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
+        match r {
+            Ok(_) => eprintln!("{q}: supported ✅"),
+            Err(e) => eprintln!("{q}: blocked ❌ — {e:?}"),
+        }
+    }
+}
+
+#[test]
+fn probe_planner_supports_or_in_where() {
+    // WHERE a = 1 OR b = 2  — OR 树能否正确走 remaining_predicate
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let plan = yyds_gateway::bind_sql_catalog(
+        "SELECT id FROM users WHERE name = 'alice' OR age > 20",
+        &catalog, 7,
+    )
+    .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+    .expect("plan");
+    match plan {
+        yyds_gateway::SqlExecutionPlan::Scan(_) => eprintln!("OR in WHERE: Scan with remaining_predicate ✅"),
+        other => panic!("expected Scan, got {other:?}"),
+    }
+}
