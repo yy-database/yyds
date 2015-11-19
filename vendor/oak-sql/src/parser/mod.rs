@@ -87,6 +87,30 @@ impl<'config> Pratt<SqlLanguage> for SqlParser<'config> {
         use crate::lexer::SqlTokenType::*;
         let kind = state.peek_kind()?;
 
+        // Function call postfix: Identifier '(' args? ')'
+        // This is checked before binary operators because LeftParen is not a binary op.
+        if kind == LeftParen && left.kind() == SqlElementType::Identifier {
+            let cp = state.checkpoint_before(left);
+            state.expect(LeftParen).ok();
+            let mut first = true;
+            while state.not_at_end() && state.peek_kind() != Some(RightParen) {
+                if first {
+                    // COUNT(*) — handle bare Star as wildcard arg (emit empty Star arg, builder ignores).
+                    if state.peek_kind() == Some(Star) {
+                        state.bump(); // consume the Star token
+                        first = false;
+                        if !state.eat(Comma) { break; }
+                        continue;
+                    }
+                    first = false;
+                }
+                PrattParser::parse(state, 0, self);
+                if !state.eat(Comma) { break; }
+            }
+            state.expect(RightParen).ok();
+            return Some(state.finish_at(cp, SqlElementType::FunctionCall));
+        }
+
         let (prec, assoc) = match kind {
             Or => (1, Associativity::Left),
             Between | In | Is => (2, Associativity::Left),  // 与 AND 同级 → Pratt parse right operand 时 AND 不被拦截

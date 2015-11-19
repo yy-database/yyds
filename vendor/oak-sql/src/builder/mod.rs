@@ -182,7 +182,7 @@ impl<'config> SqlBuilder<'config> {
                     _ => {}
                 },
                 RedTree::Node(n) => match n.green.kind {
-                    SqlElementType::Expression => expr = Some(self.build_expression(n, source)?),
+                    SqlElementType::Expression | SqlElementType::FunctionCall => expr = Some(self.build_expression(n, source)?),
                     SqlElementType::Identifier => {
                         if expr.is_none() {
                             expr = Some(Expression::Identifier(self.build_identifier(n, source)?));

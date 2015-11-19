@@ -81,17 +81,26 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         }));
     }
 
-    // Scan 路径：prefix / after / before 都是 bytes；limit 来自 SQL LIMIT 子句。
+    // Scan 路径：prefix / after / before 都是 bytes。
+    // ORDER BY 存在时 kv-scan 不设 limit（要全量 scan 后才好 sort），
+    // 把 LIMIT/OFFSET 推迟给 execute 层在 sort 后应用。
+    let has_order_by = select.order_by.is_some();
+    let kv_limit = if has_order_by { 0 } else { select.limit.unwrap_or(0) };
+    let limit_after_sort = if has_order_by { select.limit.unwrap_or(0) } else { 0 };
+    let offset_after_sort = if has_order_by { select.offset.unwrap_or(0) } else { 0 };
+
     Ok(SqlExecutionPlan::Scan(ScanPlan {
         namespace,
         rowid_prefix: pk_prefix.unwrap_or_default(),
         rowid_after: pk_after,
         rowid_before: pk_before,
-        limit: select.limit.unwrap_or(0),
+        limit: kv_limit,
         projection_fields,
         projection_expressions,
         remaining_predicate,
         order_by: select.order_by,
+        limit_after_sort,
+        offset_after_sort,
     }))
 }
 
@@ -207,7 +216,8 @@ pub struct ScanPlan {
     pub rowid_after: Option<Vec<u8>>,
     /// exclusive upper cursor —— 跳过所有 `rowid >= before` 的记录。None = 无上界。
     pub rowid_before: Option<Vec<u8>>,
-    /// 0 = 无上限。由 SQL LIMIT 子句下推；当前 planner 不支持 OFFSET。
+    /// 下推到 kv-store 的 scan limit（0 = 无上限）。ORDER BY 或聚合存在时会保持 0，
+    /// 因为需要全量 scan 后再做内存处理。
     pub limit: usize,
     /// 投影里直接映射到 catalog 字段的那些列：(field_id, display_name)。
     pub projection_fields: Vec<(u64, String)>,
@@ -217,6 +227,11 @@ pub struct ScanPlan {
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
     /// 可选 ORDER BY 字段；scan 全部 rows 后由 execute 层内存排序。
     pub order_by: Option<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>,
+    /// 排序 / 聚合之后才应用的 LIMIT。ORDER BY 存在时 kv-scan limit=0，
+    /// 由本字段承接 SQL 的 LIMIT 值。0 = 无上限。
+    pub limit_after_sort: usize,
+    /// 排序 / 聚合之后才应用的 OFFSET。默认 0。
+    pub offset_after_sort: usize,
 }
 
 /// INSERT / UPDATE 执行计划。payload 由 execute 层做 TLV 编码。

@@ -190,6 +190,46 @@ pub enum SqlBoundExpression {
         /// Operand.
         expression: Box<Self>,
     },
+    /// A SQL function call — currently only aggregate functions (COUNT/SUM/AVG/MAX/MIN)
+    /// are recognized as first-class. Unknown function names are rejected at bind time.
+    Function {
+        /// Canonical lower-case function name.
+        name: String,
+        /// Bound argument expressions.
+        args: Vec<SqlBoundExpression>,
+    },
+}
+
+/// SQL aggregate function identity recognized by the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlAggregateFunction {
+    COUNT,
+    SUM,
+    AVG,
+    MAX,
+    MIN,
+}
+
+impl SqlAggregateFunction {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "COUNT" => Some(Self::COUNT),
+            "SUM" => Some(Self::SUM),
+            "AVG" => Some(Self::AVG),
+            "MAX" => Some(Self::MAX),
+            "MIN" => Some(Self::MIN),
+            _ => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::COUNT => "COUNT",
+            Self::SUM => "SUM",
+            Self::AVG => "AVG",
+            Self::MAX => "MAX",
+            Self::MIN => "MIN",
+        }
+    }
 }
 
 /// SQL literal retained by the gateway surface.
@@ -417,6 +457,20 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 };
             }
             Ok(or_tree.unwrap())
+        }
+        Expression::FunctionCall { name, args, .. } => {
+            let fname = normalize_identifier(name.name.as_ref());
+            // 只允许已知的聚合函数，拒绝未知函数。
+            if SqlAggregateFunction::from_name(&fname).is_none() {
+                return Err(bind_error(&format!(
+                    "unknown SQL function: {fname} (only COUNT/SUM/AVG/MAX/MIN are supported)"
+                )));
+            }
+            let bound_args = args
+                .iter()
+                .map(bind_expression)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(SqlBoundExpression::Function { name: fname, args: bound_args })
         }
         _ => Err(bind_error("SQL expression is outside the gateway binding subset")),
     }

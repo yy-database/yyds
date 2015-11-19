@@ -153,6 +153,13 @@ pub enum SqlCatalogBoundExpression {
     Column(SqlCatalogBoundColumn),
     /// A SQL literal retaining gateway semantics.
     Literal(SqlBoundLiteral),
+    /// A SQL function call (currently only aggregate functions).
+    Function {
+        /// Canonical lower-case function name.
+        name: String,
+        /// Catalog-bound arguments.
+        args: Vec<SqlCatalogBoundExpression>,
+    },
     /// A binary SQL expression.
     Binary {
         /// Left operand.
@@ -376,6 +383,13 @@ fn bind_expression(
             operator,
             expression: Box::new(bind_expression(*expression, source, catalog)?),
         }),
+        SqlBoundExpression::Function { name, args } => {
+            let bound_args = args
+                .into_iter()
+                .map(|arg| bind_expression(arg, source, catalog))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(SqlCatalogBoundExpression::Function { name, args: bound_args })
+        }
     }
 }
 

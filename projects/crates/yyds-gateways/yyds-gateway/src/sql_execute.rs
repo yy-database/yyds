@@ -184,7 +184,10 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         .map_err(|e| execute_error(&format!("KeyValueExecutor.scan failed: {e}")))?;
 
     let columns = scan_column_labels(plan);
-    let mut rows: Vec<Vec<SqlValue>> = Vec::new();
+
+    // 单通道：一次 scan 收集所有 (sort_key, row_values)，然后 sort → offset → limit。
+    // 当 order_by 不存在时 sort_key=None，保持 kv-store 扫描顺序。
+    let mut staged: Vec<(Option<SqlValue>, Vec<SqlValue>)> = Vec::new();
     for (_rowid, value_bytes) in scanned {
         let row = decode_row(&value_bytes)?;
 
@@ -195,6 +198,11 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             }
         }
 
+        let sort_key = match &plan.order_by {
+            Some((expr, _)) => Some(eval_expression(expr, &row)?),
+            None => None,
+        };
+
         let mut row_values: Vec<SqlValue> = Vec::new();
         for (field_id, _) in &plan.projection_fields {
             row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
@@ -202,30 +210,11 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         for (expr, _) in &plan.projection_expressions {
             row_values.push(eval_expression(expr, &row)?);
         }
-        rows.push(row_values);
+        staged.push((sort_key, row_values));
     }
 
-    if let Some((ref sort_expr, ref direction)) = plan.order_by {
-        let mut staged: Vec<(Option<SqlValue>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
-        for (_rowid, value_bytes) in executor.execute_scan(
-            &namespace, &plan.rowid_prefix, plan.rowid_after.as_deref(),
-            plan.rowid_before.as_deref(), 0,
-        ).map_err(|e| execute_error(&format!("scan for ORDER BY failed: {e}")))? {
-            let row = decode_row(&value_bytes)?;
-            if let Some(ref predicate) = plan.remaining_predicate {
-                let v = eval_expression(predicate, &row)?;
-                if !truthy(&v) { continue; }
-            }
-            let sort_key = Some(eval_expression(sort_expr, &row)?);
-            let mut row_values: Vec<SqlValue> = Vec::new();
-            for (field_id, _) in &plan.projection_fields {
-                row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
-            }
-            for (expr, _) in &plan.projection_expressions {
-                row_values.push(eval_expression(expr, &row)?);
-            }
-            staged.push((sort_key, row_values));
-        }
+    // Sort if ORDER BY present.
+    if let Some((_, ref direction)) = plan.order_by {
         let dir = direction.clone();
         staged.sort_by(move |a, b| {
             let ord = compare_values(a.0.as_ref(), b.0.as_ref());
@@ -234,8 +223,17 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
                 crate::sql::SqlBoundOrderDirection::Desc => ord.reverse(),
             }
         });
-        rows = staged.into_iter().map(|(_, r)| r).collect();
     }
+
+    // OFFSET + LIMIT 应用。
+    let offset = plan.offset_after_sort;
+    let limit = plan.limit_after_sort;
+    let rows: Vec<Vec<SqlValue>> = staged
+        .into_iter()
+        .skip(offset)
+        .take(if limit == 0 { usize::MAX } else { limit })
+        .map(|(_, r)| r)
+        .collect();
 
     Ok(SqlResult { columns, rows })
 }
@@ -341,6 +339,11 @@ fn eval_expression(expr: &SqlCatalogBoundExpression, row: &RowFieldValues) -> Re
             let l = eval_expression(left, row)?;
             let r = eval_expression(right, row)?;
             eval_binary(*operator, &l, &r)?
+        }
+        SqlCatalogBoundExpression::Function { name, .. } => {
+            return Err(execute_error(&format!(
+                "aggregate function {name} cannot be evaluated on a single row"
+            )));
         }
     })
 }

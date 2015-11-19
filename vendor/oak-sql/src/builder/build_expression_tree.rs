@@ -245,7 +245,13 @@ impl<'config> SqlBuilder<'config> {
             match child {
                 RedTree::Node(n) => {
                     if n.green.kind == SqlElementType::Identifier {
-                        name = Some(self.build_identifier(n, source)?);
+                        // First Identifier child is the function name. Subsequent ones
+                        // (from bare identifier args like MAX(id)) are args → Expression::Identifier.
+                        if name.is_none() {
+                            name = Some(self.build_identifier(n, source)?);
+                        } else {
+                            args.push(Expression::Identifier(self.build_identifier(n, source)?));
+                        }
                     }
                     else if n.green.kind == SqlElementType::Expression {
                         args.push(self.build_expression(n, source)?);
