@@ -1,6 +1,6 @@
 {
     "name": "@yydb/yyds-darwin-arm64",
-    "version": "0.0.7",
+    "version": "0.0.8",
     "description": "YYDS Node-API binary for macOS arm64",
     "license": "MPL-2.0",
         "type": "module",
