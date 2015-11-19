@@ -99,12 +99,15 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
     }
 
     // Scan 路径：prefix / after / before 都是 bytes。
-    // ORDER BY 或聚合存在时 kv-scan 不设 limit（要全量 scan 后才好 sort/aggregate），
-    // 把 LIMIT/OFFSET 推迟给 execute 层在 sort/aggregate 后应用。
+    // ORDER BY 或聚合 或 有 remaining_predicate 时 kv-scan 不设 limit
+    // —— 先 filter/aggregate/sort 才能知道前 N 行是哪些。
+    // 把 LIMIT/OFFSET 推迟给 execute 层应用。
     let has_order_by = select.order_by.is_some();
-    let kv_limit = if has_order_by || has_aggregate { 0 } else { select.limit.unwrap_or(0) };
-    let limit_after_sort = if has_order_by { select.limit.unwrap_or(0) } else { 0 };
-    let offset_after_sort = if has_order_by { select.offset.unwrap_or(0) } else { 0 };
+    let has_predicate = remaining_predicate.is_some();
+    let needs_post_filter_limit = has_order_by || has_aggregate || has_predicate;
+    let kv_limit = if needs_post_filter_limit { 0 } else { select.limit.unwrap_or(0) };
+    let limit_after_sort = if needs_post_filter_limit { select.limit.unwrap_or(0) } else { 0 };
+    let offset_after_sort = if needs_post_filter_limit { select.offset.unwrap_or(0) } else { 0 };
 
     Ok(SqlExecutionPlan::Scan(ScanPlan {
         namespace,

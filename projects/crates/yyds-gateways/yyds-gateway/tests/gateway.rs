@@ -474,6 +474,40 @@ fn sql_aggregate_rejects_mixed_aggregate_nonaggregate() {
 }
 
 #[test]
+fn sql_limit_with_where_scans_all_then_returns_limited() {
+    // Regression: kv_limit 不能下推到 KV-scan 当有 WHERE（非 pk 条件）时。
+    // 否则先 scan N 行再 filter 会返回不足 N 行的结果。
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = empty_executor();
+
+    // 按 rowid 顺序（= id 升序）：(7,30), (11,20), (13,35), (17,22)
+    for (id, _name, age) in [(7i64, "alice", 30i64), (11, "bob", 20), (13, "carol", 35), (17, "dan", 22)] {
+        let sql = format!("INSERT INTO users VALUES ({id}, '', {age})");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+    }
+
+    // WHERE age > 22 LIMIT 2 → 预期：2 行 alice(30), carol(35)
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id, age FROM users WHERE age > 22 LIMIT 2", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+
+    // 顺序由 KV 实现决定（未指定 ORDER BY），只检查数量和值集合。
+    assert_eq!(result.rows.len(), 2, "expected 2 rows, got {} — kv_limit pushdown bug", result.rows.len());
+    let ages: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|r| {
+            if let yyds_gateway::SqlValue::Number(n) = &r[1] { *n } else { unreachable!() }
+        })
+        .collect();
+    assert!(ages.contains(&30.0), "missing alice(30)");
+    assert!(ages.contains(&35.0), "missing carol(35)");
+}
+
+#[test]
 fn sql_update_then_select_round_trip() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     // 预置 row: id=9, name=original, age=20
