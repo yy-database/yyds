@@ -205,6 +205,11 @@ impl<'config> SqlBuilder<'config> {
             }
             SqlTokenType::True | SqlTokenType::False => Ok(Expression::Literal(Literal::Boolean(t.kind == SqlTokenType::True, t.span.clone()))),
             SqlTokenType::Null => Ok(Expression::Literal(Literal::Null(t.span.clone()))),
+            // Identifier leaf — 从 build_primary_expression 里 Leaf(Identifier_) 子节点进入，
+            // 构造 Expression::Identifier (与 build_identifier 同逻辑)。
+            SqlTokenType::Identifier_ => {
+                Ok(Expression::Identifier(Identifier { name: self.get_text(t.span.clone(), source), span: t.span.clone() }))
+            }
             _ => Err(OakError::custom_error("Not a primary expression leaf")),
         }
     }

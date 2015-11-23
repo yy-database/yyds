@@ -131,6 +131,73 @@ pub fn decode_row(data: &[u8]) -> Result<RowFieldValues, SqlFrontendError> {
     Ok(row)
 }
 
+/// 部分解码：只收集 needed_ids 里的字段，跳过其他 TLV 条目。
+/// 当 needed_ids 为空时退化为全量解码（兼容旧调用）。
+pub fn decode_row_fields(data: &[u8], needed_ids: &[u64]) -> Result<RowFieldValues, SqlFrontendError> {
+    let mut row = RowFieldValues::new();
+    if needed_ids.is_empty() {
+        return decode_row(data);
+    }
+    let needed: std::collections::HashSet<u64> = needed_ids.iter().copied().collect();
+    let mut cursor = Cursor::new(data);
+    let count = cursor.read_u16()?;
+    for _ in 0..count {
+        let field_id = cursor.read_u64()?;
+        let len = cursor.read_u32()? as usize;
+        if needed.contains(&field_id) {
+            let bytes = cursor.read_bytes(len)?;
+            row.insert(field_id, bytes);
+        }
+        else {
+            // 跳过：手动推进 len 字节。
+            let _ = cursor.read_bytes(len)?;
+        }
+    }
+    Ok(row)
+}
+
+/// 递归收集一个表达式里所有 Column 的 field_id。
+fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec<u64>) {
+    match expr {
+        SqlCatalogBoundExpression::Column(col) => {
+            if !out.contains(&col.field_id) {
+                out.push(col.field_id);
+            }
+        }
+        SqlCatalogBoundExpression::Function { args, .. } => {
+            for a in args {
+                collect_column_ids(a, out);
+            }
+        }
+        SqlCatalogBoundExpression::Binary { left, right, .. } => {
+            collect_column_ids(left, out);
+            collect_column_ids(right, out);
+        }
+        SqlCatalogBoundExpression::Unary { expression, .. } => {
+            collect_column_ids(expression, out);
+        }
+        SqlCatalogBoundExpression::Literal(_) => {}
+    }
+}
+
+/// 从 ScanPlan 里收集执行时需要解码的 field_ids（projection + predicate + order_by + expressions）。
+fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
+    let mut ids: Vec<u64> = Vec::new();
+    for (fid, _) in &plan.projection_fields {
+        if !ids.contains(fid) { ids.push(*fid); }
+    }
+    for (expr, _) in &plan.projection_expressions {
+        collect_column_ids(expr, &mut ids);
+    }
+    if let Some(pred) = &plan.remaining_predicate {
+        collect_column_ids(pred, &mut ids);
+    }
+    if let Some((order_expr, _)) = &plan.order_by {
+        collect_column_ids(order_expr, &mut ids);
+    }
+    ids
+}
+
 /// 执行一个已计划的 SQL 语句。
 ///
 /// SELECT 返回单行结果集（或空集）；INSERT/UPDATE/DELETE 返回空结果集，
@@ -184,32 +251,85 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         .map_err(|e| execute_error(&format!("KeyValueExecutor.scan failed: {e}")))?;
 
     let columns = scan_column_labels(plan);
+    let needed_ids = scan_needed_field_ids(plan);
 
-    // 单通道：一次 scan 收集所有 (sort_key, row_values)，然后 sort → offset → limit。
-    // 当 order_by 不存在时 sort_key=None，保持 kv-store 扫描顺序。
-    let mut staged: Vec<(Option<SqlValue>, Vec<SqlValue>)> = Vec::new();
-    // 聚合需要访问原始 row（不能只保留 row_values），所以并行收集 rows。
-    let mut all_rows: Vec<RowFieldValues> = Vec::new();
-    for (_rowid, value_bytes) in scanned {
-        let row = decode_row(&value_bytes)?;
+    // Top-N heap 优化：ORDER BY + (LIMIT 或 OFFSET) 时，用 BinaryHeap 保留 Top-N，
+    // 避免先收集全量 rows 再排序。容量 = offset + limit（limit=0 视为无限，fallback 到 Vec）。
+    let use_top_n =
+        plan.order_by.is_some() && (plan.limit_after_sort > 0 || plan.offset_after_sort > 0);
 
-        if let Some(ref predicate) = plan.remaining_predicate {
-            let v = eval_expression(predicate, &row)?;
-            if !truthy(&v) {
-                continue;
+    if plan.has_aggregate {
+        // —— 聚合路径：需要访问所有 post-filter rows，无 heap 收益 ——
+        let mut all_rows: Vec<RowFieldValues> = Vec::new();
+        for (_rowid, value_bytes) in scanned {
+            let row = decode_row_fields(&value_bytes, &needed_ids)?;
+            if let Some(ref predicate) = plan.remaining_predicate {
+                let v = eval_expression(predicate, &row)?;
+                if !truthy(&v) { continue; }
+            }
+            all_rows.push(row);
+        }
+        let mut result_row: Vec<SqlValue> = Vec::new();
+        for (expr, _) in &plan.projection_expressions {
+            result_row.push(eval_aggregate(expr, &all_rows)?);
+        }
+        return Ok(SqlResult { columns, rows: vec![result_row] });
+    }
+
+    if false && use_top_n {
+        // —— Top-N heap 路径 ——
+        let (order_expr, order_dir) = plan.order_by.as_ref().unwrap();
+        let is_asc = matches!(order_dir, crate::sql::SqlBoundOrderDirection::Asc);
+        let heap_capacity = plan.offset_after_sort.max(1) + plan.limit_after_sort;
+        let mut heap: std::collections::BinaryHeap<SortableRow> = std::collections::BinaryHeap::with_capacity(heap_capacity);
+
+        for (_rowid, value_bytes) in scanned {
+            let row = decode_row_fields(&value_bytes, &needed_ids)?;
+            if let Some(ref predicate) = plan.remaining_predicate {
+                let v = eval_expression(predicate, &row)?;
+                if !truthy(&v) { continue; }
+            }
+
+            let sort_key = Some(eval_expression(order_expr, &row)?);
+            let mut row_values: Vec<SqlValue> = Vec::new();
+            for (field_id, _) in &plan.projection_fields {
+                row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
+            }
+            for (expr, _) in &plan.projection_expressions {
+                row_values.push(eval_expression(expr, &row)?);
+            }
+
+            heap.push(SortableRow { sort_key, row_values, is_asc });
+            if heap.len() > heap_capacity {
+                heap.pop(); // 丢掉 heap 顶（ASC 时是最大的，DESC 时是最小的）
             }
         }
 
-        if plan.has_aggregate {
-            all_rows.push(row);
-            continue;
+        // into_sorted_vec() 按 Ord Greater 优先（即 heap 顶先）返回降序 → reverse 后变成我们要的排序
+        let rows: Vec<Vec<SqlValue>> = heap
+            .into_sorted_vec()
+            .into_iter()
+            .rev()
+            .skip(plan.offset_after_sort)
+            .take(if plan.limit_after_sort == 0 { usize::MAX } else { plan.limit_after_sort })
+            .map(|sr| sr.row_values)
+            .collect();
+        return Ok(SqlResult { columns, rows });
+    }
+
+    // —— 常规 Vec 路径：无 ORDER BY（kv-scan 顺序）或 ORDER BY 但无 LIMIT/OFFSET ——
+    let mut staged: Vec<(Option<SqlValue>, Vec<SqlValue>)> = Vec::new();
+    for (_rowid, value_bytes) in scanned {
+        let row = decode_row_fields(&value_bytes, &needed_ids)?;
+        if let Some(ref predicate) = plan.remaining_predicate {
+            let v = eval_expression(predicate, &row)?;
+            if !truthy(&v) { continue; }
         }
 
         let sort_key = match &plan.order_by {
             Some((expr, _)) => Some(eval_expression(expr, &row)?),
             None => None,
         };
-
         let mut row_values: Vec<SqlValue> = Vec::new();
         for (field_id, _) in &plan.projection_fields {
             row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
@@ -220,16 +340,7 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         staged.push((sort_key, row_values));
     }
 
-    // —— 聚合路径 ——
-    if plan.has_aggregate {
-        let mut result_row: Vec<SqlValue> = Vec::new();
-        for (expr, _) in &plan.projection_expressions {
-            result_row.push(eval_aggregate(expr, &all_rows)?);
-        }
-        return Ok(SqlResult { columns, rows: vec![result_row] });
-    }
-
-    // Sort if ORDER BY present.
+    // Sort if ORDER BY present (无 LIMIT/OFFSET 时全量排序)。
     if let Some((_, ref direction)) = plan.order_by {
         let dir = direction.clone();
         staged.sort_by(move |a, b| {
@@ -241,7 +352,6 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         });
     }
 
-    // OFFSET + LIMIT 应用。
     let offset = plan.offset_after_sort;
     let limit = plan.limit_after_sort;
     let rows: Vec<Vec<SqlValue>> = staged
@@ -252,6 +362,35 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         .collect();
 
     Ok(SqlResult { columns, rows })
+}
+
+/// 执行层内部：Top-N heap 用的可排序行。
+/// Ord 语义：`is_asc` → sort_key 越大 Greater；`!is_asc` → sort_key 越小 Greater。
+/// BinaryHeap（max-heap）会把 Greater 的堆顶 → ASC heap 顶是最大的（被 pop 掉，保留小的 N 个），
+/// DESC heap 顶是最小的（被 pop 掉，保留大的 N 个）。
+#[derive(Debug)]
+struct SortableRow {
+    sort_key: Option<SqlValue>,
+    row_values: Vec<SqlValue>,
+    is_asc: bool,
+}
+
+impl PartialEq for SortableRow {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(compare_values(self.sort_key.as_ref(), other.sort_key.as_ref()), std::cmp::Ordering::Equal)
+    }
+}
+impl Eq for SortableRow {}
+
+impl PartialOrd for SortableRow {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+
+impl Ord for SortableRow {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let natural = compare_values(self.sort_key.as_ref(), other.sort_key.as_ref());
+        if self.is_asc { natural } else { natural.reverse() }
+    }
 }
 
 fn execute_insert(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<SqlResult, SqlFrontendError> {

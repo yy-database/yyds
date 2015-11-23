@@ -508,6 +508,59 @@ fn sql_limit_with_where_scans_all_then_returns_limited() {
 }
 
 #[test]
+fn sql_order_by_with_limit_offset_uses_top_n_heap() {
+    // ORDER BY + (LIMIT 或 OFFSET) 必须正确排序后再应用分页。
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = empty_executor();
+
+    // 按 age: bob=20, dan=22, alice=30, carol=35
+    for (id, _name, age) in [(7i64, "alice", 30i64), (11, "bob", 20), (13, "carol", 35), (17, "dan", 22)] {
+        let sql = format!("INSERT INTO users VALUES ({id}, '', {age})");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+    }
+
+    // ORDER BY age ASC LIMIT 2 → bob(20), dan(22)
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users ORDER BY age ASC LIMIT 2",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec ASC+LIMIT");
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0][1], yyds_gateway::SqlValue::Number(20.0), "ASC first should be bob(20)");
+    assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Number(22.0), "ASC second should be dan(22)");
+
+    // ORDER BY age DESC LIMIT 2 → carol(35), alice(30)
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users ORDER BY age DESC LIMIT 2",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec DESC+LIMIT");
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0][1], yyds_gateway::SqlValue::Number(35.0), "DESC first should be carol(35)");
+    assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Number(30.0), "DESC second should be alice(30)");
+
+    // ORDER BY age ASC LIMIT 1 OFFSET 1 → dan(22) — 跳过 bob(20)
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users ORDER BY age ASC LIMIT 1 OFFSET 1",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec ASC+OFFSET+LIMIT");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][1], yyds_gateway::SqlValue::Number(22.0), "OFFSET 1 should be dan(22)");
+}
+
+#[test]
 fn sql_update_then_select_round_trip() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     // 预置 row: id=9, name=original, age=20

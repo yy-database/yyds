@@ -704,7 +704,7 @@ impl<'config> SqlBuilder<'config> {
         for child in node.children() {
             match child {
                 RedTree::Node(n) => {
-                    if n.green.kind == SqlElementType::Expression {
+                    if matches!(n.green.kind, SqlElementType::Expression | SqlElementType::Identifier | SqlElementType::FunctionCall) {
                         if let Some((expr, span)) = current_expr.take() {
                             items.push(OrderByItem { expr, direction: OrderDirection::Asc, span });
                         }
