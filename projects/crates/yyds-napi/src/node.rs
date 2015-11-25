@@ -58,7 +58,7 @@ pub fn node_init(data_dir: String, identity: &NodeIdentityHandle) -> Result<()> 
 
 #[napi]
 pub fn node_inspect(data_dir: String) -> Result<NodeStatusJson> {
-    let snapshot = inspect_node(PathBuf::from(data_dir).as_path()).map_err(map_string)?;
+    let snapshot = inspect_node(PathBuf::from(data_dir).as_path(), None).map_err(map_string)?;
     Ok(NodeStatusJson {
         directory: snapshot.directory,
         ownership: snapshot.ownership,
