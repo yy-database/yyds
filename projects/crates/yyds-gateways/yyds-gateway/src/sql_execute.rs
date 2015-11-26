@@ -18,7 +18,7 @@ use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 use crate::{
     catalog_bind::SqlCatalogBoundExpression,
     sql::{SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError},
-    sql_planner::{DeletePlan, ReadPlan, ScanPlan, SqlExecutionPlan, WritePlan},
+    sql_planner::{DeletePlan, ReadPlan, ScanPlan, SqlExecutionPlan, UpdatePlan, WritePlan},
 };
 
 /// SQL 查询的结果集。
@@ -28,6 +28,8 @@ pub struct SqlResult {
     pub columns: Vec<String>,
     /// 行（每行的列值按 `columns` 顺序）。
     pub rows: Vec<Vec<SqlValue>>,
+    /// DML 影响行数；SELECT 保持 0。
+    pub affected_rows: u64,
 }
 
 /// SQL 层面的值域。
@@ -201,13 +203,13 @@ fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
 /// 执行一个已计划的 SQL 语句。
 ///
 /// SELECT 返回单行结果集（或空集）；INSERT/UPDATE/DELETE 返回空结果集，
-/// 影响行数的计数暂时通过 `executed` 字段表达。
+/// 影响行数记录在 `SqlResult.affected_rows`。
 pub fn execute_plan(executor: &dyn KeyValueExecutor, plan: &SqlExecutionPlan) -> Result<SqlResult, SqlFrontendError> {
     match plan {
         SqlExecutionPlan::Read(read_plan) => execute_read(executor, read_plan),
         SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, scan_plan),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, write_plan),
-        SqlExecutionPlan::Update(write_plan) => execute_update(executor, write_plan),
+        SqlExecutionPlan::Update(update_plan) => execute_update(executor, update_plan),
         SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, delete_plan),
     }
 }
@@ -222,14 +224,14 @@ fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlR
     let result = batch.into_iter().next().ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
     let row_bytes = match result {
         yyds_types::KeyValueResult::Get(Some(bytes)) => bytes,
-        _ => return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new() }),
+        _ => return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new(), affected_rows: 0 }),
     };
     let row = decode_row(&row_bytes)?;
 
     if let Some(ref predicate) = plan.remaining_predicate {
         let v = eval_expression(predicate, &row)?;
         if !truthy(&v) {
-            return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new() });
+            return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new(), affected_rows: 0 });
         }
     }
 
@@ -241,7 +243,7 @@ fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlR
     for (expr, _) in &plan.projection_expressions {
         row_values.push(eval_expression(expr, &row)?);
     }
-    Ok(SqlResult { columns, rows: vec![row_values] })
+    Ok(SqlResult { columns, rows: vec![row_values], affected_rows: 0 })
 }
 
 fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlResult, SqlFrontendError> {
@@ -273,7 +275,7 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         for (expr, _) in &plan.projection_expressions {
             result_row.push(eval_aggregate(expr, &all_rows)?);
         }
-        return Ok(SqlResult { columns, rows: vec![result_row] });
+        return Ok(SqlResult { columns, rows: vec![result_row], affected_rows: 0 });
     }
 
     if false && use_top_n {
@@ -314,7 +316,7 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             .take(if plan.limit_after_sort == 0 { usize::MAX } else { plan.limit_after_sort })
             .map(|sr| sr.row_values)
             .collect();
-        return Ok(SqlResult { columns, rows });
+        return Ok(SqlResult { columns, rows, affected_rows: 0 });
     }
 
     // —— 常规 Vec 路径：无 ORDER BY（kv-scan 顺序）或 ORDER BY 但无 LIMIT/OFFSET ——
@@ -361,7 +363,7 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         .map(|(_, r)| r)
         .collect();
 
-    Ok(SqlResult { columns, rows })
+    Ok(SqlResult { columns, rows, affected_rows: 0 })
 }
 
 /// 执行层内部：Top-N heap 用的可排序行。
@@ -399,11 +401,15 @@ fn execute_insert(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<S
     let namespace = Namespace(plan.namespace.clone());
     let action = KeyValueAction::PutIfAbsent(bytes);
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
-    let _result = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?;
-    Ok(SqlResult { columns: Vec::new(), rows: Vec::new() })
+    let result = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?;
+    let affected = match result {
+        yyds_types::KeyValueResult::PutIfAbsent { revision: Some(_) } => 1,
+        _ => 0,
+    };
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
 }
 
-fn execute_update(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<SqlResult, SqlFrontendError> {
+fn execute_update(executor: &dyn KeyValueExecutor, plan: &UpdatePlan) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
     let get_cmd = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Get };
     let batch = executor
@@ -411,24 +417,56 @@ fn execute_update(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<S
         .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
     let existing_bytes = match batch.into_iter().next() {
         Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
-        _ => return Err(execute_error("UPDATE target row not found")),
+        _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
     };
     let mut row = decode_row(&existing_bytes)?;
+
+    // 先评估 remaining_predicate —— 不通过就不写，影响 0 行。
+    if let Some(ref predicate) = plan.remaining_predicate {
+        let v = eval_expression(predicate, &row)?;
+        if !truthy(&v) {
+            return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
+        }
+    }
+
     for field in &plan.fields {
         row.insert(field.field_id, sql_value_to_bytes(&field.value));
     }
     let encoded = encode_row(&row);
     let put_cmd = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
     let _ = executor.execute(put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?;
-    Ok(SqlResult { columns: Vec::new(), rows: Vec::new() })
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 1 })
 }
 
 fn execute_delete(executor: &dyn KeyValueExecutor, plan: &DeletePlan) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
+
+    // 如果有 remaining_predicate —— 先 Get 拿到行评估，不通过就不删。
+    if let Some(ref predicate) = plan.remaining_predicate {
+        let get_cmd = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Get };
+        let batch = executor
+            .execute_read_batch(&[get_cmd])
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
+        let existing_bytes = match batch.into_iter().next() {
+            Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
+            // 行已不存在 — 也是 0 影响行
+            _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
+        };
+        let row = decode_row(&existing_bytes)?;
+        let v = eval_expression(predicate, &row)?;
+        if !truthy(&v) {
+            return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
+        }
+    }
+
     let action = KeyValueAction::Delete;
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
-    let _ = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?;
-    Ok(SqlResult { columns: Vec::new(), rows: Vec::new() })
+    let result = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?;
+    let affected = match result {
+        yyds_types::KeyValueResult::Delete { removed: true } => 1,
+        _ => 0,
+    };
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
 }
 
 fn write_plan_to_row(plan: &WritePlan) -> RowFieldValues {

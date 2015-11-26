@@ -144,17 +144,19 @@ pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Resul
     Ok(SqlExecutionPlan::Insert(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields }))
 }
 
-/// 计划一个 UPDATE。要求 WHERE pk = literal。
+/// 计划一个 UPDATE。要求 WHERE 里有 `pk = literal`；其余条件保留为 row-level filter。
 pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, update.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
     let pk_field = primary_key_of(table)?;
 
-    let rowid = match update.predicate {
+    let (rowid, remaining_predicate) = match update.predicate {
         None => return Err(planner_error("UPDATE requires WHERE with `pk = literal`")),
         Some(expr) => {
-            let (pk_literal, ..) = extract_pk_range(expr, pk_field.field_id)?;
-            pk_literal.ok_or_else(|| planner_error(&format!("UPDATE WHERE must contain `{} = literal`", pk_field.name)))?
+            let (pk_literal, _pk_prefix, _pk_after, _pk_before, remaining) = extract_pk_range(expr, pk_field.field_id)?;
+            let lit = pk_literal
+                .ok_or_else(|| planner_error(&format!("UPDATE WHERE must contain `{} = literal`", pk_field.name)))?;
+            (lit, remaining)
         }
     };
     let rowid_bytes = pk_literal_to_rowid(&rowid)?;
@@ -164,24 +166,31 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
         let lit = literal_from_expression(value_expr)?;
         write_fields.push(WriteField { field_id: field.field_id, value: lit });
     }
-    Ok(SqlExecutionPlan::Update(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields }))
+    Ok(SqlExecutionPlan::Update(UpdatePlan {
+        namespace,
+        rowid: rowid_bytes,
+        fields: write_fields,
+        remaining_predicate,
+    }))
 }
 
-/// 计划一个 DELETE。要求 WHERE pk = literal。
+/// 计划一个 DELETE。要求 WHERE 里有 `pk = literal`；其余条件保留为 row-level filter。
 pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, delete.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
     let pk_field = primary_key_of(table)?;
 
-    let rowid = match delete.predicate {
+    let (rowid, remaining_predicate) = match delete.predicate {
         None => return Err(planner_error("DELETE requires WHERE with `pk = literal`")),
         Some(expr) => {
-            let (pk_literal, ..) = extract_pk_range(expr, pk_field.field_id)?;
-            pk_literal.ok_or_else(|| planner_error(&format!("DELETE WHERE must contain `{} = literal`", pk_field.name)))?
+            let (pk_literal, _pk_prefix, _pk_after, _pk_before, remaining) = extract_pk_range(expr, pk_field.field_id)?;
+            let lit = pk_literal
+                .ok_or_else(|| planner_error(&format!("DELETE WHERE must contain `{} = literal`", pk_field.name)))?;
+            (lit, remaining)
         }
     };
     let rowid_bytes = pk_literal_to_rowid(&rowid)?;
-    Ok(SqlExecutionPlan::Delete(DeletePlan { namespace, rowid: rowid_bytes }))
+    Ok(SqlExecutionPlan::Delete(DeletePlan { namespace, rowid: rowid_bytes, remaining_predicate }))
 }
 
 /// 从 bound expression 里提取 literal。目前 INSERT/UPDATE 的值必须是 literal。
@@ -205,9 +214,9 @@ pub enum SqlExecutionPlan {
     Scan(ScanPlan),
     /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
     Insert(WritePlan),
-    /// UPDATE — 先 Get + 再 Put（WHERE pk=literal 必须存在）。
-    Update(WritePlan),
-    /// DELETE — Delete（WHERE pk=literal 必须存在）。
+    /// UPDATE — 先 Get 再 remaining_predicate 再 Put。
+    Update(UpdatePlan),
+    /// DELETE — 先 Get 再 remaining_predicate 再 Delete。
     Delete(DeletePlan),
 }
 
@@ -258,7 +267,7 @@ pub struct ScanPlan {
     pub has_aggregate: bool,
 }
 
-/// INSERT / UPDATE 执行计划。payload 由 execute 层做 TLV 编码。
+/// INSERT 执行计划。payload 由 execute 层做 TLV 编码。
 #[derive(Debug, Clone)]
 pub struct WritePlan {
     /// namespace 标签。
@@ -267,6 +276,20 @@ pub struct WritePlan {
     pub rowid: Vec<u8>,
     /// INSERT 时提供所有字段值；UPDATE 时提供要 SET 的字段。
     pub fields: Vec<WriteField>,
+}
+
+/// UPDATE 执行计划。payload 由 execute 层做 TLV 编码。
+#[derive(Debug, Clone)]
+pub struct UpdatePlan {
+    /// namespace 标签。
+    pub namespace: String,
+    /// 要写入的 row 的主键值 bytes。
+    pub rowid: Vec<u8>,
+    /// 要 SET 的字段。
+    pub fields: Vec<WriteField>,
+    /// 从原 WHERE 里剥掉主键等值后剩下的表达式。
+    /// execute_update 会在写入前对现有 row 评估此 predicate。
+    pub remaining_predicate: Option<SqlCatalogBoundExpression>,
 }
 
 /// 一个要写入的字段。
@@ -283,6 +306,9 @@ pub struct WriteField {
 pub struct DeletePlan {
     pub namespace: String,
     pub rowid: Vec<u8>,
+    /// 从原 WHERE 里剥掉主键等值后剩下的表达式。
+    /// execute_delete 会在删除前对现有 row 评估此 predicate。
+    pub remaining_predicate: Option<SqlCatalogBoundExpression>,
 }
 
 /// 从 WHERE predicate 里提取所有关于 pk 字段的条件。

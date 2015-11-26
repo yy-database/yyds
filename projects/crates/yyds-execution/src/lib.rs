@@ -33,6 +33,39 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         Err(Error::Unsupported("scan is not implemented by this executor"))
     }
+
+    /// Opens a local transaction handle bound to this executor.
+    ///
+    /// The handle lets callers issue commands through a transaction boundary so that a gateway
+    /// can bind `BEGIN` / `COMMIT` / `ROLLBACK` protocol verbs to a real typed object. Executors
+    /// without transaction support return `Error::Unsupported`.
+    fn begin_transaction(&self) -> yyds_types::Result<Box<dyn TransactionHandle + '_>> {
+        Err(Error::Unsupported("this executor does not support local transactions"))
+    }
+}
+
+/// A local transaction handle that exposes the same command surface as the executor but
+/// wraps it in a begin/commit/rollback contract.
+///
+/// The current reference implementation (`LocalTransactionHandle`) delegates each command
+/// immediately to the underlying shard so that commits and rollbacks are currently no-ops.
+/// This design is stable enough that gateway layers can bind BEGIN/COMMIT/ROLLBACK today,
+/// and a future buffered implementation that batches writes until commit can replace it
+/// without changing the gateway contract.
+pub trait TransactionHandle: Debug {
+    /// Executes one command within the transaction.
+    fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult>;
+
+    /// Reads an ordered batch within the transaction, preserving duplicate keys.
+    fn execute_read_batch(&self, _commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
+        Err(Error::Unsupported("transaction batch reads are not implemented by this handle"))
+    }
+
+    /// Finalises the transaction and persists any pending state.
+    fn commit(self: Box<Self>) -> yyds_types::Result<()>;
+
+    /// Aborts the transaction and discards any pending state.
+    fn rollback(self: Box<Self>);
 }
 
 /// Routes commands to mounted local shards under one immutable routing map.
@@ -58,12 +91,60 @@ where
     pub fn routing(&self) -> &ShardMap {
         &self.routing
     }
+
+    /// Opens a local transaction handle bound to this executor.
+    ///
+    /// The handle delegates each command to the underlying shard immediately so that writes
+    /// are applied before commit — this is the current minimal implementation. It exists so
+    /// that gateway layers can bind BEGIN / COMMIT / ROLLBACK protocol verbs to a real typed
+    /// object; a future buffered implementation may batch writes until commit without changing
+    /// the gateway contract.
+    pub fn begin_transaction(&self) -> Box<dyn TransactionHandle + '_> {
+        Box::new(LocalTransactionHandle { executor: self })
+    }
+}
+
+/// Local transaction handle that delegates commands immediately to the executor's shards.
+///
+/// Currently commit and rollback are no-ops because writes are applied eagerly. This struct
+/// exists to give gateway layers a typed object to bind BEGIN / COMMIT / ROLLBACK to. A future
+/// rewrite may batch writes until commit without changing the trait contract.
+#[derive(Debug)]
+pub struct LocalTransactionHandle<'a, S = FileShard> {
+    executor: &'a LocalExecutor<S>,
+}
+
+impl<'a, S> TransactionHandle for LocalTransactionHandle<'a, S>
+where
+    S: KvStore + Send + Debug,
+{
+    fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
+        self.executor.execute(command)
+    }
+
+    fn execute_read_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
+        self.executor.execute_read_batch(commands)
+    }
+
+    fn commit(self: Box<Self>) -> yyds_types::Result<()> {
+        // Current implementation is eager, so there is nothing to flush. A future buffered
+        // implementation will persist pending writes here and return the result of that flush.
+        Ok(())
+    }
+
+    fn rollback(self: Box<Self>) {
+        // Current implementation is eager, so writes cannot be undone once applied. A future
+        // buffered implementation will discard pending writes here instead of applying them.
+    }
 }
 
 impl<S> KeyValueExecutor for LocalExecutor<S>
 where
     S: KvStore + Send + Debug,
 {
+    fn begin_transaction(&self) -> yyds_types::Result<Box<dyn TransactionHandle + '_>> {
+        Ok(self.begin_transaction())
+    }
     fn execute_read_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
         if commands.iter().any(|command| command.action != KeyValueAction::Get) {
             return Err(Error::Unsupported("read batches accept only read actions"));

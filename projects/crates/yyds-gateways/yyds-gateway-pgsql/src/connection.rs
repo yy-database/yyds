@@ -254,13 +254,14 @@ fn execute_simple_query(
         write_command_complete(stream, &format!("SELECT {}", result.rows.len()))?;
     }
     else {
+        let affected = result.affected_rows;
         let tag = match &plan {
-            SqlExecutionPlan::Insert(_) => "INSERT 0 1",
-            SqlExecutionPlan::Update(_) => "UPDATE 1",
-            SqlExecutionPlan::Delete(_) => "DELETE 1",
+            SqlExecutionPlan::Insert(_) => format!("INSERT 0 {}", affected),
+            SqlExecutionPlan::Update(_) => format!("UPDATE {}", affected),
+            SqlExecutionPlan::Delete(_) => format!("DELETE {}", affected),
             SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) => unreachable!(),
         };
-        write_command_complete(stream, tag)?;
+        write_command_complete(stream, &tag)?;
     }
     Ok(())
 }

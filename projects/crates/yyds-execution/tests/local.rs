@@ -240,3 +240,43 @@ fn scan_applies_prefix_after_and_limit_globally() {
     let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
     assert_eq!(keys, vec![b"a-10", b"a-11"]);
 }
+
+#[test]
+fn transaction_handle_exposes_begin_commit_and_rollback_contract() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let directory = create_folder().unwrap();
+    let shard_id = ShardId("txn-a".into());
+    let executor = LocalExecutor::new(
+        ShardMap::new(ShardEpoch(7), vec![shard_id.clone()]).unwrap(),
+        HashMap::from([(shard_id, FileShard::open(directory.path().join("txn-a.yykv")).unwrap())]),
+    )
+    .unwrap();
+
+    // Pre-populate one key so we know the plain executor round-trips correctly.
+    executor.execute(command(KeyValueAction::Put(b"initial".to_vec()), b"seed")).unwrap();
+    assert_eq!(
+        executor.execute(command(KeyValueAction::Get, b"seed")).unwrap(),
+        KeyValueResult::Get(Some(b"initial".to_vec()))
+    );
+
+    // Grab a typed handle first to confirm it delegates through the trait method.
+    let typed_handle: Box<dyn TransactionHandle + '_> = executor.begin_transaction();
+    typed_handle.execute(command(KeyValueAction::Put(b"hello".to_vec()), b"val")).unwrap();
+    typed_handle.commit().unwrap();
+
+    let result = executor.execute(command(KeyValueAction::Get, b"val")).unwrap();
+    assert_eq!(result, KeyValueResult::Get(Some(b"hello".to_vec())));
+
+    // Second handle proves multiple transactions can be opened from the same executor.
+    let handle: Box<dyn TransactionHandle + '_> = executor.begin_transaction();
+    handle.execute(command(KeyValueAction::IncrementBy(41), b"counter")).unwrap();
+    handle.commit().unwrap();
+    let counter = executor.execute(command(KeyValueAction::IncrementBy(1), b"counter")).unwrap();
+    assert_eq!(counter, KeyValueResult::Increment { value: 42 });
+
+    // Rollback is a valid terminal action.
+    let rollback_handle: Box<dyn TransactionHandle + '_> = executor.begin_transaction();
+    rollback_handle.execute(command(KeyValueAction::Put(b"pending".to_vec()), b"temp")).unwrap();
+    rollback_handle.rollback();
+}

@@ -1042,3 +1042,78 @@ fn probe_planner_supports_or_in_where() {
         other => panic!("expected Scan, got {other:?}"),
     }
 }
+
+#[test]
+fn sql_update_rejects_when_remaining_predicate_fails() {
+    // 预置 row: id=9, name='original', age=20
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
+
+    // UPDATE users SET name='updated' WHERE id = 9 AND age = 99
+    // age=99 与实际 age=20 不匹配 — 应该影响 0 行且数据不变
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated' WHERE id = 9 AND age = 99",
+        &catalog, 7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("update");
+
+    assert_eq!(result.affected_rows, 0, "remaining predicate mismatch should affect 0 rows");
+
+    // SELECT 验证：数据保持原样
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+
+    assert_eq!(result.rows[0], vec![
+        yyds_gateway::SqlValue::String("original".into()),
+        yyds_gateway::SqlValue::Number(20.0),
+    ]);
+}
+
+#[test]
+fn sql_update_succeeds_when_remaining_predicate_matches() {
+    // 预置 row: id=9, name='original', age=20
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
+
+    // UPDATE users SET name='updated' WHERE id = 9 AND age = 20 — 应该成功
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated' WHERE id = 9 AND age = 20",
+        &catalog, 7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("update");
+
+    assert_eq!(result.affected_rows, 1, "matching remaining predicate should affect 1 row");
+
+    // SELECT 验证：name 已更新
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+
+    assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String("updated".into()));
+}
+
+#[test]
+fn sql_delete_rejects_when_remaining_predicate_fails() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_row("table:1", b"55", &[(1, b"55"), (2, b"victim")]);
+
+    // DELETE FROM users WHERE id = 55 AND name = 'other' — name 不匹配
+    let bound = yyds_gateway::bind_sql_catalog(
+        "DELETE FROM users WHERE id = 55 AND name = 'other'",
+        &catalog, 7,
+    ).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("delete");
+
+    assert_eq!(result.affected_rows, 0, "remaining predicate mismatch should affect 0 rows");
+
+    // SELECT 验证：数据仍然存在
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+
+    assert!(!result.rows.is_empty(), "row should still exist when predicate fails");
+}

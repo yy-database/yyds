@@ -314,7 +314,7 @@ fn execute_sql(stream: &mut impl Write, sequence: u8, sql: &str, runtime: &Mysql
         }
     };
     if is_write {
-        write_ok_with_affected(stream, sequence, 1)?;
+        write_ok_with_affected(stream, sequence, result.affected_rows)?;
         return Ok(());
     }
     write_result_set(stream, sequence, &result)
