@@ -46,10 +46,10 @@ pub enum SqlValue {
 }
 
 impl SqlValue {
-    /// 从 KV 层拿到的原始 bytes 推断一个 SqlValue。
+    /// 从 KV 层拿到的原始 bytes 推断一个 SqlValue（无类型信息，宽松推断）。
     ///
-    /// 目前策略很朴素：如果 bytes 是合法 UTF-8 并且能解析为整数或浮点数，就返回 Number；
-    /// 否则返回 String。如果上游知道精确类型，应避免这条推断路径。
+    /// 如果 bytes 是合法 UTF-8 并且能解析为整数或浮点数，就返回 Number；
+    /// 否则返回 String。如果上游知道精确类型，应使用 [`Self::from_row_bytes_typed`]。
     pub fn from_row_bytes(bytes: &[u8]) -> Self {
         let text = String::from_utf8_lossy(bytes).into_owned();
         if let Ok(int) = text.parse::<i64>() {
@@ -61,6 +61,48 @@ impl SqlValue {
             }
         }
         SqlValue::String(text)
+    }
+
+    /// 按声明的 `field_type` 精确解码 bytes。
+    ///
+    /// - `String` 字段永远返回 [`SqlValue::String`]，保留前导零、空串、非数字文本。
+    /// - `Int64`/`Int32` 按整数解析。
+    /// - `Float64` 按浮点解析。
+    /// - `Bool` 识别 `true`/`false`/`1`/`0`。
+    /// - `Unknown` / `Bytes` 退回到 [`Self::from_row_bytes`] 的宽松推断。
+    ///
+    /// 解码失败时降级为 [`SqlValue::String`] 保留原始 UTF-8 文本，
+    /// 让上层继续处理而不是 panic。
+    pub fn from_row_bytes_typed(bytes: &[u8], field_type: &crate::catalog_bind::SqlFieldType) -> Self {
+        let inner = field_type.inner();
+        match inner {
+            crate::catalog_bind::SqlFieldType::String => SqlValue::String(String::from_utf8_lossy(bytes).into_owned()),
+            crate::catalog_bind::SqlFieldType::Int64 | crate::catalog_bind::SqlFieldType::Int32 => {
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                text.parse::<i64>()
+                    .map(|n| SqlValue::Number(n as f64))
+                    .unwrap_or(SqlValue::String(text))
+            }
+            crate::catalog_bind::SqlFieldType::Float64 => {
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                text.parse::<f64>()
+                    .ok()
+                    .filter(|f| f.is_finite())
+                    .map(SqlValue::Number)
+                    .unwrap_or(SqlValue::String(text))
+            }
+            crate::catalog_bind::SqlFieldType::Bool => {
+                let text = String::from_utf8_lossy(bytes).into_owned();
+                match text.as_str() {
+                    "true" | "True" | "TRUE" | "1" => SqlValue::Boolean(true),
+                    "false" | "False" | "FALSE" | "0" | "" => SqlValue::Boolean(false),
+                    _ => SqlValue::String(text),
+                }
+            }
+            crate::catalog_bind::SqlFieldType::Bytes => SqlValue::String(String::from_utf8_lossy(bytes).into_owned()),
+            crate::catalog_bind::SqlFieldType::Unknown => Self::from_row_bytes(bytes),
+            crate::catalog_bind::SqlFieldType::Optional(_) => unreachable!("inner() strips Optional"),
+        }
     }
 
     /// 从 SQL 字面量构造。
@@ -99,9 +141,20 @@ impl RowFieldValues {
         self.fields.get(&field_id).map(|v| v.as_slice())
     }
 
-    /// 按 field_id 取推断后的 SqlValue。
+    /// 按 field_id 取推断后的 SqlValue（无类型信息，宽松推断）。
     pub fn value(&self, field_id: u64) -> Option<SqlValue> {
         self.fields.get(&field_id).map(|v| SqlValue::from_row_bytes(v))
+    }
+
+    /// 按 `field_type` 精确解码 bytes，保留前导零和空串等字符串语义。
+    pub fn value_typed(
+        &self,
+        field_id: u64,
+        field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    ) -> Option<SqlValue> {
+        let bytes = self.fields.get(&field_id)?;
+        let field_type = field_types.get(&field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        Some(SqlValue::from_row_bytes_typed(bytes, &field_type))
     }
 }
 
@@ -229,7 +282,7 @@ fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlR
     let row = decode_row(&row_bytes)?;
 
     if let Some(ref predicate) = plan.remaining_predicate {
-        let v = eval_expression(predicate, &row)?;
+        let v = eval_expression(predicate, &row, &plan.field_types)?;
         if !truthy(&v) {
             return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new(), affected_rows: 0 });
         }
@@ -238,10 +291,10 @@ fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlR
     let columns = read_column_labels(plan);
     let mut row_values: Vec<SqlValue> = Vec::new();
     for (field_id, _) in &plan.projection_fields {
-        row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
+        row_values.push(row.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
     }
     for (expr, _) in &plan.projection_expressions {
-        row_values.push(eval_expression(expr, &row)?);
+        row_values.push(eval_expression(expr, &row, &plan.field_types)?);
     }
     Ok(SqlResult { columns, rows: vec![row_values], affected_rows: 0 })
 }
@@ -266,14 +319,14 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         for (_rowid, value_bytes) in scanned {
             let row = decode_row_fields(&value_bytes, &needed_ids)?;
             if let Some(ref predicate) = plan.remaining_predicate {
-                let v = eval_expression(predicate, &row)?;
+                let v = eval_expression(predicate, &row, &plan.field_types)?;
                 if !truthy(&v) { continue; }
             }
             all_rows.push(row);
         }
         let mut result_row: Vec<SqlValue> = Vec::new();
         for (expr, _) in &plan.projection_expressions {
-            result_row.push(eval_aggregate(expr, &all_rows)?);
+            result_row.push(eval_aggregate(expr, &all_rows, &plan.field_types)?);
         }
         return Ok(SqlResult { columns, rows: vec![result_row], affected_rows: 0 });
     }
@@ -288,17 +341,17 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         for (_rowid, value_bytes) in scanned {
             let row = decode_row_fields(&value_bytes, &needed_ids)?;
             if let Some(ref predicate) = plan.remaining_predicate {
-                let v = eval_expression(predicate, &row)?;
+                let v = eval_expression(predicate, &row, &plan.field_types)?;
                 if !truthy(&v) { continue; }
             }
 
-            let sort_key = Some(eval_expression(order_expr, &row)?);
+            let sort_key = Some(eval_expression(order_expr, &row, &plan.field_types)?);
             let mut row_values: Vec<SqlValue> = Vec::new();
             for (field_id, _) in &plan.projection_fields {
-                row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
+                row_values.push(row.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
             }
             for (expr, _) in &plan.projection_expressions {
-                row_values.push(eval_expression(expr, &row)?);
+                row_values.push(eval_expression(expr, &row, &plan.field_types)?);
             }
 
             heap.push(SortableRow { sort_key, row_values, is_asc });
@@ -324,20 +377,20 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
     for (_rowid, value_bytes) in scanned {
         let row = decode_row_fields(&value_bytes, &needed_ids)?;
         if let Some(ref predicate) = plan.remaining_predicate {
-            let v = eval_expression(predicate, &row)?;
+            let v = eval_expression(predicate, &row, &plan.field_types)?;
             if !truthy(&v) { continue; }
         }
 
         let sort_key = match &plan.order_by {
-            Some((expr, _)) => Some(eval_expression(expr, &row)?),
+            Some((expr, _)) => Some(eval_expression(expr, &row, &plan.field_types)?),
             None => None,
         };
         let mut row_values: Vec<SqlValue> = Vec::new();
         for (field_id, _) in &plan.projection_fields {
-            row_values.push(row.value(*field_id).unwrap_or(SqlValue::Null));
+            row_values.push(row.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
         }
         for (expr, _) in &plan.projection_expressions {
-            row_values.push(eval_expression(expr, &row)?);
+            row_values.push(eval_expression(expr, &row, &plan.field_types)?);
         }
         staged.push((sort_key, row_values));
     }
@@ -423,7 +476,7 @@ fn execute_update(executor: &dyn KeyValueExecutor, plan: &UpdatePlan) -> Result<
 
     // 先评估 remaining_predicate —— 不通过就不写，影响 0 行。
     if let Some(ref predicate) = plan.remaining_predicate {
-        let v = eval_expression(predicate, &row)?;
+        let v = eval_expression(predicate, &row, &plan.field_types)?;
         if !truthy(&v) {
             return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
         }
@@ -453,7 +506,7 @@ fn execute_delete(executor: &dyn KeyValueExecutor, plan: &DeletePlan) -> Result<
             _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
         };
         let row = decode_row(&existing_bytes)?;
-        let v = eval_expression(predicate, &row)?;
+        let v = eval_expression(predicate, &row, &plan.field_types)?;
         if !truthy(&v) {
             return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
         }
@@ -519,7 +572,11 @@ fn truthy(v: &SqlValue) -> bool {
 }
 
 /// 对一个聚合函数在所有收集到的行上求值，返回单个 SqlValue。
-fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> Result<SqlValue, SqlFrontendError> {
+fn eval_aggregate(
+    expr: &SqlCatalogBoundExpression,
+    rows: &[RowFieldValues],
+    field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+) -> Result<SqlValue, SqlFrontendError> {
     let (name, args) = match expr {
         SqlCatalogBoundExpression::Function { name, args } => (name.clone(), args.clone()),
         _ => return Err(execute_error(&format!("eval_aggregate: non-Function expression encountered: {expr:?}"))),
@@ -538,7 +595,7 @@ fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> 
                 // COUNT(col) — count rows where col is not NULL.
                 let mut non_null: usize = 0;
                 for row in rows {
-                    let v = eval_expression(&args[0], row)?;
+                    let v = eval_expression(&args[0], row, field_types)?;
                     if !matches!(v, SqlValue::Null) {
                         non_null += 1;
                     }
@@ -550,7 +607,7 @@ fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> 
             let mut sum: f64 = 0.0;
             let mut any_non_null = false;
             for row in rows {
-                let v = eval_expression(&args[0], row)?;
+                let v = eval_expression(&args[0], row, field_types)?;
                 if let SqlValue::Number(n) = v {
                     sum += n;
                     any_non_null = true;
@@ -562,7 +619,7 @@ fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> 
             let mut sum: f64 = 0.0;
             let mut count: usize = 0;
             for row in rows {
-                let v = eval_expression(&args[0], row)?;
+                let v = eval_expression(&args[0], row, field_types)?;
                 if let SqlValue::Number(n) = v {
                     sum += n;
                     count += 1;
@@ -573,7 +630,7 @@ fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> 
         SqlAggregateFunction::MAX => {
             let mut max: Option<f64> = None;
             for row in rows {
-                let v = eval_expression(&args[0], row)?;
+                let v = eval_expression(&args[0], row, field_types)?;
                 if let SqlValue::Number(n) = v {
                     max = Some(match max { Some(m) => n.max(m), None => n });
                 }
@@ -583,7 +640,7 @@ fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> 
         SqlAggregateFunction::MIN => {
             let mut min: Option<f64> = None;
             for row in rows {
-                let v = eval_expression(&args[0], row)?;
+                let v = eval_expression(&args[0], row, field_types)?;
                 if let SqlValue::Number(n) = v {
                     min = Some(match min { Some(m) => n.min(m), None => n });
                 }
@@ -593,19 +650,23 @@ fn eval_aggregate(expr: &SqlCatalogBoundExpression, rows: &[RowFieldValues]) -> 
     }
 }
 
-fn eval_expression(expr: &SqlCatalogBoundExpression, row: &RowFieldValues) -> Result<SqlValue, SqlFrontendError> {
+fn eval_expression(
+    expr: &SqlCatalogBoundExpression,
+    row: &RowFieldValues,
+    field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+) -> Result<SqlValue, SqlFrontendError> {
     Ok(match expr {
-        SqlCatalogBoundExpression::Column(col) => {
-            row.value(col.field_id).ok_or_else(|| execute_error(&format!("column {} not present in row", col.field_name)))?
-        }
+        SqlCatalogBoundExpression::Column(col) => row
+            .value_typed(col.field_id, field_types)
+            .ok_or_else(|| execute_error(&format!("column {} not present in row", col.field_name)))?,
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Unary { operator, expression } => {
-            let inner = eval_expression(expression, row)?;
+            let inner = eval_expression(expression, row, field_types)?;
             eval_unary(*operator, inner)?
         }
         SqlCatalogBoundExpression::Binary { left, operator, right } => {
-            let l = eval_expression(left, row)?;
-            let r = eval_expression(right, row)?;
+            let l = eval_expression(left, row, field_types)?;
+            let r = eval_expression(right, row, field_types)?;
             eval_binary(*operator, &l, &r)?
         }
         SqlCatalogBoundExpression::Function { name, .. } => {

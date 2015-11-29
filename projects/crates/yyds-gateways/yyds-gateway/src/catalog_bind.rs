@@ -2,8 +2,84 @@
 
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundLiteral,
-    SqlBoundOrderByItem, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
+    SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
 };
+use vos::contract::{CanonicalType, ResolvedCanonicalType};
+
+/// Scalar types the gateway can project from a VOS field contract.
+///
+/// The gateway does not reproduce the full VOS type algebra — it keeps the
+/// information needed to decode row bytes and validate SQL literals. Fields
+/// whose type does not map cleanly fall back to [`SqlFieldType::Unknown`] and
+/// leave interpretation to the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlFieldType {
+    /// 64-bit signed integer (`i64` / `int64`).
+    Int64,
+    /// 32-bit signed integer (`i32` / `int32`).
+    Int32,
+    /// 64-bit floating point (`f64` / `float64`).
+    Float64,
+    /// UTF-8 string (`utf8`).
+    String,
+    /// Boolean (`bool`).
+    Bool,
+    /// Raw opaque bytes (`bytes`).
+    Bytes,
+    /// Optional wrapper — inner type + NULL. Box breaks the recursion
+    Optional(Box<SqlFieldType>),
+    /// Anything the gateway does not recognise stays opaque.
+    Unknown,
+}
+
+impl SqlFieldType {
+    /// Extract the innermost non-optional type.
+    pub fn inner(&self) -> SqlFieldType {
+        match self {
+            SqlFieldType::Optional(inner) => inner.inner(),
+            other => other.clone(),
+        }
+    }
+
+    /// Whether NULL is a legal value for this field.
+    pub fn is_nullable(&self) -> bool {
+        matches!(self, SqlFieldType::Optional(_))
+    }
+}
+
+/// Map a resolved VOS type to a gateway-facing [`SqlFieldType`].
+fn project_resolved_type(ty: &ResolvedCanonicalType) -> SqlFieldType {
+    match ty {
+        ResolvedCanonicalType::Builtin(path) => match path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice() {
+            ["i64"] | ["int64"] | ["Int64"] => SqlFieldType::Int64,
+            ["i32"] | ["int32"] | ["Int32"] => SqlFieldType::Int32,
+            ["f64"] | ["float64"] | ["Float64"] => SqlFieldType::Float64,
+            ["utf8"] | ["String"] | ["string"] => SqlFieldType::String,
+            ["bool"] | ["Bool"] => SqlFieldType::Bool,
+            ["bytes"] | ["Bytes"] => SqlFieldType::Bytes,
+            _ => SqlFieldType::Unknown,
+        },
+        ResolvedCanonicalType::Optional(inner) => SqlFieldType::Optional(Box::new(project_resolved_type(inner))),
+        _ => SqlFieldType::Unknown,
+    }
+}
+
+/// Map a schema-projection VOS type to a gateway-facing [`SqlFieldType`].
+fn project_projection_type(ty: &CanonicalType) -> SqlFieldType {
+    match ty {
+        CanonicalType::Named(path) => match path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice() {
+            ["i64"] | ["int64"] | ["Int64"] => SqlFieldType::Int64,
+            ["i32"] | ["int32"] | ["Int32"] => SqlFieldType::Int32,
+            ["f64"] | ["float64"] | ["Float64"] => SqlFieldType::Float64,
+            ["utf8"] | ["String"] | ["string"] => SqlFieldType::String,
+            ["bool"] | ["Bool"] => SqlFieldType::Bool,
+            ["bytes"] | ["Bytes"] => SqlFieldType::Bytes,
+            _ => SqlFieldType::Unknown,
+        },
+        CanonicalType::Optional(inner) => SqlFieldType::Optional(Box::new(project_projection_type(inner))),
+        _ => SqlFieldType::Unknown,
+    }
+}
 
 /// A table identity exposed by the YYDS catalog to a gateway binder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +99,8 @@ pub struct SqlCatalogField {
     pub field_id: u64,
     /// VOS field name used for SQL lookup.
     pub name: String,
+    /// Declared field type projected from the VOS contract.
+    pub field_type: SqlFieldType,
 }
 
 /// The gateway's immutable view of one published VOS catalog revision.
@@ -70,7 +148,11 @@ impl SqlCatalog {
                         if field.field_id == 0 || !field_ids.insert(field.field_id) {
                             return Err(catalog_error("invalid or duplicate catalog field identity"));
                         }
-                        Ok(SqlCatalogField { field_id: field.field_id, name: field.canonical_name.clone() })
+                        Ok(SqlCatalogField {
+                            field_id: field.field_id,
+                            name: field.canonical_name.clone(),
+                            field_type: project_resolved_type(&field.canonical_type),
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(SqlCatalogTable { type_id: entry.type_id, name, fields })
@@ -106,7 +188,14 @@ impl SqlCatalog {
                 fields: entry
                     .fields
                     .iter()
-                    .map(|field| SqlCatalogField { field_id: field.field_id.0, name: field.current_name.clone() })
+                    .map(|field| SqlCatalogField {
+                        field_id: field.field_id.0,
+                        name: field.current_name.clone(),
+                        // Snapshot fields carry a TypeExpr (AST form), not a CanonicalType —
+                        // project lazily to Unknown. The resolved-contract path carries full
+                        // canonical type information via `from_resolved_contract`.
+                        field_type: SqlFieldType::Unknown,
+                    })
                     .collect(),
             })
             .collect();

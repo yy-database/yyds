@@ -87,6 +87,13 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         };
 
     // 3. 分流：有精确 pk 等值 → Read；其他全部 → Scan。
+    // 先从 catalog table 收集 field_id → SqlFieldType 映射。
+    let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> = table
+        .fields
+        .iter()
+        .map(|f| (f.field_id, f.field_type.clone()))
+        .collect();
+
     if let Some(lit) = pk_equality {
         let rowid = pk_literal_to_rowid(&lit)?;
         return Ok(SqlExecutionPlan::Read(ReadPlan {
@@ -95,6 +102,7 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
             projection_fields,
             projection_expressions,
             remaining_predicate,
+            field_types: field_types.clone(),
         }));
     }
 
@@ -122,6 +130,7 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         limit_after_sort,
         offset_after_sort,
         has_aggregate,
+        field_types,
     }))
 }
 
@@ -129,6 +138,8 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
 pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, insert.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
+    let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
+        table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
     let pk_bound = insert.fields.first().ok_or_else(|| planner_error("INSERT has no fields"))?;
     let pk_value = insert.values.first().ok_or_else(|| planner_error("INSERT has no values"))?;
@@ -138,10 +149,14 @@ pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Resul
     let mut write_fields = Vec::with_capacity(insert.fields.len());
     for (field, value) in insert.fields.iter().zip(insert.values.iter()) {
         let lit = literal_from_expression(value)?;
-        write_fields.push(WriteField { field_id: field.field_id, value: lit });
+        let field_type = field_types
+            .get(&field.field_id)
+            .cloned()
+            .unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
         let _ = pk_bound;
     }
-    Ok(SqlExecutionPlan::Insert(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields }))
+    Ok(SqlExecutionPlan::Insert(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields, field_types }))
 }
 
 /// 计划一个 UPDATE。要求 WHERE 里有 `pk = literal`；其余条件保留为 row-level filter。
@@ -149,6 +164,8 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
     let table = find_table(catalog, update.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
     let pk_field = primary_key_of(table)?;
+    let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
+        table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
     let (rowid, remaining_predicate) = match update.predicate {
         None => return Err(planner_error("UPDATE requires WHERE with `pk = literal`")),
@@ -164,13 +181,18 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
     let mut write_fields = Vec::new();
     for (field, value_expr) in &update.assignments {
         let lit = literal_from_expression(value_expr)?;
-        write_fields.push(WriteField { field_id: field.field_id, value: lit });
+        let field_type = field_types
+            .get(&field.field_id)
+            .cloned()
+            .unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
     }
     Ok(SqlExecutionPlan::Update(UpdatePlan {
         namespace,
         rowid: rowid_bytes,
         fields: write_fields,
         remaining_predicate,
+        field_types,
     }))
 }
 
@@ -179,6 +201,8 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
     let table = find_table(catalog, delete.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
     let pk_field = primary_key_of(table)?;
+    let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
+        table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
     let (rowid, remaining_predicate) = match delete.predicate {
         None => return Err(planner_error("DELETE requires WHERE with `pk = literal`")),
@@ -190,7 +214,7 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
         }
     };
     let rowid_bytes = pk_literal_to_rowid(&rowid)?;
-    Ok(SqlExecutionPlan::Delete(DeletePlan { namespace, rowid: rowid_bytes, remaining_predicate }))
+    Ok(SqlExecutionPlan::Delete(DeletePlan { namespace, rowid: rowid_bytes, remaining_predicate, field_types }))
 }
 
 /// 从 bound expression 里提取 literal。目前 INSERT/UPDATE 的值必须是 literal。
@@ -233,6 +257,8 @@ pub struct ReadPlan {
     pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
     /// 从原 WHERE 里剥掉主键等值后剩下的表达式；`None` 表示没有剩余。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+    /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
 
 /// SELECT 多行扫描执行计划。
@@ -265,6 +291,8 @@ pub struct ScanPlan {
     /// True when any projection expression is an aggregate function
     /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce exactly one result row.
     pub has_aggregate: bool,
+    /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
 
 /// INSERT 执行计划。payload 由 execute 层做 TLV 编码。
@@ -276,6 +304,8 @@ pub struct WritePlan {
     pub rowid: Vec<u8>,
     /// INSERT 时提供所有字段值；UPDATE 时提供要 SET 的字段。
     pub fields: Vec<WriteField>,
+    /// field_id → SqlFieldType 映射，execute 层 encode/eval 用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
 
 /// UPDATE 执行计划。payload 由 execute 层做 TLV 编码。
@@ -290,6 +320,8 @@ pub struct UpdatePlan {
     /// 从原 WHERE 里剥掉主键等值后剩下的表达式。
     /// execute_update 会在写入前对现有 row 评估此 predicate。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+    /// field_id → SqlFieldType 映射，execute 层 eval predicate 用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
 
 /// 一个要写入的字段。
@@ -299,6 +331,8 @@ pub struct WriteField {
     pub field_id: u64,
     /// 要写入的值（必须是 Literal，复杂表达式暂不支持）。
     pub value: SqlBoundLiteral,
+    /// 从 catalog 投影的字段类型，execute 层编码校验用。
+    pub field_type: crate::catalog_bind::SqlFieldType,
 }
 
 /// DELETE 执行计划。
@@ -309,6 +343,8 @@ pub struct DeletePlan {
     /// 从原 WHERE 里剥掉主键等值后剩下的表达式。
     /// execute_delete 会在删除前对现有 row 评估此 predicate。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+    /// field_id → SqlFieldType 映射，execute 层 eval predicate 用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
 
 /// 从 WHERE predicate 里提取所有关于 pk 字段的条件。

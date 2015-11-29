@@ -1117,3 +1117,51 @@ fn sql_delete_rejects_when_remaining_predicate_fails() {
 
     assert!(!result.rows.is_empty(), "row should still exist when predicate fails");
 }
+
+#[test]
+fn utf8_field_preserves_leading_zeros_through_decode() {
+    // utf8 字段存 "001" — 不应该被误解析成 Number(1.0)
+    let catalog = catalog("table users { @@id: i64, code: utf8 }\n");
+    let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"001")]);
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+
+    assert_eq!(result.rows.len(), 1);
+    // 关键字段：必须是 String 不是 Number！
+    assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String("001".into()));
+}
+
+#[test]
+fn utf8_field_preserves_empty_string() {
+    // utf8 字段存空字符串 — 不能被当成 NULL 或 Number
+    let catalog = catalog("table users { @@id: i64, label: utf8 }\n");
+    let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"")]);
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT label FROM users WHERE id = 1", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String(String::new()));
+}
+
+#[test]
+fn predicate_on_utf8_field_does_not_numeric_coerce() {
+    // code='001' 但我们用 code=1 去查 — 应该返回空（类型不同不匹配）
+    let catalog = catalog("table users { @@id: i64, code: utf8 }\n");
+    let executor = make_executor_with_row("table:1", b"5", &[(1, b"5"), (2, b"001")]);
+
+    // 类型正确的匹配
+    let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = '001'", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    assert_eq!(result.rows.len(), 1, "string literal match should find row");
+
+    // 类型错误：用数字 literal 查字符串字段 — 应该不匹配（宽松比较不做自动类型转换）
+    let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = 1", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    assert_eq!(result.rows.len(), 0, "number literal should not coerce match against string field");
+}
