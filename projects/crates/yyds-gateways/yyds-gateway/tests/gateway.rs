@@ -212,7 +212,7 @@ fn sql_select_pk_equality_executes_against_kv_adapter() {
 
     let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 42", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
     assert_eq!(result.rows.len(), 1);
@@ -229,7 +229,7 @@ fn sql_select_star_expands_all_fields() {
 
     let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users WHERE id = 1", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
     assert_eq!(result.rows[0].len(), 2);
@@ -243,7 +243,7 @@ fn sql_select_pk_string_literal_uses_string_rowid() {
     let bound =
         yyds_gateway::bind_sql_catalog("SELECT score FROM users WHERE id = 'alice'", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::Number(100.0));
 }
@@ -256,7 +256,7 @@ fn sql_select_missing_row_returns_empty_result() {
 
     let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 999", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert!(result.rows.is_empty());
 }
@@ -309,7 +309,7 @@ fn sql_select_and_extracts_pk_and_filters_on_remaining() {
     };
     assert!(read_plan.remaining_predicate.is_some(), "AND 的右侧应留在 remaining");
 
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
     assert_eq!(result.rows.len(), 1);
 }
 
@@ -322,7 +322,7 @@ fn sql_select_projects_binary_expression() {
     let bound =
         yyds_gateway::bind_sql_catalog("SELECT id + 1 AS inc FROM users WHERE id = 1", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::Number(2.0));
 }
@@ -391,13 +391,13 @@ fn sql_insert_then_select_round_trip() {
     // Oak 解析后 INSERT VALUES 第一个值是 pk literal = 7
     let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (7, 'alice', 30)", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    yyds_gateway::execute_plan(&executor, &plan).expect("insert executes");
+    yyds_gateway::execute_plan(&executor, None, &plan).expect("insert executes");
 
     // SELECT 出来验证
     let bound =
         yyds_gateway::bind_sql_catalog("SELECT id, name, age FROM users WHERE id = 7", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after insert");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select after insert");
 
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string(), "age".to_string()]);
     assert_eq!(result.rows.len(), 1);
@@ -421,44 +421,44 @@ fn sql_aggregate_functions_count_sum_avg_max_min() {
         let sql = format!("INSERT INTO users VALUES ({id}, '{name}', {age})");
         let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("insert");
     }
 
     // COUNT(*) → 3
     let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec COUNT(*)");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec COUNT(*)");
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(3.0)]);
 
     // COUNT(age) WHERE age > 28 → alice(30) + carol(35) = 2
     let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users WHERE age > 28", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec COUNT(col) WHERE");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec COUNT(col) WHERE");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(2.0)]);
 
     // SUM(age) → 30 + 25 + 35 = 90
     let bound = yyds_gateway::bind_sql_catalog("SELECT SUM(age) FROM users", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec SUM");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec SUM");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(90.0)]);
 
     // AVG(age) → 90 / 3 = 30
     let bound = yyds_gateway::bind_sql_catalog("SELECT AVG(age) FROM users", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec AVG");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec AVG");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(30.0)]);
 
     // MAX(age) → 35
     let bound = yyds_gateway::bind_sql_catalog("SELECT MAX(age) FROM users", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec MAX");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec MAX");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(35.0)]);
 
     // MIN(age) → 25
     let bound = yyds_gateway::bind_sql_catalog("SELECT MIN(age) FROM users", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec MIN");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec MIN");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(25.0)]);
 }
 
@@ -485,14 +485,14 @@ fn sql_limit_with_where_scans_all_then_returns_limited() {
         let sql = format!("INSERT INTO users VALUES ({id}, '', {age})");
         let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("insert");
     }
 
     // WHERE age > 22 LIMIT 2 → 预期：2 行 alice(30), carol(35)
     let bound =
         yyds_gateway::bind_sql_catalog("SELECT id, age FROM users WHERE age > 22 LIMIT 2", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
 
     // 顺序由 KV 实现决定（未指定 ORDER BY），只检查数量和值集合。
     assert_eq!(result.rows.len(), 2, "expected 2 rows, got {} — kv_limit pushdown bug", result.rows.len());
@@ -518,7 +518,7 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
         let sql = format!("INSERT INTO users VALUES ({id}, '', {age})");
         let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("insert");
     }
 
     // ORDER BY age ASC LIMIT 2 → bob(20), dan(22)
@@ -529,7 +529,7 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     )
     .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec ASC+LIMIT");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec ASC+LIMIT");
     assert_eq!(result.rows.len(), 2);
     assert_eq!(result.rows[0][1], yyds_gateway::SqlValue::Number(20.0), "ASC first should be bob(20)");
     assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Number(22.0), "ASC second should be dan(22)");
@@ -542,7 +542,7 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     )
     .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec DESC+LIMIT");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec DESC+LIMIT");
     assert_eq!(result.rows.len(), 2);
     assert_eq!(result.rows[0][1], yyds_gateway::SqlValue::Number(35.0), "DESC first should be carol(35)");
     assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Number(30.0), "DESC second should be alice(30)");
@@ -555,7 +555,7 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     )
     .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec ASC+OFFSET+LIMIT");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec ASC+OFFSET+LIMIT");
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][1], yyds_gateway::SqlValue::Number(22.0), "OFFSET 1 should be dan(22)");
 }
@@ -570,12 +570,12 @@ fn sql_update_then_select_round_trip() {
     let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated', age = 99 WHERE id = 9", &catalog, 7)
         .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    yyds_gateway::execute_plan(&executor, &plan).expect("update executes");
+    yyds_gateway::execute_plan(&executor, None, &plan).expect("update executes");
 
     // SELECT 验证
     let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after update");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select after update");
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::String("updated".into()), yyds_gateway::SqlValue::Number(99.0),]);
@@ -589,12 +589,12 @@ fn sql_delete_removes_row() {
     // DELETE FROM users WHERE id = 55
     let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    yyds_gateway::execute_plan(&executor, &plan).expect("delete executes");
+    yyds_gateway::execute_plan(&executor, None, &plan).expect("delete executes");
 
     // SELECT 验证空
     let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select after delete");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select after delete");
     assert!(result.rows.is_empty());
 }
 
@@ -633,7 +633,7 @@ fn sql_select_star_from_table_scans_all_rows() {
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     // 确认走 Scan 路径
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
     assert_eq!(result.rows.len(), 3);
@@ -661,7 +661,7 @@ fn sql_scan_applies_remaining_predicate_from_non_pk_equality() {
         .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("execute");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert_eq!(result.rows.len(), 2);
     // alice 在 id=1 和 id=3 两行
@@ -687,14 +687,14 @@ fn sql_insert_multiple_then_select_star_returns_all() {
     ] {
         let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-        yyds_gateway::execute_plan(&executor, &plan).expect("insert");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("insert");
     }
 
     // SELECT * 验证 scan 路径返回所有三行
     let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM items", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("scan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("scan");
 
     assert_eq!(result.rows.len(), 3);
     let ids: Vec<f64> = result.rows.iter().map(|row| match &row[0] {
@@ -727,7 +727,7 @@ fn sql_select_pk_greater_pushes_after_cursor() {
         }
         other => panic!("expected Scan, got {other:?}"),
     }
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 2);
     let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
     assert_eq!(ids, vec![2.0, 3.0]);
@@ -755,7 +755,7 @@ fn sql_select_pk_less_pushes_before_cursor() {
         }
         other => panic!("expected Scan, got {other:?}"),
     }
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 2);
     let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
     assert_eq!(ids, vec![1.0, 2.0]);
@@ -784,7 +784,7 @@ fn sql_select_pk_range_after_and_before_together() {
         }
         other => panic!("expected Scan, got {other:?}"),
     }
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 2);
     let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
     assert_eq!(ids, vec![2.0, 3.0]);
@@ -813,7 +813,7 @@ fn sql_limit_pushes_down_to_scan() {
         }
         other => panic!("expected Scan, got {other:?}"),
     }
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 3);
     let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
     assert_eq!(ids, vec![1.0, 2.0, 3.0]);
@@ -843,7 +843,7 @@ fn sql_select_pk_like_prefix_pushes_rowid_prefix() {
         }
         other => panic!("expected Scan for LIKE, got {other:?}"),
     }
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     let ids: Vec<String> = result.rows.iter().map(|r| {
         if let yyds_gateway::SqlValue::String(s) = &r[0] { s.to_string() }
         else { panic!() }
@@ -890,7 +890,7 @@ fn sql_select_pk_between_extracts_range() {
         }
         other => panic!("expected Scan for BETWEEN, got {other:?}"),
     }
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 3);
 }
 
@@ -916,7 +916,7 @@ fn sql_select_pk_in_list_filters_rows() {
         yyds_gateway::SqlExecutionPlan::Scan(_) => { /* IN 不做 pushdown，走 Scan */ }
         other => panic!("expected Scan for IN, got {other:?}"),
     }
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("exec");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 3);
     let ids: Vec<f64> = result.rows.iter().map(|r| match &r[0] {
         yyds_gateway::SqlValue::Number(n) => *n,
@@ -1056,14 +1056,14 @@ fn sql_update_rejects_when_remaining_predicate_fails() {
         &catalog, 7,
     ).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("update");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("update");
 
     assert_eq!(result.affected_rows, 0, "remaining predicate mismatch should affect 0 rows");
 
     // SELECT 验证：数据保持原样
     let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
 
     assert_eq!(result.rows[0], vec![
         yyds_gateway::SqlValue::String("original".into()),
@@ -1083,14 +1083,14 @@ fn sql_update_succeeds_when_remaining_predicate_matches() {
         &catalog, 7,
     ).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("update");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("update");
 
     assert_eq!(result.affected_rows, 1, "matching remaining predicate should affect 1 row");
 
     // SELECT 验证：name 已更新
     let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 9", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
 
     assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String("updated".into()));
 }
@@ -1106,14 +1106,14 @@ fn sql_delete_rejects_when_remaining_predicate_fails() {
         &catalog, 7,
     ).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("delete");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("delete");
 
     assert_eq!(result.affected_rows, 0, "remaining predicate mismatch should affect 0 rows");
 
     // SELECT 验证：数据仍然存在
     let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
 
     assert!(!result.rows.is_empty(), "row should still exist when predicate fails");
 }
@@ -1126,7 +1126,7 @@ fn utf8_field_preserves_leading_zeros_through_decode() {
 
     let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 9", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
 
     assert_eq!(result.rows.len(), 1);
     // 关键字段：必须是 String 不是 Number！
@@ -1141,7 +1141,7 @@ fn utf8_field_preserves_empty_string() {
 
     let bound = yyds_gateway::bind_sql_catalog("SELECT label FROM users WHERE id = 1", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String(String::new()));
@@ -1156,12 +1156,12 @@ fn predicate_on_utf8_field_does_not_numeric_coerce() {
     // 类型正确的匹配
     let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = '001'", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
     assert_eq!(result.rows.len(), 1, "string literal match should find row");
 
     // 类型错误：用数字 literal 查字符串字段 — 应该不匹配（宽松比较不做自动类型转换）
     let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = 1", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let result = yyds_gateway::execute_plan(&executor, &plan).expect("select");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
     assert_eq!(result.rows.len(), 0, "number literal should not coerce match against string field");
 }

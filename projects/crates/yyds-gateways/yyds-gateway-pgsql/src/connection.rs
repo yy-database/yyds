@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
-use yyds_execution::KeyValueExecutor;
+use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan, SqlSessionCommand,
     SqlTransactionAction, SqlValue,
@@ -69,7 +69,7 @@ pub fn serve_cancellable(
 
 fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRuntime>>) -> io::Result<()> {
     let mut pending = Vec::new();
-    let mut transaction_status = TransactionStatus::Idle;
+    let mut session = TransactionSession::new();
     let parameters = loop {
         let packet = read_startup(&mut stream, &mut pending)?;
         match packet.code {
@@ -101,7 +101,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
         send_parameter(&mut stream, "application_name", application_name)?;
     }
     send_backend_key(&mut stream)?;
-    send_ready(&mut stream, transaction_status)?;
+    send_ready(&mut stream, &session)?;
 
     loop {
         let message = match read_message(&mut stream, &mut pending) {
@@ -116,26 +116,26 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
                 let Some(sql_bytes) = message.payload.strip_suffix(&[0])
                 else {
                     write_error_response(&mut stream, "08P01", "malformed PostgreSQL simple-query message")?;
-                    transaction_status.fail();
-                    send_ready(&mut stream, transaction_status)?;
+                    session.fail();
+                    send_ready(&mut stream, &session)?;
                     continue;
                 };
                 if sql_bytes.contains(&0) {
                     write_error_response(&mut stream, "08P01", "embedded NUL in PostgreSQL query")?;
-                    transaction_status.fail();
+                    session.fail();
                 }
                 else if let Ok(sql) = std::str::from_utf8(sql_bytes) {
-                    handle_simple_query(&mut stream, sql, &mut transaction_status, runtime.as_deref())?;
+                    handle_simple_query(&mut stream, sql, &mut session, runtime.as_ref())?;
                 }
                 else {
                     write_error_response(&mut stream, "22021", "query is not valid UTF-8")?;
-                    transaction_status.fail();
+                    session.fail();
                 }
-                send_ready(&mut stream, transaction_status)?;
+                send_ready(&mut stream, &session)?;
             }
             _ => {
                 write_error_response(&mut stream, "08P01", "unsupported PostgreSQL frontend message")?;
-                send_ready(&mut stream, transaction_status)?;
+                send_ready(&mut stream, &session)?;
             }
         }
     }
@@ -148,13 +148,56 @@ enum TransactionStatus {
     Failed,
 }
 
-impl TransactionStatus {
-    fn fail(&mut self) {
-        if *self == Self::InTransaction {
-            *self = Self::Failed;
+/// Session-scoped transaction state: the PostgreSQL wire protocol ReadyForQuery byte
+/// plus a real storage transaction handle that writes and row reads are bound to.
+struct TransactionSession {
+    /// The executor Arc stays alive for as long as a transaction is open so the handle's
+    /// internal references remain valid.
+    executor: Option<Arc<dyn KeyValueExecutor>>,
+    handle: Option<Box<dyn TransactionHandle + 'static>>,
+    /// Tracks whether we are inside a transaction block even without a runtime handle
+    /// (e.g. the PostgreSQL protocol test).
+    protocol_only_transaction: bool,
+    failed: bool,
+}
+
+impl TransactionSession {
+    fn new() -> Self {
+        Self { executor: None, handle: None, protocol_only_transaction: false, failed: false }
+    }
+
+    fn as_status(&self) -> TransactionStatus {
+        if self.failed {
+            TransactionStatus::Failed
+        }
+        else if self.handle.is_some() || self.protocol_only_transaction {
+            TransactionStatus::InTransaction
+        }
+        else {
+            TransactionStatus::Idle
         }
     }
 
+    fn fail(&mut self) {
+        if self.handle.is_some() || self.protocol_only_transaction {
+            self.failed = true;
+        }
+    }
+
+    fn in_transaction(&self) -> bool {
+        self.handle.is_some() || self.protocol_only_transaction
+    }
+
+    fn ready_byte(&self) -> u8 {
+        self.as_status().ready_byte()
+    }
+}
+
+impl Default for TransactionSession {
+    fn default() -> Self { Self::new() }
+}
+
+impl TransactionStatus {
     fn ready_byte(self) -> u8 {
         match self {
             Self::Idle => b'I',
@@ -167,39 +210,79 @@ impl TransactionStatus {
 fn handle_simple_query(
     stream: &mut impl Write,
     sql: &str,
-    status: &mut TransactionStatus,
-    runtime: Option<&PgsqlSqlRuntime>,
+    session: &mut TransactionSession,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
 ) -> io::Result<()> {
     match parse_session_command(sql) {
         Err(_) => {
-            status.fail();
+            session.fail();
             write_error_response(stream, "42601", "Oak could not parse the SQL statement")
         }
         Ok(Some(SqlSessionCommand::Transaction(action))) => match action {
-            SqlTransactionAction::Begin if *status == TransactionStatus::Failed => write_error_response(
+            SqlTransactionAction::Begin if session.failed => write_error_response(
                 stream,
                 "25P02",
                 "current transaction is aborted, commands ignored until end of transaction block",
             ),
             SqlTransactionAction::Begin => {
-                *status = TransactionStatus::InTransaction;
+                match runtime {
+                    Some(rt) => {
+                        // The gateway constructs the handle directly because the generic
+                        // `KeyValueExecutor::begin_transaction` default returns `Unsupported`.
+                        let executor = rt.executor.clone();
+                        let handle = LocalTransactionHandle::new(executor.clone());
+                        session.executor = Some(executor);
+                        session.handle = Some(Box::new(handle));
+                        session.protocol_only_transaction = false;
+                        session.failed = false;
+                    }
+                    None => {
+                        // No runtime — stay in protocol-only mode. execute_plan will receive
+                        // `None` for the handle and go through the executor directly.
+                        session.executor = None;
+                        session.handle = None;
+                        session.protocol_only_transaction = true;
+                        session.failed = false;
+                    }
+                }
                 write_command_complete(stream, "BEGIN")
             }
-            SqlTransactionAction::Commit if *status == TransactionStatus::Failed => {
-                *status = TransactionStatus::Idle;
+            SqlTransactionAction::Commit if session.failed => {
+                if let Some(handle) = session.handle.take() {
+                    handle.rollback();
+                }
+                session.executor = None;
+                session.handle = None;
+                session.protocol_only_transaction = false;
+                session.failed = false;
                 write_command_complete(stream, "ROLLBACK")
             }
             SqlTransactionAction::Commit => {
-                *status = TransactionStatus::Idle;
+                if let Some(handle) = session.handle.take() {
+                    if let Err(err) = handle.commit() {
+                        write_error_response(stream, "58P01", &format!("COMMIT failed: {err}"))?;
+                        return Ok(());
+                    }
+                }
+                session.executor = None;
+                session.handle = None;
+                session.protocol_only_transaction = false;
+                session.failed = false;
                 write_command_complete(stream, "COMMIT")
             }
             SqlTransactionAction::Rollback => {
-                *status = TransactionStatus::Idle;
+                if let Some(handle) = session.handle.take() {
+                    handle.rollback();
+                }
+                session.executor = None;
+                session.handle = None;
+                session.protocol_only_transaction = false;
+                session.failed = false;
                 write_command_complete(stream, "ROLLBACK")
             }
         },
         Ok(Some(SqlSessionCommand::SetNames { .. })) | Ok(None) => {
-            if *status == TransactionStatus::Failed {
+            if session.failed {
                 return write_error_response(
                     stream,
                     "25P02",
@@ -207,9 +290,9 @@ fn handle_simple_query(
                 );
             }
             match runtime {
-                Some(rt) => execute_simple_query(stream, sql, rt, status),
+                Some(rt) => execute_simple_query(stream, sql, rt, session),
                 None => {
-                    status.fail();
+                    session.fail();
                     write_error_response(stream, "0A000", "PostgreSQL query execution is not implemented (no SQL runtime)")
                 }
             }
@@ -221,28 +304,29 @@ fn handle_simple_query(
 fn execute_simple_query(
     stream: &mut impl Write,
     sql: &str,
-    runtime: &PgsqlSqlRuntime,
-    status: &mut TransactionStatus,
+    runtime: &Arc<PgsqlSqlRuntime>,
+    session: &mut TransactionSession,
 ) -> io::Result<()> {
     let bound = match bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version) {
         Ok(b) => b,
         Err(error) => {
-            status.fail();
+            session.fail();
             return write_error_response(stream, "42P01", &format!("SQL bind error: {}", error.message));
         }
     };
     let plan = match plan_statement(bound, &runtime.catalog) {
         Ok(p) => p,
         Err(error) => {
-            status.fail();
+            session.fail();
             return write_error_response(stream, "42883", &format!("SQL plan error: {}", error.message));
         }
     };
     let is_read = matches!(&plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_));
-    let result = match execute_plan(runtime.executor.as_ref(), &plan) {
+    let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
+    let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan) {
         Ok(r) => r,
         Err(error) => {
-            status.fail();
+            session.fail();
             return write_error_response(stream, "58P01", &format!("SQL execution error: {}", error.message));
         }
     };
@@ -405,8 +489,8 @@ fn send_backend_key(stream: &mut impl Write) -> io::Result<()> {
     write_message(stream, b'K', &payload)
 }
 
-fn send_ready(stream: &mut impl Write, status: TransactionStatus) -> io::Result<()> {
-    write_message(stream, b'Z', &[status.ready_byte()])
+fn send_ready(stream: &mut impl Write, session: &TransactionSession) -> io::Result<()> {
+    write_message(stream, b'Z', &[session.ready_byte()])
 }
 
 fn write_command_complete(stream: &mut impl Write, tag: &str) -> io::Result<()> {

@@ -2,7 +2,7 @@
 #![warn(missing_docs, rustdoc::missing_crate_level_docs)]
 #![doc = include_str!("../readme.md")]
 
-use std::{collections::HashMap, fmt::Debug, sync::Mutex};
+use std::{collections::HashMap, fmt::Debug, sync::{Arc, Mutex}};
 
 use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
 use yyds_types::{Error, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, ShardId, ShardMap};
@@ -39,7 +39,7 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// The handle lets callers issue commands through a transaction boundary so that a gateway
     /// can bind `BEGIN` / `COMMIT` / `ROLLBACK` protocol verbs to a real typed object. Executors
     /// without transaction support return `Error::Unsupported`.
-    fn begin_transaction(&self) -> yyds_types::Result<Box<dyn TransactionHandle + '_>> {
+    fn begin_transaction(&self) -> yyds_types::Result<Box<dyn TransactionHandle>> {
         Err(Error::Unsupported("this executor does not support local transactions"))
     }
 }
@@ -91,17 +91,6 @@ where
     pub fn routing(&self) -> &ShardMap {
         &self.routing
     }
-
-    /// Opens a local transaction handle bound to this executor.
-    ///
-    /// The handle delegates each command to the underlying shard immediately so that writes
-    /// are applied before commit — this is the current minimal implementation. It exists so
-    /// that gateway layers can bind BEGIN / COMMIT / ROLLBACK protocol verbs to a real typed
-    /// object; a future buffered implementation may batch writes until commit without changing
-    /// the gateway contract.
-    pub fn begin_transaction(&self) -> Box<dyn TransactionHandle + '_> {
-        Box::new(LocalTransactionHandle { executor: self })
-    }
 }
 
 /// Local transaction handle that delegates commands immediately to the executor's shards.
@@ -110,14 +99,18 @@ where
 /// exists to give gateway layers a typed object to bind BEGIN / COMMIT / ROLLBACK to. A future
 /// rewrite may batch writes until commit without changing the trait contract.
 #[derive(Debug)]
-pub struct LocalTransactionHandle<'a, S = FileShard> {
-    executor: &'a LocalExecutor<S>,
+pub struct LocalTransactionHandle {
+    executor: Arc<dyn KeyValueExecutor>,
 }
 
-impl<'a, S> TransactionHandle for LocalTransactionHandle<'a, S>
-where
-    S: KvStore + Send + Debug,
-{
+impl LocalTransactionHandle {
+    /// Creates a new handle bound to an executor via a shared Arc.
+    pub fn new(executor: Arc<dyn KeyValueExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+impl TransactionHandle for LocalTransactionHandle {
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
         self.executor.execute(command)
     }
@@ -142,9 +135,6 @@ impl<S> KeyValueExecutor for LocalExecutor<S>
 where
     S: KvStore + Send + Debug,
 {
-    fn begin_transaction(&self) -> yyds_types::Result<Box<dyn TransactionHandle + '_>> {
-        Ok(self.begin_transaction())
-    }
     fn execute_read_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
         if commands.iter().any(|command| command.action != KeyValueAction::Get) {
             return Err(Error::Unsupported("read batches accept only read actions"));

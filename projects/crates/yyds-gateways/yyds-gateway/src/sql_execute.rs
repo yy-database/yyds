@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use yyds_execution::KeyValueExecutor;
+use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
@@ -257,24 +257,36 @@ fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
 ///
 /// SELECT 返回单行结果集（或空集）；INSERT/UPDATE/DELETE 返回空结果集，
 /// 影响行数记录在 `SqlResult.affected_rows`。
-pub fn execute_plan(executor: &dyn KeyValueExecutor, plan: &SqlExecutionPlan) -> Result<SqlResult, SqlFrontendError> {
+pub fn execute_plan(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &SqlExecutionPlan,
+) -> Result<SqlResult, SqlFrontendError> {
     match plan {
-        SqlExecutionPlan::Read(read_plan) => execute_read(executor, read_plan),
+        SqlExecutionPlan::Read(read_plan) => execute_read(executor, transaction, read_plan),
         SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, scan_plan),
-        SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, write_plan),
-        SqlExecutionPlan::Update(update_plan) => execute_update(executor, update_plan),
-        SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, delete_plan),
+        SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan),
+        SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan),
+        SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, transaction, delete_plan),
     }
 }
 
-fn execute_read(executor: &dyn KeyValueExecutor, plan: &ReadPlan) -> Result<SqlResult, SqlFrontendError> {
+fn execute_read(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &ReadPlan,
+) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Get };
-    let batch = executor
-        .execute_read_batch(&[command])
-        .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
-
-    let result = batch.into_iter().next().ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
+    let batch_result = match transaction {
+        Some(handle) => handle
+            .execute_read_batch(&[command.clone()])
+            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+        None => executor
+            .execute_read_batch(&[command])
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+    };
+    let result = batch_result.into_iter().next().ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
     let row_bytes = match result {
         yyds_types::KeyValueResult::Get(Some(bytes)) => bytes,
         _ => return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new(), affected_rows: 0 }),
@@ -448,13 +460,24 @@ impl Ord for SortableRow {
     }
 }
 
-fn execute_insert(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<SqlResult, SqlFrontendError> {
+fn execute_insert(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &WritePlan,
+) -> Result<SqlResult, SqlFrontendError> {
     let row = write_plan_to_row(plan);
     let bytes = encode_row(&row);
     let namespace = Namespace(plan.namespace.clone());
     let action = KeyValueAction::PutIfAbsent(bytes);
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
-    let result = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?;
+    let result = match transaction {
+        Some(handle) => handle
+            .execute(command)
+            .map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
+        None => executor
+            .execute(command)
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
+    };
     let affected = match result {
         yyds_types::KeyValueResult::PutIfAbsent { revision: Some(_) } => 1,
         _ => 0,
@@ -462,13 +485,22 @@ fn execute_insert(executor: &dyn KeyValueExecutor, plan: &WritePlan) -> Result<S
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
 }
 
-fn execute_update(executor: &dyn KeyValueExecutor, plan: &UpdatePlan) -> Result<SqlResult, SqlFrontendError> {
+fn execute_update(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &UpdatePlan,
+) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
     let get_cmd = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Get };
-    let batch = executor
-        .execute_read_batch(&[get_cmd])
-        .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
-    let existing_bytes = match batch.into_iter().next() {
+    let batch_result = match transaction {
+        Some(handle) => handle
+            .execute_read_batch(&[get_cmd.clone()])
+            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+        None => executor
+            .execute_read_batch(&[get_cmd])
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+    };
+    let existing_bytes = match batch_result.into_iter().next() {
         Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
         _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
     };
@@ -487,20 +519,37 @@ fn execute_update(executor: &dyn KeyValueExecutor, plan: &UpdatePlan) -> Result<
     }
     let encoded = encode_row(&row);
     let put_cmd = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
-    let _ = executor.execute(put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?;
+    let put_result = match transaction {
+        Some(handle) => handle
+            .execute(put_cmd)
+            .map_err(|e| execute_error(&format!("TransactionHandle.update failed: {e}")))?,
+        None => executor
+            .execute(put_cmd)
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
+    };
+    let _ = put_result;
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 1 })
 }
 
-fn execute_delete(executor: &dyn KeyValueExecutor, plan: &DeletePlan) -> Result<SqlResult, SqlFrontendError> {
+fn execute_delete(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &DeletePlan,
+) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
 
     // 如果有 remaining_predicate —— 先 Get 拿到行评估，不通过就不删。
     if let Some(ref predicate) = plan.remaining_predicate {
         let get_cmd = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Get };
-        let batch = executor
-            .execute_read_batch(&[get_cmd])
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
-        let existing_bytes = match batch.into_iter().next() {
+        let batch_result = match transaction {
+            Some(handle) => handle
+                .execute_read_batch(&[get_cmd.clone()])
+                .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+            None => executor
+                .execute_read_batch(&[get_cmd])
+                .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+        };
+        let existing_bytes = match batch_result.into_iter().next() {
             Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
             // 行已不存在 — 也是 0 影响行
             _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
@@ -514,8 +563,15 @@ fn execute_delete(executor: &dyn KeyValueExecutor, plan: &DeletePlan) -> Result<
 
     let action = KeyValueAction::Delete;
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
-    let result = executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?;
-    let affected = match result {
+    let delete_result = match transaction {
+        Some(handle) => handle
+            .execute(command)
+            .map_err(|e| execute_error(&format!("TransactionHandle.delete failed: {e}")))?,
+        None => executor
+            .execute(command)
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
+    };
+    let affected = match delete_result {
         yyds_types::KeyValueResult::Delete { removed: true } => 1,
         _ => 0,
     };

@@ -10,10 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use yyds_execution::KeyValueExecutor;
+use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan, SqlResult,
-    SqlSessionCommand, SqlValue,
+    SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -68,7 +68,32 @@ pub fn serve_cancellable(
     serve_session(CancellableSocket { stream, stopping }, runtime)
 }
 
+/// MySQL session-scoped transaction state. Unlike PostgreSQL there is no wire-protocol
+/// ReadyForQuery byte for transaction mode, so we only track the storage handle and failure.
+struct MysqlTransactionSession {
+    executor: Option<Arc<dyn KeyValueExecutor>>,
+    handle: Option<Box<dyn TransactionHandle + 'static>>,
+    failed: bool,
+}
+
+impl MysqlTransactionSession {
+    fn new() -> Self {
+        Self { executor: None, handle: None, failed: false }
+    }
+
+    fn fail(&mut self) {
+        if self.handle.is_some() {
+            self.failed = true;
+        }
+    }
+}
+
+impl Default for MysqlTransactionSession {
+    fn default() -> Self { Self::new() }
+}
+
 fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<()> {
+    let mut session = MysqlTransactionSession::new();
     write_packet(&mut stream, 0, &handshake())?;
     let response = match read_packet(&mut stream)? {
         Some((1, response)) => response,
@@ -127,19 +152,61 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                     Ok(Some(SqlSessionCommand::SetNames { .. })) => {
                         write_error(&mut stream, sequence.wrapping_add(1), 1273, "HY000", "unsupported utf8mb4 collation")?;
                     }
-                    Ok(Some(SqlSessionCommand::Transaction(_))) => {
-                        write_ok(&mut stream, sequence.wrapping_add(1))?;
+                    Ok(Some(SqlSessionCommand::Transaction(action))) => {
+                        match action {
+                            SqlTransactionAction::Begin if session.failed => {
+                                write_error(&mut stream, sequence.wrapping_add(1), 40001, "HY000", "current transaction is aborted")?;
+                            }
+                            SqlTransactionAction::Begin => {
+                                let Some(rt) = runtime.as_ref() else {
+                                    write_error(&mut stream, sequence.wrapping_add(1), 1235, "42000", "no SQL runtime")?;
+                                    continue;
+                                };
+                                let executor = rt.executor.clone();
+                                let handle = LocalTransactionHandle::new(executor.clone());
+                                session.executor = Some(executor);
+                                session.handle = Some(Box::new(handle));
+                                session.failed = false;
+                                write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            }
+                            SqlTransactionAction::Commit if session.failed => {
+                                if let Some(handle) = session.handle.take() { handle.rollback(); }
+                                session.executor = None;
+                                session.failed = false;
+                                write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            }
+                            SqlTransactionAction::Commit => {
+                                if let Some(handle) = session.handle.take() {
+                                    let _ = handle.commit();
+                                }
+                                session.executor = None;
+                                session.failed = false;
+                                write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            }
+                            SqlTransactionAction::Rollback => {
+                                if let Some(handle) = session.handle.take() { handle.rollback(); }
+                                session.executor = None;
+                                session.failed = false;
+                                write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            }
+                        }
                     }
-                    Ok(None) | Err(_) => match &runtime {
-                        Some(runtime) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, runtime)?,
-                        None => write_error(
-                            &mut stream,
-                            sequence.wrapping_add(1),
-                            1235,
-                            "42000",
-                            "YYDS MySQL SQL execution is not implemented (no SQL runtime)",
-                        )?,
-                    },
+                    Ok(None) | Err(_) => {
+                        if session.failed {
+                            write_error(&mut stream, sequence.wrapping_add(1), 40001, "HY000", "current transaction is aborted")?;
+                            continue;
+                        }
+                        match runtime.as_ref() {
+                            Some(rt) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, rt, &mut session)?,
+                            None => write_error(
+                                &mut stream,
+                                sequence.wrapping_add(1),
+                                1235,
+                                "42000",
+                                "YYDS MySQL SQL execution is not implemented (no SQL runtime)",
+                            )?,
+                        }
+                    }
                 }
             }
             _ => write_error(&mut stream, sequence.wrapping_add(1), 1047, "08S01", "unsupported MySQL command")?,
@@ -288,10 +355,17 @@ fn write_error(stream: &mut impl Write, sequence: u8, code: u16, state: &str, me
 
 /// 把一条 SQL 走完整的 bind → plan → execute → wire 路径。
 /// 根据 plan variant 分发：SELECT → ResultSet；INSERT/UPDATE/DELETE → OK(AffectedRows=1)。
-fn execute_sql(stream: &mut impl Write, sequence: u8, sql: &str, runtime: &MysqlSqlRuntime) -> io::Result<()> {
+fn execute_sql(
+    stream: &mut impl Write,
+    sequence: u8,
+    sql: &str,
+    runtime: &Arc<MysqlSqlRuntime>,
+    session: &mut MysqlTransactionSession,
+) -> io::Result<()> {
     let bound = match bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version) {
         Ok(bound) => bound,
         Err(error) => {
+            session.fail();
             write_error(stream, sequence, 1064, "42000", &format!("SQL bind error: {}", error.message))?;
             return Ok(());
         }
@@ -299,6 +373,7 @@ fn execute_sql(stream: &mut impl Write, sequence: u8, sql: &str, runtime: &Mysql
     let plan = match plan_statement(bound, &runtime.catalog) {
         Ok(plan) => plan,
         Err(error) => {
+            session.fail();
             write_error(stream, sequence, 1235, "42000", &format!("SQL plan error: {}", error.message))?;
             return Ok(());
         }
@@ -306,9 +381,11 @@ fn execute_sql(stream: &mut impl Write, sequence: u8, sql: &str, runtime: &Mysql
 
     // DML 写操作 —— 先 execute 再回 OK packet
     let is_write = !matches!(plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_));
-    let result = match execute_plan(runtime.executor.as_ref(), &plan) {
+    let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
+    let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan) {
         Ok(result) => result,
         Err(error) => {
+            session.fail();
             write_error(stream, sequence, 5000, "HY000", &format!("SQL execution error: {}", error.message))?;
             return Ok(());
         }
