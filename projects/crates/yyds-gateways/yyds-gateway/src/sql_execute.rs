@@ -79,17 +79,11 @@ impl SqlValue {
             crate::catalog_bind::SqlFieldType::String => SqlValue::String(String::from_utf8_lossy(bytes).into_owned()),
             crate::catalog_bind::SqlFieldType::Int64 | crate::catalog_bind::SqlFieldType::Int32 => {
                 let text = String::from_utf8_lossy(bytes).into_owned();
-                text.parse::<i64>()
-                    .map(|n| SqlValue::Number(n as f64))
-                    .unwrap_or(SqlValue::String(text))
+                text.parse::<i64>().map(|n| SqlValue::Number(n as f64)).unwrap_or(SqlValue::String(text))
             }
             crate::catalog_bind::SqlFieldType::Float64 => {
                 let text = String::from_utf8_lossy(bytes).into_owned();
-                text.parse::<f64>()
-                    .ok()
-                    .filter(|f| f.is_finite())
-                    .map(SqlValue::Number)
-                    .unwrap_or(SqlValue::String(text))
+                text.parse::<f64>().ok().filter(|f| f.is_finite()).map(SqlValue::Number).unwrap_or(SqlValue::String(text))
             }
             crate::catalog_bind::SqlFieldType::Bool => {
                 let text = String::from_utf8_lossy(bytes).into_owned();
@@ -239,7 +233,9 @@ fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec<u64>) {
 fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
     let mut ids: Vec<u64> = Vec::new();
     for (fid, _) in &plan.projection_fields {
-        if !ids.contains(fid) { ids.push(*fid); }
+        if !ids.contains(fid) {
+            ids.push(*fid);
+        }
     }
     for (expr, _) in &plan.projection_expressions {
         collect_column_ids(expr, &mut ids);
@@ -322,8 +318,7 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
 
     // Top-N heap 优化：ORDER BY + (LIMIT 或 OFFSET) 时，用 BinaryHeap 保留 Top-N，
     // 避免先收集全量 rows 再排序。容量 = offset + limit（limit=0 视为无限，fallback 到 Vec）。
-    let use_top_n =
-        plan.order_by.is_some() && (plan.limit_after_sort > 0 || plan.offset_after_sort > 0);
+    let use_top_n = plan.order_by.is_some() && (plan.limit_after_sort > 0 || plan.offset_after_sort > 0);
 
     if plan.has_aggregate {
         // —— 聚合路径：需要访问所有 post-filter rows，无 heap 收益 ——
@@ -332,7 +327,9 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             let row = decode_row_fields(&value_bytes, &needed_ids)?;
             if let Some(ref predicate) = plan.remaining_predicate {
                 let v = eval_expression(predicate, &row, &plan.field_types)?;
-                if !truthy(&v) { continue; }
+                if !truthy(&v) {
+                    continue;
+                }
             }
             all_rows.push(row);
         }
@@ -354,7 +351,9 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             let row = decode_row_fields(&value_bytes, &needed_ids)?;
             if let Some(ref predicate) = plan.remaining_predicate {
                 let v = eval_expression(predicate, &row, &plan.field_types)?;
-                if !truthy(&v) { continue; }
+                if !truthy(&v) {
+                    continue;
+                }
             }
 
             let sort_key = Some(eval_expression(order_expr, &row, &plan.field_types)?);
@@ -390,7 +389,9 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         let row = decode_row_fields(&value_bytes, &needed_ids)?;
         if let Some(ref predicate) = plan.remaining_predicate {
             let v = eval_expression(predicate, &row, &plan.field_types)?;
-            if !truthy(&v) { continue; }
+            if !truthy(&v) {
+                continue;
+            }
         }
 
         let sort_key = match &plan.order_by {
@@ -421,12 +422,8 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
 
     let offset = plan.offset_after_sort;
     let limit = plan.limit_after_sort;
-    let rows: Vec<Vec<SqlValue>> = staged
-        .into_iter()
-        .skip(offset)
-        .take(if limit == 0 { usize::MAX } else { limit })
-        .map(|(_, r)| r)
-        .collect();
+    let rows: Vec<Vec<SqlValue>> =
+        staged.into_iter().skip(offset).take(if limit == 0 { usize::MAX } else { limit }).map(|(_, r)| r).collect();
 
     Ok(SqlResult { columns, rows, affected_rows: 0 })
 }
@@ -450,13 +447,20 @@ impl PartialEq for SortableRow {
 impl Eq for SortableRow {}
 
 impl PartialOrd for SortableRow {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Ord for SortableRow {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let natural = compare_values(self.sort_key.as_ref(), other.sort_key.as_ref());
-        if self.is_asc { natural } else { natural.reverse() }
+        if self.is_asc {
+            natural
+        }
+        else {
+            natural.reverse()
+        }
     }
 }
 
@@ -471,12 +475,8 @@ fn execute_insert(
     let action = KeyValueAction::PutIfAbsent(bytes);
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
     let result = match transaction {
-        Some(handle) => handle
-            .execute(command)
-            .map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
-        None => executor
-            .execute(command)
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
+        Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
+        None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
     };
     let affected = match result {
         yyds_types::KeyValueResult::PutIfAbsent { revision: Some(_) } => 1,
@@ -520,12 +520,8 @@ fn execute_update(
     let encoded = encode_row(&row);
     let put_cmd = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
     let put_result = match transaction {
-        Some(handle) => handle
-            .execute(put_cmd)
-            .map_err(|e| execute_error(&format!("TransactionHandle.update failed: {e}")))?,
-        None => executor
-            .execute(put_cmd)
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
+        Some(handle) => handle.execute(put_cmd).map_err(|e| execute_error(&format!("TransactionHandle.update failed: {e}")))?,
+        None => executor.execute(put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
     };
     let _ = put_result;
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 1 })
@@ -564,12 +560,8 @@ fn execute_delete(
     let action = KeyValueAction::Delete;
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
     let delete_result = match transaction {
-        Some(handle) => handle
-            .execute(command)
-            .map_err(|e| execute_error(&format!("TransactionHandle.delete failed: {e}")))?,
-        None => executor
-            .execute(command)
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
+        Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.delete failed: {e}")))?,
+        None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
     };
     let affected = match delete_result {
         yyds_types::KeyValueResult::Delete { removed: true } => 1,
@@ -638,8 +630,8 @@ fn eval_aggregate(
         _ => return Err(execute_error(&format!("eval_aggregate: non-Function expression encountered: {expr:?}"))),
     };
 
-    let agg = SqlAggregateFunction::from_name(&name)
-        .ok_or_else(|| execute_error(&format!("unknown aggregate function: {name}")))?;
+    let agg =
+        SqlAggregateFunction::from_name(&name).ok_or_else(|| execute_error(&format!("unknown aggregate function: {name}")))?;
 
     match agg {
         SqlAggregateFunction::COUNT => {
@@ -669,7 +661,12 @@ fn eval_aggregate(
                     any_non_null = true;
                 }
             }
-            if any_non_null { Ok(SqlValue::Number(sum)) } else { Ok(SqlValue::Null) }
+            if any_non_null {
+                Ok(SqlValue::Number(sum))
+            }
+            else {
+                Ok(SqlValue::Null)
+            }
         }
         SqlAggregateFunction::AVG => {
             let mut sum: f64 = 0.0;
@@ -681,14 +678,22 @@ fn eval_aggregate(
                     count += 1;
                 }
             }
-            if count > 0 { Ok(SqlValue::Number(sum / count as f64)) } else { Ok(SqlValue::Null) }
+            if count > 0 {
+                Ok(SqlValue::Number(sum / count as f64))
+            }
+            else {
+                Ok(SqlValue::Null)
+            }
         }
         SqlAggregateFunction::MAX => {
             let mut max: Option<f64> = None;
             for row in rows {
                 let v = eval_expression(&args[0], row, field_types)?;
                 if let SqlValue::Number(n) = v {
-                    max = Some(match max { Some(m) => n.max(m), None => n });
+                    max = Some(match max {
+                        Some(m) => n.max(m),
+                        None => n,
+                    });
                 }
             }
             Ok(max.map(SqlValue::Number).unwrap_or(SqlValue::Null))
@@ -698,7 +703,10 @@ fn eval_aggregate(
             for row in rows {
                 let v = eval_expression(&args[0], row, field_types)?;
                 if let SqlValue::Number(n) = v {
-                    min = Some(match min { Some(m) => n.min(m), None => n });
+                    min = Some(match min {
+                        Some(m) => n.min(m),
+                        None => n,
+                    });
                 }
             }
             Ok(min.map(SqlValue::Number).unwrap_or(SqlValue::Null))
@@ -726,9 +734,7 @@ fn eval_expression(
             eval_binary(*operator, &l, &r)?
         }
         SqlCatalogBoundExpression::Function { name, .. } => {
-            return Err(execute_error(&format!(
-                "aggregate function {name} cannot be evaluated on a single row"
-            )));
+            return Err(execute_error(&format!("aggregate function {name} cannot be evaluated on a single row")));
         }
     })
 }

@@ -100,25 +100,36 @@ fn hello_command_returns_is_writable_primary() {
         let elem_type = body[pos];
         pos += 1;
         let key_start = pos;
-        while pos < body.len() && body[pos] != 0 { pos += 1; }
+        while pos < body.len() && body[pos] != 0 {
+            pos += 1;
+        }
         let key = &body[key_start..pos];
         pos += 1; // skip null terminator
 
         match elem_type {
-            0x10 => { // int32
-                let val = i32::from_le_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]);
+            0x10 => {
+                // int32
+                let val = i32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
                 pos += 4;
-                if key == b"ok" { found_ok = val >= 1; }
+                if key == b"ok" {
+                    found_ok = val >= 1;
+                }
             }
-            0x01 => { // double
-                let val = f64::from_le_bytes(body[pos..pos+8].try_into().unwrap());
+            0x01 => {
+                // double
+                let val = f64::from_le_bytes(body[pos..pos + 8].try_into().unwrap());
                 pos += 8;
-                if key == b"ok" { found_ok = val >= 1.0; }
+                if key == b"ok" {
+                    found_ok = val >= 1.0;
+                }
             }
-            0x08 => { // bool
+            0x08 => {
+                // bool
                 let val = body[pos] != 0;
                 pos += 1;
-                if key == b"isWritablePrimary" { found_writable = val; }
+                if key == b"isWritablePrimary" {
+                    found_writable = val;
+                }
             }
             _ => break,
         }
@@ -174,12 +185,28 @@ fn ping_command_returns_ok_document() {
         let elem_type = body[pos];
         pos += 1;
         let key_start = pos;
-        while pos < body.len() && body[pos] != 0 { pos += 1; }
+        while pos < body.len() && body[pos] != 0 {
+            pos += 1;
+        }
         let key = &body[key_start..pos];
         pos += 1;
         match elem_type {
-            0x10 => { let val = i32::from_le_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]); pos += 4; if key == b"ok" { found_ok = val >= 1; break; } }
-            0x01 => { let val = f64::from_le_bytes(body[pos..pos+8].try_into().unwrap()); pos += 8; if key == b"ok" { found_ok = val >= 1.0; break; } }
+            0x10 => {
+                let val = i32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
+                pos += 4;
+                if key == b"ok" {
+                    found_ok = val >= 1;
+                    break;
+                }
+            }
+            0x01 => {
+                let val = f64::from_le_bytes(body[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                if key == b"ok" {
+                    found_ok = val >= 1.0;
+                    break;
+                }
+            }
             _ => break,
         }
     }
@@ -232,21 +259,29 @@ fn unknown_command_returns_error_document() {
         let elem_type = body[pos];
         pos += 1;
         let key_start = pos;
-        while pos < body.len() && body[pos] != 0 { pos += 1; }
+        while pos < body.len() && body[pos] != 0 {
+            pos += 1;
+        }
         let key = &body[key_start..pos];
         pos += 1;
         match elem_type {
-            0x10 => { // int32
-                let val = i32::from_le_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]);
+            0x10 => {
+                // int32
+                let val = i32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]);
                 pos += 4;
-                if key == b"ok" { ok_val = Some(val); }
+                if key == b"ok" {
+                    ok_val = Some(val);
+                }
             }
-            0x02 => { // string
-                let str_len = i32::from_le_bytes([body[pos], body[pos+1], body[pos+2], body[pos+3]]) as usize;
+            0x02 => {
+                // string
+                let str_len = i32::from_le_bytes([body[pos], body[pos + 1], body[pos + 2], body[pos + 3]]) as usize;
                 pos += 4;
                 let s = String::from_utf8_lossy(&body[pos..pos + str_len - 1]).into_owned();
                 pos += str_len;
-                if key == b"errmsg" { errmsg = Some(s); }
+                if key == b"errmsg" {
+                    errmsg = Some(s);
+                }
             }
             _ => break,
         }

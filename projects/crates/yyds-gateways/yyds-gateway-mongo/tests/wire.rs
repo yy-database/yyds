@@ -27,12 +27,7 @@ fn hello_body() -> Vec<u8> {
 #[test]
 fn command_name_extracts_hello_from_op_msg_frame() {
     let body = hello_body();
-    let header = MsgHeader {
-        total_length: 16 + body.len() as u32,
-        request_id: 1,
-        response_to: 0,
-        opcode: 2013,
-    };
+    let header = MsgHeader { total_length: 16 + body.len() as u32, request_id: 1, response_to: 0, opcode: 2013 };
     let frame = yyds_gateway_mongo::wire::Frame { header, body };
     let name = yyds_gateway_mongo::command_name_from_frame(&frame);
     assert_eq!(name, Some("hello"));
@@ -52,15 +47,7 @@ fn op_msg_frame_roundtrip_preserves_header_and_body() {
 
     let mut reader = Cursor::new(bytes);
     let frame = read_frame(&mut reader, FrameLimits::default()).unwrap().unwrap();
-    assert_eq!(
-        frame.header,
-        MsgHeader {
-            total_length: (16 + body.len()) as u32,
-            request_id,
-            response_to,
-            opcode: 2013,
-        }
-    );
+    assert_eq!(frame.header, MsgHeader { total_length: (16 + body.len()) as u32, request_id, response_to, opcode: 2013 });
     assert_eq!(frame.body, body);
 }
 
@@ -102,7 +89,7 @@ fn truncated_header_is_reported_as_connection_closed() {
     // 全空流 → ConnectionClosed；半拉 → UnexpectedEof (Io)。两者都是有效 IO 终止。
     assert!(
         matches!(result, Err(yyds_gateway_mongo::wire::FrameError::ConnectionClosed))
-        || matches!(result, Err(yyds_gateway_mongo::wire::FrameError::Io(_)))
+            || matches!(result, Err(yyds_gateway_mongo::wire::FrameError::Io(_)))
     );
 }
 

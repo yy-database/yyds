@@ -89,7 +89,9 @@ impl MysqlTransactionSession {
 }
 
 impl Default for MysqlTransactionSession {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<()> {
@@ -152,48 +154,63 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                     Ok(Some(SqlSessionCommand::SetNames { .. })) => {
                         write_error(&mut stream, sequence.wrapping_add(1), 1273, "HY000", "unsupported utf8mb4 collation")?;
                     }
-                    Ok(Some(SqlSessionCommand::Transaction(action))) => {
-                        match action {
-                            SqlTransactionAction::Begin if session.failed => {
-                                write_error(&mut stream, sequence.wrapping_add(1), 40001, "HY000", "current transaction is aborted")?;
-                            }
-                            SqlTransactionAction::Begin => {
-                                let Some(rt) = runtime.as_ref() else {
-                                    write_error(&mut stream, sequence.wrapping_add(1), 1235, "42000", "no SQL runtime")?;
-                                    continue;
-                                };
-                                let executor = rt.executor.clone();
-                                let handle = LocalTransactionHandle::new(executor.clone());
-                                session.executor = Some(executor);
-                                session.handle = Some(Box::new(handle));
-                                session.failed = false;
-                                write_ok(&mut stream, sequence.wrapping_add(1))?;
-                            }
-                            SqlTransactionAction::Commit if session.failed => {
-                                if let Some(handle) = session.handle.take() { handle.rollback(); }
-                                session.executor = None;
-                                session.failed = false;
-                                write_ok(&mut stream, sequence.wrapping_add(1))?;
-                            }
-                            SqlTransactionAction::Commit => {
-                                if let Some(handle) = session.handle.take() {
-                                    let _ = handle.commit();
-                                }
-                                session.executor = None;
-                                session.failed = false;
-                                write_ok(&mut stream, sequence.wrapping_add(1))?;
-                            }
-                            SqlTransactionAction::Rollback => {
-                                if let Some(handle) = session.handle.take() { handle.rollback(); }
-                                session.executor = None;
-                                session.failed = false;
-                                write_ok(&mut stream, sequence.wrapping_add(1))?;
-                            }
+                    Ok(Some(SqlSessionCommand::Transaction(action))) => match action {
+                        SqlTransactionAction::Begin if session.failed => {
+                            write_error(
+                                &mut stream,
+                                sequence.wrapping_add(1),
+                                40001,
+                                "HY000",
+                                "current transaction is aborted",
+                            )?;
                         }
-                    }
+                        SqlTransactionAction::Begin => {
+                            let Some(rt) = runtime.as_ref()
+                            else {
+                                write_error(&mut stream, sequence.wrapping_add(1), 1235, "42000", "no SQL runtime")?;
+                                continue;
+                            };
+                            let executor = rt.executor.clone();
+                            let handle = LocalTransactionHandle::new(executor.clone());
+                            session.executor = Some(executor);
+                            session.handle = Some(Box::new(handle));
+                            session.failed = false;
+                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                        }
+                        SqlTransactionAction::Commit if session.failed => {
+                            if let Some(handle) = session.handle.take() {
+                                handle.rollback();
+                            }
+                            session.executor = None;
+                            session.failed = false;
+                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                        }
+                        SqlTransactionAction::Commit => {
+                            if let Some(handle) = session.handle.take() {
+                                let _ = handle.commit();
+                            }
+                            session.executor = None;
+                            session.failed = false;
+                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                        }
+                        SqlTransactionAction::Rollback => {
+                            if let Some(handle) = session.handle.take() {
+                                handle.rollback();
+                            }
+                            session.executor = None;
+                            session.failed = false;
+                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                        }
+                    },
                     Ok(None) | Err(_) => {
                         if session.failed {
-                            write_error(&mut stream, sequence.wrapping_add(1), 40001, "HY000", "current transaction is aborted")?;
+                            write_error(
+                                &mut stream,
+                                sequence.wrapping_add(1),
+                                40001,
+                                "HY000",
+                                "current transaction is aborted",
+                            )?;
                             continue;
                         }
                         match runtime.as_ref() {

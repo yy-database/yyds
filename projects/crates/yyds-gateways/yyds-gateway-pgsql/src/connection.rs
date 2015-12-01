@@ -194,7 +194,9 @@ impl TransactionSession {
 }
 
 impl Default for TransactionSession {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TransactionStatus {

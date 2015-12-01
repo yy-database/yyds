@@ -391,8 +391,11 @@ impl SqliteDatabase {
     /// `.yyds` catalog 文件路径。两者通常由同一个 YYDS node 产生。
     #[napi]
     pub fn bindSqlRuntime(&mut self, data_dir: String, catalog_path: String) -> napi::Result<()> {
-        let executor = crate::node_runtime::open_executor(PathBuf::from(&data_dir).as_path(), Some(PathBuf::from(&catalog_path).as_path()))
-            .map_err(|msg| napi::Error::from_reason(format!("open executor: {msg}")))?;
+        let executor = crate::node_runtime::open_executor(
+            PathBuf::from(&data_dir).as_path(),
+            Some(PathBuf::from(&catalog_path).as_path()),
+        )
+        .map_err(|msg| napi::Error::from_reason(format!("open executor: {msg}")))?;
         let yyds_catalog =
             Catalog::open(&catalog_path).map_err(|msg| napi::Error::from_reason(format!("open catalog: {msg}")))?;
         let cat = SqlCatalog::from_yyds_catalog(&yyds_catalog)

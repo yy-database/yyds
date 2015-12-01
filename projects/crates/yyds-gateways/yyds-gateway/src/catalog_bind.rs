@@ -2,7 +2,8 @@
 
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundLiteral,
-    SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlFrontendError,
+    SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate,
+    SqlFrontendError,
 };
 use vos::contract::{CanonicalType, ResolvedCanonicalType};
 
@@ -473,10 +474,8 @@ fn bind_expression(
             expression: Box::new(bind_expression(*expression, source, catalog)?),
         }),
         SqlBoundExpression::Function { name, args } => {
-            let bound_args = args
-                .into_iter()
-                .map(|arg| bind_expression(arg, source, catalog))
-                .collect::<Result<Vec<_>, _>>()?;
+            let bound_args =
+                args.into_iter().map(|arg| bind_expression(arg, source, catalog)).collect::<Result<Vec<_>, _>>()?;
             Ok(SqlCatalogBoundExpression::Function { name, args: bound_args })
         }
     }

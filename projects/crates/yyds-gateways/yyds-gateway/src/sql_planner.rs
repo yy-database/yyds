@@ -17,8 +17,8 @@
 
 use crate::{
     catalog_bind::{
-        SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
-        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundUpdate,
+        SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert, SqlCatalogBoundProjection,
+        SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundUpdate,
     },
     sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlFrontendError},
 };
@@ -53,24 +53,22 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
                     projection_fields.push((field.field_id, field.name.clone()));
                 }
             }
-            SqlCatalogBoundProjection::Expression { expression, alias } => {
-                match expression {
-                    SqlCatalogBoundExpression::Column(col) => {
-                        has_non_aggregate = true;
-                        projection_fields.push((col.field_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
-                    }
-                    SqlCatalogBoundExpression::Function { .. } => {
-                        has_aggregate = true;
-                        projection_expressions
-                            .push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
-                    }
-                    other => {
-                        has_non_aggregate = true;
-                        projection_expressions
-                            .push((other.clone(), alias.clone().unwrap_or_else(|| expression_default_label(other))));
-                    }
+            SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
+                SqlCatalogBoundExpression::Column(col) => {
+                    has_non_aggregate = true;
+                    projection_fields.push((col.field_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
                 }
-            }
+                SqlCatalogBoundExpression::Function { .. } => {
+                    has_aggregate = true;
+                    projection_expressions
+                        .push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
+                }
+                other => {
+                    has_non_aggregate = true;
+                    projection_expressions
+                        .push((other.clone(), alias.clone().unwrap_or_else(|| expression_default_label(other))));
+                }
+            },
         }
     }
 
@@ -80,19 +78,15 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
     }
 
     // 2. 递归解析 predicate 的 AND 树，把 pk 条件提取出来。
-    let (pk_equality, pk_prefix, pk_after, pk_before, remaining_predicate) =
-        match select.predicate {
-            None => (None, None, None, None, None),
-            Some(expr) => extract_pk_range(expr, pk_field.field_id)?,
-        };
+    let (pk_equality, pk_prefix, pk_after, pk_before, remaining_predicate) = match select.predicate {
+        None => (None, None, None, None, None),
+        Some(expr) => extract_pk_range(expr, pk_field.field_id)?,
+    };
 
     // 3. 分流：有精确 pk 等值 → Read；其他全部 → Scan。
     // 先从 catalog table 收集 field_id → SqlFieldType 映射。
-    let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> = table
-        .fields
-        .iter()
-        .map(|f| (f.field_id, f.field_type.clone()))
-        .collect();
+    let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
+        table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
     if let Some(lit) = pk_equality {
         let rowid = pk_literal_to_rowid(&lit)?;
@@ -149,10 +143,7 @@ pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Resul
     let mut write_fields = Vec::with_capacity(insert.fields.len());
     for (field, value) in insert.fields.iter().zip(insert.values.iter()) {
         let lit = literal_from_expression(value)?;
-        let field_type = field_types
-            .get(&field.field_id)
-            .cloned()
-            .unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
         write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
         let _ = pk_bound;
     }
@@ -171,8 +162,8 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
         None => return Err(planner_error("UPDATE requires WHERE with `pk = literal`")),
         Some(expr) => {
             let (pk_literal, _pk_prefix, _pk_after, _pk_before, remaining) = extract_pk_range(expr, pk_field.field_id)?;
-            let lit = pk_literal
-                .ok_or_else(|| planner_error(&format!("UPDATE WHERE must contain `{} = literal`", pk_field.name)))?;
+            let lit =
+                pk_literal.ok_or_else(|| planner_error(&format!("UPDATE WHERE must contain `{} = literal`", pk_field.name)))?;
             (lit, remaining)
         }
     };
@@ -181,10 +172,7 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
     let mut write_fields = Vec::new();
     for (field, value_expr) in &update.assignments {
         let lit = literal_from_expression(value_expr)?;
-        let field_type = field_types
-            .get(&field.field_id)
-            .cloned()
-            .unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
         write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
     }
     Ok(SqlExecutionPlan::Update(UpdatePlan {
@@ -208,8 +196,8 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
         None => return Err(planner_error("DELETE requires WHERE with `pk = literal`")),
         Some(expr) => {
             let (pk_literal, _pk_prefix, _pk_after, _pk_before, remaining) = extract_pk_range(expr, pk_field.field_id)?;
-            let lit = pk_literal
-                .ok_or_else(|| planner_error(&format!("DELETE WHERE must contain `{} = literal`", pk_field.name)))?;
+            let lit =
+                pk_literal.ok_or_else(|| planner_error(&format!("DELETE WHERE must contain `{} = literal`", pk_field.name)))?;
             (lit, remaining)
         }
     };
@@ -361,23 +349,12 @@ fn extract_pk_range(
     predicate: SqlCatalogBoundExpression,
     pk_field_id: u64,
 ) -> Result<
-    (
-        Option<SqlBoundLiteral>,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        Option<SqlCatalogBoundExpression>,
-    ),
+    (Option<SqlBoundLiteral>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<SqlCatalogBoundExpression>),
     SqlFrontendError,
 > {
-
     match predicate {
         // AND 拆分 — 两侧分别提取，再合并。
-        SqlCatalogBoundExpression::Binary {
-            left,
-            operator: SqlBoundBinaryOperator::And,
-            right,
-        } => {
+        SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::And, right } => {
             let (l_eq, l_pre, l_after, l_before, l_rem) = extract_pk_range(*left, pk_field_id)?;
             let (r_eq, r_pre, r_after, r_before, r_rem) = extract_pk_range(*right, pk_field_id)?;
             let eq = merge_opt(l_eq, r_eq, "conflicting primary-key equality inside AND")?;
@@ -390,78 +367,98 @@ fn extract_pk_range(
 
         // 所有其他 Binary 表达式 —— 尝试识别 pk 条件。
         SqlCatalogBoundExpression::Binary { left, operator, right } => {
-
-
-
             match (operator, *left, *right) {
                 // pk = literal
-                (SqlBoundBinaryOperator::Equal, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
-                | (SqlBoundBinaryOperator::Equal, SqlCatalogBoundExpression::Literal(lit), SqlCatalogBoundExpression::Column(col))
-                    if col.field_id == pk_field_id =>
-                {
+                (
+                    SqlBoundBinaryOperator::Equal,
+                    SqlCatalogBoundExpression::Column(col),
+                    SqlCatalogBoundExpression::Literal(lit),
+                )
+                | (
+                    SqlBoundBinaryOperator::Equal,
+                    SqlCatalogBoundExpression::Literal(lit),
+                    SqlCatalogBoundExpression::Column(col),
+                ) if col.field_id == pk_field_id => {
                     let _rowid = pk_literal_to_rowid(&lit)?;
                     Ok((Some(lit), None, None, None, None))
                 }
 
                 // pk > literal → after exclusive
-                (SqlBoundBinaryOperator::Greater, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
-                    if col.field_id == pk_field_id =>
-                {
+                (
+                    SqlBoundBinaryOperator::Greater,
+                    SqlCatalogBoundExpression::Column(col),
+                    SqlCatalogBoundExpression::Literal(lit),
+                ) if col.field_id == pk_field_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, Some(rowid), None, None))
                 }
 
                 // pk >= literal → after exclusive：key > (lit-1) 等价于 key >= lit
-                (SqlBoundBinaryOperator::GreaterEqual, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
-                    if col.field_id == pk_field_id =>
-                {
+                (
+                    SqlBoundBinaryOperator::GreaterEqual,
+                    SqlCatalogBoundExpression::Column(col),
+                    SqlCatalogBoundExpression::Literal(lit),
+                ) if col.field_id == pk_field_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, Some(rowid_decrement(&rowid)), None, None))
                 }
 
                 // pk < literal → before exclusive
-                (SqlBoundBinaryOperator::Less, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
-                    if col.field_id == pk_field_id =>
-                {
+                (
+                    SqlBoundBinaryOperator::Less,
+                    SqlCatalogBoundExpression::Column(col),
+                    SqlCatalogBoundExpression::Literal(lit),
+                ) if col.field_id == pk_field_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, None, Some(rowid), None))
                 }
 
                 // pk <= literal → before exclusive：key < (lit+1) 等价于 key <= lit
-                (SqlBoundBinaryOperator::LessEqual, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
-                    if col.field_id == pk_field_id =>
-                {
+                (
+                    SqlBoundBinaryOperator::LessEqual,
+                    SqlCatalogBoundExpression::Column(col),
+                    SqlCatalogBoundExpression::Literal(lit),
+                ) if col.field_id == pk_field_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, None, Some(rowid_increment(&rowid)), None))
                 }
 
                 // pk LIKE 'prefix%'
-                (SqlBoundBinaryOperator::Like, SqlCatalogBoundExpression::Column(col), SqlCatalogBoundExpression::Literal(lit))
-                    if col.field_id == pk_field_id =>
-                {
-
+                (
+                    SqlBoundBinaryOperator::Like,
+                    SqlCatalogBoundExpression::Column(col),
+                    SqlCatalogBoundExpression::Literal(lit),
+                ) if col.field_id == pk_field_id => {
                     let prefix = match &lit {
                         SqlBoundLiteral::String(s) if s.ends_with('%') && !s.ends_with("%%") => {
                             s[..s.len() - 1].as_bytes().to_vec()
                         }
                         _ => {
                             // LIKE 模式不只是 prefix%，下推成 remaining
-                            return Ok((None, None, None, None, Some(SqlCatalogBoundExpression::Binary {
-                                left: Box::new(SqlCatalogBoundExpression::Column(col)),
-                                operator: SqlBoundBinaryOperator::Like,
-                                right: Box::new(SqlCatalogBoundExpression::Literal(lit)),
-                            })));
+                            return Ok((
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(SqlCatalogBoundExpression::Binary {
+                                    left: Box::new(SqlCatalogBoundExpression::Column(col)),
+                                    operator: SqlBoundBinaryOperator::Like,
+                                    right: Box::new(SqlCatalogBoundExpression::Literal(lit)),
+                                }),
+                            ));
                         }
                     };
                     Ok((None, Some(prefix), None, None, None))
                 }
 
                 // 其他所有 Binary —— 留在 remaining
-                (op, left, right) => Ok((None, None, None, None, Some(SqlCatalogBoundExpression::Binary {
-                    left: Box::new(left),
-                    operator: op,
-                    right: Box::new(right),
-                }))),
+                (op, left, right) => Ok((
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(SqlCatalogBoundExpression::Binary { left: Box::new(left), operator: op, right: Box::new(right) }),
+                )),
             }
         }
 

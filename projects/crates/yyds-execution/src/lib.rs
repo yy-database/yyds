@@ -2,7 +2,11 @@
 #![warn(missing_docs, rustdoc::missing_crate_level_docs)]
 #![doc = include_str!("../readme.md")]
 
-use std::{collections::HashMap, fmt::Debug, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::{Arc, Mutex},
+};
 
 use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
 use yyds_types::{Error, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, ShardId, ShardMap};

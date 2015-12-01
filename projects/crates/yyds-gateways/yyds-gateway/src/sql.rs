@@ -297,14 +297,15 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     }
     match &root.statements[0] {
         SqlStatement::Select(select) => {
-
             if !select.joins.is_empty() || select.group_by.is_some() || select.having.is_some() {
                 return Err(bind_error("SQL SELECT clauses are not in the gateway binding subset"));
             }
             let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
             let (limit, offset) = match &select.limit {
                 Some(clause) => {
-                    let n = extract_u64(&clause.limit).ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))? as usize;
+                    let n = extract_u64(&clause.limit)
+                        .ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))?
+                        as usize;
                     let off = clause.offset.as_ref().and_then(|e| extract_u64(e)).map(|v| v as usize);
                     (Some(n), off)
                 }
@@ -462,14 +463,9 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             let fname = normalize_identifier(name.name.as_ref());
             // 只允许已知的聚合函数，拒绝未知函数。
             if SqlAggregateFunction::from_name(&fname).is_none() {
-                return Err(bind_error(&format!(
-                    "unknown SQL function: {fname} (only COUNT/SUM/AVG/MAX/MIN are supported)"
-                )));
+                return Err(bind_error(&format!("unknown SQL function: {fname} (only COUNT/SUM/AVG/MAX/MIN are supported)")));
             }
-            let bound_args = args
-                .iter()
-                .map(bind_expression)
-                .collect::<Result<Vec<_>, _>>()?;
+            let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             Ok(SqlBoundExpression::Function { name: fname, args: bound_args })
         }
         _ => Err(bind_error("SQL expression is outside the gateway binding subset")),

@@ -27,7 +27,14 @@ pub trait KvStore {
     /// Returns up to `limit` records whose key bytes start with `prefix` and compare greater
     /// exclusive lower cursor; `before` is the exclusive upper cursor. `limit` of `0`
     /// means no cap. Results are sorted by key bytes ascending.
-    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, before: Option<&[u8]>, limit: usize) -> Result<Vec<Record>>;
+    fn scan(
+        &self,
+        namespace: &Namespace,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        before: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<Record>>;
 }
 
 /// In-memory shard used by unit tests and early integrations.
@@ -61,7 +68,14 @@ impl KvStore for MemoryShard {
         Ok(self.records.remove(key).is_some())
     }
 
-    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, before: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
+    fn scan(
+        &self,
+        namespace: &Namespace,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        before: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<Record>> {
         Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
     }
 }
@@ -162,7 +176,14 @@ impl KvStore for FileShard {
         Ok(true)
     }
 
-    fn scan(&self, namespace: &Namespace, prefix: &[u8], after: Option<&[u8]>, before: Option<&[u8]>, limit: usize) -> Result<Vec<Record>> {
+    fn scan(
+        &self,
+        namespace: &Namespace,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        before: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<Record>> {
         Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
     }
 }

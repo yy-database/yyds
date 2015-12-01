@@ -372,9 +372,7 @@ fn make_executor_with_rows(
             values.insert(*field_id, bytes.to_vec());
         }
         let row_bytes = yyds_gateway::encode_row(&values);
-        shard
-            .put(Key::new(namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(row_bytes)))
-            .expect("put row");
+        shard.put(Key::new(namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(row_bytes))).expect("put row");
     }
 
     let mut shards = std::collections::HashMap::new();
@@ -489,8 +487,7 @@ fn sql_limit_with_where_scans_all_then_returns_limited() {
     }
 
     // WHERE age > 22 LIMIT 2 → 预期：2 行 alice(30), carol(35)
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT id, age FROM users WHERE age > 22 LIMIT 2", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, age FROM users WHERE age > 22 LIMIT 2", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
 
@@ -500,7 +497,12 @@ fn sql_limit_with_where_scans_all_then_returns_limited() {
         .rows
         .iter()
         .map(|r| {
-            if let yyds_gateway::SqlValue::Number(n) = &r[1] { *n } else { unreachable!() }
+            if let yyds_gateway::SqlValue::Number(n) = &r[1] {
+                *n
+            }
+            else {
+                unreachable!()
+            }
         })
         .collect();
     assert!(ages.contains(&30.0), "missing alice(30)");
@@ -522,12 +524,8 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     }
 
     // ORDER BY age ASC LIMIT 2 → bob(20), dan(22)
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT name, age FROM users ORDER BY age ASC LIMIT 2",
-        &catalog,
-        7,
-    )
-    .expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT name, age FROM users ORDER BY age ASC LIMIT 2", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec ASC+LIMIT");
     assert_eq!(result.rows.len(), 2);
@@ -535,12 +533,8 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Number(22.0), "ASC second should be dan(22)");
 
     // ORDER BY age DESC LIMIT 2 → carol(35), alice(30)
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT name, age FROM users ORDER BY age DESC LIMIT 2",
-        &catalog,
-        7,
-    )
-    .expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT name, age FROM users ORDER BY age DESC LIMIT 2", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec DESC+LIMIT");
     assert_eq!(result.rows.len(), 2);
@@ -548,12 +542,8 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Number(30.0), "DESC second should be alice(30)");
 
     // ORDER BY age ASC LIMIT 1 OFFSET 1 → dan(22) — 跳过 bob(20)
-    let bound = yyds_gateway::bind_sql_catalog(
-        "SELECT name, age FROM users ORDER BY age ASC LIMIT 1 OFFSET 1",
-        &catalog,
-        7,
-    )
-    .expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users ORDER BY age ASC LIMIT 1 OFFSET 1", &catalog, 7)
+        .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec ASC+OFFSET+LIMIT");
     assert_eq!(result.rows.len(), 1);
@@ -622,11 +612,7 @@ fn sql_select_star_from_table_scans_all_rows() {
     // 预置三行 — id=1/alice, id=2/bob, id=3/carol
     let executor = make_executor_with_rows(
         "table:1",
-        &[
-            (b"1", &[(1, b"1"), (2, b"alice")]),
-            (b"2", &[(1, b"2"), (2, b"bob")]),
-            (b"3", &[(1, b"3"), (2, b"carol")]),
-        ],
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
 
     let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users", &catalog, 7).expect("catalog bind");
@@ -637,10 +623,14 @@ fn sql_select_star_from_table_scans_all_rows() {
 
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string()]);
     assert_eq!(result.rows.len(), 3);
-    let ids: Vec<f64> = result.rows.iter().map(|row| match &row[0] {
-        yyds_gateway::SqlValue::Number(n) => *n,
-        other => panic!("expected number, got {other:?}"),
-    }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|row| match &row[0] {
+            yyds_gateway::SqlValue::Number(n) => *n,
+            other => panic!("expected number, got {other:?}"),
+        })
+        .collect();
     assert_eq!(ids, vec![1.0, 2.0, 3.0]);
 }
 
@@ -649,26 +639,26 @@ fn sql_scan_applies_remaining_predicate_from_non_pk_equality() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor = make_executor_with_rows(
         "table:1",
-        &[
-            (b"1", &[(1, b"1"), (2, b"alice")]),
-            (b"2", &[(1, b"2"), (2, b"bob")]),
-            (b"3", &[(1, b"3"), (2, b"alice")]),
-        ],
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"alice")])],
     );
 
     // WHERE name = 'alice' — 不是 pk 等值，planner 输出 ScanPlan 带 remaining_predicate
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE name = 'alice'", &catalog, 7)
-        .expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE name = 'alice'", &catalog, 7).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
     assert_eq!(result.rows.len(), 2);
     // alice 在 id=1 和 id=3 两行
-    let ids: Vec<f64> = result.rows.iter().map(|row| match &row[0] {
-        yyds_gateway::SqlValue::Number(n) => *n,
-        other => panic!("expected number, got {other:?}"),
-    }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|row| match &row[0] {
+            yyds_gateway::SqlValue::Number(n) => *n,
+            other => panic!("expected number, got {other:?}"),
+        })
+        .collect();
     assert!(ids.contains(&1.0));
     assert!(ids.contains(&3.0));
     assert_eq!(ids.len(), 2);
@@ -680,11 +670,9 @@ fn sql_insert_multiple_then_select_star_returns_all() {
     let executor = empty_executor();
 
     // 连续 INSERT 三行 — 全部写入同一个 executor
-    for sql in &[
-        "INSERT INTO items VALUES (1, 'A1')",
-        "INSERT INTO items VALUES (2, 'B2')",
-        "INSERT INTO items VALUES (3, 'C3')",
-    ] {
+    for sql in
+        &["INSERT INTO items VALUES (1, 'A1')", "INSERT INTO items VALUES (2, 'B2')", "INSERT INTO items VALUES (3, 'C3')"]
+    {
         let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         yyds_gateway::execute_plan(&executor, None, &plan).expect("insert");
@@ -697,10 +685,14 @@ fn sql_insert_multiple_then_select_star_returns_all() {
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("scan");
 
     assert_eq!(result.rows.len(), 3);
-    let ids: Vec<f64> = result.rows.iter().map(|row| match &row[0] {
-        yyds_gateway::SqlValue::Number(n) => *n,
-        other => panic!("expected number, got {other:?}"),
-    }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|row| match &row[0] {
+            yyds_gateway::SqlValue::Number(n) => *n,
+            other => panic!("expected number, got {other:?}"),
+        })
+        .collect();
     assert_eq!(ids, vec![1.0, 2.0, 3.0]);
 }
 
@@ -709,11 +701,7 @@ fn sql_select_pk_greater_pushes_after_cursor() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor = make_executor_with_rows(
         "table:1",
-        &[
-            (b"1", &[(1, b"1"), (2, b"alice")]),
-            (b"2", &[(1, b"2"), (2, b"bob")]),
-            (b"3", &[(1, b"3"), (2, b"carol")]),
-        ],
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
 
     let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id > 1", &catalog, 7)
@@ -729,7 +717,18 @@ fn sql_select_pk_greater_pushes_after_cursor() {
     }
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 2);
-    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|r| {
+            if let yyds_gateway::SqlValue::Number(n) = &r[0] {
+                *n
+            }
+            else {
+                panic!()
+            }
+        })
+        .collect();
     assert_eq!(ids, vec![2.0, 3.0]);
 }
 
@@ -738,11 +737,7 @@ fn sql_select_pk_less_pushes_before_cursor() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor = make_executor_with_rows(
         "table:1",
-        &[
-            (b"1", &[(1, b"1"), (2, b"alice")]),
-            (b"2", &[(1, b"2"), (2, b"bob")]),
-            (b"3", &[(1, b"3"), (2, b"carol")]),
-        ],
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
 
     let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id < 3", &catalog, 7)
@@ -757,7 +752,18 @@ fn sql_select_pk_less_pushes_before_cursor() {
     }
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 2);
-    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|r| {
+            if let yyds_gateway::SqlValue::Number(n) = &r[0] {
+                *n
+            }
+            else {
+                panic!()
+            }
+        })
+        .collect();
     assert_eq!(ids, vec![1.0, 2.0]);
 }
 
@@ -786,7 +792,18 @@ fn sql_select_pk_range_after_and_before_together() {
     }
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 2);
-    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|r| {
+            if let yyds_gateway::SqlValue::Number(n) = &r[0] {
+                *n
+            }
+            else {
+                panic!()
+            }
+        })
+        .collect();
     assert_eq!(ids, vec![2.0, 3.0]);
 }
 
@@ -815,7 +832,18 @@ fn sql_limit_pushes_down_to_scan() {
     }
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 3);
-    let ids: Vec<f64> = result.rows.iter().map(|r| { if let yyds_gateway::SqlValue::Number(n) = &r[0] { *n } else { panic!() } }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|r| {
+            if let yyds_gateway::SqlValue::Number(n) = &r[0] {
+                *n
+            }
+            else {
+                panic!()
+            }
+        })
+        .collect();
     assert_eq!(ids, vec![1.0, 2.0, 3.0]);
 }
 
@@ -844,10 +872,18 @@ fn sql_select_pk_like_prefix_pushes_rowid_prefix() {
         other => panic!("expected Scan for LIKE, got {other:?}"),
     }
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
-    let ids: Vec<String> = result.rows.iter().map(|r| {
-        if let yyds_gateway::SqlValue::String(s) = &r[0] { s.to_string() }
-        else { panic!() }
-    }).collect();
+    let ids: Vec<String> = result
+        .rows
+        .iter()
+        .map(|r| {
+            if let yyds_gateway::SqlValue::String(s) = &r[0] {
+                s.to_string()
+            }
+            else {
+                panic!()
+            }
+        })
+        .collect();
     assert_eq!(ids, vec!["apple".to_string(), "apply".to_string()]);
 }
 
@@ -918,10 +954,14 @@ fn sql_select_pk_in_list_filters_rows() {
     }
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("exec");
     assert_eq!(result.rows.len(), 3);
-    let ids: Vec<f64> = result.rows.iter().map(|r| match &r[0] {
-        yyds_gateway::SqlValue::Number(n) => *n,
-        other => panic!("expected Number, got {other:?}"),
-    }).collect();
+    let ids: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|r| match &r[0] {
+            yyds_gateway::SqlValue::Number(n) => *n,
+            other => panic!("expected Number, got {other:?}"),
+        })
+        .collect();
     assert!(ids.contains(&2.0) && ids.contains(&4.0) && ids.contains(&5.0));
 }
 
@@ -938,14 +978,14 @@ fn probe_ast(sql: &str) -> String {
 #[test]
 fn probe_parser_basic_binary_ops() {
     let bin = "Some(Binary";
-    assert!(probe_ast("SELECT * FROM t WHERE id = 1")   .starts_with(bin));
-    assert!(probe_ast("SELECT * FROM t WHERE id > 1")  .starts_with(bin));
-    assert!(probe_ast("SELECT * FROM t WHERE id >= 1")  .starts_with(bin));
-    assert!(probe_ast("SELECT * FROM t WHERE id < 1")   .starts_with(bin));
-    assert!(probe_ast("SELECT * FROM t WHERE id <= 1") .starts_with(bin));
-    assert!(probe_ast("SELECT * FROM t WHERE id != 1")  .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id = 1").starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id > 1").starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id >= 1").starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id < 1").starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id <= 1").starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE id != 1").starts_with(bin));
     assert!(probe_ast("SELECT * FROM t WHERE a = 1 AND b = 2").starts_with(bin));
-    assert!(probe_ast("SELECT * FROM t WHERE a = 1 OR b = 2") .starts_with(bin));
+    assert!(probe_ast("SELECT * FROM t WHERE a = 1 OR b = 2").starts_with(bin));
 }
 
 #[test]
@@ -1011,15 +1051,10 @@ fn probe_planner_supports_distinct() {
 #[test]
 fn probe_planner_supports_aggregates() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let queries = [
-        "SELECT COUNT(*) FROM users",
-        "SELECT MAX(id) FROM users",
-        "SELECT SUM(id) FROM users",
-        "SELECT AVG(id) FROM users",
-    ];
+    let queries =
+        ["SELECT COUNT(*) FROM users", "SELECT MAX(id) FROM users", "SELECT SUM(id) FROM users", "SELECT AVG(id) FROM users"];
     for q in &queries {
-        let r = yyds_gateway::bind_sql_catalog(q, &catalog, 7)
-            .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
+        let r = yyds_gateway::bind_sql_catalog(q, &catalog, 7).and_then(|b| yyds_gateway::plan_statement(b, &catalog));
         match r {
             Ok(_) => eprintln!("{q}: supported ✅"),
             Err(e) => eprintln!("{q}: blocked ❌ — {e:?}"),
@@ -1031,12 +1066,9 @@ fn probe_planner_supports_aggregates() {
 fn probe_planner_supports_or_in_where() {
     // WHERE a = 1 OR b = 2  — OR 树能否正确走 remaining_predicate
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
-    let plan = yyds_gateway::bind_sql_catalog(
-        "SELECT id FROM users WHERE name = 'alice' OR age > 20",
-        &catalog, 7,
-    )
-    .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
-    .expect("plan");
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE name = 'alice' OR age > 20", &catalog, 7)
+        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+        .expect("plan");
     match plan {
         yyds_gateway::SqlExecutionPlan::Scan(_) => eprintln!("OR in WHERE: Scan with remaining_predicate ✅"),
         other => panic!("expected Scan, got {other:?}"),
@@ -1051,10 +1083,8 @@ fn sql_update_rejects_when_remaining_predicate_fails() {
 
     // UPDATE users SET name='updated' WHERE id = 9 AND age = 99
     // age=99 与实际 age=20 不匹配 — 应该影响 0 行且数据不变
-    let bound = yyds_gateway::bind_sql_catalog(
-        "UPDATE users SET name = 'updated' WHERE id = 9 AND age = 99",
-        &catalog, 7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age = 99", &catalog, 7)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("update");
 
@@ -1065,10 +1095,7 @@ fn sql_update_rejects_when_remaining_predicate_fails() {
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
 
-    assert_eq!(result.rows[0], vec![
-        yyds_gateway::SqlValue::String("original".into()),
-        yyds_gateway::SqlValue::Number(20.0),
-    ]);
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::String("original".into()), yyds_gateway::SqlValue::Number(20.0),]);
 }
 
 #[test]
@@ -1078,10 +1105,8 @@ fn sql_update_succeeds_when_remaining_predicate_matches() {
     let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
 
     // UPDATE users SET name='updated' WHERE id = 9 AND age = 20 — 应该成功
-    let bound = yyds_gateway::bind_sql_catalog(
-        "UPDATE users SET name = 'updated' WHERE id = 9 AND age = 20",
-        &catalog, 7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age = 20", &catalog, 7)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("update");
 
@@ -1101,10 +1126,8 @@ fn sql_delete_rejects_when_remaining_predicate_fails() {
     let executor = make_executor_with_row("table:1", b"55", &[(1, b"55"), (2, b"victim")]);
 
     // DELETE FROM users WHERE id = 55 AND name = 'other' — name 不匹配
-    let bound = yyds_gateway::bind_sql_catalog(
-        "DELETE FROM users WHERE id = 55 AND name = 'other'",
-        &catalog, 7,
-    ).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55 AND name = 'other'", &catalog, 7)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("delete");
 
@@ -1154,7 +1177,8 @@ fn predicate_on_utf8_field_does_not_numeric_coerce() {
     let executor = make_executor_with_row("table:1", b"5", &[(1, b"5"), (2, b"001")]);
 
     // 类型正确的匹配
-    let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = '001'", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = '001'", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
     assert_eq!(result.rows.len(), 1, "string literal match should find row");

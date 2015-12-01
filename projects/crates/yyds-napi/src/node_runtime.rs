@@ -53,7 +53,8 @@ pub struct NodeStatusSnapshot {
 /// Opens catalog-driven facts (schema revision, routing map) from an optional `.yyds` catalog file.
 /// Returns fallback hardcoded facts when the catalog path is absent, missing, or lacks published routing.
 fn load_catalog_facts(catalog_path: Option<&Path>) -> CatalogFacts {
-    let Some(path) = catalog_path else {
+    let Some(path) = catalog_path
+    else {
         return CatalogFacts::fallback(LOCAL_SHARD_ID);
     };
     if !path.exists() {
@@ -104,27 +105,30 @@ enum CatalogSource {
 impl CatalogFacts {
     fn fallback(local_shard_id: &str) -> Self {
         let shard = ShardId(local_shard_id.to_string());
-        Self {
-            schema_revision: None,
-            routing: Some(ShardEpoch(1)),
-            shards: vec![shard],
-            source: CatalogSource::Fallback,
-        }
+        Self { schema_revision: None, routing: Some(ShardEpoch(1)), shards: vec![shard], source: CatalogSource::Fallback }
     }
 
     fn health(&self) -> String {
         match (&self.source, self.schema_revision, self.routing) {
             (CatalogSource::File(path), Some(rev), Some(epoch)) => {
-                format!("catalog-driven (path={}, schema_revision={}, routing_epoch={}, shards={})",
-                    path.display(), rev, epoch.0, self.shards.len())
+                format!(
+                    "catalog-driven (path={}, schema_revision={}, routing_epoch={}, shards={})",
+                    path.display(),
+                    rev,
+                    epoch.0,
+                    self.shards.len()
+                )
             }
             (CatalogSource::File(path), None, Some(epoch)) => {
-                format!("catalog-driven-schema-pending (path={}, routing_epoch={}, shards={})",
-                    path.display(), epoch.0, self.shards.len())
+                format!(
+                    "catalog-driven-schema-pending (path={}, routing_epoch={}, shards={})",
+                    path.display(),
+                    epoch.0,
+                    self.shards.len()
+                )
             }
             (CatalogSource::File(path), Some(rev), None) => {
-                format!("catalog-driven-routing-pending (path={}, schema_revision={})",
-                    path.display(), rev)
+                format!("catalog-driven-routing-pending (path={}, schema_revision={})", path.display(), rev)
             }
             (CatalogSource::File(path), None, None) => {
                 format!("catalog-driven-empty (path={})", path.display())
@@ -149,15 +153,13 @@ pub fn init_node(data_dir: &Path, identity: NodeIdentity) -> Result<(), String> 
 pub fn open_executor(directory: &Path, catalog_path: Option<&Path>) -> Result<Arc<dyn KeyValueExecutor>, String> {
     let facts = load_catalog_facts(catalog_path);
     let epoch = facts.routing.ok_or_else(|| String::from("catalog routing failed unexpectedly"))?;
-    let routing = ShardMap::new(epoch, facts.shards.clone())
-        .map_err(|error| format!("routing: {error:?}"))?;
+    let routing = ShardMap::new(epoch, facts.shards.clone()).map_err(|error| format!("routing: {error:?}"))?;
 
     let mut shards = std::collections::HashMap::new();
     for shard_id in &facts.shards {
         let shard_path = directory.join(format!("{}.yykv", shard_id.0));
-        let shard = FileShard::open(&shard_path).map_err(|error| {
-            format!("failed to open shard {} at {}: {error}", shard_id.0, shard_path.display())
-        })?;
+        let shard = FileShard::open(&shard_path)
+            .map_err(|error| format!("failed to open shard {} at {}: {error}", shard_id.0, shard_path.display()))?;
         shards.insert(shard_id.clone(), shard);
     }
     let executor = LocalExecutor::new(routing, shards).map_err(|error| error.to_string())?;

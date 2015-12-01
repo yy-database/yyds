@@ -38,14 +38,22 @@ pub fn handle_command(command_name: &str) -> Result<Vec<u8>> {
 fn build_hello_bson() -> Vec<u8> {
     let mut doc = Vec::new();
     doc.extend_from_slice(&0_u32.to_le_bytes()); // placeholder
-    // isWritablePrimary: bool true
-    doc.push(0x08); doc.extend_from_slice(b"isWritablePrimary\x00"); doc.push(1);
+                                                 // isWritablePrimary: bool true
+    doc.push(0x08);
+    doc.extend_from_slice(b"isWritablePrimary\x00");
+    doc.push(1);
     // maxWireVersion: int32 17
-    doc.push(0x10); doc.extend_from_slice(b"maxWireVersion\x00"); doc.extend_from_slice(&17_i32.to_le_bytes());
+    doc.push(0x10);
+    doc.extend_from_slice(b"maxWireVersion\x00");
+    doc.extend_from_slice(&17_i32.to_le_bytes());
     // minWireVersion: int32 0
-    doc.push(0x10); doc.extend_from_slice(b"minWireVersion\x00"); doc.extend_from_slice(&0_i32.to_le_bytes());
+    doc.push(0x10);
+    doc.extend_from_slice(b"minWireVersion\x00");
+    doc.extend_from_slice(&0_i32.to_le_bytes());
     // ok: double 1.0
-    doc.push(0x01); doc.extend_from_slice(b"ok\x00"); doc.extend_from_slice(&1.0_f64.to_le_bytes());
+    doc.push(0x01);
+    doc.extend_from_slice(b"ok\x00");
+    doc.extend_from_slice(&1.0_f64.to_le_bytes());
     // terminator
     doc.push(0);
     let len = doc.len() as u32;
@@ -56,8 +64,9 @@ fn build_hello_bson() -> Vec<u8> {
 fn build_ok_bson(ok: i32) -> Vec<u8> {
     let mut doc = Vec::new();
     doc.extend_from_slice(&0_u32.to_le_bytes()); // placeholder
-    // ok: double (Mongo 惯例用 double)
-    doc.push(0x01); doc.extend_from_slice(b"ok\x00");
+                                                 // ok: double (Mongo 惯例用 double)
+    doc.push(0x01);
+    doc.extend_from_slice(b"ok\x00");
     let v = if ok >= 1 { 1.0_f64 } else { 0.0_f64 };
     doc.extend_from_slice(&v.to_le_bytes());
     doc.push(0);
