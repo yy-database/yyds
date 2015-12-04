@@ -218,11 +218,16 @@ impl TransactionHandle for LocalTransactionHandle {
     }
 
     fn execute_read_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
-        // This is intentionally deferred to Commit 2 so that the buffered snapshot-merge
-        // implementation lands in its own reviewed change. For now the blanket Unsupported
-        // keeps the gateway contract intact because gateway code still falls back to the
-        // single-command `execute` path.
-        Err(Error::Unsupported("transaction batch reads land in the next commit"))
+        if commands.iter().any(|command| command.action != KeyValueAction::Get) {
+            return Err(Error::Unsupported("transaction read batches accept only Get actions"));
+        }
+        commands
+            .iter()
+            .map(|command| {
+                let value = self.resolve(&command.namespace.0, &command.key)?;
+                Ok(KeyValueResult::Get(value))
+            })
+            .collect()
     }
 
     fn commit(self: Box<Self>) -> yyds_types::Result<()> {
