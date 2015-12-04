@@ -97,41 +97,152 @@ where
     }
 }
 
-/// Local transaction handle that delegates commands immediately to the executor's shards.
+/// Tracks the in-flight state of a single `(namespace, key)` pair inside a local transaction.
 ///
-/// Currently commit and rollback are no-ops because writes are applied eagerly. This struct
-/// exists to give gateway layers a typed object to bind BEGIN / COMMIT / ROLLBACK to. A future
-/// rewrite may batch writes until commit without changing the trait contract.
+/// Only the final state per key is stored so that a second `Put` on the same key simply
+/// overwrites the first without needing to replay a multi-value history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BufferedState {
+    /// The key has been set to this value inside the transaction.
+    Value(Vec<u8>),
+    /// The key has been deleted inside the transaction.
+    Deleted,
+}
+
+/// Buffered local transaction handle.
+///
+/// Writes issued through this handle are held in a per-handle buffer until either
+/// [`TransactionHandle::commit`] or [`TransactionHandle::rollback`] is called. Reads are
+/// served by consulting the buffer first (snapshot reads), then delegating to the underlying
+/// executor so that transactions observe their own writes.
 #[derive(Debug)]
 pub struct LocalTransactionHandle {
     executor: Arc<dyn KeyValueExecutor>,
+    buffer: Mutex<HashMap<(String, Vec<u8>), BufferedState>>,
 }
 
 impl LocalTransactionHandle {
     /// Creates a new handle bound to an executor via a shared Arc.
     pub fn new(executor: Arc<dyn KeyValueExecutor>) -> Self {
-        Self { executor }
+        Self { executor, buffer: Mutex::new(HashMap::new()) }
+    }
+
+    /// Resolves the current observable value for `(namespace, key)` by merging the buffer
+    /// over the underlying executor state.
+    fn resolve(&self, namespace: &str, key: &[u8]) -> yyds_types::Result<Option<Vec<u8>>> {
+        let buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+        if let Some(state) = buffer.get(&(namespace.to_owned(), key.to_vec())) {
+            return Ok(match state {
+                BufferedState::Value(bytes) => Some(bytes.clone()),
+                BufferedState::Deleted => None,
+            });
+        }
+        Ok(
+            match self.executor.execute(KeyValueCommand {
+                namespace: Namespace(namespace.to_owned()),
+                key: key.to_vec(),
+                action: KeyValueAction::Get,
+            })? {
+                KeyValueResult::Get(value) => value,
+                _ => unreachable!("Get action always yields Get result"),
+            },
+        )
     }
 }
 
 impl TransactionHandle for LocalTransactionHandle {
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
-        self.executor.execute(command)
+        let KeyValueCommand { namespace, key, action } = command;
+        match action {
+            KeyValueAction::Get => {
+                let value = self.resolve(&namespace.0, &key)?;
+                Ok(KeyValueResult::Get(value))
+            }
+            KeyValueAction::Exists => {
+                let value = self.resolve(&namespace.0, &key)?;
+                Ok(KeyValueResult::Exists(value.is_some()))
+            }
+            KeyValueAction::Put(value) => {
+                let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                buffer.insert((namespace.0, key), BufferedState::Value(value));
+                Ok(KeyValueResult::Put { revision: 1 })
+            }
+            KeyValueAction::PutIfAbsent(value) => {
+                let exists = self.resolve(&namespace.0, &key)?.is_some();
+                if exists {
+                    return Ok(KeyValueResult::PutIfAbsent { revision: None });
+                }
+                let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                buffer.insert((namespace.0, key), BufferedState::Value(value));
+                Ok(KeyValueResult::PutIfAbsent { revision: Some(1) })
+            }
+            KeyValueAction::PutIfPresent(value) => {
+                let exists = self.resolve(&namespace.0, &key)?.is_some();
+                if !exists {
+                    return Ok(KeyValueResult::PutIfPresent { revision: None });
+                }
+                let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                buffer.insert((namespace.0, key), BufferedState::Value(value));
+                Ok(KeyValueResult::PutIfPresent { revision: Some(1) })
+            }
+            KeyValueAction::Delete => {
+                let existed = self.resolve(&namespace.0, &key)?.is_some();
+                let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                buffer.insert((namespace.0, key), BufferedState::Deleted);
+                Ok(KeyValueResult::Delete { removed: existed })
+            }
+            KeyValueAction::GetSet(new_value) => {
+                let previous = self.resolve(&namespace.0, &key)?;
+                let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                buffer.insert((namespace.0, key), BufferedState::Value(new_value));
+                Ok(KeyValueResult::GetSet(previous))
+            }
+            KeyValueAction::GetDelete => {
+                let previous = self.resolve(&namespace.0, &key)?;
+                let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                buffer.insert((namespace.0, key), BufferedState::Deleted);
+                Ok(KeyValueResult::GetDelete(previous))
+            }
+            KeyValueAction::IncrementBy(delta) => {
+                let current_bytes = self.resolve(&namespace.0, &key)?;
+                let current = match current_bytes {
+                    Some(bytes) => parse_integer(&bytes)?,
+                    None => 0,
+                };
+                let value = current.checked_add(delta).ok_or(Error::IntegerOverflow)?;
+                let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                buffer.insert((namespace.0, key), BufferedState::Value(value.to_string().into_bytes()));
+                Ok(KeyValueResult::Increment { value })
+            }
+        }
     }
 
     fn execute_read_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
-        self.executor.execute_read_batch(commands)
+        // This is intentionally deferred to Commit 2 so that the buffered snapshot-merge
+        // implementation lands in its own reviewed change. For now the blanket Unsupported
+        // keeps the gateway contract intact because gateway code still falls back to the
+        // single-command `execute` path.
+        Err(Error::Unsupported("transaction batch reads land in the next commit"))
     }
 
     fn commit(self: Box<Self>) -> yyds_types::Result<()> {
-        // Current implementation is eager, so there is nothing to flush. A future buffered
-        // implementation will persist pending writes here and return the result of that flush.
+        let buffer = self.buffer.into_inner().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+        for ((namespace, key), state) in buffer {
+            let command = match state {
+                BufferedState::Value(value) => {
+                    KeyValueCommand { namespace: Namespace(namespace), key, action: KeyValueAction::Put(value) }
+                }
+                BufferedState::Deleted => {
+                    KeyValueCommand { namespace: Namespace(namespace), key, action: KeyValueAction::Delete }
+                }
+            };
+            self.executor.execute(command)?;
+        }
         Ok(())
     }
 
     fn rollback(self: Box<Self>) {
-        // Current implementation is eager, so writes cannot be undone once applied. A future
-        // buffered implementation will discard pending writes here instead of applying them.
+        // Dropping the handle discards the buffered HashMap; nothing touches the executor.
     }
 }
 
