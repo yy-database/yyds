@@ -283,3 +283,141 @@ fn transaction_handle_exposes_begin_commit_and_rollback_contract() {
     rollback_handle.execute(command(KeyValueAction::Put(b"pending".to_vec()), b"temp")).unwrap();
     rollback_handle.rollback();
 }
+
+fn make_executor() -> std::sync::Arc<LocalExecutor<MemoryShard>> {
+    let shard_id = ShardId("txn-mem".into());
+    std::sync::Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+            HashMap::from([(shard_id, MemoryShard::new())]),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn rollback_discards_insert() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Get, b"foo")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::Put(b"bar".to_vec()), b"foo")).unwrap();
+    handle.rollback();
+
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"foo")).unwrap(), KeyValueResult::Get(None));
+}
+
+#[test]
+fn rollback_discards_update_keeping_original() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"original".to_vec()), b"key")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"key")).unwrap();
+    handle.rollback();
+
+    assert_eq!(
+        executor.execute(command(KeyValueAction::Get, b"key")).unwrap(),
+        KeyValueResult::Get(Some(b"original".to_vec()))
+    );
+}
+
+#[test]
+fn commit_persists_insert() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::Put(b"hello".to_vec()), b"foo")).unwrap();
+    handle.commit().unwrap();
+
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"foo")).unwrap(), KeyValueResult::Get(Some(b"hello".to_vec())));
+}
+
+#[test]
+fn commit_persists_update() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"old".to_vec()), b"key")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"key")).unwrap();
+    handle.commit().unwrap();
+
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"key")).unwrap(), KeyValueResult::Get(Some(b"new".to_vec())));
+}
+
+#[test]
+fn transaction_sees_own_writes_before_commit() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::Put(b"pending".to_vec()), b"temp")).unwrap();
+
+    // Inside the transaction we read our own write.
+    assert_eq!(handle.execute(command(KeyValueAction::Get, b"temp")).unwrap(), KeyValueResult::Get(Some(b"pending".to_vec())));
+
+    // Outside, the plain executor still sees nothing.
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"temp")).unwrap(), KeyValueResult::Get(None));
+
+    handle.rollback();
+}
+
+#[test]
+fn transaction_read_batch_merges_snapshot_view() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"original".to_vec()), b"k1")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::Put(b"txn-v".to_vec()), b"k1")).unwrap();
+    handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"k2")).unwrap();
+
+    let results =
+        handle.execute_read_batch(&[command(KeyValueAction::Get, b"k1"), command(KeyValueAction::Get, b"k2")]).unwrap();
+    assert_eq!(results, vec![KeyValueResult::Get(Some(b"txn-v".to_vec())), KeyValueResult::Get(Some(b"new".to_vec())),]);
+
+    handle.rollback();
+}
+
+#[test]
+fn transaction_delete_is_undone_by_rollback() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"alive".to_vec()), b"k")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    assert_eq!(handle.execute(command(KeyValueAction::Delete, b"k")).unwrap(), KeyValueResult::Delete { removed: true });
+
+    // Inside the transaction the key is gone.
+    assert_eq!(handle.execute(command(KeyValueAction::Exists, b"k")).unwrap(), KeyValueResult::Exists(false));
+
+    handle.rollback();
+
+    // After rollback the plain executor sees the original.
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"alive".to_vec())));
+}
+
+#[test]
+fn transaction_increment_rollback_leaves_base_untouched() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"10".to_vec()), b"counter")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::IncrementBy(5), b"counter")).unwrap();
+    handle.rollback();
+
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"counter")).unwrap(), KeyValueResult::Get(Some(b"10".to_vec())));
+}
