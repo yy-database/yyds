@@ -16,6 +16,7 @@ use base64::Engine;
 use sha1::{Digest, Sha1};
 
 use crate::{
+    node_runtime::open_executor,
     wire_dispatch::{dispatch, WireContext},
     wire_protocol::{decode_frame, read_frame, write_frame},
 };
@@ -30,10 +31,30 @@ pub struct WireServer {
 }
 
 impl WireServer {
-    /// Bind to a loopback address and start accepting connections.
+    /// Bind an address, open the catalog-driven executor from the node
+    /// directory, and start accepting connections.
+    ///
+    /// This is the **node start chain** entry point: callers pass a node
+    /// directory (and optional catalog path) rather than constructing an
+    /// executor themselves. The executor is built by [`open_executor`] so
+    /// the wire dispatch sees the same shard map and routing epoch as the
+    /// rest of the node.
+    pub fn start_from_directory(
+        bind: SocketAddr,
+        data_dir: &std::path::Path,
+        catalog_path: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
+        let executor = open_executor(data_dir, catalog_path)?;
+        let ctx = WireContext::new(executor);
+        Self::start(bind, ctx)
+    }
+
+    /// Bind to an address and start accepting connections.
     ///
     /// The server runs on a background thread; call [`stop`] (or drop) to
     /// halt. Returns the bound address (useful when the OS picks port `0`).
+    /// Prefer [`start_from_directory`] when you have a node directory — it
+    /// wires up the catalog-driven executor for you.
     pub fn start(bind: SocketAddr, ctx: WireContext) -> Result<Self, String> {
         if !bind.ip().is_loopback() {
             return Err(format!(
