@@ -215,14 +215,10 @@ pub fn read_runtime_status(directory: &Path) -> Result<Option<RuntimeStatus>, St
             if status.version != CONTROL_VERSION || status.generation.is_nil() {
                 return Err("unsupported or invalid runtime status".into());
             }
-            for address in [
-                Some(status.redis_address.as_str()),
-                status.pgsql_address.as_deref(),
-                status.mysql_address.as_deref(),
-                status.wire_address.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
+            for address in
+                [Some(status.redis_address.as_str()), status.pgsql_address.as_deref(), status.mysql_address.as_deref()]
+                    .into_iter()
+                    .flatten()
             {
                 if !address.starts_with("127.0.0.1:") && !address.starts_with("[::1]:") {
                     return Err("unsupported or invalid runtime status".into());

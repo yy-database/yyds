@@ -1,10 +1,19 @@
 //! TCP + WebSocket `/wire` server for the YY native protocol.
 //!
-//! Loopback-first (mirrors `yydb-server` — no ACL). The listener accepts
-//! plain TCP connections and WebSocket upgrades to `/wire`, dispatching each
-//! frame through [`dispatch`].
+//! ACL policy (Phase 1 — enforced at startup):
+//!
+//! * **Loopback bind** — allowed anonymously (dev mode). If no bootstrap
+//!   tokens are configured a warning is printed to stderr so operators know
+//!   the wire is open without auth.
+//! * **Non-loopback bind** — **requires** at least one bootstrap token in
+//!   the `YYDS_AUTH_TOKENS` env var (semicolon-separated); the server
+//!   refuses to start otherwise.
+//!
+//! Full Role/Permission + TLS are follow-up work — this gate keeps remote
+//! listeners from silently opening unauthenticated KV access.
 
 use std::{
+    env,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::Arc,
@@ -55,16 +64,28 @@ impl WireServer {
     /// halt. Returns the bound address (useful when the OS picks port `0`).
     /// Prefer [`start_from_directory`] when you have a node directory — it
     /// wires up the catalog-driven executor for you.
+    ///
+    /// ACL gate — see crate-level docs. Non-loopback binds require at least
+    /// one token in `YYDS_AUTH_TOKENS`.
     pub fn start(bind: SocketAddr, ctx: WireContext) -> Result<Self, String> {
-        if !bind.ip().is_loopback() {
-            return Err(format!(
-                "wire listener refuses non-loopback bind `{bind}` — YYDS wire has no ACL; \
-                 use 127.0.0.1 / ::1"
-            ));
-        }
+        let bind_is_loopback = bind.ip().is_loopback();
+        let tokens = bootstrap_tokens_from_env(bind_is_loopback)?;
+
         let listener = TcpListener::bind(bind).map_err(|e| format!("wire bind: {e}"))?;
         let address = listener.local_addr().map_err(|e| format!("wire local_addr: {e}"))?;
-        println!("yyds wire listening on {address} (TCP + ws://{address}/wire; no ACL)");
+        if bind_is_loopback && tokens.is_empty() {
+            println!("yyds wire listening on {address} (loopback-only, anonymous dev mode ⚠)");
+            eprintln!("⚠  Wire bound to loopback with no bootstrap tokens — anonymous dev access is allowed locally.");
+            eprintln!("   Set YYDS_AUTH_TOKENS for explicit bootstrap token(s) before binding remotely.");
+        }
+        else {
+            let scope = if bind_is_loopback { "loopback" } else { "remote" };
+            println!("yyds wire listening on {address} ({scope}; {} bootstrap token(s) from YYDS_AUTH_TOKENS)", tokens.len());
+            if !bind_is_loopback {
+                eprintln!("⚠  Wire bound to non-loopback address {address} — TLS is still NOT enforced at the wire layer.");
+                eprintln!("⚠  This is ONLY safe on a trusted network or behind a TLS-terminating proxy.");
+            }
+        }
         let listener = Arc::new(listener);
         let listener_for_thread = Arc::clone(&listener);
         let join = thread::Builder::new()
@@ -298,6 +319,46 @@ fn is_disconnect(error: &str) -> bool {
         || error.contains("ConnectionReset")
         || error.contains("BrokenPipe")
         || error.contains("stream closed")
+}
+
+// ─── Bootstrap token gate ────────────────────────────────────────────────
+
+/// Parse the `YYDS_AUTH_TOKENS` env var into a list of bootstrap tokens.
+///
+/// Format: semicolon-separated tokens, e.g.
+/// ```text
+/// YYDS_AUTH_TOKENS=token-abc123;token-xyz789
+/// ```
+///
+/// * **Loopback bind** — missing or empty env var returns an **empty** Vec
+///   (anonymous dev mode is allowed; the caller warns).
+/// * **Non-loopback bind** — missing or empty env var returns an error so
+///   the server refuses to start before opening a listener.
+///
+/// This is Phase 1 — just a presence check. Full Role/Permission follows
+/// once the dispatch layer wires in session lookup.
+pub fn bootstrap_tokens_from_env(bind_is_loopback: bool) -> Result<Vec<String>, String> {
+    match env::var("YYDS_AUTH_TOKENS") {
+        Ok(raw) => {
+            let tokens: Vec<String> =
+                raw.split(';').map(str::trim).filter(|piece| !piece.is_empty()).map(ToOwned::to_owned).collect();
+            if tokens.is_empty() {
+                return Err("YYDS_AUTH_TOKENS parsed to no entries — set at least one token".to_owned());
+            }
+            Ok(tokens)
+        }
+        Err(env::VarError::NotPresent) => {
+            if bind_is_loopback {
+                Ok(Vec::new())
+            }
+            else {
+                Err("non-loopback bind requires explicit bootstrap token(s) — \
+                     set YYDS_AUTH_TOKENS (semicolon-separated) before starting the wire server"
+                    .to_owned())
+            }
+        }
+        Err(env::VarError::NotUnicode(value)) => Err(format!("YYDS_AUTH_TOKENS is not valid UTF-8: {value:?}")),
+    }
 }
 
 // Silence the unused-duration warning — we keep Duration imported for future heartbeat work.
