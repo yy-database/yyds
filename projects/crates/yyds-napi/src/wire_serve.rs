@@ -366,3 +366,69 @@ pub fn bootstrap_tokens_from_env(bind_is_loopback: bool) -> Result<Vec<String>, 
 fn _dead_code_suppress() {
     let _ = Duration::from_secs(0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    // Serialize env-var reads/writes across parallel test threads.
+    fn env_guard() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env<F: FnOnce()>(name: &str, value: Option<&str>, body: F) {
+        let _g = env_guard().lock().unwrap();
+        let prev = env::var_os(name);
+        match value {
+            Some(v) => env::set_var(name, v),
+            None => env::remove_var(name),
+        }
+        body();
+        match prev {
+            Some(v) => env::set_var(name, v),
+            None => env::remove_var(name),
+        }
+    }
+
+    #[test]
+    fn bootstrap_tokens_absent_is_allowed_on_loopback() {
+        with_env("YYDS_AUTH_TOKENS", None, || {
+            let tokens = bootstrap_tokens_from_env(true).unwrap();
+            assert!(tokens.is_empty(), "loopback bind without env should return empty tokens");
+        });
+    }
+
+    #[test]
+    fn bootstrap_tokens_absent_is_refused_on_non_loopback() {
+        with_env("YYDS_AUTH_TOKENS", None, || {
+            let err = bootstrap_tokens_from_env(false).unwrap_err();
+            assert!(err.contains("non-loopback"), "error should mention non-loopback bind requirement, got: {err}");
+        });
+    }
+
+    #[test]
+    fn bootstrap_tokens_parses_semicolon_separated_list() {
+        with_env("YYDS_AUTH_TOKENS", Some("t-alpha;t-beta; t-gamma"), || {
+            let tokens = bootstrap_tokens_from_env(true).unwrap();
+            assert_eq!(tokens, vec!["t-alpha", "t-beta", "t-gamma"]);
+        });
+    }
+
+    #[test]
+    fn bootstrap_tokens_present_allows_non_loopback() {
+        with_env("YYDS_AUTH_TOKENS", Some("t-remote-01"), || {
+            let tokens = bootstrap_tokens_from_env(false).unwrap();
+            assert_eq!(tokens, vec!["t-remote-01"]);
+        });
+    }
+
+    #[test]
+    fn bootstrap_tokens_blank_env_is_rejected() {
+        with_env("YYDS_AUTH_TOKENS", Some(";;   ;"), || {
+            let err = bootstrap_tokens_from_env(true).unwrap_err();
+            assert!(err.contains("parsed to no entries"));
+        });
+    }
+}
