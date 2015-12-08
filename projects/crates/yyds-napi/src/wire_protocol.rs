@@ -33,6 +33,8 @@ pub enum MessageType {
     KvGetOk = 10,
     KvPut = 11,
     KvPutOk = 12,
+    Authenticate = 13,
+    AuthenticateOk = 14,
     Error = 255,
     /// Unknown message type — still framed so the peer can answer with Error.
     Unknown(u16),
@@ -53,6 +55,8 @@ impl MessageType {
             10 => Self::KvGetOk,
             11 => Self::KvPut,
             12 => Self::KvPutOk,
+            13 => Self::Authenticate,
+            14 => Self::AuthenticateOk,
             255 => Self::Error,
             other => Self::Unknown(other),
         }
@@ -72,6 +76,8 @@ impl MessageType {
             Self::KvGetOk => 10,
             Self::KvPut => 11,
             Self::KvPutOk => 12,
+            Self::Authenticate => 13,
+            Self::AuthenticateOk => 14,
             Self::Error => 255,
             Self::Unknown(code) => code,
         }
@@ -88,6 +94,7 @@ impl MessageType {
                 | Self::SchemaEnsureOk
                 | Self::KvGetOk
                 | Self::KvPutOk
+                | Self::AuthenticateOk
                 | Self::Error
         )
     }
@@ -279,6 +286,23 @@ pub fn encode_error_body(code: &str, message: &str) -> Vec<u8> {
 
 pub fn error_frame(request_id: u32, code: &str, message: impl Into<String>) -> Frame {
     Frame::new(MessageType::Error, request_id, encode_error_body(code, &message.into()))
+}
+
+// --- Authenticate ---
+
+/// Encode a bootstrap token into the Authenticate request body.
+pub fn encode_authenticate_body(token: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    push_bytes(&mut body, token.as_bytes());
+    body
+}
+
+/// Decode an Authenticate request body into the raw token string.
+pub fn decode_authenticate_body(body: &[u8]) -> Result<String, String> {
+    let mut offset = 0;
+    let token_len = read_u32(body, &mut offset)?;
+    let token = read_bytes(body, &mut offset, token_len)?;
+    std::str::from_utf8(token).map(|s| s.to_owned()).map_err(|_| "auth token is not utf-8".into())
 }
 
 #[cfg(test)]

@@ -37,17 +37,29 @@ const KERNEL_CODE: &str = "yyds.kernel.error";
 /// wire catalog into the runtime — but dispatch needs the slot ready so the
 /// connection between wire adapter and catalog happens without reworking
 /// frame handlers later.
+///
+/// `bootstrap_tokens` is the server-side registry accepted per-connection
+/// Authenticate frames (see wire_serve.rs handle_client). An empty Vec
+/// means loopback-only anonymous dev mode — no Authenticate required.
 pub struct WireContext {
     pub executor: Arc<dyn KeyValueExecutor>,
     /// Shared catalog for schema/identity operations. Phase-1 can be None
     /// (schema returns `None`, SchemaEnsure is rejected) but the struct
     /// holds the slot so the wiring point is explicit.
     pub catalog: std::sync::Mutex<Option<Arc<std::sync::Mutex<Catalog>>>>,
+    /// Bootstrap tokens parsed from `YYDS_AUTH_TOKENS` by the server. An
+    /// empty list signals anonymous-dev-mode (loopback bind only).
+    pub bootstrap_tokens: Vec<String>,
 }
 
 impl WireContext {
     pub fn new(executor: Arc<dyn KeyValueExecutor>) -> Self {
-        Self { executor, catalog: std::sync::Mutex::new(None) }
+        Self { executor, catalog: std::sync::Mutex::new(None), bootstrap_tokens: Vec::new() }
+    }
+
+    pub fn with_bootstrap_tokens(mut self, tokens: Vec<String>) -> Self {
+        self.bootstrap_tokens = tokens;
+        self
     }
 
     #[allow(dead_code)]
@@ -152,13 +164,15 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                 Err(error) => error_frame(id, KERNEL_CODE, error.to_string()),
             }
         }
-        // ---- Messages the server never initiates ----
+        // ---- Messages the server never initiates, or are handled above dispatch ----
         MessageType::HelloOk
         | MessageType::InfoOk
         | MessageType::SchemaGetOk
         | MessageType::SchemaEnsureOk
         | MessageType::KvGetOk
         | MessageType::KvPutOk
+        | MessageType::Authenticate
+        | MessageType::AuthenticateOk
         | MessageType::Error => error_frame(id, PROTOCOL_CODE, "unexpected client message type"),
         MessageType::Unknown(code) => error_frame(id, PROTOCOL_CODE, format!("unknown msg_type {code}")),
     }

@@ -1,13 +1,16 @@
 //! TCP + WebSocket `/wire` server for the YY native protocol.
 //!
-//! ACL policy (Phase 1 — enforced at startup):
+//! ACL policy (Phase 2 — enforced per-connection):
 //!
 //! * **Loopback bind** — allowed anonymously (dev mode). If no bootstrap
 //!   tokens are configured a warning is printed to stderr so operators know
-//!   the wire is open without auth.
+//!   the wire is open without auth. Each loopback connection starts as
+//!   *already authenticated* (anonymous dev mode).
 //! * **Non-loopback bind** — **requires** at least one bootstrap token in
 //!   the `YYDS_AUTH_TOKENS` env var (semicolon-separated); the server
-//!   refuses to start otherwise.
+//!   refuses to start otherwise. Each connection starts *unauthenticated*
+//!   and must send a valid Authenticate frame before any KV/Schema command
+//!   is dispatched.
 //!
 //! Full Role/Permission + TLS are follow-up work — this gate keeps remote
 //! listeners from silently opening unauthenticated KV access.
@@ -16,7 +19,10 @@ use std::{
     env,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::Duration,
 };
@@ -31,6 +37,12 @@ use crate::{
 };
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+/// Error code returned when a connection issues commands before authenticating.
+#[allow(dead_code)]
+const AUTH_CODE: &str = "yyds.auth.required";
+/// Error code returned when an Authenticate frame carries a wrong token.
+#[allow(dead_code)]
+const AUTH_FAILED_CODE: &str = "yyds.auth.failed";
 
 /// Owned listener with a join handle; dropped handles stop on the next accept.
 pub struct WireServer {
@@ -53,8 +65,10 @@ impl WireServer {
         data_dir: &std::path::Path,
         catalog_path: Option<&std::path::Path>,
     ) -> Result<Self, String> {
+        let bind_is_loopback = bind.ip().is_loopback();
+        let tokens = bootstrap_tokens_from_env(bind_is_loopback)?;
         let executor = open_executor(data_dir, catalog_path)?;
-        let ctx = WireContext::new(executor);
+        let ctx = WireContext::new(executor).with_bootstrap_tokens(tokens);
         Self::start(bind, ctx)
     }
 
@@ -70,6 +84,7 @@ impl WireServer {
     pub fn start(bind: SocketAddr, ctx: WireContext) -> Result<Self, String> {
         let bind_is_loopback = bind.ip().is_loopback();
         let tokens = bootstrap_tokens_from_env(bind_is_loopback)?;
+        let ctx = ctx.with_bootstrap_tokens(tokens.clone());
 
         let listener = TcpListener::bind(bind).map_err(|e| format!("wire bind: {e}"))?;
         let address = listener.local_addr().map_err(|e| format!("wire local_addr: {e}"))?;
@@ -123,7 +138,7 @@ fn accept_loop(listener: Arc<TcpListener>, ctx: WireContext) {
                 thread::Builder::new()
                     .name(format!("yyds-wire-{peer}"))
                     .spawn(move || {
-                        if let Err(error) = handle_client(stream, &ctx) {
+                        if let Err(error) = handle_client(stream, &ctx, peer.ip().is_loopback()) {
                             eprintln!("wire client {peer}: {error}");
                         }
                     })
@@ -139,22 +154,47 @@ impl Clone for WireContext {
         Self {
             executor: Arc::clone(&self.executor),
             catalog: std::sync::Mutex::new(self.catalog.lock().unwrap().as_ref().map(|inner| Arc::clone(inner))),
+            bootstrap_tokens: self.bootstrap_tokens.clone(),
         }
     }
 }
 
-fn handle_client(stream: TcpStream, ctx: &WireContext) -> Result<(), String> {
-    let mut peek = [0_u8; 4];
-    let n = stream.peek(&mut peek).map_err(|e| e.to_string())?;
-    if n >= 3 && &peek[..3] == b"GET" {
-        handle_websocket(stream, ctx)
+/// Per-connection authentication state.
+///
+/// Each connection gets its own `Arc<ConnectionState>` — loopback peers start
+/// as authenticated (anonymous dev mode), remote peers must send a valid
+/// Authenticate frame before any KV/Schema command is dispatched.
+pub struct ConnectionState {
+    pub authenticated: AtomicBool,
+}
+
+impl ConnectionState {
+    pub fn new(initial: bool) -> Self {
+        Self { authenticated: AtomicBool::new(initial) }
     }
-    else {
-        handle_tcp(stream, ctx)
+
+    pub fn is_authenticated(&self) -> bool {
+        self.authenticated.load(Ordering::Acquire)
+    }
+
+    pub fn set_authenticated(&self) {
+        self.authenticated.store(true, Ordering::Release);
     }
 }
 
-fn handle_tcp(mut stream: TcpStream, ctx: &WireContext) -> Result<(), String> {
+fn handle_client(stream: TcpStream, ctx: &WireContext, peer_is_loopback: bool) -> Result<(), String> {
+    let state = Arc::new(ConnectionState::new(peer_is_loopback));
+    let mut peek = [0_u8; 4];
+    let n = stream.peek(&mut peek).map_err(|e| e.to_string())?;
+    if n >= 3 && &peek[..3] == b"GET" {
+        handle_websocket(stream, ctx, state)
+    }
+    else {
+        handle_tcp(stream, ctx, state)
+    }
+}
+
+fn handle_tcp(mut stream: TcpStream, ctx: &WireContext, _state: Arc<ConnectionState>) -> Result<(), String> {
     loop {
         let request = match read_frame(&mut stream) {
             Ok(frame) => frame,
@@ -166,7 +206,7 @@ fn handle_tcp(mut stream: TcpStream, ctx: &WireContext) -> Result<(), String> {
     }
 }
 
-fn handle_websocket(mut stream: TcpStream, ctx: &WireContext) -> Result<(), String> {
+fn handle_websocket(mut stream: TcpStream, ctx: &WireContext, _state: Arc<ConnectionState>) -> Result<(), String> {
     // Read HTTP upgrade request.
     let mut buf = Vec::new();
     let mut chunk = [0_u8; 1024];
