@@ -38,6 +38,29 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
         Err(Error::Unsupported("scan is not implemented by this executor"))
     }
 
+    /// Applies multiple commands as an atomic batch.
+    ///
+    /// The default implementation folds over [`KeyValueExecutor::execute`] sequentially.
+    /// Executors that can guarantee atomicity across the batch should override this method.
+    fn execute_batch(&self, commands: Vec<KeyValueCommand>) -> yyds_types::Result<Vec<KeyValueResult>> {
+        commands.into_iter().map(|command| self.execute(command)).collect()
+    }
+
+    /// Commits a buffered transaction with OCC validation.
+    ///
+    /// Each element of `batch` carries the write command together with the original conditional
+    /// (if any). Implementations must hold an exclusive executor-wide lock while re-checking
+    /// every pre-image condition against the base store and then applying the writes so that a
+    /// concurrent transaction cannot slip between validate and apply.
+    ///
+    /// The default implementation applies all commands directly without OCC re-check.
+    fn commit_batch(&self, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
+        for entry in batch {
+            self.execute(entry.command)?;
+        }
+        Ok(())
+    }
+
     /// Opens a local transaction handle bound to this executor.
     ///
     /// The handle lets callers issue commands through a transaction boundary so that a gateway
@@ -46,6 +69,24 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     fn begin_transaction(&self) -> yyds_types::Result<Box<dyn TransactionHandle>> {
         Err(Error::Unsupported("this executor does not support local transactions"))
     }
+}
+
+/// One buffered write ready to be committed.
+#[derive(Debug, Clone)]
+pub struct BufferedCommit {
+    /// The command to replay against the base store.
+    pub command: KeyValueCommand,
+    /// Optional original conditional that must still hold on the base store at commit time.
+    pub condition: Option<CommitCondition>,
+}
+
+/// OCC pre-image condition checked at commit time.
+#[derive(Debug, Clone)]
+pub enum CommitCondition {
+    /// The key must be absent from the base store (PutIfAbsent).
+    PutIfAbsent,
+    /// The key must be present in the base store (PutIfPresent).
+    PutIfPresent,
 }
 
 /// A local transaction handle that exposes the same command surface as the executor but
@@ -72,6 +113,11 @@ pub trait TransactionHandle: Debug {
     fn rollback(self: Box<Self>);
 }
 
+/// Executor-wide mutex that serialises every [`LocalExecutor::execute`] and
+/// [`LocalExecutor::execute_batch`] call so that batched writes appear atomic to the rest of
+/// the process.
+static EXECUTOR_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
+
 /// Routes commands to mounted local shards under one immutable routing map.
 #[derive(Debug)]
 pub struct LocalExecutor<S = FileShard> {
@@ -94,6 +140,107 @@ where
     /// Returns the immutable routing map used by this executor.
     pub fn routing(&self) -> &ShardMap {
         &self.routing
+    }
+
+    /// Runs `f` while holding the executor-wide write lock.
+    fn with_global_lock<F, R>(f: F) -> yyds_types::Result<R>
+    where
+        F: FnOnce() -> yyds_types::Result<R>,
+    {
+        let _guard = EXECUTOR_GLOBAL_LOCK.lock().map_err(|_| Error::Corrupt("executor global lock poisoned"))?;
+        f()
+    }
+
+    /// Executes one command against the shards **without** acquiring the global lock. The
+    /// caller is responsible for holding [`EXECUTOR_GLOBAL_LOCK`] so that a batch remains
+    /// atomic while composed out of individual writes.
+    fn execute_single_locked(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
+        let decision = self.routing.route(&command.namespace.0, &command.key);
+        let shard = self.shards.get(&decision.shard).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
+        let mut shard = shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?;
+        let key = Key::new(command.namespace.0, command.key);
+
+        match command.action {
+            KeyValueAction::Get => {
+                let value = shard
+                    .get(&key)?
+                    .map(|record| match record.value {
+                        StoredValue::Inline(value) => Ok(value.0),
+                        StoredValue::Object(_) => {
+                            Err(Error::Unsupported("object values are not available through the local KV executor"))
+                        }
+                    })
+                    .transpose()?;
+                Ok(KeyValueResult::Get(value))
+            }
+            KeyValueAction::Exists => Ok(KeyValueResult::Exists(shard.get(&key)?.is_some())),
+            KeyValueAction::GetDelete => {
+                let value = match shard.get(&key)? {
+                    None => None,
+                    Some(record) => match record.value {
+                        StoredValue::Inline(value) => Some(value.0),
+                        StoredValue::Object(_) => {
+                            return Err(Error::Unsupported("object values are not available through the local KV executor"));
+                        }
+                    },
+                };
+                if value.is_some() {
+                    shard.delete(&key)?;
+                }
+                Ok(KeyValueResult::GetDelete(value))
+            }
+            KeyValueAction::GetSet(value) => {
+                let previous = match shard.get(&key)? {
+                    None => None,
+                    Some(record) => match record.value {
+                        StoredValue::Inline(value) => Some(value.0),
+                        StoredValue::Object(_) => {
+                            return Err(Error::Unsupported("object values are not available through the local KV executor"));
+                        }
+                    },
+                };
+                shard.put(key, StoredValue::Inline(InlineValue(value)))?;
+                Ok(KeyValueResult::GetSet(previous))
+            }
+            KeyValueAction::Put(value) => {
+                let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
+                Ok(KeyValueResult::Put { revision })
+            }
+            KeyValueAction::PutIfAbsent(value) => {
+                if shard.get(&key)?.is_some() {
+                    Ok(KeyValueResult::PutIfAbsent { revision: None })
+                }
+                else {
+                    let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
+                    Ok(KeyValueResult::PutIfAbsent { revision: Some(revision) })
+                }
+            }
+            KeyValueAction::PutIfPresent(value) => {
+                if shard.get(&key)?.is_none() {
+                    Ok(KeyValueResult::PutIfPresent { revision: None })
+                }
+                else {
+                    let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
+                    Ok(KeyValueResult::PutIfPresent { revision: Some(revision) })
+                }
+            }
+            KeyValueAction::Delete => {
+                let removed = shard.delete(&key)?;
+                Ok(KeyValueResult::Delete { removed })
+            }
+            KeyValueAction::IncrementBy(delta) => {
+                let current = match shard.get(&key)? {
+                    None => 0,
+                    Some(record) => match record.value {
+                        StoredValue::Inline(value) => parse_integer(&value.0)?,
+                        StoredValue::Object(_) => return Err(Error::Unsupported("object values cannot be incremented")),
+                    },
+                };
+                let value = current.checked_add(delta).ok_or(Error::IntegerOverflow)?;
+                shard.put(key, StoredValue::Inline(InlineValue(value.to_string().into_bytes())))?;
+                Ok(KeyValueResult::Increment { value })
+            }
+        }
     }
 }
 
@@ -321,92 +468,49 @@ where
     }
 
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
-        let decision = self.routing.route(&command.namespace.0, &command.key);
-        let shard = self.shards.get(&decision.shard).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
-        let mut shard = shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?;
-        let key = Key::new(command.namespace.0, command.key);
+        Self::with_global_lock(|| self.execute_single_locked(command))
+    }
 
-        match command.action {
-            KeyValueAction::Get => {
-                let value = shard
-                    .get(&key)?
-                    .map(|record| match record.value {
-                        StoredValue::Inline(value) => Ok(value.0),
-                        StoredValue::Object(_) => {
-                            Err(Error::Unsupported("object values are not available through the local KV executor"))
+    fn execute_batch(&self, commands: Vec<KeyValueCommand>) -> yyds_types::Result<Vec<KeyValueResult>> {
+        Self::with_global_lock(|| commands.into_iter().map(|command| self.execute_single_locked(command)).collect())
+    }
+
+    fn commit_batch(&self, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
+        // The entire OCC pre-check plus replay must sit inside one global-lock holding
+        // interval; otherwise a concurrent `PutIfAbsent` from another transaction could sneak
+        // between our re-check and our own replay and we would silently overwrite it.
+        Self::with_global_lock(|| {
+            for entry in &batch {
+                if let Some(condition) = &entry.condition {
+                    let base = self.execute_single_locked(KeyValueCommand {
+                        namespace: entry.command.namespace.clone(),
+                        key: entry.command.key.clone(),
+                        action: KeyValueAction::Get,
+                    })?;
+                    let exists = match base {
+                        KeyValueResult::Get(value) => value.is_some(),
+                        _ => unreachable!("Get always yields a Get result"),
+                    };
+                    match condition {
+                        CommitCondition::PutIfAbsent if exists => {
+                            return Err(Error::CasConflict {
+                                key: format!("{}:{}", entry.command.namespace.0, String::from_utf8_lossy(&entry.command.key)),
+                            });
                         }
-                    })
-                    .transpose()?;
-                Ok(KeyValueResult::Get(value))
-            }
-            KeyValueAction::Exists => Ok(KeyValueResult::Exists(shard.get(&key)?.is_some())),
-            KeyValueAction::GetDelete => {
-                let value = match shard.get(&key)? {
-                    None => None,
-                    Some(record) => match record.value {
-                        StoredValue::Inline(value) => Some(value.0),
-                        StoredValue::Object(_) => {
-                            return Err(Error::Unsupported("object values are not available through the local KV executor"));
+                        CommitCondition::PutIfPresent if !exists => {
+                            return Err(Error::CasConflict {
+                                key: format!("{}:{}", entry.command.namespace.0, String::from_utf8_lossy(&entry.command.key)),
+                            });
                         }
-                    },
-                };
-                if value.is_some() {
-                    shard.delete(&key)?;
-                }
-                Ok(KeyValueResult::GetDelete(value))
-            }
-            KeyValueAction::GetSet(value) => {
-                let previous = match shard.get(&key)? {
-                    None => None,
-                    Some(record) => match record.value {
-                        StoredValue::Inline(value) => Some(value.0),
-                        StoredValue::Object(_) => {
-                            return Err(Error::Unsupported("object values are not available through the local KV executor"));
-                        }
-                    },
-                };
-                shard.put(key, StoredValue::Inline(InlineValue(value)))?;
-                Ok(KeyValueResult::GetSet(previous))
-            }
-            KeyValueAction::Put(value) => {
-                let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
-                Ok(KeyValueResult::Put { revision })
-            }
-            KeyValueAction::PutIfAbsent(value) => {
-                if shard.get(&key)?.is_some() {
-                    Ok(KeyValueResult::PutIfAbsent { revision: None })
-                }
-                else {
-                    let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
-                    Ok(KeyValueResult::PutIfAbsent { revision: Some(revision) })
+                        _ => {}
+                    }
                 }
             }
-            KeyValueAction::PutIfPresent(value) => {
-                if shard.get(&key)?.is_none() {
-                    Ok(KeyValueResult::PutIfPresent { revision: None })
-                }
-                else {
-                    let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
-                    Ok(KeyValueResult::PutIfPresent { revision: Some(revision) })
-                }
+            for entry in batch {
+                self.execute_single_locked(entry.command)?;
             }
-            KeyValueAction::Delete => {
-                let removed = shard.delete(&key)?;
-                Ok(KeyValueResult::Delete { removed })
-            }
-            KeyValueAction::IncrementBy(delta) => {
-                let current = match shard.get(&key)? {
-                    None => 0,
-                    Some(record) => match record.value {
-                        StoredValue::Inline(value) => parse_integer(&value.0)?,
-                        StoredValue::Object(_) => return Err(Error::Unsupported("object values cannot be incremented")),
-                    },
-                };
-                let value = current.checked_add(delta).ok_or(Error::IntegerOverflow)?;
-                shard.put(key, StoredValue::Inline(InlineValue(value.to_string().into_bytes())))?;
-                Ok(KeyValueResult::Increment { value })
-            }
-        }
+            Ok(())
+        })
     }
 }
 
