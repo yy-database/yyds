@@ -33,15 +33,13 @@ use sha1::{Digest, Sha1};
 use crate::{
     node_runtime::open_executor,
     wire_dispatch::{dispatch, WireContext},
-    wire_protocol::{decode_frame, read_frame, write_frame},
+    wire_protocol::{decode_authenticate_body, decode_frame, error_frame, read_frame, write_frame, Frame, MessageType},
 };
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /// Error code returned when a connection issues commands before authenticating.
-#[allow(dead_code)]
 const AUTH_CODE: &str = "yyds.auth.required";
 /// Error code returned when an Authenticate frame carries a wrong token.
-#[allow(dead_code)]
 const AUTH_FAILED_CODE: &str = "yyds.auth.failed";
 
 /// Owned listener with a join handle; dropped handles stop on the next accept.
@@ -182,6 +180,49 @@ impl ConnectionState {
     }
 }
 
+/// Frame pre-dispatch gate — enforces per-connection authentication.
+///
+/// * **Authenticated** — dispatch normally (Hello / Info / Schema / KV all pass).
+/// * **Unauthenticated** — only `Hello` and `Authenticate` frames are handled
+///   (Hello returns the version as before; Authenticate validates the token).
+///   Everything else → `Error` frame with [`AUTH_CODE`].
+pub fn process_frame_with_auth(ctx: &WireContext, state: &ConnectionState, request: &Frame) -> Frame {
+    let id = request.request_id;
+
+    // Hello always passes — it's the handshake, pre-authentication.
+    if request.msg_type == MessageType::Hello {
+        return dispatch(ctx, request);
+    }
+
+    // Authenticate frame → validate token → flip state → return AuthenticateOk or Error.
+    if request.msg_type == MessageType::Authenticate {
+        return handle_authenticate(ctx, state, request);
+    }
+
+    // Business frames require authenticated state.
+    if !state.is_authenticated() {
+        return error_frame(id, AUTH_CODE, "authentication required: send Authenticate(frame 13) with a bootstrap token first");
+    }
+
+    dispatch(ctx, request)
+}
+
+fn handle_authenticate(ctx: &WireContext, state: &ConnectionState, request: &Frame) -> Frame {
+    let id = request.request_id;
+    let token = match decode_authenticate_body(&request.body) {
+        Ok(t) => t,
+        Err(e) => return error_frame(id, "yyds.protocol.invalid", format!("Authenticate body: {e}")),
+    };
+
+    if ctx.bootstrap_tokens.contains(&token) {
+        state.set_authenticated();
+        Frame::new(MessageType::AuthenticateOk, id, Vec::new())
+    }
+    else {
+        error_frame(id, AUTH_FAILED_CODE, "bootstrap token not recognized")
+    }
+}
+
 fn handle_client(stream: TcpStream, ctx: &WireContext, peer_is_loopback: bool) -> Result<(), String> {
     let state = Arc::new(ConnectionState::new(peer_is_loopback));
     let mut peek = [0_u8; 4];
@@ -194,19 +235,19 @@ fn handle_client(stream: TcpStream, ctx: &WireContext, peer_is_loopback: bool) -
     }
 }
 
-fn handle_tcp(mut stream: TcpStream, ctx: &WireContext, _state: Arc<ConnectionState>) -> Result<(), String> {
+fn handle_tcp(mut stream: TcpStream, ctx: &WireContext, state: Arc<ConnectionState>) -> Result<(), String> {
     loop {
         let request = match read_frame(&mut stream) {
             Ok(frame) => frame,
             Err(error) if is_disconnect(&error) => return Ok(()),
             Err(error) => return Err(error),
         };
-        let response = dispatch(ctx, &request);
+        let response = process_frame_with_auth(ctx, &state, &request);
         write_frame(&mut stream, &response)?;
     }
 }
 
-fn handle_websocket(mut stream: TcpStream, ctx: &WireContext, _state: Arc<ConnectionState>) -> Result<(), String> {
+fn handle_websocket(mut stream: TcpStream, ctx: &WireContext, state: Arc<ConnectionState>) -> Result<(), String> {
     // Read HTTP upgrade request.
     let mut buf = Vec::new();
     let mut chunk = [0_u8; 1024];
@@ -266,7 +307,7 @@ fn handle_websocket(mut stream: TcpStream, ctx: &WireContext, _state: Arc<Connec
             None => return Ok(()),
         };
         let request = decode_frame(&payload)?;
-        let response = dispatch(ctx, &request);
+        let response = process_frame_with_auth(ctx, &state, &request);
         let encoded = response.encode()?;
         write_ws_binary(&mut stream, &encoded)?;
     }
