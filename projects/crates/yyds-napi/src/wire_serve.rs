@@ -512,4 +512,104 @@ mod tests {
             assert!(err.contains("parsed to no entries"));
         });
     }
+
+    // ─── Authentication state machine tests ────────────────────────────────
+    //
+    // These don't spin up a real TCP server — they exercise
+    // `process_frame_with_auth` + `ConnectionState` directly. The point is
+    // to prove the four required flows (loopback anonymous, remote blocked,
+    // remote authed, remote bad-token) without socket scaffolding.
+
+    use std::collections::HashMap;
+    use yyds_execution::LocalExecutor;
+    use yyds_kv::MemoryShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    fn auth_test_ctx() -> WireContext {
+        let routing = ShardMap::new(ShardEpoch(1), vec![ShardId("local-0".into())]).unwrap();
+        let shard_id = ShardId("local-0".into());
+        let shard = MemoryShard::new();
+        let mut shards = HashMap::new();
+        shards.insert(shard_id, shard);
+        let executor = LocalExecutor::new(routing, shards).unwrap();
+        WireContext::new(Arc::new(executor)).with_bootstrap_tokens(vec!["t-secret".to_owned(), "t-fallback".to_owned()])
+    }
+
+    fn kv_get_body(key: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        let bytes = key.as_bytes();
+        body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        body.extend_from_slice(bytes);
+        body
+    }
+
+    #[test]
+    fn auth_loopback_connection_allows_kv_without_authenticate() {
+        let ctx = auth_test_ctx();
+        let state = ConnectionState::new(true); // loopback default = authenticated
+        let request = Frame::new(MessageType::KvGet, 1, kv_get_body("any-key"));
+        let response = process_frame_with_auth(&ctx, &state, &request);
+        assert_eq!(response.msg_type, MessageType::KvGetOk, "loopback anonymous should pass KvGet");
+        assert!(state.is_authenticated());
+    }
+
+    #[test]
+    fn auth_remote_connection_blocks_kv_before_authenticate() {
+        let ctx = auth_test_ctx();
+        let state = ConnectionState::new(false); // remote default = unauthenticated
+        let request = Frame::new(MessageType::KvGet, 1, kv_get_body("any-key"));
+        let response = process_frame_with_auth(&ctx, &state, &request);
+        assert_eq!(response.msg_type, MessageType::Error);
+        assert!(
+            String::from_utf8_lossy(&response.body).contains(AUTH_CODE),
+            "error body should mention AUTH_CODE `{AUTH_CODE}`, got: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+    }
+
+    #[test]
+    fn auth_remote_connection_allows_hello_before_authenticate() {
+        let ctx = auth_test_ctx();
+        let state = ConnectionState::new(false);
+        let request = Frame::new(MessageType::Hello, 1, Vec::new());
+        let response = process_frame_with_auth(&ctx, &state, &request);
+        assert_eq!(response.msg_type, MessageType::HelloOk, "Hello must be allowed pre-auth");
+    }
+
+    #[test]
+    fn auth_remote_connection_accepts_correct_token() {
+        let ctx = auth_test_ctx();
+        let state = ConnectionState::new(false);
+        let body = crate::wire_protocol::encode_authenticate_body("t-secret");
+        let request = Frame::new(MessageType::Authenticate, 1, body);
+        let response = process_frame_with_auth(&ctx, &state, &request);
+        assert_eq!(response.msg_type, MessageType::AuthenticateOk);
+        assert!(state.is_authenticated(), "ConnectionState must flip to authenticated on success");
+
+        // Second command should now pass.
+        let kv = Frame::new(MessageType::KvGet, 2, kv_get_body("k"));
+        let kv_resp = process_frame_with_auth(&ctx, &state, &kv);
+        assert_eq!(kv_resp.msg_type, MessageType::KvGetOk);
+    }
+
+    #[test]
+    fn auth_remote_connection_rejects_wrong_token() {
+        let ctx = auth_test_ctx();
+        let state = ConnectionState::new(false);
+        let body = crate::wire_protocol::encode_authenticate_body("wrong-token");
+        let request = Frame::new(MessageType::Authenticate, 1, body);
+        let response = process_frame_with_auth(&ctx, &state, &request);
+        assert_eq!(response.msg_type, MessageType::Error);
+        assert!(
+            String::from_utf8_lossy(&response.body).contains(AUTH_FAILED_CODE),
+            "error body should mention AUTH_FAILED_CODE `{AUTH_FAILED_CODE}`, got: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert!(!state.is_authenticated(), "state must remain unauthenticated after bad token");
+
+        // Business frames still blocked.
+        let kv = Frame::new(MessageType::KvGet, 2, kv_get_body("k"));
+        let kv_resp = process_frame_with_auth(&ctx, &state, &kv);
+        assert_eq!(kv_resp.msg_type, MessageType::Error);
+    }
 }
