@@ -421,3 +421,157 @@ fn transaction_increment_rollback_leaves_base_untouched() {
 
     assert_eq!(executor.execute(command(KeyValueAction::Get, b"counter")).unwrap(), KeyValueResult::Get(Some(b"10".to_vec())));
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// OCC validate-then-commit tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// 并发 PutIfAbsent OCC：两个事务都从 base 看到 key 不存在，只有先 commit 的成功，
+/// 后 commit 的被 OCC 拒绝（因为 re-check 时 key 已被前一个事务写入）。
+#[test]
+fn concurrent_put_if_absent_occ_rejects_late_commit() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+    use yyds_types::Error;
+
+    let executor = make_executor();
+
+    // 两个事务同时开始。resolve 在事务执行期间都看到 base 里 key 不存在。
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+
+    t1.execute(command(KeyValueAction::PutIfAbsent(b"first".to_vec()), b"race-key")).unwrap();
+    t2.execute(command(KeyValueAction::PutIfAbsent(b"second".to_vec()), b"race-key")).unwrap();
+
+    // t1 先 commit → OCC check: base 里 key 不存在 ✓ → 成功
+    t1.commit().unwrap();
+
+    // t2 后 commit → OCC check: base 里 key 已存在 ✗ → CasConflict
+    let err = t2.commit().unwrap_err();
+    assert!(matches!(err, Error::CasConflict { .. }), "expected CasConflict, got: {err:?}");
+
+    // base 里最终值只能是 t1 的写入（"first"），不能是 "second"
+    assert_eq!(
+        executor.execute(command(KeyValueAction::Get, b"race-key")).unwrap(),
+        KeyValueResult::Get(Some(b"first".to_vec()))
+    );
+}
+
+/// PutIfAbsent 事务与外部无条件 Put 并发提交：外部 Put 先持久化，
+/// PutIfAbsent 事务 commit 时 OCC re-check 发现 key 已存在 → 被拒。
+#[test]
+fn put_if_absent_vs_external_put_occ() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+    use yyds_types::Error;
+
+    let executor = make_executor();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::PutIfAbsent(b"txn-val".to_vec()), b"k")).unwrap();
+
+    // 外部在事务 commit 之前先无条件 Put 同一个 key
+    executor.execute(command(KeyValueAction::Put(b"external".to_vec()), b"k")).unwrap();
+
+    // 事务 commit → OCC check base → key 已存在 → CasConflict
+    let err = handle.commit().unwrap_err();
+    assert!(matches!(err, Error::CasConflict { .. }));
+
+    // 外部写入不受影响
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"external".to_vec())));
+}
+
+/// OCC re-check 使用纯 base store，不会被自己 transaction buffer 里的写入误导。
+/// 构造一个事务：先 PutIfAbsent(k)（事务内看到 k 不存在 → 通过），
+/// 然后再无条件 Put(k) → buffer 最终状态是 Value(?, None)，不带条件，
+/// commit 直接 batch apply（不走 OCC 路径）。
+/// 但如果另一个线程在两次写入之间 commit 了，我们的第二次无条件 Put 的 buffer
+/// 会覆盖第一次的条件，所以最终条件是 None，OCC 不 re-check，直接 Put。
+/// 这是当前设计的预期行为：无条件 Put 覆盖条件。
+#[test]
+fn unconditional_put_overrides_prior_conditional_in_buffer() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    // base: k 不存在
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    // PutIfAbsent → 事务内看到 k 不存在 → 成功进 buffer，带 PutIfAbsent 条件
+    handle.execute(command(KeyValueAction::PutIfAbsent(b"ifabsent".to_vec()), b"k")).unwrap();
+    // 然后无条件 Put 覆盖同一个 key → buffer 条件被清掉
+    handle.execute(command(KeyValueAction::Put(b"unconditional".to_vec()), b"k")).unwrap();
+    handle.commit().unwrap();
+
+    assert_eq!(
+        executor.execute(command(KeyValueAction::Get, b"k")).unwrap(),
+        KeyValueResult::Get(Some(b"unconditional".to_vec()))
+    );
+}
+
+/// 多 key 事务中一个 PutIfAbsent 失败，整个 commit 被回滚（其他无条件写也不持久化）。
+/// 这通过 CasConflict 返回 Err 且没有部分写入来验证。
+#[test]
+fn single_occ_failure_aborts_entire_batch() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+    use yyds_types::Error;
+
+    let executor = make_executor();
+
+    // base: "a" 不存在, "b" 不存在
+    // T1: Put("a"), PutIfAbsent("b")
+    // 外部先 Put("b")
+    // T1 commit: OCC re-check base "b" → 存在 → CasConflict
+    //           → "a" 和 "b" 都不应被写入
+    let txn: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    txn.execute(command(KeyValueAction::Put(b"t1-a".to_vec()), b"a")).unwrap();
+    txn.execute(command(KeyValueAction::PutIfAbsent(b"t1-b".to_vec()), b"b")).unwrap();
+
+    // 外部先写 "b"
+    executor.execute(command(KeyValueAction::Put(b"ext-b".to_vec()), b"b")).unwrap();
+
+    let err = txn.commit().unwrap_err();
+    assert!(matches!(err, Error::CasConflict { .. }), "expected CasConflict, got {err:?}");
+
+    // "a" 也不应该被写入（整个 batch 被 abort）
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"a")).unwrap(), KeyValueResult::Get(None));
+    // "b" 保持外部写入
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"b")).unwrap(), KeyValueResult::Get(Some(b"ext-b".to_vec())));
+}
+
+/// 全局锁保证并发 PutIfAbsent 同一 key 只有一个事务能成功 commit。
+/// 用 Barrier 让所有线程先完成 resolve（都看到 base key 不存在），然后同时 commit。
+/// commit 被全局锁串行化，只有第一个能通过 OCC re-check，其他被 CasConflict 拒绝。
+#[test]
+fn global_lock_serialises_concurrent_commits() {
+    use std::sync::{Arc, Barrier};
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor: Arc<dyn KeyValueExecutor> = make_executor();
+    const N: usize = 4;
+    let barrier = Arc::new(Barrier::new(N));
+
+    let mut workers = Vec::new();
+    for _ in 0..N {
+        let executor = Arc::clone(&executor);
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor));
+            // resolve: base 里 shared 不存在 → 进 buffer，带 PutIfAbsent 条件
+            handle.execute(command(KeyValueAction::PutIfAbsent(b"winner".to_vec()), b"shared")).unwrap();
+            // 所有线程都 resolve 完再一起开始 commit
+            barrier.wait();
+            handle.commit().is_ok()
+        }));
+    }
+    let mut success_count = 0u32;
+    for w in workers {
+        if w.join().unwrap() {
+            success_count += 1;
+        }
+    }
+    assert_eq!(success_count, 1, "only one PutIfAbsent on a shared key should succeed");
+
+    // 验证 base 里确实有值
+    assert_eq!(
+        executor.execute(command(KeyValueAction::Get, b"shared")).unwrap(),
+        KeyValueResult::Get(Some(b"winner".to_vec()))
+    );
+}
