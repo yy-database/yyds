@@ -81,7 +81,7 @@ pub struct BufferedCommit {
 }
 
 /// OCC pre-image condition checked at commit time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitCondition {
     /// The key must be absent from the base store (PutIfAbsent).
     PutIfAbsent,
@@ -247,11 +247,16 @@ where
 /// Tracks the in-flight state of a single `(namespace, key)` pair inside a local transaction.
 ///
 /// Only the final state per key is stored so that a second `Put` on the same key simply
-/// overwrites the first without needing to replay a multi-value history.
+/// overwrites the first without needing to replay a multi-value history. When the final
+/// state was reached through a conditional write (PutIfAbsent / PutIfPresent) that original
+/// condition is preserved so that [`LocalTransactionHandle::commit`] can re-check it against
+/// the base store as part of OCC validate-then-commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BufferedState {
-    /// The key has been set to this value inside the transaction.
-    Value(Vec<u8>),
+    /// The key has been set to this value inside the transaction. The optional conditional
+    /// records whether the first write on this key was a PutIfAbsent or PutIfPresent so that
+    /// commit-time OCC re-checks the correct pre-image.
+    Value(Vec<u8>, Option<CommitCondition>),
     /// The key has been deleted inside the transaction.
     Deleted,
 }
@@ -280,7 +285,7 @@ impl LocalTransactionHandle {
         let buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
         if let Some(state) = buffer.get(&(namespace.to_owned(), key.to_vec())) {
             return Ok(match state {
-                BufferedState::Value(bytes) => Some(bytes.clone()),
+                BufferedState::Value(bytes, _) => Some(bytes.clone()),
                 BufferedState::Deleted => None,
             });
         }
@@ -311,7 +316,9 @@ impl TransactionHandle for LocalTransactionHandle {
             }
             KeyValueAction::Put(value) => {
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
-                buffer.insert((namespace.0, key), BufferedState::Value(value));
+                // 无条件 Put 会覆盖 buffer 里任何已有条件（包括之前的 PutIfAbsent/PutIfPresent），
+                // 因为无条件 Put 意味着调用方已经决定不管 base 状态如何都要写。
+                buffer.insert((namespace.0, key), BufferedState::Value(value, None));
                 Ok(KeyValueResult::Put { revision: 1 })
             }
             KeyValueAction::PutIfAbsent(value) => {
@@ -320,7 +327,7 @@ impl TransactionHandle for LocalTransactionHandle {
                     return Ok(KeyValueResult::PutIfAbsent { revision: None });
                 }
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
-                buffer.insert((namespace.0, key), BufferedState::Value(value));
+                buffer.insert((namespace.0, key), BufferedState::Value(value, Some(CommitCondition::PutIfAbsent)));
                 Ok(KeyValueResult::PutIfAbsent { revision: Some(1) })
             }
             KeyValueAction::PutIfPresent(value) => {
@@ -329,19 +336,20 @@ impl TransactionHandle for LocalTransactionHandle {
                     return Ok(KeyValueResult::PutIfPresent { revision: None });
                 }
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
-                buffer.insert((namespace.0, key), BufferedState::Value(value));
+                buffer.insert((namespace.0, key), BufferedState::Value(value, Some(CommitCondition::PutIfPresent)));
                 Ok(KeyValueResult::PutIfPresent { revision: Some(1) })
             }
             KeyValueAction::Delete => {
                 let existed = self.resolve(&namespace.0, &key)?.is_some();
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+                // Delete 覆盖任何已有 Value 状态，Delete 本身不携带条件。
                 buffer.insert((namespace.0, key), BufferedState::Deleted);
                 Ok(KeyValueResult::Delete { removed: existed })
             }
             KeyValueAction::GetSet(new_value) => {
                 let previous = self.resolve(&namespace.0, &key)?;
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
-                buffer.insert((namespace.0, key), BufferedState::Value(new_value));
+                buffer.insert((namespace.0, key), BufferedState::Value(new_value, None));
                 Ok(KeyValueResult::GetSet(previous))
             }
             KeyValueAction::GetDelete => {
@@ -358,7 +366,7 @@ impl TransactionHandle for LocalTransactionHandle {
                 };
                 let value = current.checked_add(delta).ok_or(Error::IntegerOverflow)?;
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
-                buffer.insert((namespace.0, key), BufferedState::Value(value.to_string().into_bytes()));
+                buffer.insert((namespace.0, key), BufferedState::Value(value.to_string().into_bytes(), None));
                 Ok(KeyValueResult::Increment { value })
             }
         }
@@ -379,18 +387,19 @@ impl TransactionHandle for LocalTransactionHandle {
 
     fn commit(self: Box<Self>) -> yyds_types::Result<()> {
         let buffer = self.buffer.into_inner().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+
+        // 组装 commit_batch 参数：最终 replay command + 可选 OCC 条件。
+        // validate + batch apply 都在 executor.commit_batch 内部的同一全局锁里完成。
+        let mut batch = Vec::with_capacity(buffer.len());
         for ((namespace, key), state) in buffer {
-            let command = match state {
-                BufferedState::Value(value) => {
-                    KeyValueCommand { namespace: Namespace(namespace), key, action: KeyValueAction::Put(value) }
-                }
-                BufferedState::Deleted => {
-                    KeyValueCommand { namespace: Namespace(namespace), key, action: KeyValueAction::Delete }
-                }
+            let (action, condition) = match state {
+                BufferedState::Value(value, cond) => (KeyValueAction::Put(value), cond),
+                BufferedState::Deleted => (KeyValueAction::Delete, None),
             };
-            self.executor.execute(command)?;
+            batch.push(BufferedCommit { command: KeyValueCommand { namespace: Namespace(namespace), key, action }, condition });
         }
-        Ok(())
+
+        self.executor.commit_batch(batch)
     }
 
     fn rollback(self: Box<Self>) {
