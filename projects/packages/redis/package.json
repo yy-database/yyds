@@ -1,6 +1,6 @@
 {
     "name": "@yydb/redis",
-    "version": "0.0.10",
+    "version": "0.0.11",
     "description": "Pretend you installed Redis. YYDS scripting runtime underneath.",
     "license": "MPL-2.0",
         "type": "module",
