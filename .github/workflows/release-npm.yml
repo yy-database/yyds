@@ -179,24 +179,3 @@ jobs:
       # OIDC only — do not set NODE_AUTH_TOKEN (even empty).
       - name: Publish npm
         run: node scripts/publish-npm-packages.mjs
-
-  github-release:
-    name: github release zips
-    needs: [build-engine, build-engine-macos]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download engine artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: engine-*
-          path: _engines
-          merge-multiple: true
-
-      - name: Upload zips to GitHub Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node scripts/upload-github-release-zips.mjs
