@@ -269,8 +269,8 @@ pub struct ScanPlan {
     pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
     /// 行级过滤表达式；`None` 表示不过滤。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
-    /// 可选 ORDER BY 字段；scan 全部 rows 后由 execute 层内存排序。
-    pub order_by: Option<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>,
+    /// 可选 ORDER BY 字段列表；scan 全部 rows 后由 execute 层内存排序。
+    pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
     /// 排序 / 聚合之后才应用的 LIMIT。ORDER BY 存在时 kv-scan limit=0，
     /// 由本字段承接 SQL 的 LIMIT 值。0 = 无上限。
     pub limit_after_sort: usize,

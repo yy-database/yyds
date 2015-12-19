@@ -295,8 +295,8 @@ pub struct SqlCatalogBoundSelect {
     pub limit: Option<usize>,
     /// Optional OFFSET count, propagated from the gateway binder.
     pub offset: Option<usize>,
-    /// Optional ORDER BY item, propagated from the gateway binder.
-    pub order_by: Option<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>,
+    /// Optional ORDER BY items, propagated from the gateway binder.
+    pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
 }
 
 /// SQL INSERT request after catalog binding.
@@ -431,7 +431,13 @@ fn bind_select(select: SqlBoundSelect, catalog: &SqlCatalog) -> Result<SqlCatalo
         .collect::<Result<Vec<_>, _>>()?;
     let predicate = select.predicate.map(|expression| bind_expression(expression, source.as_ref(), catalog)).transpose()?;
     let order_by = match select.order_by {
-        Some(item) => Some((bind_expression(item.expr, source.as_ref(), catalog)?, item.direction)),
+        Some(items) => {
+            let bound = items
+                .into_iter()
+                .map(|item| Ok((bind_expression(item.expr, source.as_ref(), catalog)?, item.direction)))
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(bound)
+        }
         None => None,
     };
     Ok(SqlCatalogBoundSelect { source, projections, predicate, limit: select.limit, offset: select.offset, order_by })

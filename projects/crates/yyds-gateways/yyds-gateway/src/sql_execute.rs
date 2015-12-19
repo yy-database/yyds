@@ -243,8 +243,10 @@ fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
     if let Some(pred) = &plan.remaining_predicate {
         collect_column_ids(pred, &mut ids);
     }
-    if let Some((order_expr, _)) = &plan.order_by {
-        collect_column_ids(order_expr, &mut ids);
+    if let Some(order_items) = &plan.order_by {
+        for (order_expr, _) in order_items {
+            collect_column_ids(order_expr, &mut ids);
+        }
     }
     ids
 }
@@ -341,8 +343,8 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
     }
 
     if false && use_top_n {
-        // —— Top-N heap 路径 ——
-        let (order_expr, order_dir) = plan.order_by.as_ref().unwrap();
+        // —— Top-N heap 路径（仅单列 ORDER BY，多列已走 Vec 路径） ——
+        let (order_expr, order_dir) = plan.order_by.as_ref().unwrap().first().unwrap();
         let is_asc = matches!(order_dir, crate::sql::SqlBoundOrderDirection::Asc);
         let heap_capacity = plan.offset_after_sort.max(1) + plan.limit_after_sort;
         let mut heap: std::collections::BinaryHeap<SortableRow> = std::collections::BinaryHeap::with_capacity(heap_capacity);
@@ -384,7 +386,7 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
     }
 
     // —— 常规 Vec 路径：无 ORDER BY（kv-scan 顺序）或 ORDER BY 但无 LIMIT/OFFSET ——
-    let mut staged: Vec<(Option<SqlValue>, Vec<SqlValue>)> = Vec::new();
+    let mut staged: Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)> = Vec::new();
     for (_rowid, value_bytes) in scanned {
         let row = decode_row_fields(&value_bytes, &needed_ids)?;
         if let Some(ref predicate) = plan.remaining_predicate {
@@ -394,9 +396,12 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             }
         }
 
-        let sort_key = match &plan.order_by {
-            Some((expr, _)) => Some(eval_expression(expr, &row, &plan.field_types)?),
-            None => None,
+        let sort_keys: Vec<Option<SqlValue>> = match &plan.order_by {
+            Some(items) => items
+                .iter()
+                .map(|(expr, _)| Ok(Some(eval_expression(expr, &row, &plan.field_types)?)))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
         };
         let mut row_values: Vec<SqlValue> = Vec::new();
         for (field_id, _) in &plan.projection_fields {
@@ -405,18 +410,23 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
         for (expr, _) in &plan.projection_expressions {
             row_values.push(eval_expression(expr, &row, &plan.field_types)?);
         }
-        staged.push((sort_key, row_values));
+        staged.push((sort_keys, row_values));
     }
 
-    // Sort if ORDER BY present (无 LIMIT/OFFSET 时全量排序)。
-    if let Some((_, ref direction)) = plan.order_by {
-        let dir = direction.clone();
+    // Sort if ORDER BY present — multi-column, 逐列比较直到分出胜负。
+    if let Some(order_items) = &plan.order_by {
+        let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
         staged.sort_by(move |a, b| {
-            let ord = compare_values(a.0.as_ref(), b.0.as_ref());
-            match dir {
-                crate::sql::SqlBoundOrderDirection::Asc => ord,
-                crate::sql::SqlBoundOrderDirection::Desc => ord.reverse(),
+            for (idx, dir) in dirs.iter().enumerate() {
+                let ord = compare_values(a.0[idx].as_ref(), b.0[idx].as_ref());
+                if ord != std::cmp::Ordering::Equal {
+                    return match dir {
+                        crate::sql::SqlBoundOrderDirection::Asc => ord,
+                        crate::sql::SqlBoundOrderDirection::Desc => ord.reverse(),
+                    };
+                }
             }
+            std::cmp::Ordering::Equal
         });
     }
 

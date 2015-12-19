@@ -94,9 +94,8 @@ pub struct SqlBoundSelect {
     pub limit: Option<usize>,
     /// Optional SQL OFFSET count (parsed from the LIMIT ... OFFSET clause).
     pub offset: Option<usize>,
-    /// Optional SQL ORDER BY clause. Gateway currently supports at most one
-    /// sort item — multi-column ordering is not implemented yet.
-    pub order_by: Option<SqlBoundOrderByItem>,
+    /// Optional SQL ORDER BY clause — supports multi-column ordering.
+    pub order_by: Option<Vec<SqlBoundOrderByItem>>,
 }
 
 /// One SQL ORDER BY item — expression + direction.
@@ -312,17 +311,21 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 None => (None, None),
             };
             let order_by = match &select.order_by {
-                Some(clause) if clause.items.len() == 1 => {
-                    let item = &clause.items[0];
-                    let expr = bind_expression(&item.expr)?;
-                    let direction = match item.direction {
-                        oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
-                        oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
-                    };
-                    Some(SqlBoundOrderByItem { expr, direction })
-                }
-                Some(clause) if clause.items.len() > 1 => {
-                    return Err(bind_error("multi-column ORDER BY is not supported yet"));
+                Some(clause) if !clause.items.is_empty() => {
+                    let items = clause
+                        .items
+                        .iter()
+                        .map(|item| {
+                            Ok(SqlBoundOrderByItem {
+                                expr: bind_expression(&item.expr)?,
+                                direction: match item.direction {
+                                    oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
+                                    oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
+                                },
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Some(items)
                 }
                 _ => None,
             };
@@ -409,10 +412,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             expression: Box::new(bind_expression(expr)?),
         }),
         Expression::Between { expr, low, high, negated, .. } => {
-            if *negated {
-                return Err(bind_error("NOT BETWEEN is not supported yet"));
-            }
-            // Expand BETWEEN into `expr >= low AND expr <= high`
+            // 先构造 `expr >= low AND expr <= high`
             let e = bind_expression(expr)?;
             let lo = bind_expression(low)?;
             let hi = bind_expression(high)?;
@@ -426,16 +426,19 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 operator: SqlBoundBinaryOperator::LessEqual,
                 right: Box::new(hi),
             };
-            Ok(SqlBoundExpression::Binary {
+            let between = SqlBoundExpression::Binary {
                 left: Box::new(left),
                 operator: SqlBoundBinaryOperator::And,
                 right: Box::new(right),
-            })
+            };
+            if *negated {
+                Ok(SqlBoundExpression::Unary { operator: SqlBoundUnaryOperator::Not, expression: Box::new(between) })
+            }
+            else {
+                Ok(between)
+            }
         }
         Expression::InList { expr, list, negated, .. } => {
-            if *negated {
-                return Err(bind_error("NOT IN is not supported yet"));
-            }
             // Expand IN into `expr = v1 OR expr = v2 OR ... OR expr = vN`
             if list.is_empty() {
                 return Err(bind_error("IN list must not be empty"));
@@ -457,7 +460,13 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                     }),
                 };
             }
-            Ok(or_tree.unwrap())
+            let in_expr = or_tree.unwrap();
+            if *negated {
+                Ok(SqlBoundExpression::Unary { operator: SqlBoundUnaryOperator::Not, expression: Box::new(in_expr) })
+            }
+            else {
+                Ok(in_expr)
+            }
         }
         Expression::FunctionCall { name, args, .. } => {
             let fname = normalize_identifier(name.name.as_ref());
