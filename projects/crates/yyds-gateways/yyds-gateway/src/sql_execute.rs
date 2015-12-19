@@ -243,6 +243,14 @@ fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
     if let Some(pred) = &plan.remaining_predicate {
         collect_column_ids(pred, &mut ids);
     }
+    if let Some(group_exprs) = &plan.group_by {
+        for g in group_exprs {
+            collect_column_ids(g, &mut ids);
+        }
+    }
+    if let Some(having) = &plan.having {
+        collect_column_ids(having, &mut ids);
+    }
     if let Some(order_items) = &plan.order_by {
         for (order_expr, _) in order_items {
             collect_column_ids(order_expr, &mut ids);
@@ -322,8 +330,8 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
     // 避免先收集全量 rows 再排序。容量 = offset + limit（limit=0 视为无限，fallback 到 Vec）。
     let use_top_n = plan.order_by.is_some() && (plan.limit_after_sort > 0 || plan.offset_after_sort > 0);
 
-    if plan.has_aggregate {
-        // —— 聚合路径：需要访问所有 post-filter rows，无 heap 收益 ——
+    if plan.has_aggregate && plan.group_by.is_none() {
+        // —— 全局聚合路径（无 GROUP BY）：需要访问所有 post-filter rows，无 heap 收益 ——
         let mut all_rows: Vec<RowFieldValues> = Vec::new();
         for (_rowid, value_bytes) in scanned {
             let row = decode_row_fields(&value_bytes, &needed_ids)?;
@@ -340,6 +348,111 @@ fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlR
             result_row.push(eval_aggregate(expr, &all_rows, &plan.field_types)?);
         }
         return Ok(SqlResult { columns, rows: vec![result_row], affected_rows: 0 });
+    }
+
+    if let Some(group_exprs) = &plan.group_by {
+        // —— GROUP BY 路径：扫描后 bucket + 每 bucket 聚合 + HAVING + ORDER BY + LIMIT ——
+        let mut all_rows: Vec<RowFieldValues> = Vec::new();
+        for (_rowid, value_bytes) in scanned {
+            let row = decode_row_fields(&value_bytes, &needed_ids)?;
+            if let Some(ref predicate) = plan.remaining_predicate {
+                let v = eval_expression(predicate, &row, &plan.field_types)?;
+                if !truthy(&v) {
+                    continue;
+                }
+            }
+            all_rows.push(row);
+        }
+
+        // Bucket: rows → Vec<(group_key, rows)>
+        let mut buckets: std::collections::BTreeMap<String, (Vec<SqlValue>, Vec<RowFieldValues>)> =
+            std::collections::BTreeMap::new();
+        for row in &all_rows {
+            let key_vals: Vec<SqlValue> =
+                group_exprs.iter().map(|e| eval_expression(e, row, &plan.field_types)).collect::<Result<Vec<_>, _>>()?;
+            let key_str = serialize_group_key(&key_vals);
+            buckets.entry(key_str).or_insert_with(|| (key_vals, Vec::new())).1.push(row.clone());
+        }
+
+        // 对每个 bucket 计算结果行
+        let mut staged: Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)> = Vec::new();
+        let first_row = all_rows.first().cloned();
+
+        for (_key_str, (group_key_vals, bucket_rows)) in &buckets {
+            let bucket_rows = bucket_rows;
+            let first = bucket_rows.first().ok_or_else(|| execute_error("GROUP BY bucket is unexpectedly empty"))?;
+
+            // projection_fields: 按 field_id 找到对应的 GROUP BY 表达式或从 bucket 首行取
+            let mut row_values: Vec<SqlValue> = Vec::new();
+            for (field_id, _display_name) in &plan.projection_fields {
+                let mut matched_key_idx: Option<usize> = None;
+                for (idx, ge) in group_exprs.iter().enumerate() {
+                    if let SqlCatalogBoundExpression::Column(col) = ge {
+                        if col.field_id == *field_id {
+                            matched_key_idx = Some(idx);
+                            break;
+                        }
+                    }
+                }
+                if let Some(idx) = matched_key_idx {
+                    row_values.push(group_key_vals[idx].clone());
+                }
+                else {
+                    row_values.push(first.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
+                }
+            }
+            // projection_expressions
+            for (expr, _) in &plan.projection_expressions {
+                match expr {
+                    SqlCatalogBoundExpression::Function { .. } => {
+                        row_values.push(eval_aggregate(expr, bucket_rows, &plan.field_types)?);
+                    }
+                    other => row_values.push(eval_expression(other, first, &plan.field_types)?),
+                }
+            }
+
+            // HAVING — 用 eval_having 处理聚合函数引用
+            if let Some(having) = &plan.having {
+                let v = eval_having(having, bucket_rows, group_exprs, &plan.field_types)?;
+                if !truthy(&v) {
+                    continue;
+                }
+            }
+
+            // ORDER BY sort_keys — 可以引用 group key 或聚合列
+            let sort_keys: Vec<Option<SqlValue>> = match &plan.order_by {
+                Some(items) => items
+                    .iter()
+                    .map(|(e, _)| Ok(Some(eval_having(e, bucket_rows, group_exprs, &plan.field_types)?)))
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => Vec::new(),
+            };
+            staged.push((sort_keys, row_values));
+        }
+        let _ = first_row;
+
+        // Sort if ORDER BY present — multi-column 逐列比较
+        if let Some(order_items) = &plan.order_by {
+            let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
+            staged.sort_by(move |a, b| {
+                for (idx, dir) in dirs.iter().enumerate() {
+                    let ord = compare_values(a.0[idx].as_ref(), b.0[idx].as_ref());
+                    if ord != std::cmp::Ordering::Equal {
+                        return match dir {
+                            crate::sql::SqlBoundOrderDirection::Asc => ord,
+                            crate::sql::SqlBoundOrderDirection::Desc => ord.reverse(),
+                        };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+        }
+
+        let offset = plan.offset_after_sort;
+        let limit = plan.limit_after_sort;
+        let rows: Vec<Vec<SqlValue>> =
+            staged.into_iter().skip(offset).take(if limit == 0 { usize::MAX } else { limit }).map(|(_, r)| r).collect();
+        return Ok(SqlResult { columns, rows, affected_rows: 0 });
     }
 
     if false && use_top_n {

@@ -101,12 +101,13 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
     }
 
     // Scan 路径：prefix / after / before 都是 bytes。
-    // ORDER BY 或聚合 或 有 remaining_predicate 时 kv-scan 不设 limit
-    // —— 先 filter/aggregate/sort 才能知道前 N 行是哪些。
+    // ORDER BY / GROUP BY / 聚合 / remaining_predicate 时 kv-scan 不设 limit
+    // —— 先 filter/aggregate/sort/group 才能知道前 N 行是哪些。
     // 把 LIMIT/OFFSET 推迟给 execute 层应用。
     let has_order_by = select.order_by.is_some();
+    let has_group_by = select.group_by.is_some();
     let has_predicate = remaining_predicate.is_some();
-    let needs_post_filter_limit = has_order_by || has_aggregate || has_predicate;
+    let needs_post_filter_limit = has_order_by || has_group_by || has_aggregate || has_predicate;
     let kv_limit = if needs_post_filter_limit { 0 } else { select.limit.unwrap_or(0) };
     let limit_after_sort = if needs_post_filter_limit { select.limit.unwrap_or(0) } else { 0 };
     let offset_after_sort = if needs_post_filter_limit { select.offset.unwrap_or(0) } else { 0 };
@@ -120,6 +121,8 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         projection_fields,
         projection_expressions,
         remaining_predicate,
+        group_by: select.group_by,
+        having: select.having,
         order_by: select.order_by,
         limit_after_sort,
         offset_after_sort,
@@ -260,8 +263,7 @@ pub struct ScanPlan {
     pub rowid_after: Option<Vec<u8>>,
     /// exclusive upper cursor —— 跳过所有 `rowid >= before` 的记录。None = 无上界。
     pub rowid_before: Option<Vec<u8>>,
-    /// 下推到 kv-store 的 scan limit（0 = 无上限）。ORDER BY 或聚合存在时会保持 0，
-    /// 因为需要全量 scan 后再做内存处理。
+    /// 下推到 kv-store 的 scan limit（0 = 无上限）。ORDER BY / 聚合 / GROUP BY 存在时保持 0。
     pub limit: usize,
     /// 投影里直接映射到 catalog 字段的那些列：(field_id, display_name)。
     pub projection_fields: Vec<(u64, String)>,
@@ -269,15 +271,19 @@ pub struct ScanPlan {
     pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
     /// 行级过滤表达式；`None` 表示不过滤。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+    /// 可选 GROUP BY 表达式列表；scan 全部 rows 后由 execute 层做 bucket 聚合。
+    pub group_by: Option<Vec<SqlCatalogBoundExpression>>,
+    /// 可选 HAVING 表达式；GROUP BY 聚合完后应用。
+    pub having: Option<SqlCatalogBoundExpression>,
     /// 可选 ORDER BY 字段列表；scan 全部 rows 后由 execute 层内存排序。
     pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
-    /// 排序 / 聚合之后才应用的 LIMIT。ORDER BY 存在时 kv-scan limit=0，
+    /// 排序 / 聚合之后才应用的 LIMIT。ORDER BY / 聚合 / GROUP BY 存在时 kv-scan limit=0，
     /// 由本字段承接 SQL 的 LIMIT 值。0 = 无上限。
     pub limit_after_sort: usize,
     /// 排序 / 聚合之后才应用的 OFFSET。默认 0。
     pub offset_after_sort: usize,
     /// True when any projection expression is an aggregate function
-    /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce exactly one result row.
+    /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce aggregated result rows.
     pub has_aggregate: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,

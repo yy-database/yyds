@@ -12,6 +12,8 @@ use std::{
 };
 
 use yyds_control::NodeLease;
+use yyds_execution::KeyValueExecutor;
+use yyds_gateway::SqlCatalog;
 
 use crate::connection::{serve_cancellable, MysqlSqlRuntime};
 
@@ -44,6 +46,18 @@ impl MysqlService {
             listen(listener, signal, runtime)
         })?;
         Ok(Self { address, stopping, worker: Some(worker) })
+    }
+
+    /// Starts a listener with a YYDS SQL runtime for SELECT + DML execution.
+    pub fn start_with_executor(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        executor: Arc<dyn KeyValueExecutor>,
+        catalog: SqlCatalog,
+        schema_version: u32,
+    ) -> io::Result<Self> {
+        let runtime = Arc::new(MysqlSqlRuntime { catalog, executor, schema_version });
+        Self::start(owner, address, Some(runtime))
     }
 
     /// Actual bound address, including the assigned port when configured with zero.

@@ -291,6 +291,10 @@ pub struct SqlCatalogBoundSelect {
     pub projections: Vec<SqlCatalogBoundProjection>,
     /// Resolved optional predicate.
     pub predicate: Option<SqlCatalogBoundExpression>,
+    /// Resolved optional GROUP BY expressions.
+    pub group_by: Option<Vec<SqlCatalogBoundExpression>>,
+    /// Resolved optional HAVING expression.
+    pub having: Option<SqlCatalogBoundExpression>,
     /// Optional LIMIT count, propagated from the gateway binder.
     pub limit: Option<usize>,
     /// Optional OFFSET count, propagated from the gateway binder.
@@ -430,6 +434,11 @@ fn bind_select(select: SqlBoundSelect, catalog: &SqlCatalog) -> Result<SqlCatalo
         .map(|projection| bind_projection(projection, source.as_ref(), catalog))
         .collect::<Result<Vec<_>, _>>()?;
     let predicate = select.predicate.map(|expression| bind_expression(expression, source.as_ref(), catalog)).transpose()?;
+    let group_by = select
+        .group_by
+        .map(|exprs| exprs.into_iter().map(|e| bind_expression(e, source.as_ref(), catalog)).collect::<Result<Vec<_>, _>>())
+        .transpose()?;
+    let having = select.having.map(|e| bind_expression(e, source.as_ref(), catalog)).transpose()?;
     let order_by = match select.order_by {
         Some(items) => {
             let bound = items
@@ -440,7 +449,16 @@ fn bind_select(select: SqlBoundSelect, catalog: &SqlCatalog) -> Result<SqlCatalo
         }
         None => None,
     };
-    Ok(SqlCatalogBoundSelect { source, projections, predicate, limit: select.limit, offset: select.offset, order_by })
+    Ok(SqlCatalogBoundSelect {
+        source,
+        projections,
+        predicate,
+        group_by,
+        having,
+        limit: select.limit,
+        offset: select.offset,
+        order_by,
+    })
 }
 
 fn bind_projection(

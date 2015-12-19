@@ -90,6 +90,10 @@ pub struct SqlBoundSelect {
     pub projections: Vec<SqlBoundProjection>,
     /// Optional SQL WHERE expression.
     pub predicate: Option<SqlBoundExpression>,
+    /// Optional SQL GROUP BY expressions.
+    pub group_by: Option<Vec<SqlBoundExpression>>,
+    /// Optional SQL HAVING expression (applied after GROUP BY aggregation).
+    pub having: Option<SqlBoundExpression>,
     /// Optional SQL LIMIT count (parsed from the LIMIT clause's literal).
     pub limit: Option<usize>,
     /// Optional SQL OFFSET count (parsed from the LIMIT ... OFFSET clause).
@@ -296,8 +300,8 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     }
     match &root.statements[0] {
         SqlStatement::Select(select) => {
-            if !select.joins.is_empty() || select.group_by.is_some() || select.having.is_some() {
-                return Err(bind_error("SQL SELECT clauses are not in the gateway binding subset"));
+            if !select.joins.is_empty() {
+                return Err(bind_error("SQL JOIN is not in the gateway binding subset yet"));
             }
             let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
             let (limit, offset) = match &select.limit {
@@ -329,10 +333,19 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 }
                 _ => None,
             };
+            let group_by = match &select.group_by {
+                Some(clause) if !clause.columns.is_empty() => {
+                    Some(clause.columns.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?)
+                }
+                _ => None,
+            };
+            let having = select.having.as_ref().map(|h| bind_expression(&h.condition)).transpose()?;
             Ok(SqlBoundStatement::Select(SqlBoundSelect {
                 source: select.from.as_ref().map(|table| normalize_identifier(table.name.name.as_ref())),
                 projections,
                 predicate: select.expr.as_ref().map(bind_expression).transpose()?,
+                group_by,
+                having,
                 limit,
                 offset,
                 order_by,

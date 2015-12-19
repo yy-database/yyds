@@ -124,8 +124,6 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
 #[test]
 fn sql_binding_rejects_unimplemented_clauses_and_dml() {
     assert!(bind_sql("CREATE TABLE users (id i64)").is_err());
-    assert!(bind_sql("SELECT id FROM users GROUP BY id").is_err());
-    assert!(bind_sql("SELECT id FROM users HAVING id > 0").is_err());
     assert!(bind_sql("SELECT * FROM a JOIN b ON a.id = b.id").is_err());
 }
 
