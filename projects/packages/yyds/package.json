@@ -28,7 +28,7 @@
         }
     },
     "bin": {
-        "yyds": "./bin/yyds.mjs"
+        "yyds": "bin/yyds.mjs"
     },
     "files": [
         "bin",

@@ -18,8 +18,8 @@
         }
     },
     "bin": {
-        "psql": "./bin/psql.mjs",
-        "postgres": "./bin/postgres.mjs"
+        "psql": "bin/psql.mjs",
+        "postgres": "bin/postgres.mjs"
     },
     "files": [
         "bin",

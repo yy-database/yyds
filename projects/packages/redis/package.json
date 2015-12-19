@@ -18,8 +18,8 @@
         }
     },
     "bin": {
-        "redis-server": "./bin/redis-server.mjs",
-        "redis-cli": "./bin/redis-cli.mjs"
+        "redis-server": "bin/redis-server.mjs",
+        "redis-cli": "bin/redis-cli.mjs"
     },
     "files": [
         "bin",

@@ -18,7 +18,7 @@
         }
     },
     "bin": {
-        "sqlite3": "./bin/sqlite3.mjs"
+        "sqlite3": "bin/sqlite3.mjs"
     },
     "files": [
         "bin",

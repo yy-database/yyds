@@ -3,7 +3,7 @@
     "version": "0.0.11",
     "description": "Pretend you installed MySQL. YYDS scripting runtime underneath.",
     "license": "MPL-2.0",
-        "type": "module",
+    "type": "module",
     "sideEffects": false,
     "exports": {
         ".": {
@@ -18,8 +18,8 @@
         }
     },
     "bin": {
-        "mysql": "./bin/mysql.mjs",
-        "mysqld": "./bin/mysqld.mjs"
+        "mysql": "bin/mysql.mjs",
+        "mysqld": "bin/mysqld.mjs"
     },
     "files": [
         "bin",
