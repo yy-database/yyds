@@ -1010,6 +1010,64 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// 把 GROUP BY 的 key values 序列化成稳定字符串，用作 BTreeMap bucket key。
+fn serialize_group_key(values: &[SqlValue]) -> String {
+    use std::fmt::Write;
+    let mut buf = String::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            buf.push_str("|");
+        }
+        match v {
+            SqlValue::Null => buf.push_str("NULL"),
+            SqlValue::Number(n) => {
+                let _ = write!(buf, "N:{n}");
+            }
+            SqlValue::String(s) => {
+                buf.push_str("S:");
+                buf.push_str(s);
+            }
+            SqlValue::Boolean(b) => {
+                buf.push_str(if *b { "B:true" } else { "B:false" });
+            }
+        }
+    }
+    buf
+}
+
+/// 在 GROUP BY bucket 上下文中求值表达式。
+/// 与 `eval_expression` 的区别：Function 会被当作聚合函数对 bucket_rows 求值；
+/// Column 从 bucket 首行取（同一 bucket 内 group key 列值相同）。
+fn eval_having(
+    expr: &SqlCatalogBoundExpression,
+    bucket_rows: &[RowFieldValues],
+    group_exprs: &[SqlCatalogBoundExpression],
+    field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+) -> Result<SqlValue, SqlFrontendError> {
+    let first = bucket_rows.first().ok_or_else(|| execute_error("eval_having: empty bucket"))?;
+    Ok(match expr {
+        SqlCatalogBoundExpression::Column(col) => first
+            .value_typed(col.field_id, field_types)
+            .ok_or_else(|| execute_error(&format!("column {} not present in row", col.field_name)))?,
+        SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
+        SqlCatalogBoundExpression::Function { name, .. } => {
+            // Function 在 HAVING / GROUP BY ORDER BY 里一定是聚合函数
+            SqlAggregateFunction::from_name(name)
+                .ok_or_else(|| execute_error(&format!("unknown aggregate function in HAVING/ORDER BY: {name}")))?;
+            eval_aggregate(expr, bucket_rows, field_types)?
+        }
+        SqlCatalogBoundExpression::Unary { operator, expression } => {
+            let inner = eval_having(expression, bucket_rows, group_exprs, field_types)?;
+            eval_unary(*operator, inner)?
+        }
+        SqlCatalogBoundExpression::Binary { left, operator, right } => {
+            let l = eval_having(left, bucket_rows, group_exprs, field_types)?;
+            let r = eval_having(right, bucket_rows, group_exprs, field_types)?;
+            eval_binary(*operator, &l, &r)?
+        }
+    })
+}
+
 fn execute_error(message: &str) -> SqlFrontendError {
     SqlFrontendError { message: message.into() }
 }
