@@ -19,7 +19,6 @@ export default defineConfig({
             '@yydb/redis',
             '@yydb/mysql',
             '@yydb/postgresql',
-            '@yydb/sqlite',
         ],
     },
 });

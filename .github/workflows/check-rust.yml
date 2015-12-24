@@ -39,7 +39,6 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build -p yyds-napi --release
       - run: cargo build -p yyds-catalog --release
-      - run: cargo build -p yyds-sqlite --release
       - run: cargo build -p yyds-gateway --release
       - run: cargo build -p yyds-gateway-redis --release
       - run: cargo build -p yyds-gateway-mysql --release
