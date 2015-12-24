@@ -118,7 +118,7 @@ for (const [pkg, binding] of platforms) {
     preparePackageJson(path.join(root, "projects", "packages", pkg));
 }
 
-for (const dir of ["yyds", "redis", "mysql", "postgresql", "sqlite"]) {
+for (const dir of ["yyds", "redis", "mysql", "postgresql"]) {
     preparePackageJson(path.join(root, "projects", "packages", dir));
 }
 

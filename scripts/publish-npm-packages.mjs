@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 const root = process.cwd();
 const dirs = (
     process.env.PUBLISH_PACKAGES ||
-    "yyds-win32-x64 yyds-linux-x64 yyds-darwin-x64 yyds-darwin-arm64 yyds redis mysql postgresql sqlite"
+    "yyds-win32-x64 yyds-linux-x64 yyds-darwin-x64 yyds-darwin-arm64 yyds redis mysql postgresql"
 )
     .trim()
     .split(/\s+/)

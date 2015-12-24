@@ -11,7 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 yyds-types = { workspace = true }
-yyds-sqlite = { workspace = true }
 yyds-control = { workspace = true }
 yyds-kv = { workspace = true }
 yyds-catalog = { workspace = true }
