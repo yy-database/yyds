@@ -39,14 +39,40 @@ impl<'config> SqlBuilder<'config> {
             }
         }
 
+        // 前缀一元运算符（`-3`、`+1`）：CST 把运算符保留成前导 leaf，必须在
+        // 主表达式之前消费。否则它会被后续二元扫描当成缺失左操作数的减号，
+        // 使 `SELECT -3` 退化成 3、`a > -1` 退化成 `a > 1`。
+        let mut prefix_end = 0usize;
+        let mut prefix_start: Option<usize> = None;
+        let mut negate = false;
+        while prefix_end < children.len() {
+            match &children[prefix_end] {
+                RedTree::Leaf(leaf) if leaf.kind == SqlTokenType::Whitespace => prefix_end += 1,
+                RedTree::Leaf(leaf) if matches!(leaf.kind, SqlTokenType::Minus | SqlTokenType::Plus) => {
+                    if leaf.kind == SqlTokenType::Minus {
+                        negate = !negate;
+                    }
+                    prefix_start.get_or_insert(leaf.span.start);
+                    prefix_end += 1;
+                }
+                _ => break,
+            }
+        }
+
         let mut left = self.build_primary_expression(node.clone(), source)?;
+        if let Some(start) = prefix_start {
+            if negate {
+                let end = left.span().end;
+                left = Expression::Unary { op: UnaryOperator::Minus, expr: Box::new(left), span: Range { start, end } };
+            }
+        }
 
         // Precedence climbing
         // This is tricky because the CST might already be structured or flat.
         // If it's flat, we iterate through children.
         // If it's already structured (e.g. nested Expression nodes), we might need to handle it differently.
 
-        let mut i = 0;
+        let mut i = prefix_end;
         while i < children.len() {
             let child = &children[i];
             if let RedTree::Leaf(op_token) = child {

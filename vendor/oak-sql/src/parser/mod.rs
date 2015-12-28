@@ -6,7 +6,7 @@ use oak_core::{
     GreenNode, OakError, Parser, ParserState, TextEdit, TokenType,
     parser::{
         ParseCache, ParseOutput, parse_with_lexer,
-        pratt::{Associativity, Pratt, PrattParser, binary},
+        pratt::{Associativity, Pratt, PrattParser, binary, unary},
     },
     source::Source,
 };
@@ -80,7 +80,13 @@ impl<'config> Pratt<SqlLanguage> for SqlParser<'config> {
     }
 
     fn prefix<'a, S: Source + ?Sized>(&self, state: &mut State<'a, S>) -> &'a GreenNode<'a, SqlLanguage> {
-        self.primary(state)
+        use crate::lexer::SqlTokenType::*;
+        // 一元正负号：绑定力高于乘除（11），因此传入 12。缺少这一分支时
+        // `SELECT -3` 无法构造 Expression 节点，`a > -1` 会把 `-` 误当二元减号。
+        match state.peek_kind() {
+            Some(kind @ (Minus | Plus)) => unary(state, kind, 12, SqlElementType::Expression, |s, p| PrattParser::parse(s, p, self)),
+            _ => self.primary(state),
+        }
     }
 
     fn infix<'a, S: Source + ?Sized>(&self, state: &mut State<'a, S>, left: &'a GreenNode<'a, SqlLanguage>, min_precedence: u8) -> Option<&'a GreenNode<'a, SqlLanguage>> {
