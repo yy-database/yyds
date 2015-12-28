@@ -1187,3 +1187,114 @@ fn predicate_on_utf8_field_does_not_numeric_coerce() {
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
     assert_eq!(result.rows.len(), 0, "number literal should not coerce match against string field");
 }
+
+// --- 无 FROM 的 SELECT（驱动/ORM 连接探测）与标量内建函数 ---
+
+/// 驱动探测链路上的常量 SELECT：不触碰任何 namespace。
+fn evaluate_source_less(sql: &str) -> yyds_gateway::SqlResult {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(
+        matches!(plan, yyds_gateway::SqlExecutionPlan::Scalar(_)),
+        "source-less SELECT should plan as Scalar, got {plan:?}"
+    );
+    yyds_gateway::execute_plan(&executor, None, &plan).expect("execute")
+}
+
+#[test]
+fn sql_source_less_select_returns_constant_row() {
+    let result = evaluate_source_less("SELECT 1");
+    assert_eq!(result.columns, vec!["1".to_string()]);
+    assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::Number(1.0)]]);
+    assert_eq!(result.affected_rows, 0);
+}
+
+#[test]
+fn sql_source_less_select_projects_literals_with_default_labels() {
+    let result = evaluate_source_less("SELECT 1 AS one, 'x' AS label, TRUE AS flag, NULL AS missing");
+    assert_eq!(result.columns, vec!["one", "label", "flag", "missing"]);
+    assert_eq!(
+        result.rows[0],
+        vec![
+            yyds_gateway::SqlValue::Number(1.0),
+            yyds_gateway::SqlValue::String("x".into()),
+            yyds_gateway::SqlValue::Boolean(true),
+            yyds_gateway::SqlValue::Null,
+        ]
+    );
+}
+
+#[test]
+fn sql_source_less_select_evaluates_version_probe() {
+    let result = evaluate_source_less("SELECT VERSION()");
+    assert_eq!(result.columns, vec!["VERSION".to_string()]);
+    match &result.rows[0][0] {
+        yyds_gateway::SqlValue::String(banner) => assert!(banner.contains("yyds"), "unexpected banner: {banner}"),
+        other => panic!("VERSION() should return text, got {other:?}"),
+    }
+}
+
+#[test]
+fn sql_source_less_select_evaluates_now_probe() {
+    let result = evaluate_source_less("SELECT NOW()");
+    match &result.rows[0][0] {
+        yyds_gateway::SqlValue::String(timestamp) => {
+            assert_eq!(timestamp.len(), 19, "expected `YYYY-MM-DD HH:MM:SS`, got {timestamp}");
+            assert!(timestamp.as_bytes()[4] == b'-' && timestamp.as_bytes()[10] == b' ', "unexpected shape: {timestamp}");
+        }
+        other => panic!("NOW() should return text, got {other:?}"),
+    }
+}
+
+#[test]
+fn sql_source_less_select_evaluates_string_and_numeric_scalars() {
+    let result = evaluate_source_less(
+        "SELECT LOWER('ABC'), UPPER('abc'), LENGTH('hello'), COALESCE(NULL, 'fallback'), ABS(-3), ROUND(2.567, 2)",
+    );
+    assert_eq!(result.rows[0], vec![
+        yyds_gateway::SqlValue::String("abc".into()),
+        yyds_gateway::SqlValue::String("ABC".into()),
+        yyds_gateway::SqlValue::Number(5.0),
+        yyds_gateway::SqlValue::String("fallback".into()),
+        yyds_gateway::SqlValue::Number(3.0),
+        yyds_gateway::SqlValue::Number(2.57),
+    ]);
+}
+
+#[test]
+fn sql_source_less_select_honours_limit_zero() {
+    let result = evaluate_source_less("SELECT 1 LIMIT 0");
+    assert_eq!(result.columns, vec!["1".to_string()]);
+    assert!(result.rows.is_empty(), "LIMIT 0 must suppress the constant row");
+}
+
+#[test]
+fn sql_source_less_select_rejects_where_clause() {
+    let catalog = catalog("table users { @@id: i64 }\n");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT 1 WHERE 1 = 1", &catalog, 7).expect("catalog bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("WHERE without FROM must be rejected");
+    assert!(error.message.contains("requires a FROM source"), "unexpected message: {}", error.message);
+}
+
+#[test]
+fn sql_source_less_select_keeps_unary_minus_sign() {
+    // 回归：Oak 曾把前导 `-` 当成缺失左操作数的二元减号，`SELECT -3` 返回 3。
+    let result = evaluate_source_less("SELECT -3, ABS(-3), 1 - -2");
+    assert_eq!(result.rows[0], vec![
+        yyds_gateway::SqlValue::Number(-3.0),
+        yyds_gateway::SqlValue::Number(3.0),
+        yyds_gateway::SqlValue::Number(3.0),
+    ]);
+}
+
+#[test]
+fn sql_scalar_function_binding_rejects_unknown_name_and_bad_arity() {
+    let catalog = catalog("table users { @@id: i64 }\n");
+    let unknown = yyds_gateway::bind_sql_catalog("SELECT NO_SUCH_FN(1)", &catalog, 7).expect_err("unknown fn");
+    assert!(unknown.message.contains("unknown SQL function"), "unexpected message: {}", unknown.message);
+
+    let arity = yyds_gateway::bind_sql_catalog("SELECT LOWER()", &catalog, 7).expect_err("arity");
+    assert!(arity.message.contains("LOWER() expects 1 argument"), "unexpected message: {}", arity.message);
+}

@@ -323,7 +323,7 @@ fn execute_simple_query(
             return write_error_response(stream, "42883", &format!("SQL plan error: {}", error.message));
         }
     };
-    let is_read = matches!(&plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_));
+    let is_read = matches!(&plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Scalar(_));
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
     let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan) {
         Ok(r) => r,
@@ -345,7 +345,7 @@ fn execute_simple_query(
             SqlExecutionPlan::Insert(_) => format!("INSERT 0 {}", affected),
             SqlExecutionPlan::Update(_) => format!("UPDATE {}", affected),
             SqlExecutionPlan::Delete(_) => format!("DELETE {}", affected),
-            SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) => unreachable!(),
+            SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Scalar(_) => unreachable!(),
         };
         write_command_complete(stream, &tag)?;
     }

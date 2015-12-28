@@ -17,8 +17,11 @@ use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
     catalog_bind::SqlCatalogBoundExpression,
-    sql::{SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError},
-    sql_planner::{DeletePlan, ReadPlan, ScanPlan, SqlExecutionPlan, UpdatePlan, WritePlan},
+    sql::{
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError,
+        SqlScalarFunction,
+    },
+    sql_planner::{DeletePlan, ReadPlan, ScanPlan, ScalarPlan, SqlExecutionPlan, UpdatePlan, WritePlan},
 };
 
 /// SQL 查询的结果集。
@@ -271,10 +274,26 @@ pub fn execute_plan(
     match plan {
         SqlExecutionPlan::Read(read_plan) => execute_read(executor, transaction, read_plan),
         SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, scan_plan),
+        SqlExecutionPlan::Scalar(scalar_plan) => execute_scalar(scalar_plan),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan),
         SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, transaction, delete_plan),
     }
+}
+
+/// 执行无 FROM 的 SELECT：对常量与标量内建函数求值，产出一行结果。
+fn execute_scalar(plan: &ScalarPlan) -> Result<SqlResult, SqlFrontendError> {
+    let columns: Vec<String> = plan.projections.iter().map(|(_, label)| label.clone()).collect();
+    if plan.suppress_row {
+        return Ok(SqlResult { columns, rows: Vec::new(), affected_rows: 0 });
+    }
+    let row_values = RowFieldValues::new();
+    let field_types = BTreeMap::new();
+    let mut row = Vec::with_capacity(plan.projections.len());
+    for (expression, _) in &plan.projections {
+        row.push(eval_expression(expression, &row_values, &field_types)?);
+    }
+    Ok(SqlResult { columns, rows: vec![row], affected_rows: 0 })
 }
 
 fn execute_read(
@@ -856,10 +875,101 @@ fn eval_expression(
             let r = eval_expression(right, row, field_types)?;
             eval_binary(*operator, &l, &r)?
         }
-        SqlCatalogBoundExpression::Function { name, .. } => {
-            return Err(execute_error(&format!("aggregate function {name} cannot be evaluated on a single row")));
+        SqlCatalogBoundExpression::Function { name, args } => {
+            let scalar = SqlScalarFunction::from_name(name).ok_or_else(|| {
+                execute_error(&format!("aggregate function {name} cannot be evaluated on a single row"))
+            })?;
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(eval_expression(arg, row, field_types)?);
+            }
+            eval_scalar_function(scalar, &values)?
         }
     })
+}
+
+/// 对一行求值标量内建函数。参数已按从左到右求值完毕。
+fn eval_scalar_function(function: SqlScalarFunction, args: &[SqlValue]) -> Result<SqlValue, SqlFrontendError> {
+    use SqlValue::{Null, Number, String as Text};
+    Ok(match function {
+        SqlScalarFunction::Version => Text(crate::version_label()),
+        // 未选择数据库 / schema 时，MySQL 与 PostgreSQL 都返回 NULL。
+        SqlScalarFunction::Database | SqlScalarFunction::CurrentSchema => Null,
+        SqlScalarFunction::Now => Text(current_timestamp()),
+        SqlScalarFunction::Lower => match scalar_text(args, 0) {
+            Some(text) => Text(text.to_lowercase()),
+            None => Null,
+        },
+        SqlScalarFunction::Upper => match scalar_text(args, 0) {
+            Some(text) => Text(text.to_uppercase()),
+            None => Null,
+        },
+        SqlScalarFunction::Length => match scalar_text(args, 0) {
+            Some(text) => Number(text.chars().count() as f64),
+            None => Null,
+        },
+        SqlScalarFunction::Coalesce => args.iter().find(|value| **value != Null).cloned().unwrap_or(Null),
+        SqlScalarFunction::Abs => match args.first() {
+            Some(Number(value)) => Number(value.abs()),
+            Some(Null) | None => Null,
+            Some(_) => Number(0.0),
+        },
+        SqlScalarFunction::Round => match (args.first(), args.get(1)) {
+            (Some(Number(value)), Some(Number(digits))) => {
+                let factor = 10f64.powi(*digits as i32);
+                Number((value * factor).round() / factor)
+            }
+            (Some(Number(value)), _) => Number(value.round()),
+            (Some(Null) | None, _) => Null,
+            (Some(_), _) => Number(0.0),
+        },
+    })
+}
+
+/// 把第 `index` 个参数取成字符串；NULL 或缺失返回 `None`。
+fn scalar_text(args: &[SqlValue], index: usize) -> Option<String> {
+    match args.get(index) {
+        Some(SqlValue::String(text)) => Some(text.clone()),
+        Some(SqlValue::Number(value)) => Some(format_number(*value)),
+        Some(SqlValue::Boolean(value)) => Some(if *value { "1" } else { "0" }.to_string()),
+        Some(SqlValue::Null) | None => None,
+    }
+}
+
+/// Session timestamp in SQL `YYYY-MM-DD HH:MM:SS` form, derived from the host clock.
+fn current_timestamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    let days = seconds.div_euclid(86_400);
+    let remainder = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}", remainder / 3600, (remainder % 3600) / 60, remainder % 60)
+}
+
+/// Gregorian date from days since 1970-01-01 (Howard Hinnant's civil_from_days).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 { month_prime + 3 } else { month_prime - 9 };
+    (if month <= 2 { year + 1 } else { year }, month as u32, day as u32)
+}
+
+/// Render a numeric SQL value with no trailing `.0` for integral values.
+fn format_number(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    }
+    else {
+        format!("{value}")
+    }
 }
 
 fn eval_unary(op: SqlBoundUnaryOperator, operand: SqlValue) -> Result<SqlValue, SqlFrontendError> {

@@ -235,6 +235,63 @@ impl SqlAggregateFunction {
     }
 }
 
+/// SQL scalar (non-aggregate) function identity recognized by the gateway.
+///
+/// These are the functions drivers and ORMs probe on connect. They take no
+/// table source and evaluate to a single value per row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlScalarFunction {
+    /// `VERSION()` — engine banner.
+    Version,
+    /// `DATABASE()` — current schema name.
+    Database,
+    /// `CURRENT_SCHEMA()` / `SCHEMA()` — current schema name.
+    CurrentSchema,
+    /// `NOW()` / `CURRENT_TIMESTAMP()` — session timestamp.
+    Now,
+    /// `LOWER(x)` / `LCASE(x)`.
+    Lower,
+    /// `UPPER(x)` / `UCASE(x)`.
+    Upper,
+    /// `LENGTH(x)` / `CHAR_LENGTH(x)`.
+    Length,
+    /// `COALESCE(a, b, ...)` / `IFNULL(a, b)`.
+    Coalesce,
+    /// `ABS(x)`.
+    Abs,
+    /// `ROUND(x[, digits])`.
+    Round,
+}
+
+impl SqlScalarFunction {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "VERSION" => Some(Self::Version),
+            "DATABASE" | "CURRENT_DATABASE" => Some(Self::Database),
+            "CURRENT_SCHEMA" | "SCHEMA" => Some(Self::CurrentSchema),
+            "NOW" | "CURRENT_TIMESTAMP" => Some(Self::Now),
+            "LOWER" | "LCASE" => Some(Self::Lower),
+            "UPPER" | "UCASE" => Some(Self::Upper),
+            "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LEN" => Some(Self::Length),
+            "COALESCE" | "IFNULL" => Some(Self::Coalesce),
+            "ABS" => Some(Self::Abs),
+            "ROUND" => Some(Self::Round),
+            _ => None,
+        }
+    }
+
+    /// Expected argument count as `(minimum, maximum)`, where `maximum == None`
+    /// means variadic.
+    pub fn arity(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Version | Self::Database | Self::CurrentSchema | Self::Now => (0, Some(0)),
+            Self::Lower | Self::Upper | Self::Length | Self::Abs => (1, Some(1)),
+            Self::Round => (1, Some(2)),
+            Self::Coalesce => (1, None),
+        }
+    }
+}
+
 /// SQL literal retained by the gateway surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlBoundLiteral {
@@ -483,11 +540,29 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
         }
         Expression::FunctionCall { name, args, .. } => {
             let fname = normalize_identifier(name.name.as_ref());
-            // 只允许已知的聚合函数，拒绝未知函数。
-            if SqlAggregateFunction::from_name(&fname).is_none() {
-                return Err(bind_error(&format!("unknown SQL function: {fname} (only COUNT/SUM/AVG/MAX/MIN are supported)")));
-            }
             let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
+            // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
+            if SqlAggregateFunction::from_name(&fname).is_some() {
+                return Ok(SqlBoundExpression::Function { name: fname, args: bound_args });
+            }
+            let scalar = SqlScalarFunction::from_name(&fname).ok_or_else(|| {
+                bind_error(&format!(
+                    "unknown SQL function: {fname} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/COALESCE/ABS/ROUND)"
+                ))
+            })?;
+            let (minimum, maximum) = scalar.arity();
+            let supplied = bound_args.len();
+            if supplied < minimum || maximum.is_some_and(|max| supplied > max) {
+                return Err(bind_error(&format!(
+                    "{fname}() expects {}{} argument(s), got {supplied}",
+                    minimum,
+                    match maximum {
+                        Some(max) if max == minimum => String::new(),
+                        Some(max) => format!("..{max}"),
+                        None => "+".to_string(),
+                    }
+                )));
+            }
             Ok(SqlBoundExpression::Function { name: fname, args: bound_args })
         }
         _ => Err(bind_error("SQL expression is outside the gateway binding subset")),

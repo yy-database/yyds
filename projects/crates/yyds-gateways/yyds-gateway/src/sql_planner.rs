@@ -35,7 +35,10 @@ pub fn plan_statement(statement: SqlCatalogBoundStatement, catalog: &SqlCatalog)
 
 /// 计划一个 SELECT。
 pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
-    let source = select.source.as_ref().ok_or_else(|| planner_error("SQL gateway requires a FROM source"))?;
+    // 无 FROM 的 SELECT 只做常量 / 内建函数求值（驱动探测 VERSION()、SELECT 1 等）。
+    let Some(source) = select.source.as_ref() else {
+        return plan_source_less_select(select);
+    };
     let table = find_table(catalog, source.type_id)?;
     let namespace = format!("table:{}", source.type_id);
     let pk_field = primary_key_of(table)?;
@@ -129,6 +132,37 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         has_aggregate,
         field_types,
     }))
+}
+
+/// 计划一个没有 FROM 的 SELECT：只允许常量与内建函数，不访问任何 namespace。
+fn plan_source_less_select(select: SqlCatalogBoundSelect) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    if select.predicate.is_some() {
+        return Err(planner_error("SQL WHERE requires a FROM source"));
+    }
+    if select.group_by.is_some() {
+        return Err(planner_error("SQL GROUP BY requires a FROM source"));
+    }
+    if select.having.is_some() {
+        return Err(planner_error("SQL HAVING requires a FROM source"));
+    }
+    let mut projections: Vec<(SqlCatalogBoundExpression, String)> = Vec::with_capacity(select.projections.len());
+    for projection in select.projections {
+        match projection {
+            SqlCatalogBoundProjection::Star(_) => {
+                return Err(planner_error("SQL star projection requires a catalog table source"));
+            }
+            SqlCatalogBoundProjection::Expression { expression, alias } => {
+                let label = alias.unwrap_or_else(|| scalar_projection_label(&expression));
+                projections.push((expression, label));
+            }
+        }
+    }
+    if projections.is_empty() {
+        return Err(planner_error("SQL SELECT without FROM requires at least one projection"));
+    }
+    // `LIMIT 0` 按 SQL 语义返回空结果集。
+    let suppress_row = select.limit == Some(0);
+    Ok(SqlExecutionPlan::Scalar(ScalarPlan { projections, suppress_row }))
 }
 
 /// 计划一个 INSERT。要求 VALUES 里第一个值是主键 literal。
@@ -227,6 +261,8 @@ pub enum SqlExecutionPlan {
     Read(ReadPlan),
     /// SELECT — namespace 扫描 + 行级过滤。
     Scan(ScanPlan),
+    /// SELECT without FROM — constant and scalar builtin evaluation.
+    Scalar(ScalarPlan),
     /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
     Insert(WritePlan),
     /// UPDATE — 先 Get 再 remaining_predicate 再 Put。
@@ -287,6 +323,15 @@ pub struct ScanPlan {
     pub has_aggregate: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+}
+
+/// SELECT without FROM 执行计划：纯常量与标量内建函数求值，产出单行结果。
+#[derive(Debug, Clone)]
+pub struct ScalarPlan {
+    /// 投影表达式与其结果列名。
+    pub projections: Vec<(SqlCatalogBoundExpression, String)>,
+    /// `LIMIT 0` 时按 SQL 语义返回空结果集。
+    pub suppress_row: bool,
 }
 
 /// INSERT 执行计划。payload 由 execute 层做 TLV 编码。
@@ -548,6 +593,20 @@ fn primary_key_of(table: &crate::SqlCatalogTable) -> Result<&crate::SqlCatalogFi
 
 fn find_table(catalog: &SqlCatalog, type_id: u64) -> Result<&crate::SqlCatalogTable, SqlFrontendError> {
     catalog.tables().iter().find(|t| t.type_id == type_id).ok_or_else(|| planner_error("catalog table is missing"))
+}
+
+/// 无 FROM 投影的默认列名：字面量取字面量文本，函数取大写函数名，
+/// 其余表达式退回 debug 形状。驱动探测依赖这些名字（`SELECT 1` 的列名是 `1`）。
+fn scalar_projection_label(expr: &SqlCatalogBoundExpression) -> String {
+    match expr {
+        SqlCatalogBoundExpression::Literal(lit) => match lit {
+            SqlBoundLiteral::Number(text) | SqlBoundLiteral::String(text) => text.clone(),
+            SqlBoundLiteral::Boolean(value) => if *value { "true" } else { "false" }.to_string(),
+            SqlBoundLiteral::Null => "NULL".to_string(),
+        },
+        SqlCatalogBoundExpression::Function { name, .. } => name.to_ascii_uppercase(),
+        other => expression_default_label(other),
+    }
 }
 
 fn expression_default_label(expr: &SqlCatalogBoundExpression) -> String {
