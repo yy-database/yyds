@@ -283,6 +283,44 @@ fn handle_simple_query(
                 write_command_complete(stream, "ROLLBACK")
             }
         },
+        Ok(Some(SqlSessionCommand::SetVariable { .. })) => {
+            if session.failed {
+                return write_error_response(
+                    stream,
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block",
+                );
+            }
+            write_command_complete(stream, "SET")
+        }
+        Ok(Some(SqlSessionCommand::ShowParameter { name, .. })) => {
+            if session.failed {
+                return write_error_response(
+                    stream,
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block",
+                );
+            }
+            match pg_parameter(&name) {
+                Some(value) => {
+                    write_row_description(stream, &[name.clone()])?;
+                    write_data_row(stream, &[SqlValue::String(value.to_string())])?;
+                    write_command_complete(stream, "SHOW")
+                }
+                None => {
+                    session.fail();
+                    write_error_response(stream, "42704", &format!("unrecognized configuration parameter \"{name}\""))
+                }
+            }
+        }
+        Ok(Some(SqlSessionCommand::ShowVariables { .. })) => {
+            session.fail();
+            write_error_response(stream, "42601", "SHOW VARIABLES is MySQL syntax, PostgreSQL uses SHOW <parameter>")
+        }
+        Ok(Some(SqlSessionCommand::Pragma { .. })) => {
+            session.fail();
+            write_error_response(stream, "42601", "PRAGMA is not PostgreSQL syntax")
+        }
         Ok(Some(SqlSessionCommand::SetNames { .. })) | Ok(None) => {
             if session.failed {
                 return write_error_response(
@@ -350,6 +388,30 @@ fn execute_simple_query(
         write_command_complete(stream, &tag)?;
     }
     Ok(())
+}
+
+/// Emulated PostgreSQL configuration parameters exposed through `SHOW <name>`.
+const PG_PARAMETERS: &[(&str, &str)] = &[
+    ("application_name", ""),
+    ("client_encoding", "UTF8"),
+    ("client_min_messages", "notice"),
+    ("datestyle", "ISO, MDY"),
+    ("default_transaction_isolation", "read committed"),
+    ("extra_float_digits", "3"),
+    ("integer_datetimes", "on"),
+    ("intervalstyle", "postgres"),
+    ("server_encoding", "UTF8"),
+    ("server_version", "16.4"),
+    ("search_path", "yy_public"),
+    ("standard_conforming_strings", "on"),
+    ("timezone", "UTC"),
+    ("transaction_isolation", "read committed"),
+];
+
+/// Case-insensitive lookup in [`PG_PARAMETERS`].
+fn pg_parameter(name: &str) -> Option<&'static str> {
+    let needle = name.trim().to_ascii_lowercase();
+    PG_PARAMETERS.iter().find(|(key, _)| *key == needle).map(|(_, value)| *value)
 }
 
 /// PostgreSQL RowDescription message ('T') — name only，所有列 text 格式。

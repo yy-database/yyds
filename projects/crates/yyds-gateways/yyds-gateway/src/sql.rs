@@ -19,6 +19,47 @@ pub enum SqlSessionCommand {
     SetNames { character_set: String, collation: Option<String> },
     /// Transaction boundary used by SQL protocol sessions.
     Transaction(SqlTransactionAction),
+    /// `SHOW [GLOBAL|SESSION] VARIABLES [LIKE 'pattern']` — variable table probe.
+    ShowVariables {
+        /// Requested scope prefix, absent when the client did not name one.
+        scope: Option<SqlVariableScope>,
+        /// Optional `LIKE` pattern covering the variable name.
+        pattern: Option<String>,
+    },
+    /// `SHOW <name>` — single-parameter probe used by PostgreSQL clients.
+    ShowParameter {
+        /// Requested scope prefix, absent when the client did not name one.
+        scope: Option<SqlVariableScope>,
+        /// Parameter name as written by the client.
+        name: String,
+    },
+    /// `SET [GLOBAL|SESSION|LOCAL] <name> = <value>` — session assignment.
+    SetVariable {
+        /// Requested scope prefix, absent when the client did not name one.
+        scope: Option<SqlVariableScope>,
+        /// Variable name as written by the client.
+        name: String,
+        /// Assigned value, unbound against any catalog table.
+        value: SqlBoundExpression,
+    },
+    /// SQLite `PRAGMA <name> [= <value>]`.
+    Pragma {
+        /// Pragma name as written by the client.
+        name: String,
+        /// Optional assigned value.
+        value: Option<SqlBoundExpression>,
+    },
+}
+
+/// Scope prefix carried by `SET` and `SHOW` session statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlVariableScope {
+    /// `GLOBAL` — server-wide scope.
+    Global,
+    /// `SESSION` — connection scope.
+    Session,
+    /// `LOCAL` — dialect-specific local scope.
+    Local,
 }
 
 /// Transaction operation recognized by Oak and projected for protocol adapters.
@@ -64,8 +105,34 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
             oak_sql::ast::TransactionAction::Commit => SqlTransactionAction::Commit,
             oak_sql::ast::TransactionAction::Rollback => SqlTransactionAction::Rollback,
         })),
+        SqlStatement::SetVariable(statement) => Some(SqlSessionCommand::SetVariable {
+            scope: statement.scope.map(project_variable_scope),
+            name: statement.name.to_string(),
+            value: bind_expression(&statement.value)?,
+        }),
+        SqlStatement::Show(statement) => {
+            let scope = statement.scope.map(project_variable_scope);
+            if statement.target.eq_ignore_ascii_case("VARIABLES") {
+                Some(SqlSessionCommand::ShowVariables { scope, pattern: statement.like.as_deref().map(str::to_string) })
+            }
+            else {
+                Some(SqlSessionCommand::ShowParameter { scope, name: statement.target.to_string() })
+            }
+        }
+        SqlStatement::Pragma(statement) => Some(SqlSessionCommand::Pragma {
+            name: statement.name.to_string(),
+            value: statement.value.as_ref().map(bind_expression).transpose()?,
+        }),
         _ => None,
     })
+}
+
+fn project_variable_scope(scope: oak_sql::ast::SessionScope) -> SqlVariableScope {
+    match scope {
+        oak_sql::ast::SessionScope::Global => SqlVariableScope::Global,
+        oak_sql::ast::SessionScope::Session => SqlVariableScope::Session,
+        oak_sql::ast::SessionScope::Local => SqlVariableScope::Local,
+    }
 }
 
 /// Gateway-owned statement after Oak parsing and SQL-surface binding.

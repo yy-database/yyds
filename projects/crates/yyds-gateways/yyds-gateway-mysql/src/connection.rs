@@ -12,8 +12,8 @@ use std::{
 
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan, SqlResult,
-    SqlSessionCommand, SqlTransactionAction, SqlValue,
+    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
+    SqlExecutionPlan, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -27,6 +27,29 @@ const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
 const CLIENT_PLUGIN_AUTH_LENENC: u32 = 0x0020_0000;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
 const MAX_PACKET: usize = 1024 * 1024;
+
+/// Emulated `SHOW VARIABLES` table. Values describe what this gateway actually
+/// implements: no strict mode, a single-node engine, and utf8mb4 text.
+const MYSQL_VARIABLES: &[(&str, &str)] = &[
+    ("autocommit", "ON"),
+    ("character_set_client", "utf8mb4"),
+    ("character_set_connection", "utf8mb4"),
+    ("character_set_results", "utf8mb4"),
+    ("character_set_server", "utf8mb4"),
+    ("collation_connection", "utf8mb4_general_ci"),
+    ("collation_server", "utf8mb4_general_ci"),
+    ("init_connect", ""),
+    ("lower_case_table_names", "0"),
+    ("max_allowed_packet", "67108864"),
+    ("net_write_timeout", "60"),
+    ("sql_mode", ""),
+    ("time_zone", "SYSTEM"),
+    ("transaction_isolation", "READ-COMMITTED"),
+    ("tx_isolation", "READ-COMMITTED"),
+    ("version", "8.0.36-yyds"),
+    ("version_comment", "YYDS MySQL gateway"),
+    ("wait_timeout", "28800"),
+];
 
 /// Runtime dependencies injected into a MySQL connection so SQL SELECT can execute.
 #[derive(Debug)]
@@ -202,6 +225,48 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             write_ok(&mut stream, sequence.wrapping_add(1))?;
                         }
                     },
+                    Ok(Some(SqlSessionCommand::ShowVariables { pattern, .. })) => {
+                        let mut rows = Vec::new();
+                        for (name, value) in MYSQL_VARIABLES {
+                            if pattern.as_deref().is_none_or(|pattern| like_matches(pattern, name)) {
+                                rows.push(vec![SqlValue::String((*name).to_string()), SqlValue::String((*value).to_string())]);
+                            }
+                        }
+                        let result =
+                            SqlResult { columns: vec!["Variable_name".into(), "Value".into()], rows, affected_rows: 0 };
+                        write_result_set(&mut stream, sequence.wrapping_add(1), &result)?;
+                    }
+                    Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
+                        // 引擎没有隐式事务：每条语句立即提交，因此 `autocommit=0` 会造成
+                        // 客户端误判事务边界，必须显式拒绝而不是静默接受。
+                        if name.eq_ignore_ascii_case("autocommit") && !variable_truthy(&value) {
+                            session.fail();
+                            write_error(
+                                &mut stream,
+                                sequence.wrapping_add(1),
+                                1235,
+                                "42000",
+                                "autocommit=0 is not supported: statements commit immediately",
+                            )?;
+                        }
+                        else {
+                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                        }
+                    }
+                    Ok(Some(SqlSessionCommand::ShowParameter { name, .. })) => {
+                        session.fail();
+                        write_error(
+                            &mut stream,
+                            sequence.wrapping_add(1),
+                            1064,
+                            "42000",
+                            &format!("MySQL requires SHOW VARIABLES instead of SHOW {name}"),
+                        )?;
+                    }
+                    Ok(Some(SqlSessionCommand::Pragma { .. })) => {
+                        session.fail();
+                        write_error(&mut stream, sequence.wrapping_add(1), 1064, "42000", "PRAGMA is not MySQL syntax")?;
+                    }
                     Ok(None) | Err(_) => {
                         if session.failed {
                             write_error(
@@ -520,6 +585,36 @@ fn encode_length_encoded(out: &mut Vec<u8>, value: u64) {
 fn write_eof(stream: &mut impl Write, sequence: u8) -> io::Result<()> {
     // 简化 EOF packet: 0xFE + 0x0000 (warnings) + 0x0200 (status: SERVER_STATUS_AUTOCOMMIT)
     write_packet(stream, sequence, &[0xFE, 0x00, 0x00, 0x02, 0x00])
+}
+
+/// MySQL `LIKE` matching for `SHOW VARIABLES LIKE 'pattern'` — `%` matches any
+/// run of bytes and `_` matches one byte, case-insensitively.
+fn like_matches(pattern: &str, value: &str) -> bool {
+    fn walk(pattern: &[u8], value: &[u8]) -> bool {
+        match pattern.first() {
+            None => value.is_empty(),
+            Some(b'%') => walk(&pattern[1..], value) || (!value.is_empty() && walk(pattern, &value[1..])),
+            Some(b'_') => !value.is_empty() && walk(&pattern[1..], &value[1..]),
+            Some(byte) => {
+                value.first().is_some_and(|candidate| candidate.eq_ignore_ascii_case(byte)) && walk(&pattern[1..], &value[1..])
+            }
+        }
+    }
+    walk(pattern.to_ascii_lowercase().as_bytes(), value.to_ascii_lowercase().as_bytes())
+}
+
+/// Whether a `SET` value means "on" in MySQL boolean spelling.
+fn variable_truthy(value: &SqlBoundExpression) -> bool {
+    fn word(text: &str) -> bool {
+        matches!(text.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes" | "default")
+    }
+    match value {
+        SqlBoundExpression::Literal(SqlBoundLiteral::Boolean(flag)) => *flag,
+        SqlBoundExpression::Literal(SqlBoundLiteral::Number(number)) => word(number),
+        SqlBoundExpression::Literal(SqlBoundLiteral::String(text)) => word(text),
+        SqlBoundExpression::Identifier(name) => word(name),
+        _ => true,
+    }
 }
 
 fn packet_error(error: PacketError) -> io::Error {

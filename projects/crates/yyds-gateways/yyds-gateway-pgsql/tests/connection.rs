@@ -57,6 +57,45 @@ fn start_server() -> (TcpStream, thread::JoinHandle<()>) {
 }
 
 #[test]
+fn session_variable_statements_follow_postgresql_semantics() {
+    let (mut client, server) = start_server();
+
+    send_query(&mut client, "SET client_encoding = 'UTF8'");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"SET\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    send_query(&mut client, "SHOW server_version");
+    let shown = receive_until_ready(&mut client);
+    assert_eq!(shown.len(), 4);
+    assert_eq!(shown[0].0, b'T');
+    assert_eq!(shown[1].0, b'D');
+    assert!(shown[1].1.windows(4).any(|window| window == b"16.4"));
+    assert_eq!(shown[2], (b'C', b"SHOW\0".to_vec()));
+    assert_eq!(shown[3], (b'Z', b"I".to_vec()));
+
+    // MySQL 专有语法在 PostgreSQL 下必须报语法错误
+    send_query(&mut client, "SHOW VARIABLES");
+    let mysql_only = receive_until_ready(&mut client);
+    assert_eq!(mysql_only[0].0, b'E');
+    assert!(mysql_only[0].1.windows(5).any(|window| window == b"42601"));
+    assert_eq!(mysql_only.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    send_query(&mut client, "PRAGMA user_version");
+    let pragma = receive_until_ready(&mut client);
+    assert_eq!(pragma[0].0, b'E');
+    assert!(pragma[0].1.windows(5).any(|window| window == b"42601"));
+
+    // 未知参数必须明确报未识别，而不是返回空值
+    send_query(&mut client, "SHOW nope_param");
+    let unknown = receive_until_ready(&mut client);
+    assert_eq!(unknown[0].0, b'E');
+    assert!(unknown[0].1.windows(5).any(|window| window == b"42704"));
+    assert_eq!(unknown.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
 fn transaction_commands_track_failed_state_and_rollback_recovery() {
     let (mut client, server) = start_server();
 

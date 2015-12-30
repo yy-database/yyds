@@ -29,7 +29,7 @@ pub use crate::{
     sql::{
         bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral,
         SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlFrontendError, SqlSessionCommand,
-        SqlTransactionAction,
+        SqlTransactionAction, SqlVariableScope,
     },
 };
 

@@ -37,3 +37,53 @@ fn oak_session_statements_are_projected_without_gateway_parsing() {
     assert_eq!(parse_session_command("SELECT 1").unwrap(), None);
     assert!(parse_session_command("SET NAMES").is_err());
 }
+
+#[test]
+fn oak_session_variable_statements_are_projected() {
+    use yyds_gateway::{
+        parse_session_command, SqlBoundExpression, SqlBoundLiteral, SqlSessionCommand, SqlVariableScope,
+    };
+
+    assert_eq!(
+        parse_session_command("SHOW VARIABLES").unwrap(),
+        Some(SqlSessionCommand::ShowVariables { scope: None, pattern: None })
+    );
+    assert_eq!(
+        parse_session_command("SHOW SESSION VARIABLES LIKE 'auto%'").unwrap(),
+        Some(SqlSessionCommand::ShowVariables { scope: Some(SqlVariableScope::Session), pattern: Some("auto%".into()) })
+    );
+    assert_eq!(
+        parse_session_command("SHOW server_version").unwrap(),
+        Some(SqlSessionCommand::ShowParameter { scope: None, name: "server_version".into() })
+    );
+    assert_eq!(
+        parse_session_command("SET autocommit = 0").unwrap(),
+        Some(SqlSessionCommand::SetVariable {
+            scope: None,
+            name: "autocommit".into(),
+            value: SqlBoundExpression::Literal(SqlBoundLiteral::Number("0".into())),
+        })
+    );
+    assert_eq!(
+        parse_session_command("SET SESSION sql_mode = 'STRICT_TRANS_TABLES'").unwrap(),
+        Some(SqlSessionCommand::SetVariable {
+            scope: Some(SqlVariableScope::Session),
+            name: "sql_mode".into(),
+            value: SqlBoundExpression::Literal(SqlBoundLiteral::String("STRICT_TRANS_TABLES".into())),
+        })
+    );
+    assert_eq!(
+        parse_session_command("PRAGMA journal_mode = WAL").unwrap(),
+        Some(SqlSessionCommand::Pragma {
+            name: "journal_mode".into(),
+            value: Some(SqlBoundExpression::Identifier("WAL".into())),
+        })
+    );
+    assert_eq!(
+        parse_session_command("PRAGMA user_version").unwrap(),
+        Some(SqlSessionCommand::Pragma { name: "user_version".into(), value: None })
+    );
+    // `SET NAMES` 仍是字符集协商，不能被当作普通变量赋值。
+    assert!(matches!(parse_session_command("SET NAMES utf8mb4").unwrap(), Some(SqlSessionCommand::SetNames { .. })));
+    assert!(parse_session_command("SET autocommit").is_err());
+}

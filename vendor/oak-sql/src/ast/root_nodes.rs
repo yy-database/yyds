@@ -2,7 +2,7 @@ use crate::ast::statements::{
     ddl::{AlterStatement, CreateStatement, DropStatement},
     dml::{DeleteStatement, InsertStatement, UpdateStatement},
     query::SelectStatement,
-    session::{SetNamesStatement, TransactionStatement},
+    session::{PragmaStatement, SetNamesStatement, SetVariableStatement, ShowStatement, TransactionStatement},
 };
 use core::range::Range;
 use oak_core::source::{SourceBuffer, ToSource};
@@ -55,6 +55,12 @@ pub enum SqlStatement {
     Transaction(TransactionStatement),
     /// A character-set session setting.
     SetNames(SetNamesStatement),
+    /// A `SET <name> = <value>` session variable statement.
+    SetVariable(SetVariableStatement),
+    /// A `SHOW` statement covering variable probes.
+    Show(ShowStatement),
+    /// A SQLite `PRAGMA` statement.
+    Pragma(PragmaStatement),
     /// An error occurred during parsing or building.
     Error {
         /// The error message.
@@ -83,6 +89,9 @@ impl ToSource for SqlStatement {
             SqlStatement::Alter(s) => s.to_source(buffer),
             SqlStatement::Transaction(s) => s.to_source(buffer),
             SqlStatement::SetNames(s) => s.to_source(buffer),
+            SqlStatement::SetVariable(s) => s.to_source(buffer),
+            SqlStatement::Show(s) => s.to_source(buffer),
+            SqlStatement::Pragma(s) => s.to_source(buffer),
             SqlStatement::Error { message, .. } => {
                 buffer.push("/* ERROR: ");
                 buffer.push(message);
