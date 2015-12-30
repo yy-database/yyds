@@ -587,13 +587,12 @@ fn sql_delete_removes_row() {
 }
 
 #[test]
-fn sql_insert_columns_explicit_order_is_rejected_by_oak() {
+fn sql_insert_column_list_must_name_catalog_columns() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
-    // Oak SQL parser 当前只支持 `INSERT INTO t VALUES (...)`，不支持显式列顺序。
-    // catalog_bind.rs 里留了按 catalog 字段顺序填充的路径，等 Oak parser 扩展后启用。
+    // `@@id` 是 catalog 里的主键注解，SQL 列名是 `id`；`@@` 前缀属于系统变量，不能当列名。
     let error = yyds_gateway::bind_sql_catalog("INSERT INTO users (age, @@id, name) VALUES (25, 11, 'bob')", &catalog, 7)
-        .expect_err("explicit column INSERT not supported yet");
-    assert!(error.message.contains("column/value") || error.message.contains("values"));
+        .expect_err("system variable prefix is not a column");
+    assert!(error.message.contains("unknown SQL column"), "{}", error.message);
 }
 
 #[test]
@@ -1209,6 +1208,37 @@ fn sql_source_less_select_returns_constant_row() {
     assert_eq!(result.columns, vec!["1".to_string()]);
     assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::Number(1.0)]]);
     assert_eq!(result.affected_rows, 0);
+}
+
+#[test]
+fn sql_system_variable_requires_a_dialect_resolver() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    // 没有变量表方言（PostgreSQL 等）必须明确拒绝 `@@`，不能退化成列名查找。
+    let error = yyds_gateway::bind_sql_catalog("SELECT @@version", &catalog, 7).expect_err("no system variables");
+    assert!(error.message.contains("system variable"), "{}", error.message);
+}
+
+#[test]
+fn sql_system_variable_binds_through_injected_resolver() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    // 方言解析器拿到的是客户端原本拼写（含 `@@` 与作用域前缀）。
+    let resolver = |name: &str| -> Result<yyds_gateway::SqlBoundLiteral, yyds_gateway::SqlFrontendError> {
+        Ok(yyds_gateway::SqlBoundLiteral::String(name.trim_start_matches("@@").to_string()))
+    };
+    let bound = yyds_gateway::bind_sql_catalog_with_variables("SELECT @@version, @@session.sql_mode", &catalog, 7, &resolver)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scalar(_)));
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        result.rows[0],
+        vec![
+            yyds_gateway::SqlValue::String("version".to_string()),
+            yyds_gateway::SqlValue::String("session.sql_mode".to_string()),
+        ]
+    );
 }
 
 #[test]

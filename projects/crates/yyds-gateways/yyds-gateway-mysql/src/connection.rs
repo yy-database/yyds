@@ -12,8 +12,8 @@ use std::{
 
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
-    SqlExecutionPlan, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    bind_sql_catalog_with_variables, execute_plan, parse_session_command, plan_statement, SqlBoundExpression, SqlBoundLiteral,
+    SqlCatalog, SqlExecutionPlan, SqlFrontendError, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -60,6 +60,26 @@ pub struct MysqlSqlRuntime {
     pub schema_version: u32,
     /// KV execution plane.
     pub executor: Arc<dyn KeyValueExecutor>,
+}
+
+/// Resolves a `SELECT @@version` style system-variable probe against [`MYSQL_VARIABLES`].
+///
+/// The scope prefix (`@@global.` / `@@session.` / `@@local.`) is accepted and
+/// ignored: the gateway keeps one immutable variable table for every scope.
+/// Numeric-looking values are returned as numbers so drivers reading
+/// `@@max_allowed_packet` or `@@lower_case_table_names` get integer semantics.
+fn mysql_system_variable(name: &str) -> Result<SqlBoundLiteral, SqlFrontendError> {
+    let bare = name.strip_prefix("@@").unwrap_or(name);
+    let variable = bare.rsplit('.').next().unwrap_or(bare).to_ascii_lowercase();
+    let value = MYSQL_VARIABLES
+        .iter()
+        .find(|(candidate, _)| *candidate == variable)
+        .map(|(_, value)| *value)
+        .ok_or_else(|| SqlFrontendError { message: format!("Unknown system variable '{variable}'").into() })?;
+    if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Ok(SqlBoundLiteral::Number(value.to_string()));
+    }
+    Ok(SqlBoundLiteral::String(value.to_string()))
 }
 
 /// Performs a loopback-only unauthenticated startup and executes SQL against the provided runtime.
@@ -444,7 +464,7 @@ fn execute_sql(
     runtime: &Arc<MysqlSqlRuntime>,
     session: &mut MysqlTransactionSession,
 ) -> io::Result<()> {
-    let bound = match bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version) {
+    let bound = match bind_sql_catalog_with_variables(sql, &runtime.catalog, runtime.schema_version, &mysql_system_variable) {
         Ok(bound) => bound,
         Err(error) => {
             session.fail();

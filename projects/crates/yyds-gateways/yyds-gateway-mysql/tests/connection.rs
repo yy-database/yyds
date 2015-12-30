@@ -249,6 +249,50 @@ fn mysql_select_with_runtime_returns_result_set() {
 }
 
 #[test]
+fn mysql_system_variable_probes_return_single_row() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4").unwrap()).unwrap();
+    let _ = read_packet_full(&mut client);
+
+    // SELECT @@version —— 无 FROM，返回单行单列
+    client.write_all(&encode_packet(0, b"\x03SELECT @@version").unwrap()).unwrap();
+    let (_, col_count) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&col_count).0, 1);
+    let _ = read_packet_full(&mut client); // column definition
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+    let (_, row) = read_packet_full(&mut client);
+    let (value, consumed) = read_lenenc_str(&row);
+    assert_eq!(value, b"8.0.36-yyds");
+    assert_eq!(consumed, row.len());
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // 作用域前缀被接受，数值型变量按数字返回
+    client.write_all(&encode_packet(0, b"\x03SELECT @@session.lower_case_table_names").unwrap()).unwrap();
+    let (_, col_count) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&col_count).0, 1);
+    let _ = read_packet_full(&mut client); // column definition
+    let _ = read_packet_full(&mut client); // EOF
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc_str(&row).0, b"0");
+    let _ = read_packet_full(&mut client); // EOF
+
+    // 未知变量按 MySQL 语义报错
+    client.write_all(&encode_packet(0, b"\x03SELECT @@nope").unwrap()).unwrap();
+    let (_, error) = read_packet_full(&mut client);
+    assert_eq!(error[0], 0xff);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1064);
+    assert!(error.windows(b"Unknown system variable".len()).any(|window| window == b"Unknown system variable"));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
 fn mysql_select_missing_row_returns_empty_result_set() {
     let (mut client, server) = start_server_with_runtime();
     let _ = read_packet_full(&mut client);

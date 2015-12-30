@@ -139,3 +139,78 @@ fn transaction_commands_track_failed_state_and_rollback_recovery() {
     drop(client);
     server.join().unwrap();
 }
+
+/// 带 SQL runtime 的服务端，用于验证 PostgreSQL 语法下 `@@` 必须被拒绝。
+fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlCatalog;
+    use yyds_gateway_pgsql::connection::{serve_connection, PgsqlSqlRuntime};
+    use yyds_kv::{KvStore, MemoryShard};
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let source = "table users { @@id: i64, name: utf8 }\n";
+    let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::contract::TypeIdentity {
+            canonical_path: vec!["users".into()],
+            type_id: 1,
+            kind: vos::contract::TypeContractKind::Table,
+            fields: vec![
+                vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
+                vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+            ],
+        }],
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
+
+    let shard = MemoryShard::new();
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards).expect("executor");
+
+    let runtime = Arc::new(PgsqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        serve_connection(stream, Some(runtime)).unwrap();
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut startup = Vec::from(0_u32.to_be_bytes());
+    startup.extend_from_slice(&PROTOCOL_V3.to_be_bytes());
+    startup.extend_from_slice(b"user\0test\0\0");
+    let length = startup.len() as u32;
+    startup[..4].copy_from_slice(&length.to_be_bytes());
+    client.write_all(&startup).unwrap();
+    let startup_responses = receive_until_ready(&mut client);
+    assert_eq!(startup_responses.last().unwrap(), &(b'Z', b"I".to_vec()));
+    (client, server)
+}
+
+#[test]
+fn mysql_style_system_variables_are_rejected_with_a_runtime() {
+    let (mut client, server) = start_server_with_runtime();
+
+    // `@@` 在 PostgreSQL 里不是变量语法，必须报绑定错误而不是当作列名。
+    send_query(&mut client, "SELECT @@version");
+    let rejected = receive_until_ready(&mut client);
+    assert_eq!(rejected[0].0, b'E');
+    assert!(rejected[0].1.windows(5).any(|window| window == b"42P01"));
+    assert!(String::from_utf8_lossy(&rejected[0].1).contains("system variable"));
+    assert_eq!(rejected.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // 普通 SELECT 仍然走通 runtime（证明拒绝发生在绑定层而不是通用「未实现」分支）。
+    send_query(&mut client, "SELECT id FROM users");
+    let rows = receive_until_ready(&mut client);
+    assert_eq!(rows[0].0, b'T');
+    assert_eq!(rows.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
+}
