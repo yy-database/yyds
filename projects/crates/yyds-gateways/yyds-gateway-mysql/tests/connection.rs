@@ -145,7 +145,10 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let executor = LocalExecutor::new(routing, shards).expect("executor");
 
     let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    spawn_runtime_server(runtime)
+}
 
+fn spawn_runtime_server(runtime: std::sync::Arc<yyds_gateway_mysql::connection::MysqlSqlRuntime>) -> (TcpStream, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let rt = runtime;
@@ -156,6 +159,73 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     (client, server)
+}
+
+/// 向 shard 写入一整行（TLV 编码），供多表 fixture 共用。
+fn put_row(shard: &mut yyds_kv::MemoryShard, namespace: &str, rowid: &[u8], fields: &[(u64, &[u8])]) {
+    use yyds_kv::{InlineValue, Key, KvStore, StoredValue};
+    let mut values = yyds_gateway::RowFieldValues::new();
+    for (field_id, bytes) in fields {
+        values.insert(*field_id, bytes.to_vec());
+    }
+    shard
+        .put(Key::new(namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(yyds_gateway::encode_row(&values))))
+        .expect("put row");
+}
+
+/// 两表 runtime：`users`(id=1, name=2) 与 `orders`(id=3, user_id=4, total=5)。
+fn start_server_with_join_runtime() -> (TcpStream, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlCatalog;
+    use yyds_gateway_mysql::connection::MysqlSqlRuntime;
+    use yyds_kv::MemoryShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n";
+    let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![
+            vos::contract::TypeIdentity {
+                canonical_path: vec!["users".into()],
+                type_id: 1,
+                kind: vos::contract::TypeContractKind::Table,
+                fields: vec![
+                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
+                    vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+                ],
+            },
+            vos::contract::TypeIdentity {
+                canonical_path: vec!["orders".into()],
+                type_id: 2,
+                kind: vos::contract::TypeContractKind::Table,
+                fields: vec![
+                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 3, virtual_field_index: 0 },
+                    vos::contract::FieldIdentity { canonical_name: "user_id".into(), field_id: 4, virtual_field_index: 1 },
+                    vos::contract::FieldIdentity { canonical_name: "total".into(), field_id: 5, virtual_field_index: 2 },
+                ],
+            },
+        ],
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
+
+    let mut shard = MemoryShard::new();
+    put_row(&mut shard, "table:1", b"1", &[(1, b"1"), (2, b"alice")]);
+    put_row(&mut shard, "table:1", b"2", &[(1, b"2"), (2, b"bob")]);
+    put_row(&mut shard, "table:2", b"10", &[(3, b"10"), (4, b"1"), (5, b"100")]);
+    put_row(&mut shard, "table:2", b"12", &[(3, b"12"), (4, b"2"), (5, b"70")]);
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards).expect("executor");
+
+    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    spawn_runtime_server(runtime)
 }
 
 fn read_packet_full(stream: &mut TcpStream) -> (u8, Vec<u8>) {
@@ -371,6 +441,57 @@ fn session_variable_statements_report_gateway_capabilities() {
     assert_eq!(sequence, 1);
     assert_eq!(error[0], 0xff);
     assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1064);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn mysql_inner_join_returns_joined_result_set() {
+    let (mut client, server) = start_server_with_join_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    let (seq, ok) = read_packet_full(&mut client);
+    assert_eq!(seq, 2);
+    assert_eq!(ok[0], 0);
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4").unwrap()).unwrap();
+    let _ = read_packet_full(&mut client);
+
+    // JOIN 必须以结果集（而不是 OK packet）返回，ORDER BY 在连接之后应用
+    client
+        .write_all(
+            &encode_packet(
+                0,
+                b"\x03SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id ORDER BY orders.total",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let (_, col_count_pkt) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&col_count_pkt).0, 2);
+    let (_, col_def) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&col_def), "name");
+    let (_, col_def) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&col_def), "total");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // bob/70 在前，alice/100 在后
+    let (_, row) = read_packet_full(&mut client);
+    let (name, consumed) = read_lenenc_str(&row);
+    assert_eq!(name, b"bob");
+    let (total, _) = read_lenenc_str(&row[consumed..]);
+    assert_eq!(total, b"70");
+
+    let (_, row) = read_packet_full(&mut client);
+    let (name, consumed) = read_lenenc_str(&row);
+    assert_eq!(name, b"alice");
+    let (total, _) = read_lenenc_str(&row[consumed..]);
+    assert_eq!(total, b"100");
+
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
 
     drop(client);
     server.join().unwrap();
