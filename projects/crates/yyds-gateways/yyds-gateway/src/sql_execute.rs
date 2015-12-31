@@ -16,12 +16,12 @@ use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
-    catalog_bind::SqlCatalogBoundExpression,
+    catalog_bind::{collect_column_ids, SqlCatalogBoundExpression},
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError,
         SqlScalarFunction,
     },
-    sql_planner::{DeletePlan, ReadPlan, ScanPlan, ScalarPlan, SqlExecutionPlan, UpdatePlan, WritePlan},
+    sql_planner::{DeletePlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, ScalarPlan, SqlExecutionPlan, UpdatePlan, WritePlan},
 };
 
 /// SQL 查询的结果集。
@@ -138,6 +138,14 @@ impl RowFieldValues {
         self.fields.get(&field_id).map(|v| v.as_slice())
     }
 
+    /// 合并另一行的字段。JOIN 后的一行同时携带两侧表的字段，
+    /// catalog 保证 field_id 全局唯一，所以按键覆盖即等价于拼行。
+    pub fn merge(&mut self, other: &Self) {
+        for (field_id, bytes) in &other.fields {
+            self.fields.insert(*field_id, bytes.clone());
+        }
+    }
+
     /// 按 field_id 取推断后的 SqlValue（无类型信息，宽松推断）。
     pub fn value(&self, field_id: u64) -> Option<SqlValue> {
         self.fields.get(&field_id).map(|v| SqlValue::from_row_bytes(v))
@@ -208,30 +216,6 @@ pub fn decode_row_fields(data: &[u8], needed_ids: &[u64]) -> Result<RowFieldValu
     Ok(row)
 }
 
-/// 递归收集一个表达式里所有 Column 的 field_id。
-fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec<u64>) {
-    match expr {
-        SqlCatalogBoundExpression::Column(col) => {
-            if !out.contains(&col.field_id) {
-                out.push(col.field_id);
-            }
-        }
-        SqlCatalogBoundExpression::Function { args, .. } => {
-            for a in args {
-                collect_column_ids(a, out);
-            }
-        }
-        SqlCatalogBoundExpression::Binary { left, right, .. } => {
-            collect_column_ids(left, out);
-            collect_column_ids(right, out);
-        }
-        SqlCatalogBoundExpression::Unary { expression, .. } => {
-            collect_column_ids(expression, out);
-        }
-        SqlCatalogBoundExpression::Literal(_) => {}
-    }
-}
-
 /// 从 ScanPlan 里收集执行时需要解码的 field_ids（projection + predicate + order_by + expressions）。
 fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
     let mut ids: Vec<u64> = Vec::new();
@@ -274,6 +258,7 @@ pub fn execute_plan(
     match plan {
         SqlExecutionPlan::Read(read_plan) => execute_read(executor, transaction, read_plan),
         SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, scan_plan),
+        SqlExecutionPlan::Join(join_plan) => execute_join(executor, join_plan),
         SqlExecutionPlan::Scalar(scalar_plan) => execute_scalar(scalar_plan),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan),
@@ -334,6 +319,94 @@ fn execute_read(
         row_values.push(eval_expression(expr, &row, &plan.field_types)?);
     }
     Ok(SqlResult { columns, rows: vec![row_values], affected_rows: 0 })
+}
+
+/// 执行一个多表内连接计划：每个来源先整表扫描，再按 JOIN 顺序做嵌套循环合并。
+///
+/// 合并后的行同时携带两侧表的字段（field_id 全局唯一），因此投影 / WHERE /
+/// ORDER BY 全部复用单表路径的 `eval_expression`。
+fn execute_join(executor: &dyn KeyValueExecutor, plan: &JoinPlan) -> Result<SqlResult, SqlFrontendError> {
+    let mut rows = scan_join_source(executor, &plan.base)?;
+    for source in &plan.joins {
+        let right_rows = scan_join_source(executor, source)?;
+        let mut merged = Vec::new();
+        for left in &rows {
+            for right in &right_rows {
+                let mut row = left.clone();
+                row.merge(right);
+                if let Some(on) = &source.on {
+                    if !truthy(&eval_expression(on, &row, &plan.field_types)?) {
+                        continue;
+                    }
+                }
+                merged.push(row);
+            }
+        }
+        rows = merged;
+    }
+
+    let columns = join_column_labels(plan);
+    let mut staged: Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)> = Vec::new();
+    for row in &rows {
+        if let Some(predicate) = &plan.remaining_predicate {
+            if !truthy(&eval_expression(predicate, row, &plan.field_types)?) {
+                continue;
+            }
+        }
+        let sort_keys: Vec<Option<SqlValue>> = match &plan.order_by {
+            Some(items) => items
+                .iter()
+                .map(|(expr, _)| Ok(Some(eval_expression(expr, row, &plan.field_types)?)))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        let mut row_values: Vec<SqlValue> = Vec::new();
+        for (field_id, _) in &plan.projection_fields {
+            row_values.push(row.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
+        }
+        for (expr, _) in &plan.projection_expressions {
+            row_values.push(eval_expression(expr, row, &plan.field_types)?);
+        }
+        staged.push((sort_keys, row_values));
+    }
+
+    if let Some(order_items) = &plan.order_by {
+        let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
+        staged.sort_by(move |a, b| {
+            for (idx, dir) in dirs.iter().enumerate() {
+                let ord = compare_values(a.0[idx].as_ref(), b.0[idx].as_ref());
+                if ord != std::cmp::Ordering::Equal {
+                    return match dir {
+                        crate::sql::SqlBoundOrderDirection::Asc => ord,
+                        crate::sql::SqlBoundOrderDirection::Desc => ord.reverse(),
+                    };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    let offset = plan.offset_after_sort;
+    let limit = plan.limit_after_sort;
+    let rows: Vec<Vec<SqlValue>> =
+        staged.into_iter().skip(offset).take(if limit == 0 { usize::MAX } else { limit }).map(|(_, r)| r).collect();
+    Ok(SqlResult { columns, rows, affected_rows: 0 })
+}
+
+/// 整表扫描一个 JOIN 来源，只解码该表参与的字段。
+fn scan_join_source(
+    executor: &dyn KeyValueExecutor,
+    source: &JoinSourcePlan,
+) -> Result<Vec<RowFieldValues>, SqlFrontendError> {
+    let namespace = Namespace(source.namespace.clone());
+    let scanned = executor
+        .execute_scan(&namespace, &[], None, None, 0)
+        .map_err(|e| execute_error(&format!("KeyValueExecutor.scan failed: {e}")))?;
+    let mut rows = Vec::with_capacity(scanned.len());
+    for (_rowid, value_bytes) in scanned {
+        rows.push(decode_row_fields(&value_bytes, &source.needed_field_ids)?);
+    }
+    Ok(rows)
 }
 
 fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlResult, SqlFrontendError> {
@@ -742,6 +815,17 @@ fn read_column_labels(plan: &ReadPlan) -> Vec<String> {
 }
 
 fn scan_column_labels(plan: &ScanPlan) -> Vec<String> {
+    let mut labels = Vec::new();
+    for (_, name) in &plan.projection_fields {
+        labels.push(name.clone());
+    }
+    for (_, name) in &plan.projection_expressions {
+        labels.push(name.clone());
+    }
+    labels
+}
+
+fn join_column_labels(plan: &JoinPlan) -> Vec<String> {
     let mut labels = Vec::new();
     for (_, name) in &plan.projection_fields {
         labels.push(name.clone());

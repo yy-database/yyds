@@ -44,6 +44,13 @@ impl<'config> Pratt<SqlLanguage> for SqlParser<'config> {
         match state.peek_kind() {
             Some(Identifier_) => {
                 state.bump();
+                // 限定列名 `table.column`：词法层已经产出 Dot，这里把三段合成同一个
+                // Identifier 节点，AST 名字保留 `table.column` 的原始拼写（由下游绑定层
+                // 拆分限定符）。只有 `Dot` 后面紧跟标识符时才合并，避免吞掉别处的点号。
+                while state.peek_kind() == Some(Dot) && state.peek_kind_at(1) == Some(Identifier_) {
+                    state.bump(); // Dot
+                    state.bump(); // Identifier_
+                }
                 state.finish_at(cp, SqlElementType::Identifier)
             }
             Some(LeftBracket) => {

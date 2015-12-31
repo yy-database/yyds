@@ -17,20 +17,23 @@ mod sql_planner;
 pub use crate::{
     catalog_bind::{
         bind_sql_catalog, bind_sql_catalog_with_variables, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression,
-        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField,
-        SqlCatalogTable, SqlFieldType,
+        SqlCatalogBoundJoin, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable,
+        SqlCatalogField, SqlCatalogTable, SqlFieldType,
     },
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
-    sql_planner::{plan_select, plan_statement, DeletePlan, ReadPlan, ScanPlan, SqlExecutionPlan, UpdatePlan, WritePlan},
+    sql_planner::{
+        plan_select, plan_statement, DeletePlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, SqlExecutionPlan, UpdatePlan,
+        WritePlan,
+    },
 };
 
 pub use crate::{
     config::GatewayConfig,
     kind::{GatewayKind, ALL_GATEWAY_KINDS},
     sql::{
-        bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral,
-        SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlFrontendError, SqlSessionCommand,
-        SqlTransactionAction, SqlVariableScope,
+        bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundJoin, SqlBoundJoinKind,
+        SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlFrontendError,
+        SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
     },
 };
 

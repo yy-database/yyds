@@ -153,6 +153,8 @@ pub enum SqlBoundStatement {
 pub struct SqlBoundSelect {
     /// Optional source table name as written by the client.
     pub source: Option<String>,
+    /// JOIN clauses in source order.
+    pub joins: Vec<SqlBoundJoin>,
     /// Projection expressions in source order.
     pub projections: Vec<SqlBoundProjection>,
     /// Optional SQL WHERE expression.
@@ -167,6 +169,30 @@ pub struct SqlBoundSelect {
     pub offset: Option<usize>,
     /// Optional SQL ORDER BY clause — supports multi-column ordering.
     pub order_by: Option<Vec<SqlBoundOrderByItem>>,
+}
+
+/// One JOIN clause retained by the gateway binder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundJoin {
+    /// Join kind as written by the client.
+    pub kind: SqlBoundJoinKind,
+    /// Joined table name as written by the client.
+    pub table: String,
+    /// Join condition from the `ON` clause.
+    pub on: SqlBoundExpression,
+}
+
+/// SQL join kind retained by the gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlBoundJoinKind {
+    /// `[INNER] JOIN` — only rows matching on both sides survive.
+    Inner,
+    /// `LEFT [OUTER] JOIN`.
+    Left,
+    /// `RIGHT [OUTER] JOIN`.
+    Right,
+    /// `FULL [OUTER] JOIN`.
+    Full,
 }
 
 /// One SQL ORDER BY item — expression + direction.
@@ -424,9 +450,6 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     }
     match &root.statements[0] {
         SqlStatement::Select(select) => {
-            if !select.joins.is_empty() {
-                return Err(bind_error("SQL JOIN is not in the gateway binding subset yet"));
-            }
             let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
             let (limit, offset) = match &select.limit {
                 Some(clause) => {
@@ -464,8 +487,29 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 _ => None,
             };
             let having = select.having.as_ref().map(|h| bind_expression(&h.condition)).transpose()?;
+            let joins = select
+                .joins
+                .iter()
+                .map(|join| {
+                    Ok(SqlBoundJoin {
+                        kind: match join.join_type {
+                            oak_sql::ast::JoinType::Inner => SqlBoundJoinKind::Inner,
+                            oak_sql::ast::JoinType::Left => SqlBoundJoinKind::Left,
+                            oak_sql::ast::JoinType::Right => SqlBoundJoinKind::Right,
+                            oak_sql::ast::JoinType::Full => SqlBoundJoinKind::Full,
+                        },
+                        table: normalize_identifier(join.table.name.name.as_ref()),
+                        on: join
+                            .on
+                            .as_ref()
+                            .ok_or_else(|| bind_error("SQL JOIN requires an ON condition"))
+                            .and_then(bind_expression)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(SqlBoundStatement::Select(SqlBoundSelect {
                 source: select.from.as_ref().map(|table| normalize_identifier(table.name.name.as_ref())),
+                joins,
                 projections,
                 predicate: select.expr.as_ref().map(bind_expression).transpose()?,
                 group_by,

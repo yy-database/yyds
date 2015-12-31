@@ -179,6 +179,11 @@ impl<'config> SqlBuilder<'config> {
         if node.green.kind == SqlElementType::FunctionCall {
             return self.build_function_call(node, source);
         }
+        // Identifier nodes may span several leaves (`table.column` is merged into one
+        // node), so reading the first leaf would silently truncate qualified names.
+        if node.green.kind == SqlElementType::Identifier {
+            return Ok(Expression::Identifier(self.build_identifier(node, source)?));
+        }
 
         // Count expression children — LeftParen with multiple (comma-separated) children
         // is a Vector; a single Expression child is a plain grouped expression.

@@ -482,7 +482,10 @@ fn execute_sql(
     };
 
     // DML 写操作 —— 先 execute 再回 OK packet
-    let is_write = !matches!(plan, SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Scalar(_));
+    let is_write = !matches!(
+        plan,
+        SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_)
+    );
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
     let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan) {
         Ok(result) => result,

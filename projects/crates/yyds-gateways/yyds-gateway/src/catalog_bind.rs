@@ -1,9 +1,9 @@
 //! SQL compatibility binding against a published YYDS VOS catalog.
 
 use crate::sql::{
-    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundLiteral,
-    SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate,
-    SqlFrontendError,
+    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind,
+    SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
+    SqlBoundUpdate, SqlFrontendError,
 };
 use vos::contract::{CanonicalType, ResolvedCanonicalType};
 
@@ -287,6 +287,8 @@ pub enum SqlCatalogBoundProjection {
 pub struct SqlCatalogBoundSelect {
     /// Selected table identity, if the query has a source.
     pub source: Option<SqlCatalogBoundTable>,
+    /// JOIN clauses in source order, each bound to its own catalog table.
+    pub joins: Vec<SqlCatalogBoundJoin>,
     /// Resolved projections.
     pub projections: Vec<SqlCatalogBoundProjection>,
     /// Resolved optional predicate.
@@ -301,6 +303,17 @@ pub struct SqlCatalogBoundSelect {
     pub offset: Option<usize>,
     /// Optional ORDER BY items, propagated from the gateway binder.
     pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+}
+
+/// One JOIN clause after SQL names are bound to YYDS catalog identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundJoin {
+    /// Join kind retained from the SQL surface.
+    pub kind: SqlBoundJoinKind,
+    /// Joined table identity.
+    pub table: SqlCatalogBoundTable,
+    /// Join condition bound against the tables visible at this point.
+    pub on: SqlCatalogBoundExpression,
 }
 
 /// SQL INSERT request after catalog binding.
@@ -396,9 +409,9 @@ fn bind_insert(
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundInsert, SqlFrontendError> {
     let table = find_table(catalog, &insert.table)?;
-    let source = Some(table.clone());
+    let source = [table.clone()];
     let bound_fields = match insert.columns {
-        Some(cols) => cols.iter().map(|name| find_field(name, source.as_ref(), catalog)).collect::<Result<Vec<_>, _>>()?,
+        Some(cols) => cols.iter().map(|name| find_field(name, &source, catalog)).collect::<Result<Vec<_>, _>>()?,
         None => {
             // INSERT INTO t VALUES (...) 无列名 → 按 catalog 字段顺序
             let cat = catalog
@@ -427,7 +440,7 @@ fn bind_insert(
     let values = insert
         .values
         .into_iter()
-        .map(|v| bind_expression(v, source.as_ref(), catalog, variables))
+        .map(|v| bind_expression(v, &source, catalog, variables))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SqlCatalogBoundInsert { table, fields: bound_fields, values })
 }
@@ -438,17 +451,17 @@ fn bind_update(
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundUpdate, SqlFrontendError> {
     let table = find_table(catalog, &update.table)?;
-    let source = Some(table.clone());
+    let source = [table.clone()];
     let assignments = update
         .assignments
         .into_iter()
         .map(|SqlBoundAssignment { column, value }| {
-            let field = find_field(&column, source.as_ref(), catalog)?;
-            let bound_value = bind_expression(value, source.as_ref(), catalog, variables)?;
+            let field = find_field(&column, &source, catalog)?;
+            let bound_value = bind_expression(value, &source, catalog, variables)?;
             Ok((field, bound_value))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let predicate = update.predicate.map(|p| bind_expression(p, source.as_ref(), catalog, variables)).transpose()?;
+    let predicate = update.predicate.map(|p| bind_expression(p, &source, catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundUpdate { table, assignments, predicate })
 }
 
@@ -458,8 +471,8 @@ fn bind_delete(
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundDelete, SqlFrontendError> {
     let table = find_table(catalog, &delete.table)?;
-    let source = Some(table.clone());
-    let predicate = delete.predicate.map(|p| bind_expression(p, source.as_ref(), catalog, variables)).transpose()?;
+    let source = [table.clone()];
+    let predicate = delete.predicate.map(|p| bind_expression(p, &source, catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundDelete { table, predicate })
 }
 
@@ -469,25 +482,39 @@ fn bind_select(
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
     let source = select.source.as_deref().map(|name| find_table(catalog, name)).transpose()?;
-    let projections = select
-        .projections
-        .into_iter()
-        .map(|projection| bind_projection(projection, source.as_ref(), catalog, variables))
-        .collect::<Result<Vec<_>, _>>()?;
+    // JOIN 之后列名作用域包含基表与所有已连接表，ON 条件只能引用此前已出现的表。
+    let mut sources: Vec<SqlCatalogBoundTable> = source.iter().cloned().collect();
+    let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
+    for join in select.joins {
+        if join.kind != SqlBoundJoinKind::Inner {
+            return Err(catalog_error("SQL gateway supports INNER JOIN only"));
+        }
+        let table = find_table(catalog, &join.table)?;
+        if sources.iter().any(|visible| visible.type_id == table.type_id) {
+            return Err(catalog_error("SQL self join requires table aliases, which the gateway does not support"));
+        }
+        sources.push(table.clone());
+        let on = bind_expression(join.on, &sources, catalog, variables)?;
+        joins.push(SqlCatalogBoundJoin { kind: join.kind, table, on });
+    }
+    let mut projections: Vec<SqlCatalogBoundProjection> = Vec::new();
+    for projection in select.projections {
+        projections.extend(bind_projection(projection, &sources, catalog, variables)?);
+    }
     let predicate =
-        select.predicate.map(|expression| bind_expression(expression, source.as_ref(), catalog, variables)).transpose()?;
+        select.predicate.map(|expression| bind_expression(expression, &sources, catalog, variables)).transpose()?;
     let group_by = select
         .group_by
         .map(|exprs| {
-            exprs.into_iter().map(|e| bind_expression(e, source.as_ref(), catalog, variables)).collect::<Result<Vec<_>, _>>()
+            exprs.into_iter().map(|e| bind_expression(e, &sources, catalog, variables)).collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
-    let having = select.having.map(|e| bind_expression(e, source.as_ref(), catalog, variables)).transpose()?;
+    let having = select.having.map(|e| bind_expression(e, &sources, catalog, variables)).transpose()?;
     let order_by = match select.order_by {
         Some(items) => {
             let bound = items
                 .into_iter()
-                .map(|item| Ok((bind_expression(item.expr, source.as_ref(), catalog, variables)?, item.direction)))
+                .map(|item| Ok((bind_expression(item.expr, &sources, catalog, variables)?, item.direction)))
                 .collect::<Result<Vec<_>, _>>()?;
             Some(bound)
         }
@@ -495,6 +522,7 @@ fn bind_select(
     };
     Ok(SqlCatalogBoundSelect {
         source,
+        joins,
         projections,
         predicate,
         group_by,
@@ -505,27 +533,31 @@ fn bind_select(
     })
 }
 
+/// Binds one SQL projection into zero or more catalog projections (`*` expands one
+/// entry per visible table so joined queries project both sides in source order).
 fn bind_projection(
     projection: SqlBoundProjection,
-    source: Option<&SqlCatalogBoundTable>,
+    sources: &[SqlCatalogBoundTable],
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
-) -> Result<SqlCatalogBoundProjection, SqlFrontendError> {
+) -> Result<Vec<SqlCatalogBoundProjection>, SqlFrontendError> {
     match projection {
-        SqlBoundProjection::Star => source
-            .cloned()
-            .map(SqlCatalogBoundProjection::Star)
-            .ok_or_else(|| catalog_error("SQL star projection requires a catalog table source")),
-        SqlBoundProjection::Expression { expression, alias } => Ok(SqlCatalogBoundProjection::Expression {
-            expression: bind_expression(expression, source, catalog, variables)?,
+        SqlBoundProjection::Star => {
+            if sources.is_empty() {
+                return Err(catalog_error("SQL star projection requires a catalog table source"));
+            }
+            Ok(sources.iter().cloned().map(SqlCatalogBoundProjection::Star).collect())
+        }
+        SqlBoundProjection::Expression { expression, alias } => Ok(vec![SqlCatalogBoundProjection::Expression {
+            expression: bind_expression(expression, sources, catalog, variables)?,
             alias,
-        }),
+        }]),
     }
 }
 
 fn bind_expression(
     expression: SqlBoundExpression,
-    source: Option<&SqlCatalogBoundTable>,
+    sources: &[SqlCatalogBoundTable],
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundExpression, SqlFrontendError> {
@@ -535,22 +567,22 @@ fn bind_expression(
             if name.starts_with("@@") {
                 return variables(&name).map(SqlCatalogBoundExpression::Literal);
             }
-            let field = find_field(&name, source, catalog)?;
+            let field = find_field(&name, sources, catalog)?;
             Ok(SqlCatalogBoundExpression::Column(field))
         }
         SqlBoundExpression::Literal(literal) => Ok(SqlCatalogBoundExpression::Literal(literal)),
         SqlBoundExpression::Binary { left, operator, right } => Ok(SqlCatalogBoundExpression::Binary {
-            left: Box::new(bind_expression(*left, source, catalog, variables)?),
+            left: Box::new(bind_expression(*left, sources, catalog, variables)?),
             operator,
-            right: Box::new(bind_expression(*right, source, catalog, variables)?),
+            right: Box::new(bind_expression(*right, sources, catalog, variables)?),
         }),
         SqlBoundExpression::Unary { operator, expression } => Ok(SqlCatalogBoundExpression::Unary {
             operator,
-            expression: Box::new(bind_expression(*expression, source, catalog, variables)?),
+            expression: Box::new(bind_expression(*expression, sources, catalog, variables)?),
         }),
         SqlBoundExpression::Function { name, args } => {
             let bound_args =
-                args.into_iter().map(|arg| bind_expression(arg, source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
+                args.into_iter().map(|arg| bind_expression(arg, sources, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
             Ok(SqlCatalogBoundExpression::Function { name, args: bound_args })
         }
     }
@@ -565,12 +597,48 @@ fn find_table(catalog: &SqlCatalog, name: &str) -> Result<SqlCatalogBoundTable, 
     }
 }
 
+/// Resolves a column reference against every table visible at the current scope.
+///
+/// `table.column` spellings resolve inside the named table. Unqualified names must
+/// be unique across the visible tables — an ambiguity is reported instead of
+/// guessing.
 fn find_field(
     name: &str,
-    source: Option<&SqlCatalogBoundTable>,
+    sources: &[SqlCatalogBoundTable],
     catalog: &SqlCatalog,
 ) -> Result<SqlCatalogBoundColumn, SqlFrontendError> {
-    let source = source.ok_or_else(|| catalog_error("SQL column reference requires a table source"))?;
+    if sources.is_empty() {
+        return Err(catalog_error("SQL column reference requires a table source"));
+    }
+    if let Some((qualifier, column)) = name.split_once('.') {
+        let qualifier = qualifier.trim();
+        let column = column.trim();
+        let source = sources
+            .iter()
+            .find(|source| source.name == qualifier)
+            .ok_or_else(|| catalog_error(&format!("unknown SQL table qualifier: {qualifier}")))?;
+        return find_field_in_table(column, source, catalog)?
+            .ok_or_else(|| catalog_error(&format!("unknown SQL column: {qualifier}.{column}")));
+    }
+    let mut matches = Vec::new();
+    for source in sources {
+        if let Some(column) = find_field_in_table(name, source, catalog)? {
+            matches.push(column);
+        }
+    }
+    match matches.len() {
+        0 => Err(catalog_error(&format!("unknown SQL column: {name}"))),
+        1 => Ok(matches.remove(0)),
+        _ => Err(catalog_error(&format!("ambiguous SQL column: {name} (qualify it with a table name)"))),
+    }
+}
+
+/// Looks one column up inside a single catalog table.
+fn find_field_in_table(
+    name: &str,
+    source: &SqlCatalogBoundTable,
+    catalog: &SqlCatalog,
+) -> Result<Option<SqlCatalogBoundColumn>, SqlFrontendError> {
     let table = catalog
         .tables
         .iter()
@@ -578,14 +646,37 @@ fn find_field(
         .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
     let matches = table.fields.iter().filter(|field| field.name == name).collect::<Vec<_>>();
     match matches.as_slice() {
-        [] => Err(catalog_error(&format!("unknown SQL column: {name}"))),
-        [field] => Ok(SqlCatalogBoundColumn {
+        [] => Ok(None),
+        [field] => Ok(Some(SqlCatalogBoundColumn {
             type_id: table.type_id,
             field_id: field.field_id,
             table_name: table.name.clone(),
             field_name: field.name.clone(),
-        }),
+        })),
         _ => Err(catalog_error(&format!("ambiguous SQL column: {name}"))),
+    }
+}
+
+/// Recursively collects the `field_id` of every column reference in an expression,
+/// preserving first-appearance order and skipping duplicates.
+pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec<u64>) {
+    match expr {
+        SqlCatalogBoundExpression::Column(col) => {
+            if !out.contains(&col.field_id) {
+                out.push(col.field_id);
+            }
+        }
+        SqlCatalogBoundExpression::Function { args, .. } => {
+            for arg in args {
+                collect_column_ids(arg, out);
+            }
+        }
+        SqlCatalogBoundExpression::Binary { left, right, .. } => {
+            collect_column_ids(left, out);
+            collect_column_ids(right, out);
+        }
+        SqlCatalogBoundExpression::Unary { expression, .. } => collect_column_ids(expression, out),
+        SqlCatalogBoundExpression::Literal(_) => {}
     }
 }
 

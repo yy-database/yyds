@@ -124,7 +124,7 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
 #[test]
 fn sql_binding_rejects_unimplemented_clauses_and_dml() {
     assert!(bind_sql("CREATE TABLE users (id i64)").is_err());
-    assert!(bind_sql("SELECT * FROM a JOIN b ON a.id = b.id").is_err());
+    assert!(bind_sql("SELECT * FROM a JOIN b").is_err()); // JOIN without ON
 }
 
 #[test]
@@ -1317,6 +1317,165 @@ fn sql_source_less_select_keeps_unary_minus_sign() {
         yyds_gateway::SqlValue::Number(3.0),
         yyds_gateway::SqlValue::Number(3.0),
     ]);
+}
+
+// --- JOIN（内连接） ---
+
+/// 多 namespace 的 executor：JOIN 需要同时扫描基表与连接表。
+fn make_executor_with_tables(
+    tables: &[(&str, &[(&[u8], &[(u64, &[u8])])])],
+) -> yyds_execution::LocalExecutor<yyds_kv::MemoryShard> {
+    use yyds_kv::{InlineValue, Key, KvStore, MemoryShard, StoredValue};
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+
+    let mut shard = MemoryShard::new();
+    for (namespace, rows) in tables {
+        for (rowid, fields) in *rows {
+            let mut values = yyds_gateway::RowFieldValues::new();
+            for (field_id, bytes) in *fields {
+                values.insert(*field_id, bytes.to_vec());
+            }
+            let row_bytes = yyds_gateway::encode_row(&values);
+            shard.put(Key::new(*namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(row_bytes))).expect("put row");
+        }
+    }
+
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+}
+
+/// `users`(type 1: id=1, name=2) 与 `orders`(type 2: id=3, user_id=4, total=5)。
+fn join_fixture() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yyds_kv::MemoryShard>) {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n");
+    let executor = make_executor_with_tables(&[
+        ("table:1", &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")])]),
+        (
+            "table:2",
+            &[
+                (b"10", &[(3, b"10"), (4, b"1"), (5, b"100")]),
+                (b"11", &[(3, b"11"), (4, b"1"), (5, b"50")]),
+                (b"12", &[(3, b"12"), (4, b"2"), (5, b"70")]),
+                (b"13", &[(3, b"13"), (4, b"9"), (5, b"5")]),
+            ],
+        ),
+    ]);
+    (catalog, executor)
+}
+
+#[test]
+fn sql_inner_join_projects_both_sides_with_where_and_order_by() {
+    let (catalog, executor) = join_fixture();
+    let sql = "SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id \
+               WHERE orders.total > 60 ORDER BY orders.total";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Join(_)), "got {plan:?}");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
+
+    assert_eq!(result.columns, vec!["name".to_string(), "total".to_string()]);
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Number(70.0)],
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Number(100.0)],
+        ]
+    );
+}
+
+#[test]
+fn sql_inner_join_star_expands_every_joined_table() {
+    let (catalog, executor) = join_fixture();
+    let sql = "SELECT * FROM users JOIN orders ON users.id = orders.user_id ORDER BY orders.total";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
+
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string(), "id".to_string(), "user_id".to_string(), "total".to_string()]);
+    assert_eq!(result.rows.len(), 3, "orders.user_id = 9 has no users match");
+    let totals: Vec<f64> = result
+        .rows
+        .iter()
+        .map(|row| match &row[4] {
+            yyds_gateway::SqlValue::Number(n) => *n,
+            other => panic!("expected Number, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(totals, vec![50.0, 70.0, 100.0]);
+    assert_eq!(result.rows[0][1], yyds_gateway::SqlValue::String("alice".into()));
+}
+
+#[test]
+fn sql_inner_join_without_matching_rows_returns_empty() {
+    let (catalog, executor) = join_fixture();
+
+    // ON 条件本身不命中。
+    let sql = "SELECT users.name FROM users JOIN orders ON users.id = orders.user_id AND orders.total > 1000";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
+    assert!(result.rows.is_empty(), "ON filter should drop every pair");
+
+    // JOIN 命中但 WHERE 全部过滤掉。
+    let sql = "SELECT users.name FROM users JOIN orders ON users.id = orders.user_id WHERE orders.total > 1000";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
+    assert!(result.rows.is_empty(), "WHERE filter should drop every joined row");
+}
+
+#[test]
+fn sql_join_rejects_ambiguous_unqualified_columns() {
+    let (catalog, _executor) = join_fixture();
+
+    // `id` 在两张表里都有，未限定必须报歧义而不是随便选一张。
+    let error = yyds_gateway::bind_sql_catalog(
+        "SELECT id FROM users JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+    )
+    .expect_err("ambiguous column");
+    assert!(error.message.contains("ambiguous SQL column: id"), "{}", error.message);
+
+    // 引用不存在表的限定名。
+    let error = yyds_gateway::bind_sql_catalog(
+        "SELECT admins.id FROM users JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+    )
+    .expect_err("unknown qualifier");
+    assert!(error.message.contains("unknown SQL table qualifier"), "{}", error.message);
+}
+
+#[test]
+fn sql_join_rejects_outer_join_aggregates_and_self_join() {
+    let (catalog, _executor) = join_fixture();
+
+    let outer = yyds_gateway::bind_sql_catalog(
+        "SELECT users.name FROM users LEFT JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+    )
+    .expect_err("left join");
+    assert!(outer.message.contains("INNER JOIN only"), "{}", outer.message);
+
+    let self_join =
+        yyds_gateway::bind_sql_catalog("SELECT users.name FROM users JOIN users ON users.id = users.id", &catalog, 7)
+            .expect_err("self join");
+    assert!(self_join.message.contains("self join"), "{}", self_join.message);
+
+    let aggregate = yyds_gateway::bind_sql_catalog(
+        "SELECT SUM(orders.total) FROM users JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+    )
+    .expect("catalog bind");
+    let error = yyds_gateway::plan_statement(aggregate, &catalog).expect_err("aggregate over join");
+    assert!(error.message.contains("aggregate projections"), "{}", error.message);
 }
 
 #[test]

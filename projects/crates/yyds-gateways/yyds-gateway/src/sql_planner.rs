@@ -17,10 +17,10 @@
 
 use crate::{
     catalog_bind::{
-        SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert, SqlCatalogBoundProjection,
-        SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundUpdate,
+        collect_column_ids, SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
+        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogBoundUpdate,
     },
-    sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlFrontendError},
+    sql::{SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlFrontendError},
 };
 
 /// 翻译一份 catalog-bound statement 为可执行计划。
@@ -35,6 +35,9 @@ pub fn plan_statement(statement: SqlCatalogBoundStatement, catalog: &SqlCatalog)
 
 /// 计划一个 SELECT。
 pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    if !select.joins.is_empty() {
+        return plan_join_select(select, catalog);
+    }
     // 无 FROM 的 SELECT 只做常量 / 内建函数求值（驱动探测 VERSION()、SELECT 1 等）。
     let Some(source) = select.source.as_ref() else {
         return plan_source_less_select(select);
@@ -50,9 +53,10 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
     let mut has_non_aggregate = false;
     for projection in &select.projections {
         match projection {
-            SqlCatalogBoundProjection::Star(_) => {
+            SqlCatalogBoundProjection::Star(star_table) => {
                 has_non_aggregate = true;
-                for field in &table.fields {
+                let star_table = find_table(catalog, star_table.type_id)?;
+                for field in &star_table.fields {
                     projection_fields.push((field.field_id, field.name.clone()));
                 }
             }
@@ -132,6 +136,105 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         has_aggregate,
         field_types,
     }))
+}
+
+/// 计划一个带 JOIN 的 SELECT。
+///
+/// 目前只做内连接：基表与每张连接表各自全表扫描，按 JOIN 顺序做嵌套循环合并，
+/// 再套用 WHERE / 投影 / ORDER BY / LIMIT。主键下推、外连接、聚合暂不在网关子集内。
+fn plan_join_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    let SqlCatalogBoundSelect { source, joins, projections, predicate, group_by, having, limit, offset, order_by } = select;
+    let base = source.ok_or_else(|| planner_error("SQL JOIN requires a FROM table"))?;
+    if group_by.is_some() || having.is_some() {
+        return Err(planner_error("SQL JOIN with GROUP BY / HAVING is not in the gateway subset yet"));
+    }
+
+    // 1. 投影展开：Star 按来源顺序展开整表，Column 直接映射，其余表达式保留。
+    let mut projection_fields: Vec<(u64, String)> = Vec::new();
+    let mut projection_expressions: Vec<(SqlCatalogBoundExpression, String)> = Vec::new();
+    for projection in projections {
+        match projection {
+            SqlCatalogBoundProjection::Star(table) => {
+                let table = find_table(catalog, table.type_id)?;
+                for field in &table.fields {
+                    projection_fields.push((field.field_id, field.name.clone()));
+                }
+            }
+            SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
+                SqlCatalogBoundExpression::Column(col) => {
+                    projection_fields.push((col.field_id, alias.unwrap_or_else(|| col.field_name.clone())));
+                }
+                other => {
+                    if expression_has_aggregate(&other) {
+                        return Err(planner_error("SQL JOIN with aggregate projections is not in the gateway subset yet"));
+                    }
+                    let label = alias.unwrap_or_else(|| expression_default_label(&other));
+                    projection_expressions.push((other, label));
+                }
+            },
+        }
+    }
+
+    // 2. 需要解码的字段集合：投影 + WHERE + ORDER BY + 每个 ON 条件。
+    let mut needed: Vec<u64> = Vec::new();
+    for (field_id, _) in &projection_fields {
+        if !needed.contains(field_id) {
+            needed.push(*field_id);
+        }
+    }
+    for (expr, _) in &projection_expressions {
+        collect_column_ids(expr, &mut needed);
+    }
+    if let Some(predicate) = &predicate {
+        collect_column_ids(predicate, &mut needed);
+    }
+    if let Some(items) = &order_by {
+        for (expr, _) in items {
+            collect_column_ids(expr, &mut needed);
+        }
+    }
+    for join in &joins {
+        collect_column_ids(&join.on, &mut needed);
+    }
+
+    // 3. 每个来源只解码自己表的字段。
+    let mut field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> = std::collections::BTreeMap::new();
+    let base = join_source_plan(base, None, catalog, &needed, &mut field_types)?;
+    let mut join_sources = Vec::with_capacity(joins.len());
+    for join in joins {
+        join_sources.push(join_source_plan(join.table, Some(join.on), catalog, &needed, &mut field_types)?);
+    }
+
+    Ok(SqlExecutionPlan::Join(JoinPlan {
+        base,
+        joins: join_sources,
+        projection_fields,
+        projection_expressions,
+        remaining_predicate: predicate,
+        order_by,
+        limit_after_sort: limit.unwrap_or(0),
+        offset_after_sort: offset.unwrap_or(0),
+        field_types,
+    }))
+}
+
+/// 构造一个 JOIN 数据来源计划：记录 namespace、ON 条件与该表需要解码的字段。
+fn join_source_plan(
+    table: SqlCatalogBoundTable,
+    on: Option<SqlCatalogBoundExpression>,
+    catalog: &SqlCatalog,
+    needed: &[u64],
+    field_types: &mut std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+) -> Result<JoinSourcePlan, SqlFrontendError> {
+    let catalog_table = find_table(catalog, table.type_id)?;
+    let mut needed_field_ids = Vec::new();
+    for field in &catalog_table.fields {
+        field_types.insert(field.field_id, field.field_type.clone());
+        if needed.contains(&field.field_id) {
+            needed_field_ids.push(field.field_id);
+        }
+    }
+    Ok(JoinSourcePlan { namespace: format!("table:{}", catalog_table.type_id), needed_field_ids, on })
 }
 
 /// 计划一个没有 FROM 的 SELECT：只允许常量与内建函数，不访问任何 namespace。
@@ -261,6 +364,8 @@ pub enum SqlExecutionPlan {
     Read(ReadPlan),
     /// SELECT — namespace 扫描 + 行级过滤。
     Scan(ScanPlan),
+    /// SELECT — 多表内连接（嵌套循环合并后再投影 / 排序 / 限流）。
+    Join(JoinPlan),
     /// SELECT without FROM — constant and scalar builtin evaluation.
     Scalar(ScalarPlan),
     /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
@@ -323,6 +428,40 @@ pub struct ScanPlan {
     pub has_aggregate: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+}
+
+/// SELECT 多表内连接执行计划（嵌套循环合并）。
+#[derive(Debug, Clone)]
+pub struct JoinPlan {
+    /// 基表来源。
+    pub base: JoinSourcePlan,
+    /// 依次连接的来源，每个带自己的 ON 条件。
+    pub joins: Vec<JoinSourcePlan>,
+    /// 投影里直接映射到 catalog 字段的那些列：(field_id, display_name)。
+    pub projection_fields: Vec<(u64, String)>,
+    /// 投影里需要在合并行上做表达式求值的那些：(expression, display_name)。
+    pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
+    /// 行级过滤表达式；`None` 表示不过滤。
+    pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+    /// 可选 ORDER BY 字段列表；合并出全部行后由 execute 层内存排序。
+    pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+    /// 排序之后才应用的 LIMIT。0 = 无上限。
+    pub limit_after_sort: usize,
+    /// 排序之后才应用的 OFFSET。默认 0。
+    pub offset_after_sort: usize,
+    /// field_id → SqlFieldType 映射，execute 层 decode_row / 求值用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+}
+
+/// JOIN 的一个数据来源。
+#[derive(Debug, Clone)]
+pub struct JoinSourcePlan {
+    /// namespace 标签，形如 `table:{type_id}`。
+    pub namespace: String,
+    /// 需要从该表 TLV payload 里解码的字段（其余字段跳过）。
+    pub needed_field_ids: Vec<u64>,
+    /// 该来源的 ON 条件；基表为 `None`。
+    pub on: Option<SqlCatalogBoundExpression>,
 }
 
 /// SELECT without FROM 执行计划：纯常量与标量内建函数求值，产出单行结果。
@@ -611,6 +750,20 @@ fn scalar_projection_label(expr: &SqlCatalogBoundExpression) -> String {
 
 fn expression_default_label(expr: &SqlCatalogBoundExpression) -> String {
     format!("{expr:?}")
+}
+
+/// 表达式里是否出现聚合函数（含嵌套在运算里）。
+fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
+    match expr {
+        SqlCatalogBoundExpression::Function { name, args } => {
+            SqlAggregateFunction::from_name(name).is_some() || args.iter().any(expression_has_aggregate)
+        }
+        SqlCatalogBoundExpression::Binary { left, right, .. } => {
+            expression_has_aggregate(left) || expression_has_aggregate(right)
+        }
+        SqlCatalogBoundExpression::Unary { expression, .. } => expression_has_aggregate(expression),
+        _ => false,
+    }
 }
 
 fn planner_error(message: &str) -> SqlFrontendError {
