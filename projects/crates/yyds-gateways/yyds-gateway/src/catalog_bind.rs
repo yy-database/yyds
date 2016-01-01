@@ -437,11 +437,8 @@ fn bind_insert(
             insert.values.len()
         )));
     }
-    let values = insert
-        .values
-        .into_iter()
-        .map(|v| bind_expression(v, &source, catalog, variables))
-        .collect::<Result<Vec<_>, _>>()?;
+    let values =
+        insert.values.into_iter().map(|v| bind_expression(v, &source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
     Ok(SqlCatalogBoundInsert { table, fields: bound_fields, values })
 }
 
@@ -501,13 +498,10 @@ fn bind_select(
     for projection in select.projections {
         projections.extend(bind_projection(projection, &sources, catalog, variables)?);
     }
-    let predicate =
-        select.predicate.map(|expression| bind_expression(expression, &sources, catalog, variables)).transpose()?;
+    let predicate = select.predicate.map(|expression| bind_expression(expression, &sources, catalog, variables)).transpose()?;
     let group_by = select
         .group_by
-        .map(|exprs| {
-            exprs.into_iter().map(|e| bind_expression(e, &sources, catalog, variables)).collect::<Result<Vec<_>, _>>()
-        })
+        .map(|exprs| exprs.into_iter().map(|e| bind_expression(e, &sources, catalog, variables)).collect::<Result<Vec<_>, _>>())
         .transpose()?;
     let having = select.having.map(|e| bind_expression(e, &sources, catalog, variables)).transpose()?;
     let order_by = match select.order_by {

@@ -386,7 +386,9 @@ fn execute_simple_query(
             SqlExecutionPlan::Insert(_) => format!("INSERT 0 {}", affected),
             SqlExecutionPlan::Update(_) => format!("UPDATE {}", affected),
             SqlExecutionPlan::Delete(_) => format!("DELETE {}", affected),
-            SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_) => unreachable!(),
+            SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_) => {
+                unreachable!()
+            }
         };
         write_command_complete(stream, &tag)?;
     }

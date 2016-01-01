@@ -18,7 +18,8 @@
 use crate::{
     catalog_bind::{
         collect_column_ids, SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
-        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogBoundUpdate,
+        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable,
+        SqlCatalogBoundUpdate,
     },
     sql::{SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlFrontendError},
 };
@@ -39,7 +40,8 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         return plan_join_select(select, catalog);
     }
     // 无 FROM 的 SELECT 只做常量 / 内建函数求值（驱动探测 VERSION()、SELECT 1 等）。
-    let Some(source) = select.source.as_ref() else {
+    let Some(source) = select.source.as_ref()
+    else {
         return plan_source_less_select(select);
     };
     let table = find_table(catalog, source.type_id)?;

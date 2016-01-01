@@ -148,7 +148,9 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     spawn_runtime_server(runtime)
 }
 
-fn spawn_runtime_server(runtime: std::sync::Arc<yyds_gateway_mysql::connection::MysqlSqlRuntime>) -> (TcpStream, thread::JoinHandle<()>) {
+fn spawn_runtime_server(
+    runtime: std::sync::Arc<yyds_gateway_mysql::connection::MysqlSqlRuntime>,
+) -> (TcpStream, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let rt = runtime;

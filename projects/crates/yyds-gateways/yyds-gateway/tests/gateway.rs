@@ -1283,14 +1283,17 @@ fn sql_source_less_select_evaluates_string_and_numeric_scalars() {
     let result = evaluate_source_less(
         "SELECT LOWER('ABC'), UPPER('abc'), LENGTH('hello'), COALESCE(NULL, 'fallback'), ABS(-3), ROUND(2.567, 2)",
     );
-    assert_eq!(result.rows[0], vec![
-        yyds_gateway::SqlValue::String("abc".into()),
-        yyds_gateway::SqlValue::String("ABC".into()),
-        yyds_gateway::SqlValue::Number(5.0),
-        yyds_gateway::SqlValue::String("fallback".into()),
-        yyds_gateway::SqlValue::Number(3.0),
-        yyds_gateway::SqlValue::Number(2.57),
-    ]);
+    assert_eq!(
+        result.rows[0],
+        vec![
+            yyds_gateway::SqlValue::String("abc".into()),
+            yyds_gateway::SqlValue::String("ABC".into()),
+            yyds_gateway::SqlValue::Number(5.0),
+            yyds_gateway::SqlValue::String("fallback".into()),
+            yyds_gateway::SqlValue::Number(3.0),
+            yyds_gateway::SqlValue::Number(2.57),
+        ]
+    );
 }
 
 #[test]
@@ -1312,11 +1315,10 @@ fn sql_source_less_select_rejects_where_clause() {
 fn sql_source_less_select_keeps_unary_minus_sign() {
     // 回归：Oak 曾把前导 `-` 当成缺失左操作数的二元减号，`SELECT -3` 返回 3。
     let result = evaluate_source_less("SELECT -3, ABS(-3), 1 - -2");
-    assert_eq!(result.rows[0], vec![
-        yyds_gateway::SqlValue::Number(-3.0),
-        yyds_gateway::SqlValue::Number(3.0),
-        yyds_gateway::SqlValue::Number(3.0),
-    ]);
+    assert_eq!(
+        result.rows[0],
+        vec![yyds_gateway::SqlValue::Number(-3.0), yyds_gateway::SqlValue::Number(3.0), yyds_gateway::SqlValue::Number(3.0),]
+    );
 }
 
 // --- JOIN（内连接） ---
@@ -1395,7 +1397,10 @@ fn sql_inner_join_star_expands_every_joined_table() {
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute");
 
-    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string(), "id".to_string(), "user_id".to_string(), "total".to_string()]);
+    assert_eq!(
+        result.columns,
+        vec!["id".to_string(), "name".to_string(), "id".to_string(), "user_id".to_string(), "total".to_string()]
+    );
     assert_eq!(result.rows.len(), 3, "orders.user_id = 9 has no users match");
     let totals: Vec<f64> = result
         .rows
@@ -1433,21 +1438,14 @@ fn sql_join_rejects_ambiguous_unqualified_columns() {
     let (catalog, _executor) = join_fixture();
 
     // `id` 在两张表里都有，未限定必须报歧义而不是随便选一张。
-    let error = yyds_gateway::bind_sql_catalog(
-        "SELECT id FROM users JOIN orders ON users.id = orders.user_id",
-        &catalog,
-        7,
-    )
-    .expect_err("ambiguous column");
+    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users JOIN orders ON users.id = orders.user_id", &catalog, 7)
+        .expect_err("ambiguous column");
     assert!(error.message.contains("ambiguous SQL column: id"), "{}", error.message);
 
     // 引用不存在表的限定名。
-    let error = yyds_gateway::bind_sql_catalog(
-        "SELECT admins.id FROM users JOIN orders ON users.id = orders.user_id",
-        &catalog,
-        7,
-    )
-    .expect_err("unknown qualifier");
+    let error =
+        yyds_gateway::bind_sql_catalog("SELECT admins.id FROM users JOIN orders ON users.id = orders.user_id", &catalog, 7)
+            .expect_err("unknown qualifier");
     assert!(error.message.contains("unknown SQL table qualifier"), "{}", error.message);
 }
 

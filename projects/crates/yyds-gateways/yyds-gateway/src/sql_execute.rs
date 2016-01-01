@@ -21,7 +21,9 @@ use crate::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError,
         SqlScalarFunction,
     },
-    sql_planner::{DeletePlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, ScalarPlan, SqlExecutionPlan, UpdatePlan, WritePlan},
+    sql_planner::{
+        DeletePlan, JoinPlan, JoinSourcePlan, ReadPlan, ScalarPlan, ScanPlan, SqlExecutionPlan, UpdatePlan, WritePlan,
+    },
 };
 
 /// SQL 查询的结果集。
@@ -394,10 +396,7 @@ fn execute_join(executor: &dyn KeyValueExecutor, plan: &JoinPlan) -> Result<SqlR
 }
 
 /// 整表扫描一个 JOIN 来源，只解码该表参与的字段。
-fn scan_join_source(
-    executor: &dyn KeyValueExecutor,
-    source: &JoinSourcePlan,
-) -> Result<Vec<RowFieldValues>, SqlFrontendError> {
+fn scan_join_source(executor: &dyn KeyValueExecutor, source: &JoinSourcePlan) -> Result<Vec<RowFieldValues>, SqlFrontendError> {
     let namespace = Namespace(source.namespace.clone());
     let scanned = executor
         .execute_scan(&namespace, &[], None, None, 0)
@@ -960,9 +959,8 @@ fn eval_expression(
             eval_binary(*operator, &l, &r)?
         }
         SqlCatalogBoundExpression::Function { name, args } => {
-            let scalar = SqlScalarFunction::from_name(name).ok_or_else(|| {
-                execute_error(&format!("aggregate function {name} cannot be evaluated on a single row"))
-            })?;
+            let scalar = SqlScalarFunction::from_name(name)
+                .ok_or_else(|| execute_error(&format!("aggregate function {name} cannot be evaluated on a single row")))?;
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
                 values.push(eval_expression(arg, row, field_types)?);
@@ -1022,10 +1020,8 @@ fn scalar_text(args: &[SqlValue], index: usize) -> Option<String> {
 
 /// Session timestamp in SQL `YYYY-MM-DD HH:MM:SS` form, derived from the host clock.
 fn current_timestamp() -> String {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0);
+    let seconds =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs() as i64).unwrap_or(0);
     let days = seconds.div_euclid(86_400);
     let remainder = seconds.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
