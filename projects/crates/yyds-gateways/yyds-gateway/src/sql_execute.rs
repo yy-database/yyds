@@ -40,7 +40,9 @@ pub struct SqlResult {
 /// SQL 层面的值域。
 #[derive(Debug, Clone, PartialEq)]
 pub enum SqlValue {
-    /// 数值（SQL 不区分整数和浮点数，gateway 用 f64 表示）。
+    /// 64 位有符号整数。整数列必须走这个变体，避免 `i64` 经 `f64` 往返时丢失精度。
+    Integer(i64),
+    /// 非整数数值（浮点字面量、除法、AVG 等）。
     Number(f64),
     /// 字符串。
     String(String),
@@ -50,15 +52,30 @@ pub enum SqlValue {
     Null,
 }
 
+/// 解析 SQL 数值字面量：不带小数点或指数的文本优先按 `i64` 精确解析，
+/// 只有真正的小数/指数形式才转成 `f64`。
+fn numeric_literal(text: &str) -> SqlValue {
+    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+        if let Ok(value) = text.parse::<i64>() {
+            return SqlValue::Integer(value);
+        }
+    }
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() => SqlValue::Number(value),
+        _ => SqlValue::String(text.to_owned()),
+    }
+}
+
 impl SqlValue {
     /// 从 KV 层拿到的原始 bytes 推断一个 SqlValue（无类型信息，宽松推断）。
     ///
-    /// 如果 bytes 是合法 UTF-8 并且能解析为整数或浮点数，就返回 Number；
-    /// 否则返回 String。如果上游知道精确类型，应使用 [`Self::from_row_bytes_typed`]。
+    /// 如果 bytes 是合法 UTF-8 并且能解析为整数或浮点数，就返回 [`SqlValue::Integer`] /
+    /// [`SqlValue::Number`]；否则返回 String。如果上游知道精确类型，应使用
+    /// [`Self::from_row_bytes_typed`]。
     pub fn from_row_bytes(bytes: &[u8]) -> Self {
         let text = String::from_utf8_lossy(bytes).into_owned();
         if let Ok(int) = text.parse::<i64>() {
-            return SqlValue::Number(int as f64);
+            return SqlValue::Integer(int);
         }
         if let Ok(float) = text.parse::<f64>() {
             if float.is_finite() {
@@ -84,7 +101,7 @@ impl SqlValue {
             crate::catalog_bind::SqlFieldType::String => SqlValue::String(String::from_utf8_lossy(bytes).into_owned()),
             crate::catalog_bind::SqlFieldType::Int64 | crate::catalog_bind::SqlFieldType::Int32 => {
                 let text = String::from_utf8_lossy(bytes).into_owned();
-                text.parse::<i64>().map(|n| SqlValue::Number(n as f64)).unwrap_or(SqlValue::String(text))
+                text.parse::<i64>().map(SqlValue::Integer).unwrap_or(SqlValue::String(text))
             }
             crate::catalog_bind::SqlFieldType::Float64 => {
                 let text = String::from_utf8_lossy(bytes).into_owned();
@@ -107,10 +124,7 @@ impl SqlValue {
     /// 从 SQL 字面量构造。
     pub fn from_literal(lit: &SqlBoundLiteral) -> Self {
         match lit {
-            SqlBoundLiteral::Number(text) => match text.parse::<f64>() {
-                Ok(v) if v.is_finite() => SqlValue::Number(v),
-                _ => SqlValue::String(text.clone()),
-            },
+            SqlBoundLiteral::Number(text) => numeric_literal(text),
             SqlBoundLiteral::String(text) => SqlValue::String(text.clone()),
             SqlBoundLiteral::Boolean(v) => SqlValue::Boolean(*v),
             SqlBoundLiteral::Null => SqlValue::Null,
@@ -148,12 +162,8 @@ impl RowFieldValues {
         }
     }
 
-    /// 按 field_id 取推断后的 SqlValue（无类型信息，宽松推断）。
-    pub fn value(&self, field_id: u64) -> Option<SqlValue> {
-        self.fields.get(&field_id).map(|v| SqlValue::from_row_bytes(v))
-    }
-
     /// 按 `field_type` 精确解码 bytes，保留前导零和空串等字符串语义。
+    /// 这是读取字段值的唯一入口，避免在已知 catalog 类型时退回无类型推断。
     pub fn value_typed(
         &self,
         field_id: u64,
@@ -194,7 +204,7 @@ pub fn decode_row(data: &[u8]) -> Result<RowFieldValues, SqlFrontendError> {
 }
 
 /// 部分解码：只收集 needed_ids 里的字段，跳过其他 TLV 条目。
-/// 当 needed_ids 为空时退化为全量解码（兼容旧调用）。
+/// 当 needed_ids 为空时表示调用方确实需要整行（例如尚未确定投影）。
 pub fn decode_row_fields(data: &[u8], needed_ids: &[u64]) -> Result<RowFieldValues, SqlFrontendError> {
     let mut row = RowFieldValues::new();
     if needed_ids.is_empty() {
@@ -244,6 +254,27 @@ fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
         for (order_expr, _) in order_items {
             collect_column_ids(order_expr, &mut ids);
         }
+    }
+    ids
+}
+
+/// 从 ReadPlan / DeletePlan 的表达式里收集执行时需要解码的 field_ids。
+fn expression_needed_field_ids(
+    projection_fields: &[(u64, String)],
+    projection_expressions: &[(SqlCatalogBoundExpression, String)],
+    predicate: Option<&SqlCatalogBoundExpression>,
+) -> Vec<u64> {
+    let mut ids: Vec<u64> = Vec::new();
+    for (fid, _) in projection_fields {
+        if !ids.contains(fid) {
+            ids.push(*fid);
+        }
+    }
+    for (expr, _) in projection_expressions {
+        collect_column_ids(expr, &mut ids);
+    }
+    if let Some(predicate) = predicate {
+        collect_column_ids(predicate, &mut ids);
     }
     ids
 }
@@ -303,7 +334,10 @@ fn execute_read(
         yyds_types::KeyValueResult::Get(Some(bytes)) => bytes,
         _ => return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new(), affected_rows: 0 }),
     };
-    let row = decode_row(&row_bytes)?;
+    // 只解码本次读取实际需要的字段；值仍由 `value_typed` 按 catalog 类型解释。
+    let needed_ids =
+        expression_needed_field_ids(&plan.projection_fields, &plan.projection_expressions, plan.remaining_predicate.as_ref());
+    let row = decode_row_fields(&row_bytes, &needed_ids)?;
 
     if let Some(ref predicate) = plan.remaining_predicate {
         let v = eval_expression(predicate, &row, &plan.field_types)?;
@@ -718,6 +752,8 @@ fn execute_update(
         Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
         _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
     };
+    // UPDATE 必须保留未赋值的列，因此这里解码完整 TLV；字段值仍按
+    // `plan.field_types` 走类型化解释，不会退回无类型猜测。
     let mut row = decode_row(&existing_bytes)?;
 
     // 先评估 remaining_predicate —— 不通过就不写，影响 0 行。
@@ -764,7 +800,8 @@ fn execute_delete(
             // 行已不存在 — 也是 0 影响行
             _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
         };
-        let row = decode_row(&existing_bytes)?;
+        let needed_ids = expression_needed_field_ids(&[], &[], Some(predicate));
+        let row = decode_row_fields(&existing_bytes, &needed_ids)?;
         let v = eval_expression(predicate, &row, &plan.field_types)?;
         if !truthy(&v) {
             return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
@@ -838,9 +875,34 @@ fn join_column_labels(plan: &JoinPlan) -> Vec<String> {
 fn truthy(v: &SqlValue) -> bool {
     match v {
         SqlValue::Boolean(b) => *b,
+        SqlValue::Integer(n) => *n != 0,
         SqlValue::Number(n) => *n != 0.0,
         SqlValue::String(s) => !s.is_empty(),
         SqlValue::Null => false,
+    }
+}
+
+/// SQL 三值逻辑里的真值：`NULL` 既不是 true 也不是 false。
+fn sql_truth(v: &SqlValue) -> Option<bool> {
+    match v {
+        SqlValue::Null => None,
+        other => Some(truthy(other)),
+    }
+}
+
+fn sql_and(left: &SqlValue, right: &SqlValue) -> SqlValue {
+    match (sql_truth(left), sql_truth(right)) {
+        (Some(false), _) | (_, Some(false)) => SqlValue::Boolean(false),
+        (Some(true), Some(true)) => SqlValue::Boolean(true),
+        _ => SqlValue::Null,
+    }
+}
+
+fn sql_or(left: &SqlValue, right: &SqlValue) -> SqlValue {
+    match (sql_truth(left), sql_truth(right)) {
+        (Some(true), _) | (_, Some(true)) => SqlValue::Boolean(true),
+        (Some(false), Some(false)) => SqlValue::Boolean(false),
+        _ => SqlValue::Null,
     }
 }
 
@@ -862,7 +924,7 @@ fn eval_aggregate(
         SqlAggregateFunction::COUNT => {
             if args.is_empty() {
                 // COUNT(*) — total row count after filter.
-                Ok(SqlValue::Number(rows.len() as f64))
+                Ok(SqlValue::Integer(i64::try_from(rows.len()).unwrap_or(i64::MAX)))
             }
             else {
                 // COUNT(col) — count rows where col is not NULL.
@@ -873,24 +935,39 @@ fn eval_aggregate(
                         non_null += 1;
                     }
                 }
-                Ok(SqlValue::Number(non_null as f64))
+                Ok(SqlValue::Integer(i64::try_from(non_null).unwrap_or(i64::MAX)))
             }
         }
         SqlAggregateFunction::SUM => {
-            let mut sum: f64 = 0.0;
-            let mut any_non_null = false;
+            // 整数列用 i128 精确累加，避免 `i64` 先转 `f64` 再求和造成精度丢失。
+            // 出现浮点值时按 SQL 的数值提升规则整体转为 f64。
+            let mut integer_sum: i128 = 0;
+            let mut float_sum: f64 = 0.0;
+            let mut has_float = false;
+            let mut has_value = false;
             for row in rows {
-                let v = eval_expression(&args[0], row, field_types)?;
-                if let SqlValue::Number(n) = v {
-                    sum += n;
-                    any_non_null = true;
+                match eval_expression(&args[0], row, field_types)? {
+                    SqlValue::Integer(n) => {
+                        integer_sum += i128::from(n);
+                        float_sum += n as f64;
+                        has_value = true;
+                    }
+                    SqlValue::Number(n) => {
+                        has_float = true;
+                        float_sum += n;
+                        has_value = true;
+                    }
+                    _ => {}
                 }
             }
-            if any_non_null {
-                Ok(SqlValue::Number(sum))
+            if !has_value {
+                Ok(SqlValue::Null)
+            }
+            else if has_float {
+                Ok(SqlValue::Number(float_sum))
             }
             else {
-                Ok(SqlValue::Null)
+                Ok(i64::try_from(integer_sum).map(SqlValue::Integer).unwrap_or(SqlValue::Number(integer_sum as f64)))
             }
         }
         SqlAggregateFunction::AVG => {
@@ -898,9 +975,16 @@ fn eval_aggregate(
             let mut count: usize = 0;
             for row in rows {
                 let v = eval_expression(&args[0], row, field_types)?;
-                if let SqlValue::Number(n) = v {
-                    sum += n;
-                    count += 1;
+                match v {
+                    SqlValue::Integer(n) => {
+                        sum += n as f64;
+                        count += 1;
+                    }
+                    SqlValue::Number(n) => {
+                        sum += n;
+                        count += 1;
+                    }
+                    _ => {}
                 }
             }
             if count > 0 {
@@ -910,31 +994,30 @@ fn eval_aggregate(
                 Ok(SqlValue::Null)
             }
         }
-        SqlAggregateFunction::MAX => {
-            let mut max: Option<f64> = None;
+        SqlAggregateFunction::MAX | SqlAggregateFunction::MIN => {
+            let want_greater = agg == SqlAggregateFunction::MAX;
+            let mut best: Option<SqlValue> = None;
             for row in rows {
-                let v = eval_expression(&args[0], row, field_types)?;
-                if let SqlValue::Number(n) = v {
-                    max = Some(match max {
-                        Some(m) => n.max(m),
-                        None => n,
-                    });
+                let value = eval_expression(&args[0], row, field_types)?;
+                if !matches!(value, SqlValue::Integer(_) | SqlValue::Number(_)) {
+                    continue;
                 }
+                best = Some(match best {
+                    Some(current) => {
+                        let order = compare_values(Some(&value), Some(&current));
+                        let replace =
+                            if want_greater { order == std::cmp::Ordering::Greater } else { order == std::cmp::Ordering::Less };
+                        if replace {
+                            value
+                        }
+                        else {
+                            current
+                        }
+                    }
+                    None => value,
+                });
             }
-            Ok(max.map(SqlValue::Number).unwrap_or(SqlValue::Null))
-        }
-        SqlAggregateFunction::MIN => {
-            let mut min: Option<f64> = None;
-            for row in rows {
-                let v = eval_expression(&args[0], row, field_types)?;
-                if let SqlValue::Number(n) = v {
-                    min = Some(match min {
-                        Some(m) => n.min(m),
-                        None => n,
-                    });
-                }
-            }
-            Ok(min.map(SqlValue::Number).unwrap_or(SqlValue::Null))
+            Ok(best.unwrap_or(SqlValue::Null))
         }
     }
 }
@@ -972,7 +1055,7 @@ fn eval_expression(
 
 /// 对一行求值标量内建函数。参数已按从左到右求值完毕。
 fn eval_scalar_function(function: SqlScalarFunction, args: &[SqlValue]) -> Result<SqlValue, SqlFrontendError> {
-    use SqlValue::{Null, Number, String as Text};
+    use SqlValue::{Integer, Null, Number, String as Text};
     Ok(match function {
         SqlScalarFunction::Version => Text(crate::version_label()),
         // 未选择数据库 / schema 时，MySQL 与 PostgreSQL 都返回 NULL。
@@ -987,24 +1070,41 @@ fn eval_scalar_function(function: SqlScalarFunction, args: &[SqlValue]) -> Resul
             None => Null,
         },
         SqlScalarFunction::Length => match scalar_text(args, 0) {
-            Some(text) => Number(text.chars().count() as f64),
+            Some(text) => Integer(i64::try_from(text.chars().count()).unwrap_or(i64::MAX)),
             None => Null,
         },
         SqlScalarFunction::Coalesce => args.iter().find(|value| **value != Null).cloned().unwrap_or(Null),
         SqlScalarFunction::Abs => match args.first() {
+            Some(Integer(value)) => Integer(value.checked_abs().ok_or_else(|| execute_error("ABS integer overflow"))?),
             Some(Number(value)) => Number(value.abs()),
             Some(Null) | None => Null,
             Some(_) => Number(0.0),
         },
-        SqlScalarFunction::Round => match (args.first(), args.get(1)) {
-            (Some(Number(value)), Some(Number(digits))) => {
-                let factor = 10f64.powi(*digits as i32);
-                Number((value * factor).round() / factor)
+        SqlScalarFunction::Round => {
+            let digits = match args.get(1) {
+                Some(Integer(value)) => Some(*value as f64),
+                Some(Number(value)) => Some(*value),
+                _ => None,
+            };
+            match args.first() {
+                Some(Integer(value)) => match digits {
+                    Some(digits) if digits < 0.0 => {
+                        let factor = 10f64.powi(digits.abs() as i32);
+                        Number((*value as f64 / factor).round() * factor)
+                    }
+                    _ => Integer(*value),
+                },
+                Some(Number(value)) => match digits {
+                    Some(digits) => {
+                        let factor = 10f64.powi(digits as i32);
+                        Number((value * factor).round() / factor)
+                    }
+                    None => Number(value.round()),
+                },
+                Some(Null) | None => Null,
+                Some(_) => Number(0.0),
             }
-            (Some(Number(value)), _) => Number(value.round()),
-            (Some(Null) | None, _) => Null,
-            (Some(_), _) => Number(0.0),
-        },
+        }
     })
 }
 
@@ -1012,6 +1112,7 @@ fn eval_scalar_function(function: SqlScalarFunction, args: &[SqlValue]) -> Resul
 fn scalar_text(args: &[SqlValue], index: usize) -> Option<String> {
     match args.get(index) {
         Some(SqlValue::String(text)) => Some(text.clone()),
+        Some(SqlValue::Integer(value)) => Some(value.to_string()),
         Some(SqlValue::Number(value)) => Some(format_number(*value)),
         Some(SqlValue::Boolean(value)) => Some(if *value { "1" } else { "0" }.to_string()),
         Some(SqlValue::Null) | None => None,
@@ -1055,37 +1156,41 @@ fn format_number(value: f64) -> String {
 fn eval_unary(op: SqlBoundUnaryOperator, operand: SqlValue) -> Result<SqlValue, SqlFrontendError> {
     Ok(match op {
         SqlBoundUnaryOperator::Plus => match operand {
+            SqlValue::Integer(n) => SqlValue::Integer(n),
             SqlValue::Number(n) => SqlValue::Number(n),
-            other => other,
+            _ => SqlValue::Null,
         },
         SqlBoundUnaryOperator::Minus => match operand {
+            SqlValue::Integer(n) => {
+                SqlValue::Integer(n.checked_neg().ok_or_else(|| execute_error("integer overflow in unary minus"))?)
+            }
             SqlValue::Number(n) => SqlValue::Number(-n),
             _ => SqlValue::Null,
         },
-        SqlBoundUnaryOperator::Not => SqlValue::Boolean(!truthy(&operand)),
+        // SQL 三值逻辑：`NOT NULL` 仍是 NULL。
+        SqlBoundUnaryOperator::Not => match sql_truth(&operand) {
+            Some(value) => SqlValue::Boolean(!value),
+            None => SqlValue::Null,
+        },
     })
 }
 
 fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue) -> Result<SqlValue, SqlFrontendError> {
     use SqlValue::*;
+    // AND / OR 必须先于 NULL 传播处理，否则 `NULL AND FALSE` 会被错误地求成 NULL。
+    match op {
+        SqlBoundBinaryOperator::And => return Ok(sql_and(left, right)),
+        SqlBoundBinaryOperator::Or => return Ok(sql_or(left, right)),
+        _ => {}
+    }
+    if matches!(left, Null) || matches!(right, Null) {
+        return Ok(Null);
+    }
     Ok(match (left, right) {
-        (Null, _) | (_, Null) => Null,
-        (Number(a), Number(b)) => match op {
-            SqlBoundBinaryOperator::Plus => Number(a + b),
-            SqlBoundBinaryOperator::Minus => Number(a - b),
-            SqlBoundBinaryOperator::Multiply => Number(a * b),
-            SqlBoundBinaryOperator::Divide => Number(if *b == 0.0 { f64::NAN } else { a / b }),
-            SqlBoundBinaryOperator::Modulo => Number(if *b == 0.0 { f64::NAN } else { a % b }),
-            SqlBoundBinaryOperator::And => Boolean(truthy(left) && truthy(right)),
-            SqlBoundBinaryOperator::Or => Boolean(truthy(left) || truthy(right)),
-            SqlBoundBinaryOperator::Equal => Boolean(a == b),
-            SqlBoundBinaryOperator::NotEqual => Boolean(a != b),
-            SqlBoundBinaryOperator::Less => Boolean(a < b),
-            SqlBoundBinaryOperator::Greater => Boolean(a > b),
-            SqlBoundBinaryOperator::LessEqual => Boolean(a <= b),
-            SqlBoundBinaryOperator::GreaterEqual => Boolean(a >= b),
-            SqlBoundBinaryOperator::Like => Null,
-        },
+        (Integer(a), Integer(b)) => integer_binary(op, *a, *b)?,
+        (Integer(a), Number(b)) => float_binary(op, *a as f64, *b),
+        (Number(a), Integer(b)) => float_binary(op, *a, *b as f64),
+        (Number(a), Number(b)) => float_binary(op, *a, *b),
         (String(a), String(b)) => match op {
             SqlBoundBinaryOperator::Equal => Boolean(a == b),
             SqlBoundBinaryOperator::NotEqual => Boolean(a != b),
@@ -1094,19 +1199,62 @@ fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue) ->
             SqlBoundBinaryOperator::LessEqual => Boolean(a <= b),
             SqlBoundBinaryOperator::GreaterEqual => Boolean(a >= b),
             SqlBoundBinaryOperator::Like => Boolean(like_match(a, b)),
-            SqlBoundBinaryOperator::And => Boolean(truthy(left) && truthy(right)),
-            SqlBoundBinaryOperator::Or => Boolean(truthy(left) || truthy(right)),
             _ => Null,
         },
         (Boolean(a), Boolean(b)) => match op {
-            SqlBoundBinaryOperator::And => Boolean(*a && *b),
-            SqlBoundBinaryOperator::Or => Boolean(*a || *b),
             SqlBoundBinaryOperator::Equal => Boolean(a == b),
             SqlBoundBinaryOperator::NotEqual => Boolean(a != b),
             _ => Null,
         },
         _ => Null,
     })
+}
+
+/// 整数之间的四则与比较：加、减、乘、模保持精确整数，只在溢出时显式报错。
+fn integer_binary(op: SqlBoundBinaryOperator, a: i64, b: i64) -> Result<SqlValue, SqlFrontendError> {
+    use SqlValue::{Boolean, Integer, Number};
+    let overflow = || execute_error("integer overflow");
+    Ok(match op {
+        SqlBoundBinaryOperator::Plus => Integer(a.checked_add(b).ok_or_else(overflow)?),
+        SqlBoundBinaryOperator::Minus => Integer(a.checked_sub(b).ok_or_else(overflow)?),
+        SqlBoundBinaryOperator::Multiply => Integer(a.checked_mul(b).ok_or_else(overflow)?),
+        SqlBoundBinaryOperator::Divide => Number(if b == 0 { f64::NAN } else { a as f64 / b as f64 }),
+        // 与 PostgreSQL / MySQL 一致，余数符号跟随被除数。
+        SqlBoundBinaryOperator::Modulo => {
+            if b == 0 {
+                Number(f64::NAN)
+            }
+            else {
+                Integer(a.checked_rem(b).ok_or_else(overflow)?)
+            }
+        }
+        SqlBoundBinaryOperator::Equal => Boolean(a == b),
+        SqlBoundBinaryOperator::NotEqual => Boolean(a != b),
+        SqlBoundBinaryOperator::Less => Boolean(a < b),
+        SqlBoundBinaryOperator::Greater => Boolean(a > b),
+        SqlBoundBinaryOperator::LessEqual => Boolean(a <= b),
+        SqlBoundBinaryOperator::GreaterEqual => Boolean(a >= b),
+        SqlBoundBinaryOperator::Like | SqlBoundBinaryOperator::And | SqlBoundBinaryOperator::Or => SqlValue::Null,
+    })
+}
+
+/// 至少一侧是浮点时按 f64 运算；比较也按 f64 语义。
+fn float_binary(op: SqlBoundBinaryOperator, a: f64, b: f64) -> SqlValue {
+    use SqlValue::{Boolean, Number};
+    match op {
+        SqlBoundBinaryOperator::Plus => Number(a + b),
+        SqlBoundBinaryOperator::Minus => Number(a - b),
+        SqlBoundBinaryOperator::Multiply => Number(a * b),
+        SqlBoundBinaryOperator::Divide => Number(if b == 0.0 { f64::NAN } else { a / b }),
+        SqlBoundBinaryOperator::Modulo => Number(if b == 0.0 { f64::NAN } else { a % b }),
+        SqlBoundBinaryOperator::Equal => Boolean(a == b),
+        SqlBoundBinaryOperator::NotEqual => Boolean(a != b),
+        SqlBoundBinaryOperator::Less => Boolean(a < b),
+        SqlBoundBinaryOperator::Greater => Boolean(a > b),
+        SqlBoundBinaryOperator::LessEqual => Boolean(a <= b),
+        SqlBoundBinaryOperator::GreaterEqual => Boolean(a >= b),
+        SqlBoundBinaryOperator::Like | SqlBoundBinaryOperator::And | SqlBoundBinaryOperator::Or => SqlValue::Null,
+    }
 }
 
 /// SQL LIKE 匹配。`%` 匹配 0+ 任意字符，`_` 匹配正好 1 个任意字符。
@@ -1210,6 +1358,9 @@ fn serialize_group_key(values: &[SqlValue]) -> String {
         }
         match v {
             SqlValue::Null => buf.push_str("NULL"),
+            SqlValue::Integer(n) => {
+                let _ = write!(buf, "I:{n}");
+            }
             SqlValue::Number(n) => {
                 let _ = write!(buf, "N:{n}");
             }
@@ -1270,6 +1421,9 @@ fn compare_values(a: Option<&SqlValue>, b: Option<&SqlValue>) -> std::cmp::Order
         (None | Some(SqlValue::Null), Some(_)) => Ordering::Greater,
         (Some(_), None | Some(SqlValue::Null)) => Ordering::Less,
         (Some(x), Some(y)) => match (x, y) {
+            (SqlValue::Integer(n1), SqlValue::Integer(n2)) => n1.cmp(n2),
+            (SqlValue::Integer(n1), SqlValue::Number(n2)) => (*n1 as f64).partial_cmp(n2).unwrap_or(Ordering::Equal),
+            (SqlValue::Number(n1), SqlValue::Integer(n2)) => n1.partial_cmp(&(*n2 as f64)).unwrap_or(Ordering::Equal),
             (SqlValue::Number(n1), SqlValue::Number(n2)) => n1.partial_cmp(n2).unwrap_or(Ordering::Equal),
             (SqlValue::String(s1), SqlValue::String(s2)) => s1.cmp(s2),
             (SqlValue::Boolean(b1), SqlValue::Boolean(b2)) => b1.cmp(b2),

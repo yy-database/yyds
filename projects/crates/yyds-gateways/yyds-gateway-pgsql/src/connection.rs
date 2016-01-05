@@ -464,6 +464,7 @@ fn write_data_row(stream: &mut impl Write, row: &[SqlValue]) -> io::Result<()> {
 
 fn sql_value_to_pg_text(value: &SqlValue) -> String {
     match value {
+        SqlValue::Integer(n) => n.to_string(),
         SqlValue::Number(n) => format!("{n}"),
         SqlValue::String(s) => s.clone(),
         SqlValue::Boolean(b) => {
