@@ -1121,6 +1121,73 @@ fn sql_update_succeeds_when_remaining_predicate_matches() {
 }
 
 #[test]
+fn sql_update_applies_range_predicate_beyond_pk() {
+    // 预置 row: id=9, name='original', age=20
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
+
+    // pk 等值命中但 age 范围不命中 —— 不允许只按主键就写。
+    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age > 25", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("update");
+    assert_eq!(result.affected_rows, 0, "range predicate mismatch should affect 0 rows");
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::String("original".into()), yyds_gateway::SqlValue::Integer(20)]);
+
+    // 范围命中 —— 应该写入。
+    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age > 10", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("update");
+    assert_eq!(result.affected_rows, 1, "range predicate match should affect 1 row");
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
+    assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String("updated".into()));
+}
+
+#[test]
+fn sql_delete_applies_like_predicate_beyond_pk() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor =
+        make_executor_with_rows("table:1", &[(b"55", &[(1, b"55"), (2, b"victim")]), (b"56", &[(1, b"56"), (2, b"other")])]);
+
+    // pk 等值命中但 LIKE 不命中 —— 不允许只按主键就删除。
+    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 56 AND name LIKE 'v%'", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("delete");
+    assert_eq!(result.affected_rows, 0, "LIKE predicate mismatch should affect 0 rows");
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 56", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
+    assert_eq!(result.rows.len(), 1, "row 56 must survive a failed LIKE predicate");
+
+    // LIKE 命中 —— 应该删除，且只删命中的那一行。
+    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55 AND name LIKE 'v%'", &catalog, 7)
+        .expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("delete");
+    assert_eq!(result.affected_rows, 1, "LIKE predicate match should affect 1 row");
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 55", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
+    assert!(result.rows.is_empty(), "row 55 must be deleted");
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 56", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select");
+    assert_eq!(result.rows.len(), 1, "row 56 must not be affected");
+}
+
+#[test]
 fn sql_delete_rejects_when_remaining_predicate_fails() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor = make_executor_with_row("table:1", b"55", &[(1, b"55"), (2, b"victim")]);
