@@ -1654,3 +1654,109 @@ fn sql_scalar_function_binding_rejects_unknown_name_and_bad_arity() {
     let arity = yyds_gateway::bind_sql_catalog("SELECT LOWER()", &catalog, 7).expect_err("arity");
     assert!(arity.message.contains("LOWER() expects 1 argument"), "unexpected message: {}", arity.message);
 }
+
+// --- 事务内读写原子性 ---
+
+/// 在给定执行器 / 事务上下文里跑一条 SQL，返回结果集。
+fn run_sql(
+    executor: &dyn yyds_execution::KeyValueExecutor,
+    transaction: Option<&dyn yyds_execution::TransactionHandle>,
+    catalog: &yyds_gateway::SqlCatalog,
+    sql: &str,
+) -> yyds_gateway::SqlResult {
+    let bound = yyds_gateway::bind_sql_catalog(sql, catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, catalog).expect("plan");
+    yyds_gateway::execute_plan(executor, transaction, &plan).expect("execute")
+}
+
+#[test]
+fn sql_transaction_scan_observes_uncommitted_writes() {
+    use std::sync::Arc;
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(empty_executor());
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+
+    run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (1, 'alice')");
+    run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (2, 'bob')");
+    run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "UPDATE users SET name = 'carol' WHERE id = 2");
+
+    // Scan 必须合并事务 buffer，否则 SELECT * 看不到本事务尚未提交的写入。
+    let scan = run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(
+        scan.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("carol".into())],
+        ]
+    );
+
+    // 事务外仍然看不到未提交数据。
+    let outside = run_sql(executor.as_ref(), None, &catalog, "SELECT id FROM users");
+    assert!(outside.rows.is_empty(), "uncommitted rows must not leak outside the transaction");
+
+    handle.rollback();
+}
+
+#[test]
+fn sql_transaction_rollback_discards_insert_update_and_delete() {
+    use std::sync::Arc;
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> =
+        Arc::new(make_executor_with_rows("table:1", &[(b"1", &[(1, b"1"), (2, b"original")])]));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+
+    run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "UPDATE users SET name = 'txn' WHERE id = 1");
+    run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (2, 'pending')");
+    run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "DELETE FROM users WHERE id = 1");
+
+    let inside = run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "SELECT id FROM users");
+    assert_eq!(
+        inside.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(2)]],
+        "transaction view should show only the pending insert"
+    );
+
+    handle.rollback();
+
+    // 回滚后 base 完全恢复：id=1 仍是 original，id=2 不存在。
+    let survivors = run_sql(executor.as_ref(), None, &catalog, "SELECT id, name FROM users");
+    assert_eq!(
+        survivors.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("original".into())]]
+    );
+    let missing = run_sql(executor.as_ref(), None, &catalog, "SELECT id FROM users WHERE id = 2");
+    assert!(missing.rows.is_empty(), "rolled back insert must not persist");
+}
+
+#[test]
+fn sql_transaction_concurrent_update_conflict_is_rejected_at_commit() {
+    use std::sync::Arc;
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> =
+        Arc::new(make_executor_with_rows("table:1", &[(b"1", &[(1, b"1"), (2, b"original")])]));
+
+    // 两个事务都读到同一 pre-image，然后各自做 read-modify-write。
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let first = run_sql(executor.as_ref(), Some(t1.as_ref()), &catalog, "UPDATE users SET name = 't1' WHERE id = 1");
+    assert_eq!(first.affected_rows, 1);
+    let second = run_sql(executor.as_ref(), Some(t2.as_ref()), &catalog, "UPDATE users SET name = 't2' WHERE id = 1");
+    assert_eq!(second.affected_rows, 1);
+
+    t1.commit().expect("first transaction commits");
+    let error = t2.commit().expect_err("second transaction must be rejected by OCC");
+    assert!(
+        matches!(error, yyds_types::Error::CasConflict { .. }),
+        "expected CasConflict for the stale pre-image, got: {error:?}"
+    );
+
+    // 只保留第一个事务写入，后提交者不能静默覆盖。
+    let result = run_sql(executor.as_ref(), None, &catalog, "SELECT name FROM users WHERE id = 1");
+    assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::String("t1".into())]]);
+}
