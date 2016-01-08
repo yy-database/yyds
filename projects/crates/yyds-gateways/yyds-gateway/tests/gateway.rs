@@ -1760,3 +1760,88 @@ fn sql_transaction_concurrent_update_conflict_is_rejected_at_commit() {
     let result = run_sql(executor.as_ref(), None, &catalog, "SELECT name FROM users WHERE id = 1");
     assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::String("t1".into())]]);
 }
+
+// --- catalog 类型化解码矩阵 ---
+
+/// 一份覆盖 `i32` / `f64` / `bool` / `bytes` / `utf8` / 可空列的 catalog。
+fn typed_metrics() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yyds_kv::MemoryShard>) {
+    let catalog =
+        catalog("table metrics { @@id: i64, small: i32, ratio: f64, active: bool, payload: bytes, code: utf8, note: utf8? }\n");
+    assert_eq!(catalog.tables()[0].fields[1].field_type, yyds_gateway::SqlFieldType::Int32);
+    assert_eq!(catalog.tables()[0].fields[2].field_type, yyds_gateway::SqlFieldType::Float64);
+    assert_eq!(catalog.tables()[0].fields[3].field_type, yyds_gateway::SqlFieldType::Bool);
+    assert_eq!(catalog.tables()[0].fields[4].field_type, yyds_gateway::SqlFieldType::Bytes);
+    assert_eq!(catalog.tables()[0].fields[5].field_type, yyds_gateway::SqlFieldType::String);
+    assert_eq!(catalog.tables()[0].fields[6].field_type, yyds_gateway::SqlFieldType::Optional(Box::new(
+        yyds_gateway::SqlFieldType::String
+    )));
+
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[
+            // 前导零与空串必须保持字符串，bool/bytes/浮点按声明类型解释。
+            (b"1", &[(1, b"1"), (2, b"-7"), (3, b"0.5"), (4, b"1"), (5, b"blob"), (6, b"007")]),
+            // 缺失字段 = NULL，空串仍是 `''`。
+            (b"2", &[(1, b"2"), (2, b"0"), (3, b"-2.25"), (4, b"0"), (5, b""), (6, b""), (7, b"")]),
+        ],
+    );
+    (catalog, executor)
+}
+
+#[test]
+fn catalog_types_drive_decode_on_read_scan_and_transaction_paths() {
+    use std::sync::Arc;
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+    use yyds_gateway::SqlValue;
+
+    let (catalog, executor) = typed_metrics();
+    let columns = "id, small, ratio, active, payload, code, note";
+
+    // 主键等值 → Read 路径。
+    let read = run_sql(&executor, None, &catalog, &format!("SELECT {columns} FROM metrics WHERE id = 1"));
+    assert_eq!(
+        read.rows,
+        vec![vec![
+            SqlValue::Integer(1),
+            SqlValue::Integer(-7),
+            SqlValue::Number(0.5),
+            SqlValue::Boolean(true),
+            SqlValue::String("blob".into()),
+            SqlValue::String("007".into()),
+            SqlValue::Null,
+        ]]
+    );
+
+    // 无主键条件 → Scan 路径；顺序一致，值必须与 Read 完全相同。
+    let scan = run_sql(&executor, None, &catalog, &format!("SELECT {columns} FROM metrics ORDER BY id"));
+    assert_eq!(scan.rows.len(), 2);
+    assert_eq!(scan.rows[0], read.rows[0]);
+    assert_eq!(
+        scan.rows[1],
+        vec![
+            SqlValue::Integer(2),
+            SqlValue::Integer(0),
+            SqlValue::Number(-2.25),
+            SqlValue::Boolean(false),
+            SqlValue::String(String::new()),
+            SqlValue::String(String::new()),
+            SqlValue::String(String::new()),
+        ]
+    );
+
+    // 事务内扫描走同一套 catalog 类型解码，结果必须与事务外一致。
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(executor);
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let txn_scan = run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, &format!("SELECT {columns} FROM metrics ORDER BY id"));
+    assert_eq!(txn_scan.rows, scan.rows);
+    handle.rollback();
+}
+
+#[test]
+fn catalog_typed_decode_keeps_unknown_fallback_for_unmapped_types() {
+    // 未知类型（`decimal`）仍只能宽松推断，并且解码入口必须显式走 Unknown。
+    let decoded = yyds_gateway::SqlValue::from_row_bytes_typed(b"007", &yyds_gateway::SqlFieldType::Unknown);
+    assert_eq!(decoded, yyds_gateway::SqlValue::Integer(7));
+    let typed = yyds_gateway::SqlValue::from_row_bytes_typed(b"007", &yyds_gateway::SqlFieldType::String);
+    assert_eq!(typed, yyds_gateway::SqlValue::String("007".into()));
+}
