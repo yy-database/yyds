@@ -262,7 +262,11 @@ fn handle_simple_query(
             SqlTransactionAction::Commit => {
                 if let Some(handle) = session.handle.take() {
                     if let Err(err) = handle.commit() {
-                        write_error_response(stream, "58P01", &format!("COMMIT failed: {err}"))?;
+                        let state = match &err {
+                            yyds_types::Error::CasConflict { .. } => "40001",
+                            _ => "58P01",
+                        };
+                        write_error_response(stream, state, &format!("COMMIT failed: {err}"))?;
                         return Ok(());
                     }
                 }
