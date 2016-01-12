@@ -1845,3 +1845,112 @@ fn catalog_typed_decode_keeps_unknown_fallback_for_unmapped_types() {
     let typed = yyds_gateway::SqlValue::from_row_bytes_typed(b"007", &yyds_gateway::SqlFieldType::String);
     assert_eq!(typed, yyds_gateway::SqlValue::String("007".into()));
 }
+
+// --- 整数精度 ---
+
+#[test]
+fn sql_int64_extremes_survive_round_trip_ordering_and_aggregates() {
+    use yyds_gateway::SqlValue;
+
+    let catalog = catalog("table users { @@id: i64, age: i64 }\n");
+    let values = [i64::MIN, -1, 0, 9_007_199_254_740_993, i64::MAX];
+    // 负数行无法经 `INSERT ... VALUES` 表达（写值只接受简单字面量），直接落行等价。
+    let rows: Vec<(Vec<u8>, Vec<(u64, Vec<u8>)>)> = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            (
+                (index + 1).to_string().into_bytes(),
+                vec![(1, (index + 1).to_string().into_bytes()), (2, value.to_string().into_bytes())],
+            )
+        })
+        .collect();
+    let refs: Vec<(&[u8], Vec<(u64, &[u8])>)> = rows
+        .iter()
+        .map(|(rowid, fields)| {
+            (
+                rowid.as_slice(),
+                fields.iter().map(|(id, bytes)| (*id, bytes.as_slice())).collect(),
+            )
+        })
+        .collect();
+    let refs: Vec<(&[u8], &[(u64, &[u8])])> = refs.iter().map(|(id, fields)| (*id, fields.as_slice())).collect();
+    let executor = make_executor_with_rows("table:1", &refs);
+
+    // 主键与普通列都必须原样回读，`9223372036854775807` 不能被浮点舍入。
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT age FROM users WHERE id = 5").rows,
+        vec![vec![SqlValue::Integer(i64::MAX)]]
+    );
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT age FROM users WHERE age = -9223372036854775808").rows,
+        vec![vec![SqlValue::Integer(i64::MIN)]]
+    );
+
+    // ORDER BY 使用整数比较，超出 2^53 的相邻值不能并列。
+    let ordered = run_sql(&executor, None, &catalog, "SELECT age FROM users ORDER BY age");
+    assert_eq!(
+        ordered.rows,
+        values.into_iter().map(|value| vec![SqlValue::Integer(value)]).collect::<Vec<_>>()
+    );
+
+    // MAX / MIN 保留精确值，SUM 在 i128 内累加后再落回 i64。
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT MAX(age) FROM users").rows,
+        vec![vec![SqlValue::Integer(i64::MAX)]]
+    );
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT MIN(age) FROM users").rows,
+        vec![vec![SqlValue::Integer(i64::MIN)]]
+    );
+    let expected_sum: i64 = values.iter().fold(0i128, |sum, value| sum + *value as i128) as i64;
+    assert_eq!(expected_sum, 9_007_199_254_740_991);
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT SUM(age) FROM users").rows,
+        vec![vec![SqlValue::Integer(expected_sum)]]
+    );
+}
+
+#[test]
+fn sql_mixed_integer_float_comparisons_do_not_round_integers() {
+    use yyds_gateway::SqlValue;
+
+    let catalog = catalog("table users { @@id: i64, age: i64 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 5)");
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (2, 9007199254740992)");
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (3, 9007199254740993)");
+
+    let ids = |sql: &str| {
+        run_sql(&executor, None, &catalog, sql)
+            .rows
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>()
+    };
+
+    // 旧实现把 `9007199254740993` 先转成 `f64`（等于 ...992.0），大小比较会判成相等。
+    assert_eq!(
+        ids("SELECT id FROM users WHERE age > 9007199254740992.0"),
+        vec![SqlValue::Integer(3)]
+    );
+    assert_eq!(
+        ids("SELECT id FROM users WHERE age = 9007199254740992.0"),
+        vec![SqlValue::Integer(2)]
+    );
+    // oak 保留字面量文本，但 `SqlValue::Number` 是 `f64`，`...993.0` 已经舍入成
+    // `...992.0`，因此只能命中 `age = 9007199254740992` 的行。
+    assert_eq!(
+        ids("SELECT id FROM users WHERE age = 9007199254740993.0"),
+        vec![SqlValue::Integer(2)]
+    );
+    assert_eq!(ids("SELECT id FROM users WHERE 9007199254740992.0 < age"), vec![SqlValue::Integer(3)]);
+    // 小数部分仍参与精确比较：2^53 附近的 `2.5` 无法在 f64 中表示，改用小数值验证。
+    assert_eq!(ids("SELECT id FROM users WHERE age < 5.5"), vec![SqlValue::Integer(1)]);
+    assert_eq!(ids("SELECT id FROM users WHERE age > 4.5").len(), 3);
+
+    // `i64` 上下界与 `f64` 的 `2^63` 边界比较必须严格。
+    assert!(ids("SELECT id FROM users WHERE age >= 9223372036854775808.0").is_empty());
+    assert_eq!(ids("SELECT id FROM users WHERE age < 9223372036854775808.0").len(), 3);
+    assert_eq!(ids("SELECT id FROM users WHERE -9223372036854775808.0 <= age").len(), 3);
+}
