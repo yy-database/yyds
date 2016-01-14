@@ -1,6 +1,7 @@
 //! PostgreSQL protocol-v3 connection establishment and explicit query rejection.
 
 use std::{
+    collections::HashMap,
     io::{self, Read, Write},
     net::TcpStream,
     sync::{
@@ -13,9 +14,15 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, SqlCatalog, SqlExecutionPlan, SqlSessionCommand,
-    SqlTransactionAction, SqlValue,
+    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, substitute_sql_parameters, SqlCatalog,
+    SqlExecutionPlan, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
+
+/// PostgreSQL 类型 OID：`int8`、`float8`、`bool`、`text`。
+const OID_TEXT: u32 = 25;
+const OID_BOOL: u32 = 16;
+const OID_INT8: u32 = 20;
+const OID_FLOAT8: u32 = 701;
 
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
@@ -103,6 +110,9 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
     send_backend_key(&mut stream)?;
     send_ready(&mut stream, &session)?;
 
+    let mut extended = ExtendedSession::default();
+    let mut extended_failed = false;
+
     loop {
         let message = match read_message(&mut stream, &mut pending) {
             Ok(Some(message)) => message,
@@ -132,6 +142,29 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
                     session.fail();
                 }
                 send_ready(&mut stream, &session)?;
+            }
+            tag @ (b'P' | b'B' | b'D' | b'E' | b'C' | b'H' | b'S') => {
+                if extended_failed && !matches!(tag, b'S' | b'H') {
+                    // 扩展查询出错后，PostgreSQL 会丢弃同一批次的后续消息直到 Sync。
+                    continue;
+                }
+                let step = match tag {
+                    b'P' => handle_parse(&mut stream, &message.payload, &mut extended),
+                    b'B' => handle_bind(&mut stream, &message.payload, &mut extended),
+                    b'D' => handle_describe(&mut stream, &message.payload, &mut extended, &mut session, runtime.as_ref()),
+                    b'E' => handle_execute(&mut stream, &message.payload, &mut extended, &mut session, runtime.as_ref()),
+                    b'C' => handle_close(&mut stream, &message.payload, &mut extended),
+                    b'H' => stream.flush().map(|_| ExtendedStep::Continue),
+                    b'S' => {
+                        extended_failed = false;
+                        send_ready(&mut stream, &session).map(|_| ExtendedStep::Continue)
+                    }
+                    _ => Ok(ExtendedStep::Continue),
+                }?;
+                if step == ExtendedStep::Failed {
+                    extended_failed = true;
+                    session.fail();
+                }
             }
             _ => {
                 write_error_response(&mut stream, "08P01", "unsupported PostgreSQL frontend message")?;
@@ -307,7 +340,7 @@ fn handle_simple_query(
             }
             match pg_parameter(&name) {
                 Some(value) => {
-                    write_row_description(stream, &[name.clone()])?;
+                    write_row_description(stream, &[name.clone()], &[OID_TEXT])?;
                     write_data_row(stream, &[SqlValue::String(value.to_string())])?;
                     write_command_complete(stream, "SHOW")
                 }
@@ -351,52 +384,430 @@ fn execute_simple_query(
     runtime: &Arc<PgsqlSqlRuntime>,
     session: &mut TransactionSession,
 ) -> io::Result<()> {
-    let bound = match bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version) {
-        Ok(b) => b,
-        Err(error) => {
-            session.fail();
-            return write_error_response(stream, "42P01", &format!("SQL bind error: {}", error.message));
-        }
-    };
-    let plan = match plan_statement(bound, &runtime.catalog) {
-        Ok(p) => p,
-        Err(error) => {
-            session.fail();
-            return write_error_response(stream, "42883", &format!("SQL plan error: {}", error.message));
-        }
-    };
+    match run_statement(sql, runtime, session) {
+        Ok(outcome) => write_execution_outcome(stream, &outcome),
+        Err((code, message)) => write_error_response(stream, &code, &message),
+    }
+}
+
+/// 执行结果的统一形状，供 SimpleQuery 与扩展查询共用。
+struct ExecutionOutcome {
+    is_read: bool,
+    columns: Vec<String>,
+    rows: Vec<Vec<SqlValue>>,
+    command_tag: String,
+}
+
+/// bind → plan → execute，错误已映射为 SQLSTATE，并已标记事务失败。
+fn run_statement(
+    sql: &str,
+    runtime: &Arc<PgsqlSqlRuntime>,
+    session: &mut TransactionSession,
+) -> Result<ExecutionOutcome, (String, String)> {
+    // 扩展查询不经过 `handle_simple_query`，语法错误必须在这里映射为 `42601`
+    // 而不是被后面的 catalog 绑定错误统一归为 `42P01`。
+    if parse_session_command(sql).is_err() {
+        session.fail();
+        return Err(("42601".to_string(), "Oak could not parse the SQL statement".to_string()));
+    }
+    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version).map_err(|error| {
+        session.fail();
+        ("42P01".to_string(), format!("SQL bind error: {}", error.message))
+    })?;
+    let plan = plan_statement(bound, &runtime.catalog).map_err(|error| {
+        session.fail();
+        ("42883".to_string(), format!("SQL plan error: {}", error.message))
+    })?;
     let is_read = matches!(
         &plan,
         SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_)
     );
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
-    let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan) {
-        Ok(r) => r,
-        Err(error) => {
-            session.fail();
-            return write_error_response(stream, "58P01", &format!("SQL execution error: {}", error.message));
-        }
-    };
-    if is_read {
-        write_row_description(stream, &result.columns)?;
-        for row in &result.rows {
-            write_data_row(stream, row)?;
-        }
-        write_command_complete(stream, &format!("SELECT {}", result.rows.len()))?;
+    let result = execute_plan(runtime.executor.as_ref(), handle_ref, &plan).map_err(|error| {
+        session.fail();
+        ("58P01".to_string(), format!("SQL execution error: {}", error.message))
+    })?;
+    let command_tag = if is_read {
+        format!("SELECT {}", result.rows.len())
     }
     else {
         let affected = result.affected_rows;
-        let tag = match &plan {
-            SqlExecutionPlan::Insert(_) => format!("INSERT 0 {}", affected),
-            SqlExecutionPlan::Update(_) => format!("UPDATE {}", affected),
-            SqlExecutionPlan::Delete(_) => format!("DELETE {}", affected),
+        match &plan {
+            SqlExecutionPlan::Insert(_) => format!("INSERT 0 {affected}"),
+            SqlExecutionPlan::Update(_) => format!("UPDATE {affected}"),
+            SqlExecutionPlan::Delete(_) => format!("DELETE {affected}"),
             SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_) => {
-                unreachable!()
+                format!("SELECT {}", result.rows.len())
             }
-        };
-        write_command_complete(stream, &tag)?;
+        }
+    };
+    Ok(ExecutionOutcome { is_read, columns: result.columns, rows: result.rows, command_tag })
+}
+
+fn write_execution_outcome(stream: &mut impl Write, outcome: &ExecutionOutcome) -> io::Result<()> {
+    if outcome.is_read {
+        write_row_description(stream, &outcome.columns, &column_oids(&outcome.rows, outcome.columns.len()))?;
+        for row in &outcome.rows {
+            write_data_row(stream, row)?;
+        }
     }
-    Ok(())
+    write_command_complete(stream, &outcome.command_tag)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExtendedStep {
+    Continue,
+    Failed,
+}
+
+/// 扩展查询协议的会话状态：命名/匿名 statement 与 portal。
+#[derive(Default)]
+struct ExtendedSession {
+    statements: HashMap<String, PreparedStatement>,
+    portals: HashMap<String, Portal>,
+}
+
+struct PreparedStatement {
+    sql: String,
+    parameter_oids: Vec<u32>,
+}
+
+struct Portal {
+    sql: String,
+    parameters: Vec<SqlValue>,
+    outcome: Option<Result<ExecutionOutcome, (String, String)>>,
+    sent_rows: usize,
+}
+
+fn handle_parse(stream: &mut impl Write, payload: &[u8], extended: &mut ExtendedSession) -> io::Result<ExtendedStep> {
+    let mut cursor = 0;
+    let (Some(name), Some(sql)) = (take_cstring(payload, &mut cursor), take_cstring(payload, &mut cursor))
+    else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Parse message");
+    };
+    let Some(parameter_count) = take_i16(payload, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Parse message");
+    };
+    if parameter_count < 0 {
+        return extended_protocol_error(stream, "08P01", "negative PostgreSQL parameter count");
+    }
+    let mut parameter_oids = Vec::with_capacity(parameter_count as usize);
+    for _ in 0..parameter_count {
+        let Some(oid) = take_u32(payload, &mut cursor) else {
+            return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Parse parameter types");
+        };
+        parameter_oids.push(oid);
+    }
+    extended.statements.insert(name.to_string(), PreparedStatement { sql: sql.to_string(), parameter_oids });
+    write_message(stream, b'1', &[])?;
+    Ok(ExtendedStep::Continue)
+}
+
+fn handle_bind(stream: &mut impl Write, payload: &[u8], extended: &mut ExtendedSession) -> io::Result<ExtendedStep> {
+    let mut cursor = 0;
+    let (Some(portal_name), Some(statement_name)) = (take_cstring(payload, &mut cursor), take_cstring(payload, &mut cursor))
+    else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
+    };
+    let Some(statement) = extended.statements.get(statement_name) else {
+        return extended_protocol_error(
+            stream,
+            "26000",
+            &format!("prepared statement \"{statement_name}\" does not exist"),
+        );
+    };
+    let sql = statement.sql.clone();
+    let parameter_oids = statement.parameter_oids.clone();
+
+    let Some(format_count) = take_i16(payload, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
+    };
+    for _ in 0..format_count.max(0) {
+        let Some(format) = take_i16(payload, &mut cursor) else {
+            return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind format codes");
+        };
+        if format != 0 {
+            return extended_protocol_error(stream, "0A000", "binary parameter format is not supported");
+        }
+    }
+
+    let Some(parameter_count) = take_i16(payload, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
+    };
+    let mut parameters = Vec::with_capacity(parameter_count.max(0) as usize);
+    for index in 0..parameter_count.max(0) {
+        let Some(length) = take_i32(payload, &mut cursor) else {
+            return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind parameter length");
+        };
+        if length < 0 {
+            parameters.push(SqlValue::Null);
+            continue;
+        }
+        let Some(bytes) = take_bytes(payload, &mut cursor, length as usize) else {
+            return extended_protocol_error(stream, "08P01", "truncated PostgreSQL Bind parameter");
+        };
+        let oid = parameter_oids.get(index as usize).copied().unwrap_or(0);
+        match parameter_value(oid, bytes) {
+            Ok(value) => parameters.push(value),
+            Err((code, message)) => return extended_protocol_error(stream, &code, &message),
+        }
+    }
+
+    let Some(result_format_count) = take_i16(payload, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind result formats");
+    };
+    for _ in 0..result_format_count.max(0) {
+        let Some(format) = take_i16(payload, &mut cursor) else {
+            return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind result formats");
+        };
+        if format != 0 {
+            return extended_protocol_error(stream, "0A000", "binary result format is not supported");
+        }
+    }
+
+    extended.portals.insert(
+        portal_name.to_string(),
+        Portal { sql, parameters, outcome: None, sent_rows: 0 },
+    );
+    write_message(stream, b'2', &[])?;
+    Ok(ExtendedStep::Continue)
+}
+
+fn handle_describe(
+    stream: &mut impl Write,
+    payload: &[u8],
+    extended: &mut ExtendedSession,
+    session: &mut TransactionSession,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
+) -> io::Result<ExtendedStep> {
+    let Some((&kind, rest)) = payload.split_first() else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Describe message");
+    };
+    let mut cursor = 0;
+    let Some(name) = take_cstring(rest, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Describe target");
+    };
+    match kind {
+        b'S' => {
+            let Some(statement) = extended.statements.get(name) else {
+                return extended_protocol_error(
+                    stream,
+                    "26000",
+                    &format!("prepared statement \"{name}\" does not exist"),
+                );
+            };
+            write_parameter_description(stream, &statement.parameter_oids)?;
+            write_message(stream, b'n', &[])?;
+            Ok(ExtendedStep::Continue)
+        }
+        b'P' => {
+            let Some(portal) = extended.portals.get_mut(name) else {
+                return extended_protocol_error(stream, "34000", &format!("portal \"{name}\" does not exist"));
+            };
+            prepare_portal(portal, session, runtime);
+            match portal.outcome.as_ref() {
+                Some(Ok(outcome)) if outcome.is_read => {
+                    write_row_description(stream, &outcome.columns, &column_oids(&outcome.rows, outcome.columns.len()))?;
+                    Ok(ExtendedStep::Continue)
+                }
+                Some(Ok(_)) => {
+                    write_message(stream, b'n', &[])?;
+                    Ok(ExtendedStep::Continue)
+                }
+                Some(Err((code, message))) => {
+                    write_error_response(stream, code, message)?;
+                    Ok(ExtendedStep::Failed)
+                }
+                None => unreachable!("prepare_portal always stores an outcome"),
+            }
+        }
+        _ => extended_protocol_error(stream, "08P01", "unsupported PostgreSQL Describe target"),
+    }
+}
+
+fn handle_execute(
+    stream: &mut impl Write,
+    payload: &[u8],
+    extended: &mut ExtendedSession,
+    session: &mut TransactionSession,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
+) -> io::Result<ExtendedStep> {
+    let mut cursor = 0;
+    let Some(name) = take_cstring(payload, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Execute message");
+    };
+    let Some(max_rows) = take_i32(payload, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Execute row limit");
+    };
+    let Some(portal) = extended.portals.get_mut(name) else {
+        return extended_protocol_error(stream, "34000", &format!("portal \"{name}\" does not exist"));
+    };
+    prepare_portal(portal, session, runtime);
+    let Some(outcome) = portal.outcome.as_ref() else {
+        unreachable!("prepare_portal always stores an outcome");
+    };
+    match outcome {
+        Ok(outcome) => {
+            let command_tag = outcome.command_tag.clone();
+            if outcome.is_read {
+                let start = portal.sent_rows.min(outcome.rows.len());
+                let end = if max_rows > 0 {
+                    (start + max_rows as usize).min(outcome.rows.len())
+                }
+                else {
+                    outcome.rows.len()
+                };
+                let chunk: Vec<Vec<SqlValue>> = outcome.rows[start..end].to_vec();
+                portal.sent_rows = end;
+                for row in &chunk {
+                    write_data_row(stream, row)?;
+                }
+                if end < outcome.rows.len() {
+                    write_message(stream, b's', &[])?;
+                    return Ok(ExtendedStep::Continue);
+                }
+            }
+            write_command_complete(stream, &command_tag)?;
+            Ok(ExtendedStep::Continue)
+        }
+        Err((code, message)) => {
+            write_error_response(stream, code, message)?;
+            Ok(ExtendedStep::Failed)
+        }
+    }
+}
+
+fn handle_close(stream: &mut impl Write, payload: &[u8], extended: &mut ExtendedSession) -> io::Result<ExtendedStep> {
+    let Some((&kind, rest)) = payload.split_first() else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Close message");
+    };
+    let mut cursor = 0;
+    let Some(name) = take_cstring(rest, &mut cursor) else {
+        return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Close target");
+    };
+    match kind {
+        b'S' => {
+            extended.statements.remove(name);
+        }
+        b'P' => {
+            extended.portals.remove(name);
+        }
+        _ => return extended_protocol_error(stream, "08P01", "unsupported PostgreSQL Close target"),
+    }
+    write_message(stream, b'3', &[])?;
+    Ok(ExtendedStep::Continue)
+}
+
+/// Bind 只登记参数，真正执行推迟到 Describe / Execute，结果缓存避免重复写入。
+fn prepare_portal(
+    portal: &mut Portal,
+    session: &mut TransactionSession,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
+) {
+    if portal.outcome.is_some() {
+        return;
+    }
+    if session.failed {
+        portal.outcome = Some(Err((
+            "25P02".to_string(),
+            "current transaction is aborted, commands ignored until end of transaction block".to_string(),
+        )));
+        return;
+    }
+    let Some(runtime) = runtime else {
+        session.fail();
+        portal.outcome = Some(Err((
+            "0A000".to_string(),
+            "PostgreSQL query execution is not implemented (no SQL runtime)".to_string(),
+        )));
+        return;
+    };
+    let sql = match substitute_sql_parameters(&portal.sql, &portal.parameters, SqlParameterStyle::DollarNumber) {
+        Ok(sql) => sql,
+        Err(error) => {
+            session.fail();
+            portal.outcome = Some(Err(("42601".to_string(), format!("SQL parameter error: {}", error.message))));
+            return;
+        }
+    };
+    portal.outcome = Some(run_statement(&sql, runtime, session));
+}
+
+fn parameter_value(oid: u32, bytes: &[u8]) -> Result<SqlValue, (String, String)> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| ("22021".to_string(), "parameter is not valid UTF-8".to_string()))?;
+    match oid {
+        0 => Ok(infer_parameter_value(text)),
+        16 => match text {
+            "t" | "true" | "1" => Ok(SqlValue::Boolean(true)),
+            "f" | "false" | "0" => Ok(SqlValue::Boolean(false)),
+            _ => Err(("22P02".to_string(), format!("invalid input syntax for type boolean: \"{text}\""))),
+        },
+        20 | 21 | 23 | 26 => text
+            .parse::<i64>()
+            .map(SqlValue::Integer)
+            .map_err(|_| ("22P02".to_string(), format!("invalid input syntax for integer: \"{text}\""))),
+        700 | 701 => text
+            .parse::<f64>()
+            .map(SqlValue::Number)
+            .map_err(|_| ("22P02".to_string(), format!("invalid input syntax for double precision: \"{text}\""))),
+        _ => Ok(SqlValue::String(text.to_string())),
+    }
+}
+
+/// Parse 未提供 OID 时的宽松推断，保持 `"007"` 这类文本不被数字转义。
+fn infer_parameter_value(text: &str) -> SqlValue {
+    if text.parse::<i64>().map(|value| value.to_string() == text).unwrap_or(false) {
+        return SqlValue::Integer(text.parse().expect("checked integer"));
+    }
+    if (text.contains('.') || text.contains('e') || text.contains('E')) && text.parse::<f64>().is_ok() {
+        return SqlValue::Number(text.parse().expect("checked float"));
+    }
+    SqlValue::String(text.to_string())
+}
+
+fn write_parameter_description(stream: &mut impl Write, oids: &[u32]) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(2 + oids.len() * 4);
+    payload.extend_from_slice(&(oids.len() as i16).to_be_bytes());
+    for oid in oids {
+        payload.extend_from_slice(&oid.to_be_bytes());
+    }
+    write_message(stream, b't', &payload)
+}
+
+fn extended_protocol_error(stream: &mut impl Write, code: &str, message: &str) -> io::Result<ExtendedStep> {
+    write_error_response(stream, code, message)?;
+    Ok(ExtendedStep::Failed)
+}
+
+fn take_bytes<'a>(payload: &'a [u8], cursor: &mut usize, length: usize) -> Option<&'a [u8]> {
+    let end = cursor.checked_add(length)?;
+    let bytes = payload.get(*cursor..end)?;
+    *cursor = end;
+    Some(bytes)
+}
+
+fn take_cstring<'a>(payload: &'a [u8], cursor: &mut usize) -> Option<&'a str> {
+    let rest = payload.get(*cursor..)?;
+    let position = rest.iter().position(|byte| *byte == 0)?;
+    let bytes = &rest[..position];
+    *cursor += position + 1;
+    std::str::from_utf8(bytes).ok()
+}
+
+fn take_i16(payload: &[u8], cursor: &mut usize) -> Option<i16> {
+    let bytes = take_bytes(payload, cursor, 2)?;
+    Some(i16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn take_i32(payload: &[u8], cursor: &mut usize) -> Option<i32> {
+    let bytes = take_bytes(payload, cursor, 4)?;
+    Some(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn take_u32(payload: &[u8], cursor: &mut usize) -> Option<u32> {
+    let bytes = take_bytes(payload, cursor, 4)?;
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 /// Emulated PostgreSQL configuration parameters exposed through `SHOW <name>`.
@@ -423,25 +834,52 @@ fn pg_parameter(name: &str) -> Option<&'static str> {
     PG_PARAMETERS.iter().find(|(key, _)| *key == needle).map(|(_, value)| *value)
 }
 
-/// PostgreSQL RowDescription message ('T') — name only，所有列 text 格式。
-fn write_row_description(stream: &mut impl Write, columns: &[String]) -> io::Result<()> {
+/// 按首批非空值推断列类型 OID：`integer → int8`、`number → float8`、
+/// `boolean → bool`，其余一律 `text`。空结果集没有可推断依据，按 `text` 报告。
+fn column_oids(rows: &[Vec<SqlValue>], columns: usize) -> Vec<u32> {
+    (0..columns)
+        .map(|index| {
+            rows.iter()
+                .find_map(|row| match row.get(index) {
+                    Some(SqlValue::Integer(_)) => Some(OID_INT8),
+                    Some(SqlValue::Number(_)) => Some(OID_FLOAT8),
+                    Some(SqlValue::Boolean(_)) => Some(OID_BOOL),
+                    Some(SqlValue::String(_)) => Some(OID_TEXT),
+                    Some(SqlValue::Null) | None => None,
+                })
+                .unwrap_or(OID_TEXT)
+        })
+        .collect()
+}
+
+/// PostgreSQL RowDescription message ('T') — 列名 + 推断 OID，所有列 text 格式。
+fn write_row_description(stream: &mut impl Write, columns: &[String], oids: &[u32]) -> io::Result<()> {
     let mut payload = Vec::with_capacity(64);
     payload.push(b'T');
     let mut body = Vec::with_capacity(48);
     body.extend_from_slice(&(columns.len() as i16).to_be_bytes());
-    for col in columns {
+    for (index, col) in columns.iter().enumerate() {
+        let oid = oids.get(index).copied().unwrap_or(OID_TEXT);
         body.extend_from_slice(col.as_bytes());
         body.push(0);
         body.extend_from_slice(&0_i32.to_be_bytes()); // table_oid = 0
         body.extend_from_slice(&0_i16.to_be_bytes()); // column_attr = 0
-        body.extend_from_slice(&0_i32.to_be_bytes()); // type_oid = unspecified
-        body.extend_from_slice(&(-1_i16).to_be_bytes()); // type_size = variable
+        body.extend_from_slice(&oid.to_be_bytes());
+        body.extend_from_slice(&type_size(oid).to_be_bytes());
         body.extend_from_slice(&(-1_i32).to_be_bytes()); // type_mod = -1
         body.extend_from_slice(&0_i16.to_be_bytes()); // format_code = text
     }
     payload.extend_from_slice(&(body.len() as i32 + 4).to_be_bytes());
     payload.extend_from_slice(&body);
     stream.write_all(&payload)
+}
+
+fn type_size(oid: u32) -> i16 {
+    match oid {
+        OID_BOOL => 1,
+        OID_INT8 | OID_FLOAT8 => 8,
+        _ => -1,
+    }
 }
 
 /// PostgreSQL DataRow message ('D') — text encoding for each column value。
