@@ -270,6 +270,8 @@ pub enum SqlBoundExpression {
     Identifier(String),
     /// SQL literal preserving surface spelling where relevant.
     Literal(SqlBoundLiteral),
+    /// A bare `*` argument, as written by `COUNT(*)`.
+    Wildcard,
     /// SQL binary operator. Its null semantics remain SQL semantics.
     Binary {
         /// Left operand.
@@ -579,6 +581,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             Literal::Boolean(value, _) => SqlBoundLiteral::Boolean(*value),
             Literal::Null(_) => SqlBoundLiteral::Null,
         })),
+        Expression::Wildcard { .. } => Ok(SqlBoundExpression::Wildcard),
         Expression::Binary { left, op, right, .. } => Ok(SqlBoundExpression::Binary {
             left: Box::new(bind_expression(left)?),
             operator: bind_binary_operator(*op)?,
@@ -676,7 +679,11 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             }
             Ok(SqlBoundExpression::Function { name: fname, args: bound_args })
         }
-        _ => Err(bind_error("SQL expression is outside the gateway binding subset")),
+        // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
+        Expression::Subquery { .. } => Err(bind_error("SQL subquery is only supported as the right side of IN")),
+        Expression::InSubquery { .. } => Err(bind_error("SQL `IN (SELECT ...)` subqueries are not supported by this gateway")),
+        Expression::Vector { .. } => Err(bind_error("SQL vector literals are outside the gateway binding subset")),
+        Expression::Error { message, .. } => Err(bind_error(message)),
     }
 }
 

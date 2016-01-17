@@ -359,7 +359,12 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
             "SQL gateway write values must be literals; column reference `{}` is not supported in this first step",
             col.field_name
         ))),
-        _ => Err(planner_error("SQL gateway write values must be simple literals")),
+        SqlCatalogBoundExpression::Wildcard => {
+            Err(planner_error("SQL gateway write values must be literals; `*` is not a value"))
+        }
+        SqlCatalogBoundExpression::Function { .. }
+        | SqlCatalogBoundExpression::Binary { .. }
+        | SqlCatalogBoundExpression::Unary { .. } => Err(planner_error("SQL gateway write values must be simple literals")),
     }
 }
 
@@ -774,7 +779,9 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
             expression_has_aggregate(left) || expression_has_aggregate(right)
         }
         SqlCatalogBoundExpression::Unary { expression, .. } => expression_has_aggregate(expression),
-        _ => false,
+        SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
+            false
+        }
     }
 }
 

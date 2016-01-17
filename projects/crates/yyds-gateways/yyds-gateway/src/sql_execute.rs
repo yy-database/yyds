@@ -1004,13 +1004,21 @@ fn eval_aggregate(
     let agg =
         SqlAggregateFunction::from_name(&name).ok_or_else(|| execute_error(&format!("unknown aggregate function: {name}")))?;
 
+    // `*` 只对 `COUNT(*)` 有意义；`SUM(*)` 一类没有可求值的列。
+    if agg != SqlAggregateFunction::COUNT && args.iter().any(|arg| matches!(arg, SqlCatalogBoundExpression::Wildcard)) {
+        return Err(execute_error(&format!("{} does not accept `*` as its argument", agg.name())));
+    }
+
     match agg {
         SqlAggregateFunction::COUNT => {
-            if args.is_empty() {
+            if args.is_empty() || matches!(args.as_slice(), [SqlCatalogBoundExpression::Wildcard]) {
                 // COUNT(*) — total row count after filter.
                 Ok(SqlValue::Integer(i64::try_from(rows.len()).unwrap_or(i64::MAX)))
             }
             else {
+                if args.len() != 1 {
+                    return Err(execute_error("COUNT accepts exactly one argument"));
+                }
                 // COUNT(col) — count rows where col is not NULL.
                 let mut non_null: usize = 0;
                 for row in rows {
@@ -1115,6 +1123,9 @@ fn eval_expression(
         // 缺失字段就是 SQL NULL（写入 NULL 时字段会被省略），比较和投影都按 NULL 处理。
         SqlCatalogBoundExpression::Column(col) => row.value_typed(col.field_id, field_types).unwrap_or(SqlValue::Null),
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
+        SqlCatalogBoundExpression::Wildcard => {
+            return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
+        }
         SqlCatalogBoundExpression::Unary { operator, expression } => {
             let inner = eval_expression(expression, row, field_types)?;
             eval_unary(*operator, inner)?
@@ -1534,6 +1545,9 @@ fn eval_having(
     Ok(match expr {
         SqlCatalogBoundExpression::Column(col) => first.value_typed(col.field_id, field_types).unwrap_or(SqlValue::Null),
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
+        SqlCatalogBoundExpression::Wildcard => {
+            return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
+        }
         SqlCatalogBoundExpression::Function { name, .. } => {
             // Function 在 HAVING / GROUP BY ORDER BY 里一定是聚合函数
             SqlAggregateFunction::from_name(name)
