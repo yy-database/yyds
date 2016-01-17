@@ -306,6 +306,10 @@ pub fn execute_plan(
     transaction: Option<&dyn TransactionHandle>,
     plan: &SqlExecutionPlan,
 ) -> Result<SqlResult, SqlFrontendError> {
+    // 子查询必须在行级求值前先跑完并物化成值列表，因为 eval_expression 只有 row 上下文。
+    let mut plan = plan.clone();
+    resolve_subqueries(&mut plan, executor, transaction)?;
+    let plan = &plan;
     match plan {
         SqlExecutionPlan::Read(read_plan) => execute_read(executor, transaction, read_plan),
         SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, transaction, scan_plan),
@@ -314,6 +318,146 @@ pub fn execute_plan(
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan),
         SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, transaction, delete_plan),
+    }
+}
+
+/// 执行计划里所有 `IN (<subquery>)` 并替换成物化后的 `InValues`。
+fn resolve_subqueries(
+    plan: &mut SqlExecutionPlan,
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+) -> Result<(), SqlFrontendError> {
+    match plan {
+        SqlExecutionPlan::Read(plan) => {
+            lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
+            for (expression, _) in &mut plan.projection_expressions {
+                lower_in_place(expression, executor, transaction)?;
+            }
+        }
+        SqlExecutionPlan::Scan(plan) => {
+            lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
+            lower_optional(&mut plan.having, executor, transaction)?;
+            if let Some(group_by) = &mut plan.group_by {
+                for expression in group_by {
+                    lower_in_place(expression, executor, transaction)?;
+                }
+            }
+            if let Some(order_by) = &mut plan.order_by {
+                for (expression, _) in order_by {
+                    lower_in_place(expression, executor, transaction)?;
+                }
+            }
+            for (expression, _) in &mut plan.projection_expressions {
+                lower_in_place(expression, executor, transaction)?;
+            }
+        }
+        SqlExecutionPlan::Join(plan) => {
+            lower_optional(&mut plan.base.on, executor, transaction)?;
+            for join in &mut plan.joins {
+                lower_optional(&mut join.on, executor, transaction)?;
+            }
+            lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
+            if let Some(order_by) = &mut plan.order_by {
+                for (expression, _) in order_by {
+                    lower_in_place(expression, executor, transaction)?;
+                }
+            }
+            for (expression, _) in &mut plan.projection_expressions {
+                lower_in_place(expression, executor, transaction)?;
+            }
+        }
+        SqlExecutionPlan::Scalar(plan) => {
+            for (expression, _) in &mut plan.projections {
+                lower_in_place(expression, executor, transaction)?;
+            }
+        }
+        SqlExecutionPlan::Insert(_) => {}
+        SqlExecutionPlan::Update(plan) => {
+            lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
+        }
+        SqlExecutionPlan::Delete(plan) => {
+            lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
+        }
+    }
+    Ok(())
+}
+
+fn lower_optional(
+    slot: &mut Option<SqlCatalogBoundExpression>,
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+) -> Result<(), SqlFrontendError> {
+    if let Some(expression) = slot.take() {
+        *slot = Some(lower_expression(expression, executor, transaction)?);
+    }
+    Ok(())
+}
+
+fn lower_in_place(
+    slot: &mut SqlCatalogBoundExpression,
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+) -> Result<(), SqlFrontendError> {
+    let placeholder = SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Null);
+    let expression = std::mem::replace(slot, placeholder);
+    *slot = lower_expression(expression, executor, transaction)?;
+    Ok(())
+}
+
+/// 递归物化子查询：内层计划先执行，结果必须是单列，再转成 `InValues`。
+fn lower_expression(
+    expression: SqlCatalogBoundExpression,
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+) -> Result<SqlCatalogBoundExpression, SqlFrontendError> {
+    Ok(match expression {
+        SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
+            expression
+        }
+        SqlCatalogBoundExpression::Function { name, args } => SqlCatalogBoundExpression::Function {
+            name,
+            args: args.into_iter().map(|arg| lower_expression(arg, executor, transaction)).collect::<Result<Vec<_>, _>>()?,
+        },
+        SqlCatalogBoundExpression::Binary { left, operator, right } => SqlCatalogBoundExpression::Binary {
+            left: Box::new(lower_expression(*left, executor, transaction)?),
+            operator,
+            right: Box::new(lower_expression(*right, executor, transaction)?),
+        },
+        SqlCatalogBoundExpression::Unary { operator, expression } => SqlCatalogBoundExpression::Unary {
+            operator,
+            expression: Box::new(lower_expression(*expression, executor, transaction)?),
+        },
+        SqlCatalogBoundExpression::InValues { expression, values, negated } => SqlCatalogBoundExpression::InValues {
+            expression: Box::new(lower_expression(*expression, executor, transaction)?),
+            values,
+            negated,
+        },
+        SqlCatalogBoundExpression::InSubquery { expression, plan, negated } => {
+            let expression = Box::new(lower_expression(*expression, executor, transaction)?);
+            let mut plan = *plan;
+            resolve_subqueries(&mut plan, executor, transaction)?;
+            let result = execute_plan(executor, transaction, &plan)?;
+            if result.columns.len() != 1 {
+                return Err(execute_error("IN subquery must select exactly one column"));
+            }
+            let values = result
+                .rows
+                .into_iter()
+                .map(|row| row.into_iter().next().map(value_to_literal).unwrap_or(SqlBoundLiteral::Null))
+                .collect();
+            SqlCatalogBoundExpression::InValues { expression, values, negated }
+        }
+    })
+}
+
+/// 把子查询结果值换回 bound literal，让物化后的表达式保持可比较、可复用。
+fn value_to_literal(value: SqlValue) -> SqlBoundLiteral {
+    match value {
+        SqlValue::Integer(value) => SqlBoundLiteral::Number(value.to_string()),
+        SqlValue::Number(value) => SqlBoundLiteral::Number(format_number(value)),
+        SqlValue::String(value) => SqlBoundLiteral::String(value),
+        SqlValue::Boolean(value) => SqlBoundLiteral::Boolean(value),
+        SqlValue::Null => SqlBoundLiteral::Null,
     }
 }
 
@@ -1144,6 +1288,42 @@ fn eval_expression(
             }
             eval_scalar_function(scalar, &values)?
         }
+        SqlCatalogBoundExpression::InValues { expression, values, negated } => {
+            let target = eval_expression(expression, row, field_types)?;
+            eval_in_values(target, values, *negated)?
+        }
+        // 子查询应当在执行前被 materialize 成 `InValues`；走到这里说明内部计划漏了 lowering。
+        SqlCatalogBoundExpression::InSubquery { .. } => {
+            return Err(execute_error("IN subquery was not materialized before execution"))
+        }
+    })
+}
+
+/// `IN` 成员判断：左值是 NULL 时结果未知，列表里的 NULL 让未命中变成未知。
+fn eval_in_values(target: SqlValue, values: &[SqlBoundLiteral], negated: bool) -> Result<SqlValue, SqlFrontendError> {
+    if matches!(target, SqlValue::Null) {
+        return Ok(SqlValue::Null);
+    }
+    let mut found = false;
+    let mut saw_null = false;
+    for literal in values {
+        match eval_binary(SqlBoundBinaryOperator::Equal, &target, &SqlValue::from_literal(literal))? {
+            SqlValue::Boolean(true) => {
+                found = true;
+                break;
+            }
+            SqlValue::Null => saw_null = true,
+            _ => {}
+        }
+    }
+    Ok(if found {
+        SqlValue::Boolean(!negated)
+    }
+    else if saw_null {
+        SqlValue::Null
+    }
+    else {
+        SqlValue::Boolean(negated)
     })
 }
 
@@ -1266,6 +1446,9 @@ fn eval_unary(op: SqlBoundUnaryOperator, operand: SqlValue) -> Result<SqlValue, 
             Some(value) => SqlValue::Boolean(!value),
             None => SqlValue::Null,
         },
+        // 存在性判断不是与 NULL 比较，因此结果永远是 TRUE/FALSE。
+        SqlBoundUnaryOperator::IsNull => SqlValue::Boolean(matches!(operand, SqlValue::Null)),
+        SqlBoundUnaryOperator::IsNotNull => SqlValue::Boolean(!matches!(operand, SqlValue::Null)),
     })
 }
 
@@ -1562,6 +1745,13 @@ fn eval_having(
             let l = eval_having(left, bucket_rows, group_exprs, field_types)?;
             let r = eval_having(right, bucket_rows, group_exprs, field_types)?;
             eval_binary(*operator, &l, &r)?
+        }
+        SqlCatalogBoundExpression::InValues { expression, values, negated } => {
+            let target = eval_having(expression, bucket_rows, group_exprs, field_types)?;
+            eval_in_values(target, values, *negated)?
+        }
+        SqlCatalogBoundExpression::InSubquery { .. } => {
+            return Err(execute_error("IN subquery was not materialized before execution"))
         }
     })
 }

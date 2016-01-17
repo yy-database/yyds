@@ -545,6 +545,85 @@ fn sql_aggregate_functions_count_sum_avg_max_min() {
 }
 
 #[test]
+fn sql_aggregate_rejects_wildcard_for_non_count_functions() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = empty_executor();
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (7, 'alice', 30)", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    yyds_gateway::execute_plan(&executor, None, &plan).expect("insert");
+
+    for sql in ["SELECT SUM(*) FROM users", "SELECT AVG(*) FROM users", "SELECT MIN(*) FROM users", "SELECT MAX(*) FROM users"]
+    {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        let err = yyds_gateway::execute_plan(&executor, None, &plan).expect_err("`*` is only valid for COUNT");
+        assert!(format!("{err:?}").contains("does not accept `*`"), "{sql} error: {err:?}");
+    }
+}
+
+#[test]
+fn sql_null_tests_and_not_predicate_use_three_valued_logic() {
+    let (catalog, executor) = nullable_users();
+
+    // name IS NULL / IS NOT NULL 是空值存在性判断，不是与 NULL 比较。
+    for (sql, expected) in [
+        ("SELECT id FROM users WHERE name IS NULL", vec![1i64]),
+        ("SELECT id FROM users WHERE name IS NOT NULL ORDER BY id", vec![2, 3]),
+    ] {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute null test");
+        let ids: Vec<i64> = result
+            .rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(yyds_gateway::SqlValue::Integer(value)) => *value,
+                other => panic!("{sql}: unexpected row {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, expected, "{sql}");
+    }
+
+    // `NOT (age = 0)` 对 age = NULL 的行仍是 NULL，因此只返回 id=3。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE NOT (age = 0)", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute NOT predicate");
+    assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::Integer(3)]]);
+}
+
+#[test]
+fn sql_in_subquery_evaluates_membership_with_three_valued_logic() {
+    let (catalog, executor) = nullable_users();
+
+    let cases = [
+        // IN (SELECT ...) — 只保留 age = 0 的 id=2。
+        ("SELECT id FROM users WHERE id IN (SELECT id FROM users WHERE age = 0)", vec![2i64]),
+        // NOT IN — 同一条子查询的补集。
+        ("SELECT id FROM users WHERE id NOT IN (SELECT id FROM users WHERE age = 0)", vec![1, 3]),
+        // 子查询返回 NULL 时 NOT IN 结果未知，整条 predicate 过滤掉所有行。
+        ("SELECT id FROM users WHERE id NOT IN (SELECT age FROM users WHERE id = 1)", Vec::new()),
+    ];
+    for (sql, expected) in cases {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        let mut result = yyds_gateway::execute_plan(&executor, None, &plan).expect("execute IN subquery");
+        result.rows.sort_by_key(|row| match row.first() {
+            Some(yyds_gateway::SqlValue::Integer(value)) => *value,
+            _ => i64::MAX,
+        });
+        let ids: Vec<i64> = result
+            .rows
+            .iter()
+            .map(|row| match row.first() {
+                Some(yyds_gateway::SqlValue::Integer(value)) => *value,
+                other => panic!("{sql}: unexpected row {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, expected, "{sql}");
+    }
+}
+
+#[test]
 fn sql_aggregate_rejects_mixed_aggregate_nonaggregate() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     let result = yyds_gateway::bind_sql_catalog("SELECT id, COUNT(*) FROM users", &catalog, 7);

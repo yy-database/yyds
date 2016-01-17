@@ -364,12 +364,14 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
         }
         SqlCatalogBoundExpression::Function { .. }
         | SqlCatalogBoundExpression::Binary { .. }
-        | SqlCatalogBoundExpression::Unary { .. } => Err(planner_error("SQL gateway write values must be simple literals")),
+        | SqlCatalogBoundExpression::Unary { .. }
+        | SqlCatalogBoundExpression::InSubquery { .. }
+        | SqlCatalogBoundExpression::InValues { .. } => Err(planner_error("SQL gateway write values must be simple literals")),
     }
 }
 
 /// 已计划好的 SQL 操作，可以直接翻译为 KeyValueCommand 或 Scan。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlExecutionPlan {
     /// SELECT — 精确主键等值单点读取。
     Read(ReadPlan),
@@ -388,7 +390,7 @@ pub enum SqlExecutionPlan {
 }
 
 /// SELECT 精确主键等值执行计划。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadPlan {
     /// namespace 标签，形如 `table:{type_id}`。
     pub namespace: String,
@@ -407,7 +409,7 @@ pub struct ReadPlan {
 }
 
 /// SELECT 多行扫描执行计划。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanPlan {
     /// namespace 标签，形如 `table:{type_id}`。
     pub namespace: String,
@@ -446,7 +448,7 @@ pub struct ScanPlan {
 }
 
 /// SELECT 多表内连接执行计划（嵌套循环合并）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinPlan {
     /// 基表来源。
     pub base: JoinSourcePlan,
@@ -471,7 +473,7 @@ pub struct JoinPlan {
 }
 
 /// JOIN 的一个数据来源。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinSourcePlan {
     /// namespace 标签，形如 `table:{type_id}`。
     pub namespace: String,
@@ -482,7 +484,7 @@ pub struct JoinSourcePlan {
 }
 
 /// SELECT without FROM 执行计划：纯常量与标量内建函数求值，产出单行结果。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScalarPlan {
     /// 投影表达式与其结果列名。
     pub projections: Vec<(SqlCatalogBoundExpression, String)>,
@@ -491,7 +493,7 @@ pub struct ScalarPlan {
 }
 
 /// INSERT 执行计划。payload 由 execute 层做 TLV 编码。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritePlan {
     /// namespace 标签。
     pub namespace: String,
@@ -504,7 +506,7 @@ pub struct WritePlan {
 }
 
 /// UPDATE 执行计划。payload 由 execute 层做 TLV 编码。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatePlan {
     /// namespace 标签。
     pub namespace: String,
@@ -520,7 +522,7 @@ pub struct UpdatePlan {
 }
 
 /// 一个要写入的字段。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteField {
     /// field_id。
     pub field_id: u64,
@@ -531,7 +533,7 @@ pub struct WriteField {
 }
 
 /// DELETE 执行计划。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletePlan {
     pub namespace: String,
     pub rowid: Vec<u8>,
@@ -779,6 +781,8 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
             expression_has_aggregate(left) || expression_has_aggregate(right)
         }
         SqlCatalogBoundExpression::Unary { expression, .. } => expression_has_aggregate(expression),
+        SqlCatalogBoundExpression::InSubquery { expression, .. }
+        | SqlCatalogBoundExpression::InValues { expression, .. } => expression_has_aggregate(expression),
         SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
             false
         }
