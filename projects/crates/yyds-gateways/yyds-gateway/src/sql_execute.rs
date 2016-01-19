@@ -22,7 +22,8 @@ use crate::{
         SqlScalarFunction,
     },
     sql_planner::{
-        DeletePlan, JoinPlan, JoinSourcePlan, ReadPlan, ScalarPlan, ScanPlan, SqlExecutionPlan, UpdatePlan, WritePlan,
+        DeletePlan, DeleteScanPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScalarPlan, ScanPlan, SqlExecutionPlan, UpdatePlan,
+        UpdateScanPlan, WritePlan,
     },
 };
 
@@ -317,7 +318,9 @@ pub fn execute_plan(
         SqlExecutionPlan::Scalar(scalar_plan) => execute_scalar(scalar_plan),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan),
+        SqlExecutionPlan::UpdateScan(update_plan) => execute_update_scan(executor, transaction, update_plan),
         SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, transaction, delete_plan),
+        SqlExecutionPlan::DeleteScan(delete_plan) => execute_delete_scan(executor, transaction, delete_plan),
     }
 }
 
@@ -375,8 +378,14 @@ fn resolve_subqueries(
         SqlExecutionPlan::Update(plan) => {
             lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
         }
+        SqlExecutionPlan::UpdateScan(plan) => {
+            lower_optional(&mut plan.predicate, executor, transaction)?;
+        }
         SqlExecutionPlan::Delete(plan) => {
             lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
+        }
+        SqlExecutionPlan::DeleteScan(plan) => {
+            lower_optional(&mut plan.predicate, executor, transaction)?;
         }
     }
     Ok(())
@@ -1044,6 +1053,98 @@ fn execute_delete(
         yyds_types::KeyValueResult::Delete { removed: true } => 1,
         _ => 0,
     };
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
+}
+
+/// 多行 UPDATE：扫描 rowid 区间，逐行判定 WHERE 后改写，返回真实影响行数。
+///
+/// 事务内每行都把扫描到的 pre-image 交给 `write_if_unchanged`，保持上一轮的 OCC 语义。
+fn execute_update_scan(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &UpdateScanPlan,
+) -> Result<SqlResult, SqlFrontendError> {
+    let namespace = Namespace(plan.namespace.clone());
+    let scanned = scan_rows(
+        executor,
+        transaction,
+        &namespace,
+        &plan.rowid_prefix,
+        plan.rowid_after.as_deref(),
+        plan.rowid_before.as_deref(),
+        0,
+        "update_scan",
+    )?;
+    let mut affected = 0;
+    for (rowid, pre_image) in scanned {
+        let mut row = decode_row(&pre_image)?;
+        if let Some(predicate) = &plan.predicate {
+            let value = eval_expression(predicate, &row, &plan.field_types)?;
+            if !truthy(&value) {
+                continue;
+            }
+        }
+        for field in &plan.fields {
+            match sql_value_to_bytes(&field.value) {
+                Some(bytes) => row.insert(field.field_id, bytes),
+                None => row.remove(field.field_id),
+            }
+        }
+        let command =
+            KeyValueCommand { namespace: namespace.clone(), key: rowid, action: KeyValueAction::Put(encode_row(&row)) };
+        match transaction {
+            Some(handle) => handle
+                .write_if_unchanged(command, Some(pre_image))
+                .map_err(|e| execute_error(&format!("TransactionHandle.update_scan failed: {e}")))?,
+            None => {
+                executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.update_scan failed: {e}")))?
+            }
+        };
+        affected += 1;
+    }
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
+}
+
+/// 多行 DELETE：扫描 rowid 区间，逐行判定 WHERE 后删除，返回真实影响行数。
+fn execute_delete_scan(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &DeleteScanPlan,
+) -> Result<SqlResult, SqlFrontendError> {
+    let namespace = Namespace(plan.namespace.clone());
+    let scanned = scan_rows(
+        executor,
+        transaction,
+        &namespace,
+        &plan.rowid_prefix,
+        plan.rowid_after.as_deref(),
+        plan.rowid_before.as_deref(),
+        0,
+        "delete_scan",
+    )?;
+    let mut affected = 0;
+    for (rowid, pre_image) in scanned {
+        if let Some(predicate) = &plan.predicate {
+            let row = decode_row(&pre_image)?;
+            let value = eval_expression(predicate, &row, &plan.field_types)?;
+            if !truthy(&value) {
+                continue;
+            }
+        }
+        let command = KeyValueCommand { namespace: namespace.clone(), key: rowid, action: KeyValueAction::Delete };
+        let result = match transaction {
+            // 事务内逐行删除同样走 OCC：pre-image 被并发改写时 COMMIT 被拒绝。
+            Some(handle) => handle
+                .write_if_unchanged(command, Some(pre_image))
+                .map_err(|e| execute_error(&format!("TransactionHandle.delete_scan failed: {e}")))?,
+            None => {
+                executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete_scan failed: {e}")))?
+            }
+        };
+        if matches!(result, yyds_types::KeyValueResult::Delete { removed: true }) {
+            affected += 1;
+        }
+    }
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
 }
 

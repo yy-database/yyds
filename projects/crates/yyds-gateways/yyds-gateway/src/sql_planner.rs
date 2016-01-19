@@ -296,7 +296,7 @@ pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Resul
     Ok(SqlExecutionPlan::Insert(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields, field_types }))
 }
 
-/// 计划一个 UPDATE。要求 WHERE 里有 `pk = literal`；其余条件保留为 row-level filter。
+/// 计划一个 UPDATE。`pk = literal` 走单点路径；其他 WHERE 都退化为范围扫描逐行改写。
 pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, update.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
@@ -304,33 +304,48 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
         table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
-    let (rowid, remaining_predicate) = match update.predicate {
-        None => return Err(planner_error("UPDATE requires WHERE with `pk = literal`")),
-        Some(expr) => {
-            let (pk_literal, _pk_prefix, _pk_after, _pk_before, remaining) = extract_pk_range(expr, pk_field.field_id)?;
-            let lit =
-                pk_literal.ok_or_else(|| planner_error(&format!("UPDATE WHERE must contain `{} = literal`", pk_field.name)))?;
-            (lit, remaining)
-        }
-    };
-    let rowid_bytes = pk_literal_to_rowid(&rowid)?;
-
     let mut write_fields = Vec::new();
     for (field, value_expr) in &update.assignments {
         let lit = literal_from_expression(value_expr)?;
         let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
         write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
     }
-    Ok(SqlExecutionPlan::Update(UpdatePlan {
+
+    let Some(predicate) = update.predicate
+    else {
+        return Ok(SqlExecutionPlan::UpdateScan(UpdateScanPlan {
+            namespace,
+            rowid_prefix: Vec::new(),
+            rowid_after: None,
+            rowid_before: None,
+            fields: write_fields,
+            predicate: None,
+            field_types,
+        }));
+    };
+
+    let (pk_literal, pk_prefix, pk_after, pk_before, remaining) = extract_pk_range(predicate.clone(), pk_field.field_id)?;
+    if let Some(rowid_literal) = pk_literal {
+        return Ok(SqlExecutionPlan::Update(UpdatePlan {
+            namespace,
+            rowid: pk_literal_to_rowid(&rowid_literal)?,
+            fields: write_fields,
+            remaining_predicate: remaining,
+            field_types,
+        }));
+    }
+    Ok(SqlExecutionPlan::UpdateScan(UpdateScanPlan {
         namespace,
-        rowid: rowid_bytes,
+        rowid_prefix: pk_prefix.unwrap_or_default(),
+        rowid_after: pk_after,
+        rowid_before: pk_before,
         fields: write_fields,
-        remaining_predicate,
+        predicate: remaining,
         field_types,
     }))
 }
 
-/// 计划一个 DELETE。要求 WHERE 里有 `pk = literal`；其余条件保留为 row-level filter。
+/// 计划一个 DELETE。`pk = literal` 走单点路径；其他 WHERE 都退化为范围扫描逐行删除。
 pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, delete.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
@@ -338,17 +353,35 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
         table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
-    let (rowid, remaining_predicate) = match delete.predicate {
-        None => return Err(planner_error("DELETE requires WHERE with `pk = literal`")),
-        Some(expr) => {
-            let (pk_literal, _pk_prefix, _pk_after, _pk_before, remaining) = extract_pk_range(expr, pk_field.field_id)?;
-            let lit =
-                pk_literal.ok_or_else(|| planner_error(&format!("DELETE WHERE must contain `{} = literal`", pk_field.name)))?;
-            (lit, remaining)
-        }
+    let Some(predicate) = delete.predicate
+    else {
+        return Ok(SqlExecutionPlan::DeleteScan(DeleteScanPlan {
+            namespace,
+            rowid_prefix: Vec::new(),
+            rowid_after: None,
+            rowid_before: None,
+            predicate: None,
+            field_types,
+        }));
     };
-    let rowid_bytes = pk_literal_to_rowid(&rowid)?;
-    Ok(SqlExecutionPlan::Delete(DeletePlan { namespace, rowid: rowid_bytes, remaining_predicate, field_types }))
+
+    let (pk_literal, pk_prefix, pk_after, pk_before, remaining) = extract_pk_range(predicate.clone(), pk_field.field_id)?;
+    if let Some(rowid_literal) = pk_literal {
+        return Ok(SqlExecutionPlan::Delete(DeletePlan {
+            namespace,
+            rowid: pk_literal_to_rowid(&rowid_literal)?,
+            remaining_predicate: remaining,
+            field_types,
+        }));
+    }
+    Ok(SqlExecutionPlan::DeleteScan(DeleteScanPlan {
+        namespace,
+        rowid_prefix: pk_prefix.unwrap_or_default(),
+        rowid_after: pk_after,
+        rowid_before: pk_before,
+        predicate: remaining,
+        field_types,
+    }))
 }
 
 /// 从 bound expression 里提取 literal。目前 INSERT/UPDATE 的值必须是 literal。
@@ -385,8 +418,12 @@ pub enum SqlExecutionPlan {
     Insert(WritePlan),
     /// UPDATE — 先 Get 再 remaining_predicate 再 Put。
     Update(UpdatePlan),
+    /// UPDATE — 扫描匹配行后逐行改写。
+    UpdateScan(UpdateScanPlan),
     /// DELETE — 先 Get 再 remaining_predicate 再 Delete。
     Delete(DeletePlan),
+    /// DELETE — 扫描匹配行后逐行删除。
+    DeleteScan(DeleteScanPlan),
 }
 
 /// SELECT 精确主键等值执行计划。
@@ -541,6 +578,42 @@ pub struct DeletePlan {
     /// execute_delete 会在删除前对现有 row 评估此 predicate。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
     /// field_id → SqlFieldType 映射，execute 层 eval predicate 用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+}
+
+/// 多行 UPDATE 执行计划：扫描 rowid 区间，逐行评估完整 WHERE 后改写。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateScanPlan {
+    /// namespace 标签，形如 `table:{type_id}`。
+    pub namespace: String,
+    /// rowid 前缀 bytes；空 = 整个 namespace 全扫。
+    pub rowid_prefix: Vec<u8>,
+    /// exclusive lower cursor。
+    pub rowid_after: Option<Vec<u8>>,
+    /// exclusive upper cursor。
+    pub rowid_before: Option<Vec<u8>>,
+    /// 要 SET 的字段。
+    pub fields: Vec<WriteField>,
+    /// 已去掉可下推主键范围后的完整行级过滤条件；`None` 表示整段区间都匹配。
+    pub predicate: Option<SqlCatalogBoundExpression>,
+    /// field_id → SqlFieldType 映射，execute 层解码与求值用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+}
+
+/// 多行 DELETE 执行计划：扫描 rowid 区间，逐行评估完整 WHERE 后删除。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteScanPlan {
+    /// namespace 标签，形如 `table:{type_id}`。
+    pub namespace: String,
+    /// rowid 前缀 bytes；空 = 整个 namespace 全扫。
+    pub rowid_prefix: Vec<u8>,
+    /// exclusive lower cursor。
+    pub rowid_after: Option<Vec<u8>>,
+    /// exclusive upper cursor。
+    pub rowid_before: Option<Vec<u8>>,
+    /// 已去掉可下推主键范围后的完整行级过滤条件；`None` 表示整段区间都匹配。
+    pub predicate: Option<SqlCatalogBoundExpression>,
+    /// field_id → SqlFieldType 映射，execute 层解码与求值用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
 
@@ -781,8 +854,9 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
             expression_has_aggregate(left) || expression_has_aggregate(right)
         }
         SqlCatalogBoundExpression::Unary { expression, .. } => expression_has_aggregate(expression),
-        SqlCatalogBoundExpression::InSubquery { expression, .. }
-        | SqlCatalogBoundExpression::InValues { expression, .. } => expression_has_aggregate(expression),
+        SqlCatalogBoundExpression::InSubquery { expression, .. } | SqlCatalogBoundExpression::InValues { expression, .. } => {
+            expression_has_aggregate(expression)
+        }
         SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
             false
         }
