@@ -293,6 +293,14 @@ fn sql_conformance_crud_and_predicates() {
             .sql("SELECT id FROM users WHERE tag IS NOT NULL ORDER BY id")
             .rows(&[&[Int(1)], &[Int(3)]])
             .build(),
+        case("select is true")
+            .sql("SELECT id FROM users WHERE active IS TRUE ORDER BY id")
+            .rows(&[&[Int(1)], &[Int(3)]])
+            .build(),
+        case("select is not true")
+            .sql("SELECT id FROM users WHERE active IS NOT TRUE ORDER BY id")
+            .rows(&[&[Int(2)]])
+            .build(),
         case("select in subquery")
             .sql("SELECT id FROM users WHERE id IN (SELECT id FROM users WHERE age = 20)")
             .rows(&[&[Int(2)]])
@@ -452,6 +460,46 @@ fn sql_conformance_crud_and_predicates() {
     ];
 
     run_cases(&cases);
+}
+
+/// `IS` 谓词直接由 Oak 的 `IsNull` / `IsTruth` 节点绑定，网关不再从源码 span 文本
+/// 回读关键字。这里只通过绑定后的表达式求值，验证 NULL 的三值逻辑。
+#[test]
+fn sql_is_predicates_follow_three_valued_logic() {
+    let fixture = Fixture::new();
+
+    let is_values = |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}`: {error}")).rows;
+    assert_eq!(
+        is_values("SELECT NULL IS NULL, NULL IS NOT NULL, NULL IS TRUE, NULL IS NOT TRUE, NULL IS FALSE, NULL IS NOT FALSE"),
+        rows(&[&[
+            Lit::Bool(true),
+            Lit::Bool(false),
+            Lit::Bool(false),
+            Lit::Bool(true),
+            Lit::Bool(false),
+            Lit::Bool(true),
+        ]])
+    );
+    assert_eq!(
+        is_values("SELECT TRUE IS TRUE, TRUE IS NOT TRUE, FALSE IS FALSE, FALSE IS NOT FALSE"),
+        rows(&[&[Lit::Bool(true), Lit::Bool(false), Lit::Bool(true), Lit::Bool(false)]])
+    );
+
+    for sql in SEED {
+        fixture.execute(None, sql).expect("seed");
+    }
+    assert_eq!(
+        is_values("SELECT id FROM users WHERE tag IS NULL"),
+        rows(&[&[Lit::Int(2)]])
+    );
+    assert_eq!(
+        is_values("SELECT id FROM users WHERE active IS TRUE ORDER BY id"),
+        rows(&[&[Lit::Int(1)], &[Lit::Int(3)]])
+    );
+    assert_eq!(
+        is_values("SELECT id FROM users WHERE active IS NOT TRUE"),
+        rows(&[&[Lit::Int(2)]])
+    );
 }
 
 #[test]

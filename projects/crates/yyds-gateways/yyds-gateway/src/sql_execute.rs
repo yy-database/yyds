@@ -1550,6 +1550,11 @@ fn eval_unary(op: SqlBoundUnaryOperator, operand: SqlValue) -> Result<SqlValue, 
         // 存在性判断不是与 NULL 比较，因此结果永远是 TRUE/FALSE。
         SqlBoundUnaryOperator::IsNull => SqlValue::Boolean(matches!(operand, SqlValue::Null)),
         SqlBoundUnaryOperator::IsNotNull => SqlValue::Boolean(!matches!(operand, SqlValue::Null)),
+        // 真值判断同样是三值谓词：`NULL IS TRUE` 与 `NULL IS FALSE` 都为 FALSE，
+        // 因此永远不会返回 NULL。
+        SqlBoundUnaryOperator::IsTruth { value, negated } => {
+            SqlValue::Boolean((sql_truth(&operand) == Some(value)) != negated)
+        }
     })
 }
 
