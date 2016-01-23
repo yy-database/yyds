@@ -77,7 +77,9 @@ fn mysql_system_variable(name: &str) -> Result<SqlBoundLiteral, SqlFrontendError
         .map(|(_, value)| *value)
         .ok_or_else(|| SqlFrontendError { message: format!("Unknown system variable '{variable}'").into() })?;
     if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
-        return Ok(SqlBoundLiteral::Number(value.to_string()));
+        if let Ok(number) = value.parse::<i64>() {
+            return Ok(SqlBoundLiteral::Integer(number));
+        }
     }
     Ok(SqlBoundLiteral::String(value.to_string()))
 }
@@ -683,6 +685,7 @@ fn variable_truthy(value: &SqlBoundExpression) -> bool {
     }
     match value {
         SqlBoundExpression::Literal(SqlBoundLiteral::Boolean(flag)) => *flag,
+        SqlBoundExpression::Literal(SqlBoundLiteral::Integer(number)) => *number != 0,
         SqlBoundExpression::Literal(SqlBoundLiteral::Number(number)) => word(number),
         SqlBoundExpression::Literal(SqlBoundLiteral::String(text)) => word(text),
         SqlBoundExpression::Identifier(name) => word(name),

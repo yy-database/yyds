@@ -71,7 +71,7 @@ fn oak_session_variable_statements_are_projected() {
         Some(SqlSessionCommand::SetVariable {
             scope: None,
             name: "autocommit".into(),
-            value: SqlBoundExpression::Literal(SqlBoundLiteral::Number("0".into())),
+            value: SqlBoundExpression::Literal(SqlBoundLiteral::Integer(0)),
         })
     );
     assert_eq!(

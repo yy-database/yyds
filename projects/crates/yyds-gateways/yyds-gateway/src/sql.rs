@@ -399,7 +399,9 @@ impl SqlScalarFunction {
 /// SQL literal retained by the gateway surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlBoundLiteral {
-    /// Numeric SQL token, not yet coerced by a YYDS catalog binder.
+    /// Integer literal kept exact as `i64`; never round-trips through `f64`.
+    Integer(i64),
+    /// Non-integer numeric SQL token (decimal point or exponent), kept in source spelling.
     Number(String),
     /// SQL string literal contents.
     String(String),
@@ -597,26 +599,32 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
         Expression::Identifier(identifier) => {
             Ok(SqlBoundExpression::Identifier(normalize_identifier(identifier.name.as_ref())))
         }
-        Expression::Literal(literal) => Ok(SqlBoundExpression::Literal(match literal {
-            Literal::Number(value, _) => SqlBoundLiteral::Number(value.to_string()),
-            Literal::String(value, _) => SqlBoundLiteral::String(value.to_string()),
-            Literal::Boolean(value, _) => SqlBoundLiteral::Boolean(*value),
-            Literal::Null(_) => SqlBoundLiteral::Null,
-        })),
+        Expression::Literal(literal) => Ok(SqlBoundExpression::Literal(bind_literal(literal)?)),
         Expression::Wildcard { .. } => Ok(SqlBoundExpression::Wildcard),
         Expression::Binary { left, op, right, .. } => Ok(SqlBoundExpression::Binary {
             left: Box::new(bind_expression(left)?),
             operator: bind_binary_operator(*op)?,
             right: Box::new(bind_expression(right)?),
         }),
-        Expression::Unary { op, expr, .. } => Ok(SqlBoundExpression::Unary {
-            operator: match op {
-                oak_sql::ast::UnaryOperator::Plus => SqlBoundUnaryOperator::Plus,
-                oak_sql::ast::UnaryOperator::Minus => SqlBoundUnaryOperator::Minus,
-                oak_sql::ast::UnaryOperator::Not => SqlBoundUnaryOperator::Not,
-            },
-            expression: Box::new(bind_expression(expr)?),
-        }),
+        Expression::Unary { op, expr, .. } => {
+            // `-<integer>` 折叠成一个精确的负整数字面量：这样 `-9223372036854775808`
+            // 仍落在 `i64` 内，而不是先解析成正数再溢出回浮点。
+            if let oak_sql::ast::UnaryOperator::Minus = op {
+                if let Expression::Literal(Literal::Number(text, _)) = expr.as_ref() {
+                    if let Some(value) = negated_integer_literal(text) {
+                        return Ok(SqlBoundExpression::Literal(SqlBoundLiteral::Integer(value)));
+                    }
+                }
+            }
+            Ok(SqlBoundExpression::Unary {
+                operator: match op {
+                    oak_sql::ast::UnaryOperator::Plus => SqlBoundUnaryOperator::Plus,
+                    oak_sql::ast::UnaryOperator::Minus => SqlBoundUnaryOperator::Minus,
+                    oak_sql::ast::UnaryOperator::Not => SqlBoundUnaryOperator::Not,
+                },
+                expression: Box::new(bind_expression(expr)?),
+            })
+        }
         Expression::IsNull { expr, negated, .. } => Ok(SqlBoundExpression::Unary {
             operator: if *negated { SqlBoundUnaryOperator::IsNotNull } else { SqlBoundUnaryOperator::IsNull },
             expression: Box::new(bind_expression(expr)?),
@@ -719,6 +727,44 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
         Expression::Vector { .. } => Err(bind_error("SQL vector literals are outside the gateway binding subset")),
         Expression::Error { message, .. } => Err(bind_error(message)),
     }
+}
+
+/// Binds one Oak literal, keeping integer spellings exact and rejecting numeric
+/// literals that no SQL value in this gateway can represent.
+fn bind_literal(literal: &Literal) -> Result<SqlBoundLiteral, SqlFrontendError> {
+    match literal {
+        Literal::Number(text, _) => bind_number_literal(text),
+        Literal::String(value, _) => Ok(SqlBoundLiteral::String(value.to_string())),
+        Literal::Boolean(value, _) => Ok(SqlBoundLiteral::Boolean(*value)),
+        Literal::Null(_) => Ok(SqlBoundLiteral::Null),
+    }
+}
+
+/// Numeric literal binding: pure integer spellings must fit `i64` exactly,
+/// decimal/exponent spellings must be finite `f64`. Out-of-range literals are
+/// rejected instead of being silently truncated to a float.
+fn bind_number_literal(text: &str) -> Result<SqlBoundLiteral, SqlFrontendError> {
+    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+        return match text.parse::<i64>() {
+            Ok(value) => Ok(SqlBoundLiteral::Integer(value)),
+            Err(_) => Err(bind_error(&format!("numeric literal out of range: {text}"))),
+        };
+    }
+    match text.parse::<f64>() {
+        Ok(value) if value.is_finite() => Ok(SqlBoundLiteral::Number(text.to_string())),
+        _ => Err(bind_error(&format!("numeric literal out of range: {text}"))),
+    }
+}
+
+/// Folds `-<integer literal>` into a negative `i64` when the magnitude fits,
+/// including `9223372036854775808` for `i64::MIN`. Non-integer or wider
+/// spellings return `None` and keep the unary node.
+fn negated_integer_literal(text: &str) -> Option<i64> {
+    if text.contains('.') || text.contains('e') || text.contains('E') {
+        return None;
+    }
+    let magnitude = text.parse::<i128>().ok()?;
+    i64::try_from(-magnitude).ok()
 }
 
 fn bind_binary_operator(operator: BinaryOperator) -> Result<SqlBoundBinaryOperator, SqlFrontendError> {

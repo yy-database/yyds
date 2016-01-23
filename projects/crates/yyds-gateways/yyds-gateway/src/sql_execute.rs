@@ -137,6 +137,7 @@ impl SqlValue {
     /// 从 SQL 字面量构造。
     pub fn from_literal(lit: &SqlBoundLiteral) -> Self {
         match lit {
+            SqlBoundLiteral::Integer(value) => SqlValue::Integer(*value),
             SqlBoundLiteral::Number(text) => numeric_literal(text),
             SqlBoundLiteral::String(text) => SqlValue::String(text.clone()),
             SqlBoundLiteral::Boolean(v) => SqlValue::Boolean(*v),
@@ -462,7 +463,7 @@ fn lower_expression(
 /// 把子查询结果值换回 bound literal，让物化后的表达式保持可比较、可复用。
 fn value_to_literal(value: SqlValue) -> SqlBoundLiteral {
     match value {
-        SqlValue::Integer(value) => SqlBoundLiteral::Number(value.to_string()),
+        SqlValue::Integer(value) => SqlBoundLiteral::Integer(value),
         SqlValue::Number(value) => SqlBoundLiteral::Number(format_number(value)),
         SqlValue::String(value) => SqlBoundLiteral::String(value),
         SqlValue::Boolean(value) => SqlBoundLiteral::Boolean(value),
@@ -1161,6 +1162,7 @@ fn write_plan_to_row(plan: &WritePlan) -> RowFieldValues {
 
 fn sql_value_to_bytes(lit: &SqlBoundLiteral) -> Option<Vec<u8>> {
     match lit {
+        SqlBoundLiteral::Integer(value) => Some(value.to_string().into_bytes()),
         SqlBoundLiteral::Number(text) => Some(text.as_bytes().to_vec()),
         SqlBoundLiteral::String(text) => Some(text.as_bytes().to_vec()),
         SqlBoundLiteral::Boolean(v) => Some((if *v { "1" } else { "0" }).as_bytes().to_vec()),
