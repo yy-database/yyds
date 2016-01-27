@@ -21,7 +21,10 @@ use crate::{
         SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable,
         SqlCatalogBoundUpdate,
     },
-    sql::{SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlFrontendError},
+    catalog_bind::SqlFieldType,
+    sql::{
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlErrorKind, SqlFrontendError,
+    },
 };
 
 /// 翻译一份 catalog-bound statement 为可执行计划。
@@ -290,6 +293,7 @@ pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Resul
     for (field, value) in insert.fields.iter().zip(insert.values.iter()) {
         let lit = literal_from_expression(value)?;
         let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        check_write_literal(&lit, &field_type, &field.field_name)?;
         write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
         let _ = pk_bound;
     }
@@ -308,6 +312,7 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
     for (field, value_expr) in &update.assignments {
         let lit = literal_from_expression(value_expr)?;
         let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        check_write_literal(&lit, &field_type, &field.field_name)?;
         write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
     }
 
@@ -382,6 +387,49 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
         predicate: remaining,
         field_types,
     }))
+}
+
+/// Rejects a write literal that the declared column type cannot represent, so a
+/// string never lands in an integer column and reads back as the wrong value.
+fn check_write_literal(
+    literal: &SqlBoundLiteral,
+    field_type: &SqlFieldType,
+    column: &str,
+) -> Result<(), SqlFrontendError> {
+    let fits = match field_type.inner() {
+        SqlFieldType::Unknown => true,
+        SqlFieldType::Int64 | SqlFieldType::Int32 => match literal {
+            SqlBoundLiteral::Null | SqlBoundLiteral::Integer(_) => true,
+            SqlBoundLiteral::String(text) => text.parse::<i64>().is_ok(),
+            SqlBoundLiteral::Number(_) | SqlBoundLiteral::Boolean(_) => false,
+        },
+        SqlFieldType::Float64 => match literal {
+            SqlBoundLiteral::Null | SqlBoundLiteral::Integer(_) | SqlBoundLiteral::Number(_) => true,
+            SqlBoundLiteral::String(text) => text.parse::<f64>().is_ok(),
+            SqlBoundLiteral::Boolean(_) => false,
+        },
+        SqlFieldType::Bool => match literal {
+            SqlBoundLiteral::Null | SqlBoundLiteral::Boolean(_) => true,
+            SqlBoundLiteral::Integer(value) => *value == 0 || *value == 1,
+            SqlBoundLiteral::String(text) => {
+                matches!(text.to_ascii_lowercase().as_str(), "true" | "false" | "t" | "f" | "1" | "0")
+            }
+            SqlBoundLiteral::Number(_) => false,
+        },
+        SqlFieldType::String | SqlFieldType::Bytes => {
+            matches!(literal, SqlBoundLiteral::Null | SqlBoundLiteral::String(_))
+        }
+        SqlFieldType::Optional(_) => unreachable!("inner() strips Optional"),
+    };
+    if fits {
+        Ok(())
+    }
+    else {
+        Err(SqlFrontendError::new(
+            SqlErrorKind::TypeMismatch,
+            format!("SQL value {:?} cannot be written to column `{column}`", literal),
+        ))
+    }
 }
 
 /// 从 bound expression 里提取 literal。目前 INSERT/UPDATE 的值必须是 literal。
@@ -783,7 +831,9 @@ fn pk_literal_to_rowid(literal: &SqlBoundLiteral) -> Result<Vec<u8>, SqlFrontend
         SqlBoundLiteral::Number(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::String(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::Boolean(value) => Ok((if *value { "1" } else { "0" }).as_bytes().to_vec()),
-        SqlBoundLiteral::Null => Err(planner_error("primary key must not be NULL")),
+        SqlBoundLiteral::Null => {
+            Err(SqlFrontendError::new(SqlErrorKind::NotNullViolation, "primary key must not be NULL"))
+        }
     }
 }
 
@@ -866,5 +916,5 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
 }
 
 fn planner_error(message: &str) -> SqlFrontendError {
-    SqlFrontendError { message: message.into() }
+    SqlFrontendError::unsupported(message)
 }

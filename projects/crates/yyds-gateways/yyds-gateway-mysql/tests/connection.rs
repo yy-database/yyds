@@ -357,7 +357,7 @@ fn mysql_system_variable_probes_return_single_row() {
     client.write_all(&encode_packet(0, b"\x03SELECT @@nope").unwrap()).unwrap();
     let (_, error) = read_packet_full(&mut client);
     assert_eq!(error[0], 0xff);
-    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1064);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1193);
     assert!(error.windows(b"Unknown system variable".len()).any(|window| window == b"Unknown system variable"));
 
     drop(client);
@@ -648,5 +648,34 @@ fn mysql_commit_reports_occ_conflict_instead_of_silently_dropping_the_write() {
 
     drop(first);
     drop(second);
+    server.join().unwrap();
+}
+
+#[test]
+fn error_numbers_reflect_structured_gateway_errors() {
+    let (mut client, server) = start_server_with_join_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    let cases: &[(&str, u16, &str)] = &[
+        ("SELECT id FROM missing", 1146, "42S02"),
+        ("SELECT nope.id FROM users", 1146, "42S02"),
+        ("SELECT nope FROM users", 1054, "42S22"),
+        ("SELECT id FROM users INNER JOIN orders ON users.id = orders.user_id", 1052, "23000"),
+        ("PRAGMA user_version", 1064, "42000"),
+        ("SELECT nope_fn(name) FROM users", 1305, "42000"),
+        ("SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", 1235, "42000"),
+        ("INSERT INTO users (id, name) VALUES (3, 42)", 1366, "HY000"),
+        ("INSERT INTO users (id, name) VALUES (NULL, 'x')", 1048, "23000"),
+        ("INSERT INTO users (id, name) VALUES (1, 'dup')", 1062, "23000"),
+    ];
+    for (sql, expected_code, expected_state) in cases {
+        let (code, state) = expect_error(&mut client, sql);
+        assert_eq!((code, state.as_str()), (*expected_code, *expected_state), "unexpected error for `{sql}`");
+    }
+
+    drop(client);
     server.join().unwrap();
 }
