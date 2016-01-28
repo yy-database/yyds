@@ -11,6 +11,7 @@ mod catalog_bind;
 mod config;
 mod kind;
 mod sql;
+mod sql_describe;
 mod sql_execute;
 mod sql_parameters;
 mod sql_planner;
@@ -21,6 +22,7 @@ pub use crate::{
         SqlCatalogBoundJoin, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable,
         SqlCatalogField, SqlCatalogTable, SqlFieldType,
     },
+    sql_describe::{describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
     sql_parameters::{neutralized_sql_parameters, substitute_sql_parameters, SqlParameterStyle},
     sql_planner::{
