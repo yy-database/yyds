@@ -137,6 +137,59 @@ print('PyMySQL protocol-v10 startup and explicit unsupported-query response pass
 }
 
 #[test]
+#[ignore = "requires YYDS_MYSQL_REFERENCE_PYTHON with mysql-connector-python installed"]
+fn mysql_connector_prepared_statements_round_trip_typed_parameters() {
+    let directory = owner_directory();
+    let owner = Arc::new(lease(&directory));
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool }\n");
+    let executor: Arc<dyn KeyValueExecutor> = Arc::new(empty_executor());
+    let service =
+        MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, 7).unwrap();
+    let script = r#"
+import mysql.connector, sys
+
+connection = mysql.connector.connect(host='127.0.0.1', port=int(sys.argv[1]), user='yyds',
+                                     password='', database='yyds', connection_timeout=4,
+                                     charset='utf8mb4', collation='utf8mb4_general_ci',
+                                     autocommit=True, use_pure=True)
+cursor = connection.cursor(prepared=True)
+
+# Integer, string, double and boolean parameters through COM_STMT_EXECUTE.
+cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?)", (1, 'alice', 30, 1.5, True))
+assert cursor.rowcount == 1, cursor.rowcount
+cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?)", (2, 'bob', 25, 0.5, False))
+assert cursor.rowcount == 1, cursor.rowcount
+
+cursor.execute("SELECT id, name, age, score, active FROM users WHERE id = ?", (1,))
+assert [column[0] for column in cursor.description] == ['id', 'name', 'age', 'score', 'active'], cursor.description
+assert [column[1] for column in cursor.description] == [8, 253, 8, 5, 1], [column[1] for column in cursor.description]
+row = cursor.fetchone()
+assert row[:2] == (1, 'alice'), row
+assert row[2] == 30 and abs(row[3] - 1.5) < 1e-9 and row[4] == 1, row
+assert isinstance(row[0], int) and isinstance(row[3], float), row
+
+# An empty result set keeps the declared column types.
+cursor.execute("SELECT id, name FROM users WHERE id = ?", (99,))
+assert cursor.fetchall() == [], cursor.fetchall()
+assert [column[1] for column in cursor.description] == [8, 253], cursor.description
+
+# NULL parameters are carried through the execute NULL bitmap.
+cursor.execute("SELECT id FROM users WHERE name = ?", (None,))
+assert cursor.fetchall() == [], cursor.fetchall()
+
+# Statement handles can be reset and reused.
+cursor.execute("SELECT name FROM users WHERE id = ?", (2,))
+assert cursor.fetchall() == [('bob',)], 'reset statement must stay usable'
+
+connection.close()
+print('mysql-connector prepared statements passed')
+"#;
+    run_reference_client(script, service.address().port());
+    service.stop().unwrap();
+    assert_eq!(NodeLease::inspect(directory).unwrap().ownership, LocalOwnership::Available);
+}
+
+#[test]
 #[ignore = "requires YYDS_MYSQL_REFERENCE_PYTHON with PyMySQL installed"]
 fn pymysql_round_trips_typed_results_parameters_transactions_and_conflicts() {
     let directory = owner_directory();
