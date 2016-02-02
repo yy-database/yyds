@@ -46,6 +46,15 @@ fn oak_session_statements_are_projected_without_gateway_parsing() {
         Some(SqlSessionCommand::SetNames { character_set: "utf8mb4".into(), collation: Some("utf8mb4_general_ci".into()) })
     );
     assert_eq!(parse_session_command("BEGIN").unwrap(), Some(SqlSessionCommand::Transaction(SqlTransactionAction::Begin)));
+    // Both dialects also accept the verbose spelling for the same boundary.
+    assert_eq!(
+        parse_session_command("START TRANSACTION").unwrap(),
+        Some(SqlSessionCommand::Transaction(SqlTransactionAction::Begin))
+    );
+    assert_eq!(
+        parse_session_command("start transaction;").unwrap(),
+        Some(SqlSessionCommand::Transaction(SqlTransactionAction::Begin))
+    );
     // MySQL clients quote the charset and collation literals.
     assert_eq!(
         parse_session_command("SET NAMES 'utf8mb4' COLLATE 'utf8mb4_general_ci'").unwrap(),

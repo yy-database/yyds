@@ -161,7 +161,7 @@ pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError
 
 /// Projects the small set of protocol session commands from Oak's SQL AST.
 pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, SqlFrontendError> {
-    let normalized = normalize_quoted_set_names(source);
+    let normalized = normalize_start_transaction(source).or_else(|| normalize_quoted_set_names(source));
     let root = parse_sql(normalized.as_deref().unwrap_or(source))?;
     if root.statements.len() != 1 {
         return Ok(None);
@@ -196,6 +196,25 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
         }),
         _ => None,
     })
+}
+
+/// MySQL and PostgreSQL clients may spell the opening boundary as `START
+/// TRANSACTION`; Oak's session grammar only reads `BEGIN`. Rewrite that one
+/// statement and leave every other SQL surface untouched.
+fn normalize_start_transaction(source: &str) -> Option<String> {
+    let trimmed = source.trim();
+    let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+    let mut words = trimmed.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("START") {
+        return None;
+    }
+    if !words.next()?.eq_ignore_ascii_case("TRANSACTION") {
+        return None;
+    }
+    if words.next().is_some() {
+        return None;
+    }
+    Some("BEGIN".to_string())
 }
 
 /// MySQL clients spell charset negotiation as `SET NAMES 'utf8mb4' COLLATE
@@ -789,7 +808,11 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             }
         }
         Expression::FunctionCall { name, args, .. } => {
-            let fname = normalize_identifier(name.name.as_ref());
+            // Canonical lower-case name: description inference matches the
+            // documented spelling, while execution stays case-insensitive.
+            // Diagnostics keep the spelling the query used.
+            let display = normalize_identifier(name.name.as_ref());
+            let fname = display.to_ascii_lowercase();
             let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
             if SqlAggregateFunction::from_name(&fname).is_some() {
@@ -799,7 +822,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 SqlFrontendError::new(
                     SqlErrorKind::UnknownFunction,
                     format!(
-                        "unknown SQL function: {fname} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/COALESCE/ABS/ROUND)"
+                        "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/COALESCE/ABS/ROUND)"
                     ),
                 )
             })?;
@@ -809,7 +832,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 return Err(SqlFrontendError::new(
                     SqlErrorKind::UnknownFunction,
                     format!(
-                        "{fname}() expects {}{} argument(s), got {supplied}",
+                        "{display}() expects {}{} argument(s), got {supplied}",
                         minimum,
                         match maximum {
                             Some(max) if max == minimum => String::new(),

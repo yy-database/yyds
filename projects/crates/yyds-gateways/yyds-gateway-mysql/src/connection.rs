@@ -664,6 +664,11 @@ fn execute_sql(
         write_ok_with_affected(stream, sequence, result.affected_rows)?;
         return Ok(());
     }
+    // Text protocol (`COM_QUERY`) has no prepare-time description, so derive the
+    // declared column types from the plan instead of guessing from row values.
+    let declared: Vec<u8> =
+        describe_plan(&plan).iter().map(|column| mysql_field_type(&column.field_type)).collect();
+    let column_types = if column_types.is_empty() { &declared } else { column_types };
     write_result_set(stream, sequence, &result, column_types, binary_rows)
 }
 
