@@ -94,16 +94,39 @@ test("psql sends protocol-v3 queries and displays server rows and errors", async
                         ]),
                     );
                 } else if (sql === "SELECT 1; SELECT 2") {
-                    const first = Buffer.concat([Buffer.from([0, 1]), Buffer.from("one\0"), Buffer.alloc(18)]);
-                    const second = Buffer.concat([Buffer.from([0, 1]), Buffer.from("two\0"), Buffer.alloc(18)]);
-                    const row = (value: string) => Buffer.concat([Buffer.from([0, 1, 0, 0, 0, value.length]), Buffer.from(value)]);
-                    socket.write(Buffer.concat([
-                        backendMessage("T", first), backendMessage("D", row("1")), backendMessage("C", Buffer.from("SELECT 1\0")),
-                        backendMessage("T", second), backendMessage("D", row("2")), backendMessage("C", Buffer.from("SELECT 1\0")),
-                        backendMessage("Z", Buffer.from("I")),
-                    ]));
+                    const first = Buffer.concat([
+                        Buffer.from([0, 1]),
+                        Buffer.from("one\0"),
+                        Buffer.alloc(18),
+                    ]);
+                    const second = Buffer.concat([
+                        Buffer.from([0, 1]),
+                        Buffer.from("two\0"),
+                        Buffer.alloc(18),
+                    ]);
+                    const row = (value: string) =>
+                        Buffer.concat([
+                            Buffer.from([0, 1, 0, 0, 0, value.length]),
+                            Buffer.from(value),
+                        ]);
+                    socket.write(
+                        Buffer.concat([
+                            backendMessage("T", first),
+                            backendMessage("D", row("1")),
+                            backendMessage("C", Buffer.from("SELECT 1\0")),
+                            backendMessage("T", second),
+                            backendMessage("D", row("2")),
+                            backendMessage("C", Buffer.from("SELECT 1\0")),
+                            backendMessage("Z", Buffer.from("I")),
+                        ]),
+                    );
                 } else if (sql === "UPDATE samples SET value = 1") {
-                    socket.write(Buffer.concat([backendMessage("C", Buffer.from("UPDATE 1\0")), backendMessage("Z", Buffer.from("I"))]));
+                    socket.write(
+                        Buffer.concat([
+                            backendMessage("C", Buffer.from("UPDATE 1\0")),
+                            backendMessage("Z", Buffer.from("I")),
+                        ]),
+                    );
                 } else {
                     const error = Buffer.from("SERROR\0C42601\0Mserver syntax error\0\0");
                     socket.write(
@@ -158,23 +181,55 @@ test("psql applies field and NULL output settings to text rows", async (context)
                 if (pending.length < length) return;
                 pending = pending.subarray(length);
                 started = true;
-                socket.write(Buffer.concat([backendMessage("R", Buffer.from([0, 0, 0, 0])), backendMessage("Z", Buffer.from("I"))]));
+                socket.write(
+                    Buffer.concat([
+                        backendMessage("R", Buffer.from([0, 0, 0, 0])),
+                        backendMessage("Z", Buffer.from("I")),
+                    ]),
+                );
             }
             while (pending.length >= 5) {
                 const length = pending.readUInt32BE(1);
                 if (pending.length < length + 1) return;
                 pending = pending.subarray(length + 1);
-                const description = Buffer.concat([Buffer.from([0, 2]), Buffer.from("left\0"), Buffer.alloc(18), Buffer.from("right\0"), Buffer.alloc(18)]);
+                const description = Buffer.concat([
+                    Buffer.from([0, 2]),
+                    Buffer.from("left\0"),
+                    Buffer.alloc(18),
+                    Buffer.from("right\0"),
+                    Buffer.alloc(18),
+                ]);
                 const row = Buffer.from([0, 2, 0, 0, 0, 1, 65, 255, 255, 255, 255]);
-                socket.write(Buffer.concat([backendMessage("T", description), backendMessage("D", row), backendMessage("C", Buffer.from("SELECT 1\0")), backendMessage("Z", Buffer.from("I"))]));
+                socket.write(
+                    Buffer.concat([
+                        backendMessage("T", description),
+                        backendMessage("D", row),
+                        backendMessage("C", Buffer.from("SELECT 1\0")),
+                        backendMessage("Z", Buffer.from("I")),
+                    ]),
+                );
             }
         });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    context.after(() => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+    context.after(
+        () =>
+            new Promise<void>((resolve, reject) =>
+                server.close((error) => (error ? reject(error) : resolve())),
+            ),
+    );
     const address = server.address();
     assert.ok(address && typeof address === "object");
-    const result = await runCli(["-p", String(address.port), "-F", ",", "-P", "null=(none)", "-c", "SELECT 1"]);
+    const result = await runCli([
+        "-p",
+        String(address.port),
+        "-F",
+        ",",
+        "-P",
+        "null=(none)",
+        "-c",
+        "SELECT 1",
+    ]);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.stdout, "left,right\nA,(none)\n");
 });

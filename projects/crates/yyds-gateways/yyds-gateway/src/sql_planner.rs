@@ -19,9 +19,8 @@ use crate::{
     catalog_bind::{
         collect_column_ids, SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
         SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable,
-        SqlCatalogBoundUpdate,
+        SqlCatalogBoundUpdate, SqlFieldType,
     },
-    catalog_bind::SqlFieldType,
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlErrorKind, SqlFrontendError,
     },
@@ -391,11 +390,7 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
 
 /// Rejects a write literal that the declared column type cannot represent, so a
 /// string never lands in an integer column and reads back as the wrong value.
-fn check_write_literal(
-    literal: &SqlBoundLiteral,
-    field_type: &SqlFieldType,
-    column: &str,
-) -> Result<(), SqlFrontendError> {
+fn check_write_literal(literal: &SqlBoundLiteral, field_type: &SqlFieldType, column: &str) -> Result<(), SqlFrontendError> {
     let fits = match field_type.inner() {
         SqlFieldType::Unknown => true,
         SqlFieldType::Int64 | SqlFieldType::Int32 => match literal {
@@ -831,9 +826,7 @@ fn pk_literal_to_rowid(literal: &SqlBoundLiteral) -> Result<Vec<u8>, SqlFrontend
         SqlBoundLiteral::Number(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::String(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::Boolean(value) => Ok((if *value { "1" } else { "0" }).as_bytes().to_vec()),
-        SqlBoundLiteral::Null => {
-            Err(SqlFrontendError::new(SqlErrorKind::NotNullViolation, "primary key must not be NULL"))
-        }
+        SqlBoundLiteral::Null => Err(SqlFrontendError::new(SqlErrorKind::NotNullViolation, "primary key must not be NULL")),
     }
 }
 

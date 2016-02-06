@@ -138,12 +138,19 @@ test("redis-cli prints ordered MGET arrays including null and binary values", as
             pending = Buffer.concat([pending, chunk]);
             const parsed = takeCommand(pending);
             if (parsed === null) return;
-            assert.deepEqual(parsed.args, [Buffer.from("MGET"), Buffer.from("first"), Buffer.from("missing"), Buffer.from("first")]);
-            socket.write(Buffer.concat([
-                Buffer.from("*3\r\n$5\r\nvalue\r\n$-1\r\n$2\r\n"),
-                Buffer.from([0, 255]),
-                Buffer.from("\r\n"),
-            ]));
+            assert.deepEqual(parsed.args, [
+                Buffer.from("MGET"),
+                Buffer.from("first"),
+                Buffer.from("missing"),
+                Buffer.from("first"),
+            ]);
+            socket.write(
+                Buffer.concat([
+                    Buffer.from("*3\r\n$5\r\nvalue\r\n$-1\r\n$2\r\n"),
+                    Buffer.from([0, 255]),
+                    Buffer.from("\r\n"),
+                ]),
+            );
         });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -158,7 +165,18 @@ test("redis-cli prints ordered MGET arrays including null and binary values", as
     const escaped = await runCli(["-p", String(address.port), "MGET", "first", "missing", "first"]);
     assert.equal(escaped.code, 0, escaped.stderr.toString());
     assert.equal(escaped.stdout.toString(), "value\n(nil)\n\0�\n");
-    const raw = await runCli(["-p", String(address.port), "--raw", "MGET", "first", "missing", "first"]);
+    const raw = await runCli([
+        "-p",
+        String(address.port),
+        "--raw",
+        "MGET",
+        "first",
+        "missing",
+        "first",
+    ]);
     assert.equal(raw.code, 0, raw.stderr.toString());
-    assert.deepEqual(raw.stdout, Buffer.from([118, 97, 108, 117, 101, 10, 40, 110, 105, 108, 41, 10, 0, 255, 10]));
+    assert.deepEqual(
+        raw.stdout,
+        Buffer.from([118, 97, 108, 117, 101, 10, 40, 110, 105, 108, 41, 10, 0, 255, 10]),
+    );
 });

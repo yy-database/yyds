@@ -850,12 +850,12 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             negated: *negated,
         }),
         // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
-        Expression::Subquery { .. } => Err(SqlFrontendError::unsupported(
-            "SQL subquery is only supported as the right side of IN",
-        )),
-        Expression::Vector { .. } => Err(SqlFrontendError::unsupported(
-            "SQL vector literals are outside the gateway binding subset",
-        )),
+        Expression::Subquery { .. } => {
+            Err(SqlFrontendError::unsupported("SQL subquery is only supported as the right side of IN"))
+        }
+        Expression::Vector { .. } => {
+            Err(SqlFrontendError::unsupported("SQL vector literals are outside the gateway binding subset"))
+        }
         Expression::Error { message, .. } => Err(bind_error(message)),
     }
 }

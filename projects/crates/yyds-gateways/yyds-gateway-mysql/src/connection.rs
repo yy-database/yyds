@@ -16,8 +16,8 @@ use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle
 use yyds_gateway::{
     bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
     plan_statement, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlCatalogBoundStatement,
-    SqlColumn, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult,
-    SqlSessionCommand, SqlTransactionAction, SqlValue,
+    SqlColumn, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult, SqlSessionCommand,
+    SqlTransactionAction, SqlValue,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -103,11 +103,8 @@ pub struct MysqlSqlRuntime {
 fn mysql_system_variable(name: &str) -> Result<SqlBoundLiteral, SqlFrontendError> {
     let bare = name.strip_prefix("@@").unwrap_or(name);
     let variable = bare.rsplit('.').next().unwrap_or(bare).to_ascii_lowercase();
-    let value = MYSQL_VARIABLES
-        .iter()
-        .find(|(candidate, _)| *candidate == variable)
-        .map(|(_, value)| *value)
-        .ok_or_else(|| {
+    let value =
+        MYSQL_VARIABLES.iter().find(|(candidate, _)| *candidate == variable).map(|(_, value)| *value).ok_or_else(|| {
             SqlFrontendError::new(SqlErrorKind::UnknownVariable, format!("Unknown system variable '{variable}'"))
         })?;
     if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
@@ -130,7 +127,8 @@ fn normalize_session_boolean(sql: &str) -> Cow<'_, str> {
     if !statement.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("SET ")) {
         return Cow::Borrowed(sql);
     }
-    let Some(index) = statement.rfind('=') else {
+    let Some(index) = statement.rfind('=')
+    else {
         return Cow::Borrowed(sql);
     };
     let value = statement[index + 1..].trim();
@@ -666,8 +664,7 @@ fn execute_sql(
     }
     // Text protocol (`COM_QUERY`) has no prepare-time description, so derive the
     // declared column types from the plan instead of guessing from row values.
-    let declared: Vec<u8> =
-        describe_plan(&plan).iter().map(|column| mysql_field_type(&column.field_type)).collect();
+    let declared: Vec<u8> = describe_plan(&plan).iter().map(|column| mysql_field_type(&column.field_type)).collect();
     let column_types = if column_types.is_empty() { &declared } else { column_types };
     write_result_set(stream, sequence, &result, column_types, binary_rows)
 }
@@ -693,12 +690,7 @@ fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
     }
 }
 
-fn write_statement_error(
-    stream: &mut impl Write,
-    sequence: u8,
-    stage: &str,
-    error: SqlFrontendError,
-) -> io::Result<()> {
+fn write_statement_error(stream: &mut impl Write, sequence: u8, stage: &str, error: SqlFrontendError) -> io::Result<()> {
     let (code, state) = mysql_error_code(error.kind);
     write_error(stream, sequence, code, state, &format!("SQL {stage} error: {}", error.message))
 }
@@ -720,7 +712,8 @@ fn handle_prepare(
             return Ok(());
         }
     };
-    let Some(runtime) = runtime else {
+    let Some(runtime) = runtime
+    else {
         session.fail();
         write_error(stream, sequence, 1235, "42000", "YYDS MySQL SQL execution is not implemented (no SQL runtime)")?;
         return Ok(());
@@ -733,19 +726,15 @@ fn handle_prepare(
             return Ok(());
         }
     };
-    let bound = match bind_sql_catalog_with_variables(
-        &neutral,
-        &runtime.catalog,
-        runtime.schema_version,
-        &mysql_system_variable,
-    ) {
-        Ok(bound) => bound,
-        Err(error) => {
-            session.fail();
-            write_statement_error(stream, sequence, "bind", error)?;
-            return Ok(());
-        }
-    };
+    let bound =
+        match bind_sql_catalog_with_variables(&neutral, &runtime.catalog, runtime.schema_version, &mysql_system_variable) {
+            Ok(bound) => bound,
+            Err(error) => {
+                session.fail();
+                write_statement_error(stream, sequence, "bind", error)?;
+                return Ok(());
+            }
+        };
     // 写入语句的值类型检查推迟到 execute，因为只有执行时才知道参数的真实类型，
     // 因此这里只为 SELECT 推导结果列。
     let description = match bound {
@@ -811,18 +800,21 @@ fn handle_execute(
     statements: &mut PreparedStatements,
     session: &mut MysqlTransactionSession,
 ) -> io::Result<()> {
-    let Some(statement_id) = take_u32(&payload[1..]) else {
+    let Some(statement_id) = take_u32(&payload[1..])
+    else {
         write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_EXECUTE command")?;
         return Ok(());
     };
     // statement id (4) + flags (1) + iteration count (4)
     let mut cursor = 5;
-    let Some(_flags) = payload.get(cursor) else {
+    let Some(_flags) = payload.get(cursor)
+    else {
         write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_EXECUTE command")?;
         return Ok(());
     };
     cursor += 1;
-    let Some(iteration) = take_u32(&payload[cursor..]) else {
+    let Some(iteration) = take_u32(&payload[cursor..])
+    else {
         write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_EXECUTE iteration count")?;
         return Ok(());
     };
@@ -831,26 +823,23 @@ fn handle_execute(
         write_error(stream, sequence, 1210, "HY000", "COM_STMT_EXECUTE iteration count must be 1")?;
         return Ok(());
     }
-    let Some(statement) = statements.entries.get_mut(&statement_id) else {
-        write_error(
-            stream,
-            sequence,
-            1243,
-            "HY000",
-            &format!("Unknown prepared statement handler ({statement_id})"),
-        )?;
+    let Some(statement) = statements.entries.get_mut(&statement_id)
+    else {
+        write_error(stream, sequence, 1243, "HY000", &format!("Unknown prepared statement handler ({statement_id})"))?;
         return Ok(());
     };
 
     let mut values = Vec::with_capacity(statement.parameter_count);
     if statement.parameter_count > 0 {
         let bitmap_length = statement.parameter_count.div_ceil(8);
-        let Some(bitmap) = payload.get(cursor..cursor + bitmap_length) else {
+        let Some(bitmap) = payload.get(cursor..cursor + bitmap_length)
+        else {
             write_error(stream, sequence, 1210, "HY000", "truncated COM_STMT_EXECUTE null bitmap")?;
             return Ok(());
         };
         cursor += bitmap_length;
-        let Some(&bound_flag) = payload.get(cursor) else {
+        let Some(&bound_flag) = payload.get(cursor)
+        else {
             write_error(stream, sequence, 1210, "HY000", "missing COM_STMT_EXECUTE parameter types")?;
             return Ok(());
         };
@@ -858,11 +847,13 @@ fn handle_execute(
         if bound_flag == 1 {
             let mut types = Vec::with_capacity(statement.parameter_count);
             for _ in 0..statement.parameter_count {
-                let Some(&code) = payload.get(cursor) else {
+                let Some(&code) = payload.get(cursor)
+                else {
                     write_error(stream, sequence, 1210, "HY000", "truncated COM_STMT_EXECUTE parameter types")?;
                     return Ok(());
                 };
-                let Some(&flags) = payload.get(cursor + 1) else {
+                let Some(&flags) = payload.get(cursor + 1)
+                else {
                     write_error(stream, sequence, 1210, "HY000", "truncated COM_STMT_EXECUTE parameter types")?;
                     return Ok(());
                 };
@@ -872,13 +863,7 @@ fn handle_execute(
             statement.parameter_types = types;
         }
         else if statement.parameter_types.len() != statement.parameter_count {
-            write_error(
-                stream,
-                sequence,
-                1210,
-                "HY000",
-                "COM_STMT_EXECUTE reused parameter types before they were bound",
-            )?;
+            write_error(stream, sequence, 1210, "HY000", "COM_STMT_EXECUTE reused parameter types before they were bound")?;
             return Ok(());
         }
         for index in 0..statement.parameter_count {
@@ -903,7 +888,8 @@ fn handle_execute(
         write_error(stream, sequence, 40001, "HY000", "current transaction is aborted")?;
         return Ok(());
     }
-    let Some(runtime) = runtime else {
+    let Some(runtime) = runtime
+    else {
         session.fail();
         write_error(stream, sequence, 1235, "42000", "YYDS MySQL SQL execution is not implemented (no SQL runtime)")?;
         return Ok(());
@@ -921,13 +907,9 @@ fn handle_execute(
 }
 
 /// `COM_STMT_RESET` clears the cached parameter binding and returns OK.
-fn handle_reset(
-    stream: &mut impl Write,
-    sequence: u8,
-    payload: &[u8],
-    statements: &PreparedStatements,
-) -> io::Result<()> {
-    let Some(statement_id) = take_u32(&payload[1..]) else {
+fn handle_reset(stream: &mut impl Write, sequence: u8, payload: &[u8], statements: &PreparedStatements) -> io::Result<()> {
+    let Some(statement_id) = take_u32(&payload[1..])
+    else {
         return write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_RESET command");
     };
     if statements.entries.contains_key(&statement_id) {

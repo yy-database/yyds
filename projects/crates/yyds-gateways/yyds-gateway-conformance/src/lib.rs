@@ -12,8 +12,7 @@
 use yyds_gateway::{SqlParameterStyle, SqlValue};
 
 /// PostgreSQL schema source shared by every acceptance path.
-pub const USERS_SCHEMA: &str =
-    "table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }\n";
+pub const USERS_SCHEMA: &str = "table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }\n";
 
 /// Schema version expected by the gateway binder in tests.
 pub const SCHEMA_VERSION: u32 = 7;
@@ -175,10 +174,7 @@ pub fn crud_cases() -> Vec<Case> {
     use SqlParameterStyle::{DollarNumber, QuestionMark};
 
     vec![
-        case("select primary key")
-            .sql("SELECT id, name FROM users WHERE id = 2")
-            .rows(&[&[Int(2), Text("bob")]])
-            .build(),
+        case("select primary key").sql("SELECT id, name FROM users WHERE id = 2").rows(&[&[Int(2), Text("bob")]]).build(),
         case("select and predicate")
             .sql("SELECT id FROM users WHERE age > 20 AND active = TRUE ORDER BY id")
             .rows(&[&[Int(1)], &[Int(3)]])
@@ -187,10 +183,7 @@ pub fn crud_cases() -> Vec<Case> {
             .sql("SELECT id FROM users WHERE age = 20 OR name = 'carol' ORDER BY id")
             .rows(&[&[Int(2)], &[Int(3)]])
             .build(),
-        case("select not equal")
-            .sql("SELECT id FROM users WHERE age <> 20 ORDER BY id")
-            .rows(&[&[Int(1)], &[Int(3)]])
-            .build(),
+        case("select not equal").sql("SELECT id FROM users WHERE age <> 20 ORDER BY id").rows(&[&[Int(1)], &[Int(3)]]).build(),
         case("select like prefix").sql("SELECT id FROM users WHERE name LIKE 'a%'").rows(&[&[Int(1)]]).build(),
         case("select like wildcard").sql("SELECT id FROM users WHERE name LIKE '_ob'").rows(&[&[Int(2)]]).build(),
         case("select in list")
@@ -264,10 +257,7 @@ pub fn crud_cases() -> Vec<Case> {
             .setup(&[])
             .sql("INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')")
             .affected(1)
-            .state(
-                DEFAULT_STATE_COLUMNS,
-                &[&[Int(1), Text("alice"), Int(30), Lit::Float(1.5), Bool(true), Text("x")]],
-            )
+            .state(DEFAULT_STATE_COLUMNS, &[&[Int(1), Text("alice"), Int(30), Lit::Float(1.5), Bool(true), Text("x")]])
             .build(),
         case("insert row with null")
             .setup(&[])
@@ -350,10 +340,7 @@ pub fn crud_cases() -> Vec<Case> {
                 ],
             )
             .build(),
-        case("delete skipped by remaining predicate")
-            .sql("DELETE FROM users WHERE id = 2 AND age = 30")
-            .affected(0)
-            .build(),
+        case("delete skipped by remaining predicate").sql("DELETE FROM users WHERE id = 2 AND age = 30").affected(0).build(),
         case("delete every matching row")
             .sql("DELETE FROM users WHERE active = TRUE")
             .affected(2)
@@ -372,10 +359,7 @@ pub fn type_cases() -> Vec<Case> {
             .setup(&["INSERT INTO users VALUES (1, '007', 30, 0.0, FALSE, '')"])
             .sql("SELECT name, tag FROM users WHERE id = 1")
             .rows(&[&[Text("007"), Text("")]])
-            .state(
-                DEFAULT_STATE_COLUMNS,
-                &[&[Int(1), Text("007"), Int(30), Float(0.0), Lit::Bool(false), Text("")]],
-            )
+            .state(DEFAULT_STATE_COLUMNS, &[&[Int(1), Text("007"), Int(30), Float(0.0), Lit::Bool(false), Text("")]])
             .build(),
         case("select integer beyond f64 precision")
             .setup(&["INSERT INTO users VALUES (1, 'big', 9007199254740993, 0.0, FALSE, NULL)"])
@@ -390,10 +374,7 @@ pub fn type_cases() -> Vec<Case> {
             .setup(&["INSERT INTO users VALUES (1, 'max', 9223372036854775807, 0.0, FALSE, NULL)"])
             .sql("SELECT age FROM users WHERE age = 9223372036854775807")
             .rows(&[&[Int(i64::MAX)]])
-            .state(
-                DEFAULT_STATE_COLUMNS,
-                &[&[Int(1), Text("max"), Int(i64::MAX), Float(0.0), Lit::Bool(false), Null]],
-            )
+            .state(DEFAULT_STATE_COLUMNS, &[&[Int(1), Text("max"), Int(i64::MAX), Float(0.0), Lit::Bool(false), Null]])
             .build(),
         case("select float").sql("SELECT score FROM users WHERE id = 2").rows(&[&[Float(2.5)]]).build(),
         case("select null column").sql("SELECT tag FROM users WHERE id = 2").rows(&[&[Null]]).build(),
@@ -401,18 +382,12 @@ pub fn type_cases() -> Vec<Case> {
         case("count column").sql("SELECT COUNT(tag) FROM users").rows(&[&[Int(2)]]).build(),
         case("sum aggregate").sql("SELECT SUM(age) FROM users").rows(&[&[Int(90)]]).build(),
         case("avg aggregate").sql("SELECT AVG(age) FROM users").rows(&[&[Float(30.0)]]).build(),
-        case("min and max aggregate")
-            .sql("SELECT MIN(age), MAX(age) FROM users")
-            .rows(&[&[Int(20), Int(40)]])
-            .build(),
+        case("min and max aggregate").sql("SELECT MIN(age), MAX(age) FROM users").rows(&[&[Int(20), Int(40)]]).build(),
         case("order by descending")
             .sql("SELECT id FROM users ORDER BY age DESC")
             .rows(&[&[Int(3)], &[Int(1)], &[Int(2)]])
             .build(),
-        case("limit and offset")
-            .sql("SELECT id FROM users ORDER BY id LIMIT 1 OFFSET 1")
-            .rows(&[&[Int(2)]])
-            .build(),
+        case("limit and offset").sql("SELECT id FROM users ORDER BY id LIMIT 1 OFFSET 1").rows(&[&[Int(2)]]).build(),
         case("limit zero returns no rows").sql("SELECT id FROM users ORDER BY id LIMIT 0").rows(&[]).build(),
         case("order by beyond f64 precision")
             .setup(&[
@@ -547,20 +522,13 @@ pub fn render_python(mode: ClientMode) -> RenderedCases {
         }
         applied += 1;
         let mut notes = Vec::new();
-        let parameters = case
-            .parameters
-            .iter()
-            .map(|value| lit_python(*value, mode, &mut notes))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let parameters =
+            case.parameters.iter().map(|value| lit_python(*value, mode, &mut notes)).collect::<Vec<_>>().join(", ");
         let expected_rows = case
             .expected_rows
             .iter()
             .map(|row| {
-                format!(
-                    "[{}]",
-                    row.iter().map(|value| lit_python(*value, mode, &mut notes)).collect::<Vec<_>>().join(", ")
-                )
+                format!("[{}]", row.iter().map(|value| lit_python(*value, mode, &mut notes)).collect::<Vec<_>>().join(", "))
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -568,10 +536,7 @@ pub fn render_python(mode: ClientMode) -> RenderedCases {
             .expected_state
             .iter()
             .map(|row| {
-                format!(
-                    "[{}]",
-                    row.iter().map(|value| lit_python(*value, mode, &mut notes)).collect::<Vec<_>>().join(", ")
-                )
+                format!("[{}]", row.iter().map(|value| lit_python(*value, mode, &mut notes)).collect::<Vec<_>>().join(", "))
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -580,9 +545,7 @@ pub fn render_python(mode: ClientMode) -> RenderedCases {
         let state_sql = format!("SELECT {} FROM users ORDER BY id", case.state_columns);
         let write = !case.sql.trim_start().to_ascii_uppercase().starts_with("SELECT");
         if mode == ClientMode::MysqlText && case.parameters.contains(&Lit::Null) {
-            notes.push(
-                "mysql text cursor binds parameters client-side, so NULL reaches the gateway as a literal".to_string(),
-            );
+            notes.push("mysql text cursor binds parameters client-side, so NULL reaches the gateway as a literal".to_string());
         }
         let notes = notes.iter().map(|note| python_string(note)).collect::<Vec<_>>().join(", ");
         literal.push_str(&format!(

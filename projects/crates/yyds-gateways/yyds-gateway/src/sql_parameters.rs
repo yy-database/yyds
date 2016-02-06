@@ -4,8 +4,10 @@
 //! 再交给 `bind_sql_catalog`。替换只识别字符串、标识符、注释之外的位置，
 //! 不会改写已有字面量内容。SQL 语义本身仍由 planner 和 executor 决定。
 
-use crate::sql::{SqlErrorKind, SqlFrontendError};
-use crate::sql_execute::{format_number, SqlValue};
+use crate::{
+    sql::{SqlErrorKind, SqlFrontendError},
+    sql_execute::{format_number, SqlValue},
+};
 
 /// 参数占位符风格。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,10 +50,7 @@ pub fn substitute_sql_parameters(
 /// many positions the statement references. Used to derive statement metadata
 /// (parameter count, row description) without bound values. A numeric literal
 /// keeps `WHERE pk = $1` plannable, unlike `NULL`.
-pub fn neutralized_sql_parameters(
-    sql: &str,
-    style: SqlParameterStyle,
-) -> Result<(String, usize), SqlFrontendError> {
+pub fn neutralized_sql_parameters(sql: &str, style: SqlParameterStyle) -> Result<(String, usize), SqlFrontendError> {
     walk_parameters(sql, style, &mut |_| Ok("0".to_string()))
 }
 
@@ -152,17 +151,10 @@ fn copy_quoted(chars: &[char], mut index: usize, quote: char, out: &mut String) 
     index
 }
 
-fn render_parameter(
-    parameters: &[SqlValue],
-    index: usize,
-    style: SqlParameterStyle,
-) -> Result<String, SqlFrontendError> {
-    let Some(value) = parameters.get(index) else {
-        return Err(parameter_error(&format!(
-            "{} placeholder {} has no bound parameter",
-            style.label(),
-            index + 1
-        )));
+fn render_parameter(parameters: &[SqlValue], index: usize, style: SqlParameterStyle) -> Result<String, SqlFrontendError> {
+    let Some(value) = parameters.get(index)
+    else {
+        return Err(parameter_error(&format!("{} placeholder {} has no bound parameter", style.label(), index + 1)));
     };
     Ok(match value {
         SqlValue::Integer(value) => value.to_string(),

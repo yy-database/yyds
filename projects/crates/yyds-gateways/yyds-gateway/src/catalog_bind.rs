@@ -664,27 +664,17 @@ fn find_field(
     catalog: &SqlCatalog,
 ) -> Result<SqlCatalogBoundColumn, SqlFrontendError> {
     if sources.is_empty() {
-        return Err(SqlFrontendError::new(
-            SqlErrorKind::UnknownColumn,
-            "SQL column reference requires a table source",
-        ));
+        return Err(SqlFrontendError::new(SqlErrorKind::UnknownColumn, "SQL column reference requires a table source"));
     }
     if let Some((qualifier, column)) = name.split_once('.') {
         let qualifier = qualifier.trim();
         let column = column.trim();
-        let source = sources
-            .iter()
-            .find(|source| source.name == qualifier)
-            .ok_or_else(|| {
-                SqlFrontendError::new(
-                    SqlErrorKind::UnknownTableQualifier,
-                    format!("unknown SQL table qualifier: {qualifier}"),
-                )
-            })?;
-        return find_field_in_table(column, source, catalog)?
-            .ok_or_else(|| {
-                SqlFrontendError::new(SqlErrorKind::UnknownColumn, format!("unknown SQL column: {qualifier}.{column}"))
-            });
+        let source = sources.iter().find(|source| source.name == qualifier).ok_or_else(|| {
+            SqlFrontendError::new(SqlErrorKind::UnknownTableQualifier, format!("unknown SQL table qualifier: {qualifier}"))
+        })?;
+        return find_field_in_table(column, source, catalog)?.ok_or_else(|| {
+            SqlFrontendError::new(SqlErrorKind::UnknownColumn, format!("unknown SQL column: {qualifier}.{column}"))
+        });
     }
     let mut matches = Vec::new();
     for source in sources {
@@ -745,8 +735,9 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
             collect_column_ids(right, out);
         }
         SqlCatalogBoundExpression::Unary { expression, .. } => collect_column_ids(expression, out),
-        SqlCatalogBoundExpression::InSubquery { expression, .. }
-        | SqlCatalogBoundExpression::InValues { expression, .. } => collect_column_ids(expression, out),
+        SqlCatalogBoundExpression::InSubquery { expression, .. } | SqlCatalogBoundExpression::InValues { expression, .. } => {
+            collect_column_ids(expression, out)
+        }
         SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
     }
 }

@@ -30,7 +30,11 @@ function findBuiltNodes(dir) {
     return readdirSync(dir).filter((name) => name.endsWith(".node"));
 }
 
-execSync("pnpm exec napi build --platform --release", { cwd: napiDir, stdio: "inherit", shell: true });
+execSync("pnpm exec napi build --platform --release", {
+    cwd: napiDir,
+    stdio: "inherit",
+    shell: true,
+});
 
 const built = findBuiltNodes(napiDir);
 if (built.length === 0) {

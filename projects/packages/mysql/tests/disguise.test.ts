@@ -214,8 +214,15 @@ test("mysql client decodes protocol-4.1 text result sets", async (context) => {
                 socket.write(packet(2, column("id")));
                 socket.write(packet(3, column("message")));
                 socket.write(packet(4, eof()));
-                socket.write(packet(5, Buffer.concat([lengthEncoded("7"), lengthEncoded("line\n\\path")])));
-                socket.write(packet(6, Buffer.concat([lengthEncoded(null), lengthEncoded(Buffer.from([0, 255]))])));
+                socket.write(
+                    packet(5, Buffer.concat([lengthEncoded("7"), lengthEncoded("line\n\\path")])),
+                );
+                socket.write(
+                    packet(
+                        6,
+                        Buffer.concat([lengthEncoded(null), lengthEncoded(Buffer.from([0, 255]))]),
+                    ),
+                );
                 socket.write(packet(7, eof()));
             }
         });

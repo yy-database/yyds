@@ -3,11 +3,19 @@
     "version": "0.0.14",
     "description": "YYDS Node-API binary for Windows x64",
     "license": "MPL-2.0",
-        "type": "module",
+    "type": "module",
     "main": "./index.js",
-    "files": ["index.js", "lib", "readme.md"],
-    "os": ["win32"],
-    "cpu": ["x64"],
+    "files": [
+        "index.js",
+        "lib",
+        "readme.md"
+    ],
+    "os": [
+        "win32"
+    ],
+    "cpu": [
+        "x64"
+    ],
     "repository": {
         "type": "git",
         "url": "git+https://github.com/yy-database/yyds.git",

@@ -107,10 +107,7 @@ fn describe_projections(plan: &impl ProjectedPlan) -> Vec<SqlColumn> {
 
 /// Infers the declared type of an expression. The result only needs to be
 /// accurate enough to pick a wire type — execution remains the source of truth.
-fn infer_expression_type(
-    expression: &SqlCatalogBoundExpression,
-    field_types: &BTreeMap<u64, SqlFieldType>,
-) -> SqlFieldType {
+fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &BTreeMap<u64, SqlFieldType>) -> SqlFieldType {
     use SqlCatalogBoundExpression::*;
     match expression {
         Column(column) => field_types.get(&column.field_id).cloned().unwrap_or(SqlFieldType::Unknown).inner(),

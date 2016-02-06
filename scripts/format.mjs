@@ -2,7 +2,14 @@
 /**
  * Format the YYDS workspace:
  *   - Rust: `cargo fmt`
- *   - JSON / JS / TS: Biome (`indentWidth: 4`)
+ *   - JSON / JS / TS: Biome (`biome.json`: 4 spaces, line width 100)
+ *
+ * `biome.json#files.includes` keeps the gate on source code only:
+ *   - formatted: `package.json`, `biome.json`, `scripts/**`, `projects/packages/**`
+ *   - `node_modules`, `dist`, `target` are install/build outputs
+ *   - `pnpm-lock.yaml` is a package-manager artifact
+ *   - `*.md` is out of scope: Biome's Markdown formatter is experimental and docs
+ *     are not part of this gate
  *
  *   node scripts/format.mjs           # write
  *   node scripts/format.mjs --check   # check only
@@ -35,7 +42,17 @@ runFile("cargo", ["fmt", "--all", ...(checkOnly ? ["--check"] : [])]);
 
 console.log("\n--- Biome (json/js/ts, 4 spaces) ---");
 if (checkOnly) {
-    runFile("pnpm", ["exec", "biome", "format", "--check", "."]);
+    // `biome format` has no `--check` in Biome 2. `check` reports formatter
+    // differences as errors once lint and assist actions are disabled.
+    runFile("pnpm", [
+        "exec",
+        "biome",
+        "check",
+        "--formatter-enabled=true",
+        "--linter-enabled=false",
+        "--assist-enabled=false",
+        ".",
+    ]);
 } else {
     runFile("pnpm", ["exec", "biome", "format", "--write", "."]);
 }
