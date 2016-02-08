@@ -38,6 +38,7 @@ pub fn plan_statement(statement: SqlCatalogBoundStatement, catalog: &SqlCatalog)
 
 /// 计划一个 SELECT。
 pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    validate_distinct_shape(&select)?;
     if !select.joins.is_empty() {
         return plan_join_select(select, catalog);
     }
@@ -86,6 +87,9 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
     // 混合聚合 + 非聚合（无 GROUP BY）→ 拒绝。
     if has_aggregate && has_non_aggregate {
         return Err(planner_error("cannot mix aggregate and non-aggregate projections without GROUP BY"));
+    }
+    if select.distinct {
+        validate_distinct_order_by(select.order_by.as_ref(), &projection_fields, &projection_expressions)?;
     }
 
     // 2. 递归解析 predicate 的 AND 树，把 pk 条件提取出来。
@@ -141,6 +145,7 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         offset_after_sort,
         suppress_rows: select.limit == Some(0),
         has_aggregate,
+        distinct: select.distinct,
         field_types,
     }))
 }
@@ -150,7 +155,8 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
 /// 目前只做内连接：基表与每张连接表各自全表扫描，按 JOIN 顺序做嵌套循环合并，
 /// 再套用 WHERE / 投影 / ORDER BY / LIMIT。主键下推、外连接、聚合暂不在网关子集内。
 fn plan_join_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
-    let SqlCatalogBoundSelect { source, joins, projections, predicate, group_by, having, limit, offset, order_by } = select;
+    let SqlCatalogBoundSelect { source, joins, projections, predicate, group_by, having, limit, offset, order_by, distinct } =
+        select;
     let base = source.ok_or_else(|| planner_error("SQL JOIN requires a FROM table"))?;
     if group_by.is_some() || having.is_some() {
         return Err(planner_error("SQL JOIN with GROUP BY / HAVING is not in the gateway subset yet"));
@@ -180,6 +186,10 @@ fn plan_join_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resu
                 }
             },
         }
+    }
+
+    if distinct {
+        validate_distinct_order_by(order_by.as_ref(), &projection_fields, &projection_expressions)?;
     }
 
     // 2. 需要解码的字段集合：投影 + WHERE + ORDER BY + 每个 ON 条件。
@@ -222,6 +232,7 @@ fn plan_join_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resu
         limit_after_sort: limit.unwrap_or(0),
         offset_after_sort: offset.unwrap_or(0),
         suppress_rows: limit == Some(0),
+        distinct,
         field_types,
     }))
 }
@@ -521,6 +532,8 @@ pub struct ScanPlan {
     /// True when any projection expression is an aggregate function
     /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce aggregated result rows.
     pub has_aggregate: bool,
+    /// `SELECT DISTINCT`：execute 层在排序/分页之前按投影值去重。
+    pub distinct: bool,
     /// `LIMIT 0`：结果集必须为空，包括聚合结果。
     pub suppress_rows: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
@@ -548,6 +561,8 @@ pub struct JoinPlan {
     pub offset_after_sort: usize,
     /// `LIMIT 0`：结果集必须为空。
     pub suppress_rows: bool,
+    /// `SELECT DISTINCT`：execute 层在排序/分页之前按投影值去重。
+    pub distinct: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row / 求值用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
@@ -906,6 +921,47 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
             false
         }
     }
+}
+
+/// `DISTINCT` 只实现整条 SELECT 的投影去重；与分组/聚合组合的形式显式拒绝。
+fn validate_distinct_shape(select: &SqlCatalogBoundSelect) -> Result<(), SqlFrontendError> {
+    if !select.distinct {
+        return Ok(());
+    }
+    if select.group_by.is_some() || select.having.is_some() {
+        return Err(planner_error("SELECT DISTINCT cannot be combined with GROUP BY or HAVING"));
+    }
+    if select.projections.iter().any(|projection| match projection {
+        SqlCatalogBoundProjection::Expression { expression, .. } => expression_has_aggregate(expression),
+        SqlCatalogBoundProjection::Star(_) => false,
+    }) {
+        return Err(planner_error("SELECT DISTINCT cannot be combined with aggregate projections"));
+    }
+    Ok(())
+}
+
+/// `SELECT DISTINCT` 下 ORDER BY 只能引用投影里出现的表达式（PostgreSQL / MySQL 共同规则）。
+fn validate_distinct_order_by(
+    order_by: Option<&Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+    projection_fields: &[(u64, String)],
+    projection_expressions: &[(SqlCatalogBoundExpression, String)],
+) -> Result<(), SqlFrontendError> {
+    let Some(items) = order_by
+    else {
+        return Ok(());
+    };
+    for (expression, _) in items {
+        let projected = match expression {
+            SqlCatalogBoundExpression::Column(column) => {
+                projection_fields.iter().any(|(field_id, _)| *field_id == column.field_id)
+            }
+            other => projection_expressions.iter().any(|(candidate, _)| candidate == other),
+        };
+        if !projected {
+            return Err(planner_error("ORDER BY under SELECT DISTINCT must reference a projected expression"));
+        }
+    }
+    Ok(())
 }
 
 fn planner_error(message: &str) -> SqlFrontendError {

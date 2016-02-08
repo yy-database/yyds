@@ -13,7 +13,7 @@ use yyds_gateway::{
     SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    crud_cases, distinct_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -125,6 +125,27 @@ fn sql_conformance_crud_and_predicates() {
 #[test]
 fn sql_conformance_types_aggregates_and_paging() {
     run_cases(&type_cases());
+}
+
+#[test]
+fn sql_conformance_distinct() {
+    run_cases(&distinct_cases());
+}
+
+#[test]
+fn sql_distinct_unsupported_shapes_are_rejected() {
+    let fixture = Fixture::new();
+    for sql in [
+        "SELECT DISTINCT age, COUNT(*) FROM users GROUP BY age",
+        "SELECT DISTINCT COUNT(*) FROM users",
+        "SELECT DISTINCT age FROM users ORDER BY id",
+        "SELECT COUNT(DISTINCT age) FROM users",
+        "SELECT id FROM users WHERE id IN (SELECT DISTINCT id FROM users)",
+        "SELECT id FROM users ORDER BY id NULLS FIRST",
+    ] {
+        let error = fixture.execute(None, sql).expect_err(sql);
+        assert!(!error.is_empty(), "`{sql}` must report a reason");
+    }
 }
 
 /// `IS` 谓词直接由 Oak 的 `IsNull` / `IsTruth` 节点绑定，网关不再从源码 span 文本
