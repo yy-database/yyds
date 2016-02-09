@@ -13,7 +13,8 @@ use yyds_gateway::{
     SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    crud_cases, distinct_cases, group_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED,
+    USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -130,6 +131,27 @@ fn sql_conformance_types_aggregates_and_paging() {
 #[test]
 fn sql_conformance_distinct() {
     run_cases(&distinct_cases());
+}
+
+#[test]
+fn sql_conformance_group_by_and_having() {
+    run_cases(&group_cases());
+}
+
+#[test]
+fn sql_group_by_projection_errors_are_rejected() {
+    let fixture = Fixture::new();
+    for sql in [
+        "SELECT name, COUNT(*) FROM users GROUP BY age",
+        "SELECT name FROM users GROUP BY age",
+        "SELECT * FROM users GROUP BY age",
+        "SELECT age FROM users HAVING COUNT(*) > 1",
+        "SELECT name, COUNT(*) FROM users GROUP BY age HAVING name = 'alice'",
+        "SELECT name FROM users GROUP BY age ORDER BY name",
+    ] {
+        let error = fixture.execute(None, sql).expect_err(sql);
+        assert!(!error.is_empty(), "`{sql}` must report a reason");
+    }
 }
 
 #[test]

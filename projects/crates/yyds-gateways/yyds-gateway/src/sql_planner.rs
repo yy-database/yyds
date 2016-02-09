@@ -23,6 +23,7 @@ use crate::{
     },
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlErrorKind, SqlFrontendError,
+        SqlScalarFunction,
     },
 };
 
@@ -38,6 +39,7 @@ pub fn plan_statement(statement: SqlCatalogBoundStatement, catalog: &SqlCatalog)
 
 /// 计划一个 SELECT。
 pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    validate_grouped_select(&select)?;
     validate_distinct_shape(&select)?;
     if !select.joins.is_empty() {
         return plan_join_select(select, catalog);
@@ -84,8 +86,8 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         }
     }
 
-    // 混合聚合 + 非聚合（无 GROUP BY）→ 拒绝。
-    if has_aggregate && has_non_aggregate {
+    // 混合聚合 + 非聚合（无 GROUP BY）→ 拒绝；有 GROUP BY 时由分组校验约束非聚合列。
+    if has_aggregate && has_non_aggregate && select.group_by.is_none() {
         return Err(planner_error("cannot mix aggregate and non-aggregate projections without GROUP BY"));
     }
     if select.distinct {
@@ -920,6 +922,87 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
         SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
             false
         }
+    }
+}
+
+/// 分组查询只允许投影分组列/分组表达式或聚合函数，避免返回任意组内行。
+fn validate_grouped_select(select: &SqlCatalogBoundSelect) -> Result<(), SqlFrontendError> {
+    let Some(group_expressions) = select.group_by.as_ref()
+    else {
+        if select.having.is_some() {
+            return Err(planner_error("SQL HAVING requires GROUP BY in the gateway subset"));
+        }
+        return Ok(());
+    };
+    let group_columns: Vec<u64> = group_expressions
+        .iter()
+        .filter_map(|expression| match expression {
+            SqlCatalogBoundExpression::Column(column) => Some(column.field_id),
+            _ => None,
+        })
+        .collect();
+    let allowed =
+        |expression: &SqlCatalogBoundExpression| grouped_expression_allowed(expression, group_expressions, &group_columns);
+    for projection in &select.projections {
+        match projection {
+            SqlCatalogBoundProjection::Star(_) => {
+                return Err(planner_error("SELECT * cannot be combined with GROUP BY"));
+            }
+            SqlCatalogBoundProjection::Expression { expression, .. } if !allowed(expression) => {
+                let detail = match expression {
+                    SqlCatalogBoundExpression::Column(column) => format!("column `{}`", column.field_name),
+                    other => format!("expression {other:?}"),
+                };
+                return Err(planner_error(&format!(
+                    "{detail} must appear in the GROUP BY clause or be used in an aggregate function"
+                )));
+            }
+            SqlCatalogBoundProjection::Expression { .. } => {}
+        }
+    }
+    if let Some(having) = select.having.as_ref() {
+        if !allowed(having) {
+            return Err(planner_error("HAVING must reference GROUP BY columns or aggregate functions"));
+        }
+    }
+    if let Some(items) = select.order_by.as_ref() {
+        for (expression, _) in items {
+            if !allowed(expression) {
+                return Err(planner_error("ORDER BY must reference GROUP BY columns or aggregate functions"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn grouped_expression_allowed(
+    expression: &SqlCatalogBoundExpression,
+    group_expressions: &[SqlCatalogBoundExpression],
+    group_columns: &[u64],
+) -> bool {
+    if group_expressions.iter().any(|group| group == expression) {
+        return true;
+    }
+    match expression {
+        SqlCatalogBoundExpression::Column(column) => group_columns.contains(&column.field_id),
+        SqlCatalogBoundExpression::Literal(_) => true,
+        SqlCatalogBoundExpression::Wildcard => false,
+        SqlCatalogBoundExpression::Function { name, .. } if SqlAggregateFunction::from_name(name).is_some() => true,
+        SqlCatalogBoundExpression::Function { name, args } => {
+            SqlScalarFunction::from_name(name).is_some()
+                && args.iter().all(|arg| grouped_expression_allowed(arg, group_expressions, group_columns))
+        }
+        SqlCatalogBoundExpression::Unary { expression, .. } => {
+            grouped_expression_allowed(expression, group_expressions, group_columns)
+        }
+        SqlCatalogBoundExpression::Binary { left, right, .. } => {
+            grouped_expression_allowed(left, group_expressions, group_columns)
+                && grouped_expression_allowed(right, group_expressions, group_columns)
+        }
+        SqlCatalogBoundExpression::InValues { expression, .. } => {
+            grouped_expression_allowed(expression, group_expressions, group_columns)
+        }
+        SqlCatalogBoundExpression::InSubquery { .. } => false,
     }
 }
 

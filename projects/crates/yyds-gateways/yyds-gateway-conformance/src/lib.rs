@@ -491,11 +491,79 @@ pub fn distinct_cases() -> Vec<Case> {
     ]
 }
 
+/// Fixture whose nullable `tag` column has one all-NULL group.
+pub const NULL_GROUP_SEED: &[&str] = &[
+    "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, NULL)",
+    "INSERT INTO users VALUES (2, 'bob', 20, 2.5, FALSE, NULL)",
+];
+
+/// State after [`NULL_GROUP_SEED`].
+pub fn null_group_state() -> &'static [&'static [Lit]] {
+    &[
+        &[Lit::Int(1), Lit::Text("alice"), Lit::Int(30), Lit::Float(1.5), Lit::Bool(true), Lit::Null],
+        &[Lit::Int(2), Lit::Text("bob"), Lit::Int(20), Lit::Float(2.5), Lit::Bool(false), Lit::Null],
+    ]
+}
+
+/// `GROUP BY` / `HAVING` with real grouped result rows.
+pub fn group_cases() -> Vec<Case> {
+    use Lit::{Bool, Int, Null, Text};
+
+    vec![
+        case("group by single column count")
+            .sql("SELECT active, COUNT(*) FROM users GROUP BY active ORDER BY active")
+            .rows(&[&[Bool(false), Int(1)], &[Bool(true), Int(2)]])
+            .build(),
+        case("group by single column sum")
+            .sql("SELECT active, SUM(age) FROM users GROUP BY active ORDER BY active")
+            .rows(&[&[Bool(false), Int(20)], &[Bool(true), Int(70)]])
+            .build(),
+        case("group by nullable key")
+            .sql("SELECT tag, COUNT(*) FROM users GROUP BY tag ORDER BY tag")
+            .rows(&[&[Text(""), Int(1)], &[Text("x"), Int(1)], &[Null, Int(1)]])
+            .rows_for(Driver::Mysql, &[&[Null, Int(1)], &[Text(""), Int(1)], &[Text("x"), Int(1)]])
+            .build(),
+        case("group by multiple columns")
+            .sql("SELECT active, tag, COUNT(*) FROM users GROUP BY active, tag ORDER BY active, tag")
+            .rows(&[&[Bool(false), Null, Int(1)], &[Bool(true), Text(""), Int(1)], &[Bool(true), Text("x"), Int(1)]])
+            .build(),
+        case("having aggregate predicate")
+            .sql("SELECT active, COUNT(*) FROM users GROUP BY active HAVING COUNT(*) > 1 ORDER BY active")
+            .rows(&[&[Bool(true), Int(2)]])
+            .build(),
+        case("having grouped column predicate")
+            .sql("SELECT active, SUM(age) FROM users GROUP BY active HAVING active = TRUE ORDER BY active")
+            .rows(&[&[Bool(true), Int(70)]])
+            .build(),
+        case("having excludes every group")
+            .sql("SELECT tag, COUNT(*) FROM users GROUP BY tag HAVING COUNT(*) > 5")
+            .rows(&[])
+            .build(),
+        case("group by order over aggregate")
+            .sql("SELECT active, COUNT(*) FROM users GROUP BY active ORDER BY COUNT(*) DESC")
+            .rows(&[&[Bool(true), Int(2)], &[Bool(false), Int(1)]])
+            .build(),
+        case("group by empty table")
+            .setup(&[])
+            .state(DEFAULT_STATE_COLUMNS, &[])
+            .sql("SELECT age, COUNT(*) FROM users GROUP BY age")
+            .rows(&[])
+            .build(),
+        case("group by all null values")
+            .setup(NULL_GROUP_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_group_state())
+            .sql("SELECT tag, COUNT(*) FROM users GROUP BY tag")
+            .rows(&[&[Null, Int(2)]])
+            .build(),
+    ]
+}
+
 /// Every case that both the in-process suite and the real-client suites run.
 pub fn all_cases() -> Vec<Case> {
     let mut cases = crud_cases();
     cases.extend(type_cases());
     cases.extend(distinct_cases());
+    cases.extend(group_cases());
     cases
 }
 
