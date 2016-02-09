@@ -441,6 +441,68 @@ pub fn type_cases() -> Vec<Case> {
     ]
 }
 
+/// Fixture with tied sort keys for multi-column `ORDER BY` coverage.
+pub const ORDER_SEED: &[&str] = &[
+    "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
+    "INSERT INTO users VALUES (2, 'bob', 20, 2.5, FALSE, NULL)",
+    "INSERT INTO users VALUES (3, 'carol', 40, 3.25, TRUE, '')",
+    "INSERT INTO users VALUES (4, 'dave', 30, 0.5, FALSE, 'y')",
+];
+
+/// State after [`ORDER_SEED`].
+pub fn order_state() -> &'static [&'static [Lit]] {
+    &[
+        &[Lit::Int(1), Lit::Text("alice"), Lit::Int(30), Lit::Float(1.5), Lit::Bool(true), Lit::Text("x")],
+        &[Lit::Int(2), Lit::Text("bob"), Lit::Int(20), Lit::Float(2.5), Lit::Bool(false), Lit::Null],
+        &[Lit::Int(3), Lit::Text("carol"), Lit::Int(40), Lit::Float(3.25), Lit::Bool(true), Lit::Text("")],
+        &[Lit::Int(4), Lit::Text("dave"), Lit::Int(30), Lit::Float(0.5), Lit::Bool(false), Lit::Text("y")],
+    ]
+}
+
+/// Multi-column and mixed-direction `ORDER BY` over tied sort keys.
+pub fn order_cases() -> Vec<Case> {
+    use Lit::Int;
+
+    vec![
+        case("order by mixed directions")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id FROM users ORDER BY active DESC, age ASC")
+            .rows(&[&[Int(1)], &[Int(3)], &[Int(2)], &[Int(4)]])
+            .build(),
+        case("order by mixed directions reversed")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id FROM users ORDER BY active ASC, age DESC")
+            .rows(&[&[Int(4)], &[Int(2)], &[Int(3)], &[Int(1)]])
+            .build(),
+        case("order by expression and descending tie break")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, age FROM users ORDER BY age * -1 ASC, id DESC")
+            .rows(&[&[Int(3), Int(40)], &[Int(4), Int(30)], &[Int(1), Int(30)], &[Int(2), Int(20)]])
+            .build(),
+        case("order by keeps scan order for ties")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id FROM users ORDER BY active ASC")
+            .rows(&[&[Int(2)], &[Int(4)], &[Int(1)], &[Int(3)]])
+            .build(),
+        case("order by multiple columns with limit and offset")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id FROM users ORDER BY age DESC LIMIT 2 OFFSET 1")
+            .rows(&[&[Int(1)], &[Int(4)]])
+            .build(),
+        case("order by descending columns")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id FROM users ORDER BY active DESC, id DESC")
+            .rows(&[&[Int(3)], &[Int(1)], &[Int(4)], &[Int(2)]])
+            .build(),
+    ]
+}
+
 /// Fixture with duplicate projected values for `DISTINCT` de-duplication.
 pub const DISTINCT_SEED: &[&str] = &[
     "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
@@ -564,6 +626,7 @@ pub fn all_cases() -> Vec<Case> {
     cases.extend(type_cases());
     cases.extend(distinct_cases());
     cases.extend(group_cases());
+    cases.extend(order_cases());
     cases
 }
 
