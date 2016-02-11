@@ -22,27 +22,45 @@ use crate::{
         SqlCatalogBoundUpdate, SqlFieldType,
     },
     sql::{
-        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlErrorKind, SqlFrontendError,
-        SqlScalarFunction,
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlDialect, SqlErrorKind,
+        SqlFrontendError, SqlScalarFunction,
     },
 };
 
-/// 翻译一份 catalog-bound statement 为可执行计划。
+/// 翻译一份 catalog-bound statement 为可执行计划（PostgreSQL 排序规则）。
 pub fn plan_statement(statement: SqlCatalogBoundStatement, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    plan_statement_for_dialect(statement, catalog, SqlDialect::Postgres)
+}
+
+/// 翻译一份 catalog-bound statement 为可执行计划，NULL 排序规则由 `dialect` 决定。
+pub fn plan_statement_for_dialect(
+    statement: SqlCatalogBoundStatement,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
     match statement {
-        SqlCatalogBoundStatement::Select(select) => plan_select(select, catalog),
+        SqlCatalogBoundStatement::Select(select) => plan_select_for_dialect(select, catalog, dialect),
         SqlCatalogBoundStatement::Insert(insert) => plan_insert(insert, catalog),
         SqlCatalogBoundStatement::Update(update) => plan_update(update, catalog),
         SqlCatalogBoundStatement::Delete(delete) => plan_delete(delete, catalog),
     }
 }
 
-/// 计划一个 SELECT。
+/// 计划一个 SELECT（PostgreSQL 排序规则）。
 pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    plan_select_for_dialect(select, catalog, SqlDialect::Postgres)
+}
+
+/// 计划一个 SELECT，NULL 排序规则由 `dialect` 决定。
+pub fn plan_select_for_dialect(
+    select: SqlCatalogBoundSelect,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
     validate_grouped_select(&select)?;
     validate_distinct_shape(&select)?;
     if !select.joins.is_empty() {
-        return plan_join_select(select, catalog);
+        return plan_join_select(select, catalog, dialect);
     }
     // 无 FROM 的 SELECT 只做常量 / 内建函数求值（驱动探测 VERSION()、SELECT 1 等）。
     let Some(source) = select.source.as_ref()
@@ -145,6 +163,7 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         order_by: select.order_by,
         limit_after_sort,
         offset_after_sort,
+        nulls_first: dialect.nulls_sort_first(),
         suppress_rows: select.limit == Some(0),
         has_aggregate,
         distinct: select.distinct,
@@ -156,7 +175,11 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
 ///
 /// 目前只做内连接：基表与每张连接表各自全表扫描，按 JOIN 顺序做嵌套循环合并，
 /// 再套用 WHERE / 投影 / ORDER BY / LIMIT。主键下推、外连接、聚合暂不在网关子集内。
-fn plan_join_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+fn plan_join_select(
+    select: SqlCatalogBoundSelect,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let SqlCatalogBoundSelect { source, joins, projections, predicate, group_by, having, limit, offset, order_by, distinct } =
         select;
     let base = source.ok_or_else(|| planner_error("SQL JOIN requires a FROM table"))?;
@@ -233,6 +256,7 @@ fn plan_join_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resu
         order_by,
         limit_after_sort: limit.unwrap_or(0),
         offset_after_sort: offset.unwrap_or(0),
+        nulls_first: dialect.nulls_sort_first(),
         suppress_rows: limit == Some(0),
         distinct,
         field_types,
@@ -531,6 +555,8 @@ pub struct ScanPlan {
     pub limit_after_sort: usize,
     /// 排序 / 聚合之后才应用的 OFFSET。默认 0。
     pub offset_after_sort: usize,
+    /// 本方言下 `NULL` 是否排在任何非 NULL 值之前（MySQL 是，PostgreSQL 否）。
+    pub nulls_first: bool,
     /// True when any projection expression is an aggregate function
     /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce aggregated result rows.
     pub has_aggregate: bool,
@@ -561,6 +587,8 @@ pub struct JoinPlan {
     pub limit_after_sort: usize,
     /// 排序之后才应用的 OFFSET。默认 0。
     pub offset_after_sort: usize,
+    /// 本方言下 `NULL` 是否排在任何非 NULL 值之前（MySQL 是，PostgreSQL 否）。
+    pub nulls_first: bool,
     /// `LIMIT 0`：结果集必须为空。
     pub suppress_rows: bool,
     /// `SELECT DISTINCT`：execute 层在排序/分页之前按投影值去重。

@@ -9,34 +9,39 @@ use std::sync::Arc;
 
 use yyds_execution::{KeyValueExecutor, LocalExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, plan_statement, substitute_sql_parameters, SqlCatalog, SqlParameterStyle, SqlResult,
-    SqlValue,
+    bind_sql_catalog, execute_plan, plan_statement_for_dialect, substitute_sql_parameters, SqlCatalog, SqlDialect,
+    SqlParameterStyle, SqlResult, SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, group_cases, order_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION,
-    SEED, USERS_SCHEMA,
+    crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, rows, type_cases, Case, Driver, Lit,
+    DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
 struct Fixture {
     catalog: SqlCatalog,
     executor: Arc<dyn KeyValueExecutor>,
+    dialect: SqlDialect,
 }
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_dialect(SqlDialect::Postgres)
+    }
+
+    fn with_dialect(dialect: SqlDialect) -> Self {
         let catalog = catalog(USERS_SCHEMA);
         let shard_id = yyds_types::ShardId("s1".into());
         let routing = yyds_types::ShardMap::new(yyds_types::ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
         let mut shards = std::collections::HashMap::new();
         shards.insert(shard_id, MemoryShard::new());
         let executor = LocalExecutor::new(routing, shards).expect("executor");
-        Self { catalog, executor: Arc::new(executor) }
+        Self { catalog, executor: Arc::new(executor), dialect }
     }
 
     fn execute(&self, transaction: Option<&dyn TransactionHandle>, sql: &str) -> Result<SqlResult, String> {
         let bound = bind_sql_catalog(sql, &self.catalog, SCHEMA_VERSION).map_err(|error| error.message)?;
-        let plan = plan_statement(bound, &self.catalog).map_err(|error| error.message)?;
+        let plan = plan_statement_for_dialect(bound, &self.catalog, self.dialect).map_err(|error| error.message)?;
         execute_plan(self.executor.as_ref(), transaction, &plan).map_err(|error| error.message)
     }
 
@@ -90,22 +95,34 @@ fn run_cases(cases: &[Case]) {
             pending.push(format!("{}: {reason}", case.name));
             continue;
         }
-        let fixture = Fixture::new();
-        for sql in case.setup {
-            fixture.execute(None, sql).unwrap_or_else(|error| panic!("{} setup `{sql}`: {error}", case.name));
+        for (dialect, driver) in [(SqlDialect::Postgres, Driver::Postgres), (SqlDialect::Mysql, Driver::Mysql)] {
+            let fixture = Fixture::with_dialect(dialect);
+            for sql in case.setup {
+                fixture.execute(None, sql).unwrap_or_else(|error| panic!("{} setup `{sql}`: {error}", case.name));
+            }
+            let result = fixture
+                .execute_with(case.sql, case.parameters, case.style)
+                .unwrap_or_else(|error| panic!("{} `{}` under {driver:?}: {error}", case.name, case.sql));
+            assert_eq!(
+                result.rows,
+                rows(case.expected_rows_for(driver)),
+                "{} returned rows for `{}` under {driver:?}",
+                case.name,
+                case.sql
+            );
+            assert_eq!(
+                result.affected_rows, case.expected_affected_rows,
+                "{} affected rows for `{}` under {driver:?}",
+                case.name, case.sql
+            );
+            assert_eq!(
+                fixture.snapshot(case.state_columns),
+                rows(case.expected_state),
+                "{} database state after `{}` under {driver:?}",
+                case.name,
+                case.sql
+            );
         }
-        let result = fixture
-            .execute_with(case.sql, case.parameters, case.style)
-            .unwrap_or_else(|error| panic!("{} `{}`: {error}", case.name, case.sql));
-        assert_eq!(result.rows, rows(case.expected_rows), "{} returned rows for `{}`", case.name, case.sql);
-        assert_eq!(result.affected_rows, case.expected_affected_rows, "{} affected rows for `{}`", case.name, case.sql);
-        assert_eq!(
-            fixture.snapshot(case.state_columns),
-            rows(case.expected_state),
-            "{} database state after `{}`",
-            case.name,
-            case.sql
-        );
     }
     if pending.is_empty() {
         eprintln!("pending `oaks` / protocol gaps: none");
@@ -141,6 +158,11 @@ fn sql_conformance_group_by_and_having() {
 #[test]
 fn sql_conformance_order_by() {
     run_cases(&order_cases());
+}
+
+#[test]
+fn sql_conformance_null_ordering() {
+    run_cases(&null_order_cases());
 }
 
 #[test]

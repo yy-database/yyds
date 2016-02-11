@@ -591,11 +591,12 @@ fn execute_join(
         retain_distinct_projected_rows(&mut staged);
     }
 
+    let nulls_first = plan.nulls_first;
     if let Some(order_items) = &plan.order_by {
         let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
         staged.sort_by(move |a, b| {
             for (idx, dir) in dirs.iter().enumerate() {
-                let ord = compare_values(a.0[idx].as_ref(), b.0[idx].as_ref());
+                let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), nulls_first);
                 if ord != std::cmp::Ordering::Equal {
                     return match dir {
                         crate::sql::SqlBoundOrderDirection::Asc => ord,
@@ -770,11 +771,12 @@ fn execute_scan(
         }
 
         // Sort if ORDER BY present — multi-column 逐列比较
+        let nulls_first = plan.nulls_first;
         if let Some(order_items) = &plan.order_by {
             let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
             staged.sort_by(move |a, b| {
                 for (idx, dir) in dirs.iter().enumerate() {
-                    let ord = compare_values(a.0[idx].as_ref(), b.0[idx].as_ref());
+                    let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), nulls_first);
                     if ord != std::cmp::Ordering::Equal {
                         return match dir {
                             crate::sql::SqlBoundOrderDirection::Asc => ord,
@@ -868,11 +870,12 @@ fn execute_scan(
     }
 
     // Sort if ORDER BY present — multi-column, 逐列比较直到分出胜负。
+    let nulls_first = plan.nulls_first;
     if let Some(order_items) = &plan.order_by {
         let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
         staged.sort_by(move |a, b| {
             for (idx, dir) in dirs.iter().enumerate() {
-                let ord = compare_values(a.0[idx].as_ref(), b.0[idx].as_ref());
+                let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), nulls_first);
                 if ord != std::cmp::Ordering::Equal {
                     return match dir {
                         crate::sql::SqlBoundOrderDirection::Asc => ord,
@@ -1932,11 +1935,31 @@ fn retain_distinct_projected_rows(staged: &mut Vec<(Vec<Option<SqlValue>>, Vec<S
 
 /// NULLs sort last (standard SQL behavior). Mixed types collate equal.
 fn compare_values(a: Option<&SqlValue>, b: Option<&SqlValue>) -> std::cmp::Ordering {
+    compare_values_with_nulls(a, b, false)
+}
+
+/// 比较两个排序键，NULL 位置由方言决定：PostgreSQL 把 NULL 视为最大值，
+/// MySQL 把 NULL 视为最小值。
+fn compare_values_with_nulls(a: Option<&SqlValue>, b: Option<&SqlValue>, nulls_first: bool) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
         (None, None) | (Some(SqlValue::Null), Some(SqlValue::Null)) => Ordering::Equal,
-        (None | Some(SqlValue::Null), Some(_)) => Ordering::Greater,
-        (Some(_), None | Some(SqlValue::Null)) => Ordering::Less,
+        (None | Some(SqlValue::Null), Some(_)) => {
+            if nulls_first {
+                Ordering::Less
+            }
+            else {
+                Ordering::Greater
+            }
+        }
+        (Some(_), None | Some(SqlValue::Null)) => {
+            if nulls_first {
+                Ordering::Greater
+            }
+            else {
+                Ordering::Less
+            }
+        }
         (Some(x), Some(y)) => match (x, y) {
             (SqlValue::Integer(n1), SqlValue::Integer(n2)) => n1.cmp(n2),
             // 排序同样不能把 `i64` 先转 `f64`，否则超出 2^53 的行会并列。

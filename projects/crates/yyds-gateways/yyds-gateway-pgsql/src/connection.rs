@@ -14,9 +14,10 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command, plan_statement,
-    substitute_sql_parameters, SqlCatalog, SqlCatalogBoundStatement, SqlColumn, SqlErrorKind, SqlExecutionPlan, SqlFieldType,
-    SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
+    plan_statement_for_dialect, substitute_sql_parameters, SqlCatalog, SqlCatalogBoundStatement, SqlColumn, SqlDialect,
+    SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction,
+    SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -426,7 +427,7 @@ fn run_statement(
         session.fail();
         statement_error("bind", error)
     })?;
-    let plan = plan_statement(bound, &runtime.catalog).map_err(|error| {
+    let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres).map_err(|error| {
         session.fail();
         statement_error("plan", error)
     })?;
@@ -757,7 +758,8 @@ fn statement_description(sql: &str, runtime: Option<&Arc<PgsqlSqlRuntime>>) -> R
     if !matches!(bound, SqlCatalogBoundStatement::Select(_)) {
         return Ok(Vec::new());
     }
-    let plan = plan_statement(bound, &runtime.catalog).map_err(|error| statement_error("plan", error))?;
+    let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres)
+        .map_err(|error| statement_error("plan", error))?;
     Ok(describe_plan(&plan))
 }
 
