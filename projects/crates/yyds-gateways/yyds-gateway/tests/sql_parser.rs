@@ -47,8 +47,23 @@ fn select_distinct_modifier_is_bound() {
         panic!("expected SELECT")
     };
     assert!(!plain.distinct);
-    // `DISTINCT` other than the leading SELECT modifier has no gateway semantics.
+    let SqlBoundStatement::Select(all) = bind_sql("SELECT ALL id FROM users").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    assert!(!all.distinct);
+    let SqlBoundStatement::Select(subquery) =
+        bind_sql("SELECT id FROM users WHERE id IN (SELECT DISTINCT id FROM users)").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    let Some(yyds_gateway::SqlBoundExpression::InSubquery { select, .. }) = subquery.predicate else {
+        panic!("expected IN (SELECT ...) predicate")
+    };
+    assert!(select.distinct);
+    // `DISTINCT` other than the leading SELECT quantifier has no gateway semantics.
     assert!(bind_sql("SELECT COUNT(DISTINCT id) FROM users").is_err());
+    assert!(bind_sql("SELECT DISTINCT ON (id) id FROM users").is_err());
 }
 
 #[test]
