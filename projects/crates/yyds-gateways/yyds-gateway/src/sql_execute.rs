@@ -18,8 +18,8 @@ use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 use crate::{
     catalog_bind::{collect_column_ids, SqlCatalogBoundExpression},
     sql::{
-        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlErrorKind, SqlFrontendError,
-        SqlScalarFunction,
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundUnaryOperator,
+        SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
     },
     sql_planner::{
         DeletePlan, DeleteScanPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScalarPlan, ScanPlan, SqlExecutionPlan, UpdatePlan,
@@ -271,8 +271,8 @@ fn scan_needed_field_ids(plan: &ScanPlan) -> Vec<u64> {
         collect_column_ids(having, &mut ids);
     }
     if let Some(order_items) = &plan.order_by {
-        for (order_expr, _) in order_items {
-            collect_column_ids(order_expr, &mut ids);
+        for item in order_items {
+            collect_column_ids(&item.expression, &mut ids);
         }
     }
     ids
@@ -347,8 +347,8 @@ fn resolve_subqueries(
                 }
             }
             if let Some(order_by) = &mut plan.order_by {
-                for (expression, _) in order_by {
-                    lower_in_place(expression, executor, transaction)?;
+                for item in order_by {
+                    lower_in_place(&mut item.expression, executor, transaction)?;
                 }
             }
             for (expression, _) in &mut plan.projection_expressions {
@@ -362,8 +362,8 @@ fn resolve_subqueries(
             }
             lower_optional(&mut plan.remaining_predicate, executor, transaction)?;
             if let Some(order_by) = &mut plan.order_by {
-                for (expression, _) in order_by {
-                    lower_in_place(expression, executor, transaction)?;
+                for item in order_by {
+                    lower_in_place(&mut item.expression, executor, transaction)?;
                 }
             }
             for (expression, _) in &mut plan.projection_expressions {
@@ -574,7 +574,7 @@ fn execute_join(
         let sort_keys: Vec<Option<SqlValue>> = match &plan.order_by {
             Some(items) => items
                 .iter()
-                .map(|(expr, _)| Ok(Some(eval_expression(expr, row, &plan.field_types)?)))
+                .map(|item| Ok(Some(eval_expression(&item.expression, row, &plan.field_types)?)))
                 .collect::<Result<Vec<_>, _>>()?,
             None => Vec::new(),
         };
@@ -593,10 +593,13 @@ fn execute_join(
 
     let nulls_first = plan.nulls_first;
     if let Some(order_items) = &plan.order_by {
-        let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
+        let orderings = order_items
+            .iter()
+            .map(|item| (item.direction.clone(), order_nulls_first(&item.direction, item.nulls, nulls_first)))
+            .collect::<Vec<_>>();
         staged.sort_by(move |a, b| {
-            for (idx, dir) in dirs.iter().enumerate() {
-                let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), nulls_first);
+            for (idx, (dir, nulls_first)) in orderings.iter().enumerate() {
+                let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), *nulls_first);
                 if ord != std::cmp::Ordering::Equal {
                     return match dir {
                         crate::sql::SqlBoundOrderDirection::Asc => ord,
@@ -763,7 +766,7 @@ fn execute_scan(
             let sort_keys: Vec<Option<SqlValue>> = match &plan.order_by {
                 Some(items) => items
                     .iter()
-                    .map(|(e, _)| Ok(Some(eval_having(e, bucket_rows, group_exprs, &plan.field_types)?)))
+                    .map(|item| Ok(Some(eval_having(&item.expression, bucket_rows, group_exprs, &plan.field_types)?)))
                     .collect::<Result<Vec<_>, _>>()?,
                 None => Vec::new(),
             };
@@ -773,10 +776,13 @@ fn execute_scan(
         // Sort if ORDER BY present — multi-column 逐列比较
         let nulls_first = plan.nulls_first;
         if let Some(order_items) = &plan.order_by {
-            let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
+            let orderings = order_items
+            .iter()
+            .map(|item| (item.direction.clone(), order_nulls_first(&item.direction, item.nulls, nulls_first)))
+            .collect::<Vec<_>>();
             staged.sort_by(move |a, b| {
-                for (idx, dir) in dirs.iter().enumerate() {
-                    let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), nulls_first);
+                for (idx, (dir, nulls_first)) in orderings.iter().enumerate() {
+                    let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), *nulls_first);
                     if ord != std::cmp::Ordering::Equal {
                         return match dir {
                             crate::sql::SqlBoundOrderDirection::Asc => ord,
@@ -797,8 +803,9 @@ fn execute_scan(
 
     if false && use_top_n {
         // —— Top-N heap 路径（仅单列 ORDER BY，多列已走 Vec 路径） ——
-        let (order_expr, order_dir) = plan.order_by.as_ref().unwrap().first().unwrap();
-        let is_asc = matches!(order_dir, crate::sql::SqlBoundOrderDirection::Asc);
+        let item = plan.order_by.as_ref().unwrap().first().unwrap();
+        let order_expr = &item.expression;
+        let is_asc = matches!(&item.direction, SqlBoundOrderDirection::Asc);
         let heap_capacity = plan.offset_after_sort.max(1) + plan.limit_after_sort;
         let mut heap: std::collections::BinaryHeap<SortableRow> = std::collections::BinaryHeap::with_capacity(heap_capacity);
 
@@ -852,7 +859,7 @@ fn execute_scan(
         let sort_keys: Vec<Option<SqlValue>> = match &plan.order_by {
             Some(items) => items
                 .iter()
-                .map(|(expr, _)| Ok(Some(eval_expression(expr, &row, &plan.field_types)?)))
+                .map(|item| Ok(Some(eval_expression(&item.expression, &row, &plan.field_types)?)))
                 .collect::<Result<Vec<_>, _>>()?,
             None => Vec::new(),
         };
@@ -872,10 +879,13 @@ fn execute_scan(
     // Sort if ORDER BY present — multi-column, 逐列比较直到分出胜负。
     let nulls_first = plan.nulls_first;
     if let Some(order_items) = &plan.order_by {
-        let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
+        let orderings = order_items
+            .iter()
+            .map(|item| (item.direction.clone(), order_nulls_first(&item.direction, item.nulls, nulls_first)))
+            .collect::<Vec<_>>();
         staged.sort_by(move |a, b| {
-            for (idx, dir) in dirs.iter().enumerate() {
-                let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), nulls_first);
+            for (idx, (dir, nulls_first)) in orderings.iter().enumerate() {
+                let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), *nulls_first);
                 if ord != std::cmp::Ordering::Equal {
                     return match dir {
                         crate::sql::SqlBoundOrderDirection::Asc => ord,
@@ -1936,6 +1946,16 @@ fn retain_distinct_projected_rows(staged: &mut Vec<(Vec<Option<SqlValue>>, Vec<S
 /// NULLs sort last (standard SQL behavior). Mixed types collate equal.
 fn compare_values(a: Option<&SqlValue>, b: Option<&SqlValue>) -> std::cmp::Ordering {
     compare_values_with_nulls(a, b, false)
+}
+
+/// 解析 ORDER BY 项排序前的 NULL 置前标记：未写 `NULLS FIRST/LAST` 时用方言默认，
+/// 显式子句则在 ASC 或 DESC 下分别映射为置前或置后。
+fn order_nulls_first(direction: &SqlBoundOrderDirection, explicit: Option<SqlNullsOrder>, dialect_default: bool) -> bool {
+    match explicit {
+        None => dialect_default,
+        Some(SqlNullsOrder::First) => matches!(direction, SqlBoundOrderDirection::Asc),
+        Some(SqlNullsOrder::Last) => matches!(direction, SqlBoundOrderDirection::Desc),
+    }
 }
 
 /// 比较两个排序键，NULL 位置由方言决定：PostgreSQL 把 NULL 视为最大值，

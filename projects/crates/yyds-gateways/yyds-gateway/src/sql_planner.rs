@@ -18,12 +18,12 @@
 use crate::{
     catalog_bind::{
         collect_column_ids, SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
-        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable,
-        SqlCatalogBoundUpdate, SqlFieldType,
+        SqlCatalogBoundOrderByItem, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement,
+        SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlFieldType,
     },
     sql::{
-        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlDialect, SqlErrorKind,
-        SqlFrontendError, SqlScalarFunction,
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlDialect, SqlErrorKind, SqlFrontendError,
+        SqlScalarFunction,
     },
 };
 
@@ -231,8 +231,8 @@ fn plan_join_select(
         collect_column_ids(predicate, &mut needed);
     }
     if let Some(items) = &order_by {
-        for (expr, _) in items {
-            collect_column_ids(expr, &mut needed);
+        for item in items {
+            collect_column_ids(&item.expression, &mut needed);
         }
     }
     for join in &joins {
@@ -549,7 +549,7 @@ pub struct ScanPlan {
     /// 可选 HAVING 表达式；GROUP BY 聚合完后应用。
     pub having: Option<SqlCatalogBoundExpression>,
     /// 可选 ORDER BY 字段列表；scan 全部 rows 后由 execute 层内存排序。
-    pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+    pub order_by: Option<Vec<SqlCatalogBoundOrderByItem>>,
     /// 排序 / 聚合之后才应用的 LIMIT。ORDER BY / 聚合 / GROUP BY 存在时 kv-scan limit=0，
     /// 由本字段承接 SQL 的 LIMIT 值。0 = 无上限。
     pub limit_after_sort: usize,
@@ -582,7 +582,7 @@ pub struct JoinPlan {
     /// 行级过滤表达式；`None` 表示不过滤。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
     /// 可选 ORDER BY 字段列表；合并出全部行后由 execute 层内存排序。
-    pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+    pub order_by: Option<Vec<SqlCatalogBoundOrderByItem>>,
     /// 排序之后才应用的 LIMIT。0 = 无上限。
     pub limit_after_sort: usize,
     /// 排序之后才应用的 OFFSET。默认 0。
@@ -994,8 +994,8 @@ fn validate_grouped_select(select: &SqlCatalogBoundSelect) -> Result<(), SqlFron
         }
     }
     if let Some(items) = select.order_by.as_ref() {
-        for (expression, _) in items {
-            if !allowed(expression) {
+        for item in items {
+            if !allowed(&item.expression) {
                 return Err(planner_error("ORDER BY must reference GROUP BY columns or aggregate functions"));
             }
         }
@@ -1053,7 +1053,7 @@ fn validate_distinct_shape(select: &SqlCatalogBoundSelect) -> Result<(), SqlFron
 
 /// `SELECT DISTINCT` 下 ORDER BY 只能引用投影里出现的表达式（PostgreSQL / MySQL 共同规则）。
 fn validate_distinct_order_by(
-    order_by: Option<&Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+    order_by: Option<&Vec<SqlCatalogBoundOrderByItem>>,
     projection_fields: &[(u64, String)],
     projection_expressions: &[(SqlCatalogBoundExpression, String)],
 ) -> Result<(), SqlFrontendError> {
@@ -1061,8 +1061,8 @@ fn validate_distinct_order_by(
     else {
         return Ok(());
     };
-    for (expression, _) in items {
-        let projected = match expression {
+    for item in items {
+        let projected = match &item.expression {
             SqlCatalogBoundExpression::Column(column) => {
                 projection_fields.iter().any(|(field_id, _)| *field_id == column.field_id)
             }
