@@ -698,6 +698,12 @@ fn execute_scan(
         for (expr, _) in &plan.projection_expressions {
             result_row.push(eval_aggregate(expr, &all_rows, &plan.field_types)?);
         }
+        if let Some(having) = &plan.having {
+            let keep = eval_having(having, &all_rows, &[], &plan.field_types)?;
+            if !truthy(&keep) {
+                return Ok(SqlResult { columns, rows: Vec::new(), affected_rows: 0 });
+            }
+        }
         return Ok(SqlResult { columns, rows: vec![result_row], affected_rows: 0 });
     }
 
@@ -1846,9 +1852,11 @@ fn eval_having(
     group_exprs: &[SqlCatalogBoundExpression],
     field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 ) -> Result<SqlValue, SqlFrontendError> {
-    let first = bucket_rows.first().ok_or_else(|| execute_error("eval_having: empty bucket"))?;
+    let first = bucket_rows.first();
     Ok(match expr {
-        SqlCatalogBoundExpression::Column(col) => first.value_typed(col.field_id, field_types).unwrap_or(SqlValue::Null),
+        SqlCatalogBoundExpression::Column(col) => {
+            first.and_then(|row| row.value_typed(col.field_id, field_types)).unwrap_or(SqlValue::Null)
+        }
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Wildcard => {
             return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))

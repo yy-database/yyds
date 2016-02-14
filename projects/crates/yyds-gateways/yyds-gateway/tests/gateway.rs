@@ -1467,6 +1467,34 @@ fn sql_order_by_nulls_first_last_overrides_dialect_default() {
 }
 
 #[test]
+fn sql_group_by_ordinal_and_unqualified_having() {
+    let (catalog, executor) = nullable_users();
+    let rows = |sql: &str| -> Vec<Vec<yyds_gateway::SqlValue>> {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("exec").rows
+    };
+    let integer = yyds_gateway::SqlValue::Integer;
+
+    // `GROUP BY 1` resolves to the first projection expression (`age`).
+    assert_eq!(
+        rows("SELECT age, COUNT(*) FROM users GROUP BY 1 ORDER BY age ASC"),
+        vec![
+            vec![integer(0), integer(1)],
+            vec![integer(10), integer(1)],
+            vec![yyds_gateway::SqlValue::Null, integer(1)],
+        ]
+    );
+    // HAVING binds without GROUP BY and filters the global aggregate row.
+    assert_eq!(rows("SELECT COUNT(*) FROM users HAVING COUNT(*) > 2"), vec![vec![integer(3)]]);
+    assert!(rows("SELECT COUNT(*) FROM users HAVING COUNT(*) > 3").is_empty());
+
+    // Out-of-range and star positions are rejected explicitly.
+    assert!(yyds_gateway::bind_sql_catalog("SELECT age FROM users GROUP BY 2", &catalog, 7).is_err());
+    assert!(yyds_gateway::bind_sql_catalog("SELECT * FROM users GROUP BY 1", &catalog, 7).is_err());
+}
+
+#[test]
 fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
     let (catalog, executor) = nullable_users();
 

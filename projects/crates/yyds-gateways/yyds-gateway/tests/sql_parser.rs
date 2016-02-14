@@ -34,6 +34,41 @@ fn oak_prefix_unary_minus_survives_parsing() {
 }
 
 #[test]
+fn select_clauses_come_from_ast_fields() {
+    use yyds_gateway::{bind_sql, SqlBoundExpression, SqlBoundStatement};
+
+    let SqlBoundStatement::Select(select) = bind_sql("SELECT age, COUNT(*) FROM users GROUP BY 1").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    assert_eq!(select.group_by, Some(vec![SqlBoundExpression::Identifier("age".into())]));
+
+    let SqlBoundStatement::Select(select) =
+        bind_sql("SELECT age FROM users ORDER BY age DESC NULLS FIRST").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    assert!(select.order_by.is_some_and(|items| items.len() == 1));
+}
+
+#[test]
+fn unsupported_upstream_forms_are_rejected_explicitly() {
+    use yyds_gateway::bind_sql;
+
+    for sql in [
+        "SELECT COUNT(DISTINCT age) FROM users",
+        "SELECT DISTINCT ON (age) id FROM users",
+        "SELECT age FROM users GROUP BY GROUPING SETS ((age))",
+        "SELECT age FROM users GROUP BY ROLLUP(age)",
+        "SELECT age FROM users GROUP BY CUBE(age)",
+        "SELECT id FROM users UNION SELECT id FROM users",
+        "SELECT id FROM users FOR UPDATE",
+    ] {
+        assert!(bind_sql(sql).is_err(), "`{sql}` must be rejected explicitly");
+    }
+}
+
+#[test]
 fn select_distinct_modifier_is_bound() {
     use yyds_gateway::{bind_sql, SqlBoundStatement};
 
