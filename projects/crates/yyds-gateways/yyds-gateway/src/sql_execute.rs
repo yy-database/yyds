@@ -783,9 +783,9 @@ fn execute_scan(
         let nulls_first = plan.nulls_first;
         if let Some(order_items) = &plan.order_by {
             let orderings = order_items
-            .iter()
-            .map(|item| (item.direction.clone(), order_nulls_first(&item.direction, item.nulls, nulls_first)))
-            .collect::<Vec<_>>();
+                .iter()
+                .map(|item| (item.direction.clone(), order_nulls_first(&item.direction, item.nulls, nulls_first)))
+                .collect::<Vec<_>>();
             staged.sort_by(move |a, b| {
                 for (idx, (dir, nulls_first)) in orderings.iter().enumerate() {
                     let ord = compare_values_with_nulls(a.0[idx].as_ref(), b.0[idx].as_ref(), *nulls_first);
