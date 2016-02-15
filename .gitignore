@@ -1,4 +1,7 @@
-# Rust
+# Rust (`projects/yyds.rs/` workspace only)
+projects/yyds.rs/target/
+projects/yyds.rs/.cargo/config.toml
+projects/yyds.rs/Cargo.lock
 target/
 
 # Node
@@ -12,10 +15,6 @@ pnpm-lock.yaml
 .idea/
 .vscode/
 *.iml
-
-# Rust
-.cargo/config.toml
-Cargo.lock
 
 # OS
 .DS_Store

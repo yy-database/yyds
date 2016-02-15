@@ -2,6 +2,24 @@
 import { defineConfig } from '@doki-land/nifty';
 
 export default defineConfig({
+    format: {
+        preset: 'nifty',
+        style: {
+            indentStyle: 'space',
+            indentWidth: 4,
+            lineWidth: 100,
+            quoteStyle: 'double',
+        },
+        includes: ['package.json', 'nifty.config.ts', 'scripts/**', 'projects/yyds.ts/**'],
+        excludes: [
+            '**/node_modules/**',
+            '**/dist/**',
+            '**/target/**',
+            '**/pnpm-lock.yaml',
+            '**/*.md',
+            'projects/yyds.ts/platforms/**/lib/**',
+        ],
+    },
     trust: {
         npm: {
             repo: 'yy-database/yyds',

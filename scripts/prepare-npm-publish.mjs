@@ -16,6 +16,7 @@ function resolveVersion() {
 }
 
 const version = resolveVersion();
+const EMULATOR_DIRS = new Set(["redis", "mysql", "postgresql"]);
 
 function walkFiles(dir, acc = []) {
     if (!fs.existsSync(dir)) return acc;
@@ -36,24 +37,6 @@ function findArtifact(basename) {
         throw new Error(`missing artifact ${basename} under _engines/`);
     }
     return hit;
-}
-
-function copyDirContents(srcDir, destDir) {
-    fs.mkdirSync(destDir, { recursive: true });
-    for (const name of fs.readdirSync(srcDir)) {
-        const src = path.join(srcDir, name);
-        const dest = path.join(destDir, name);
-        if (fs.statSync(src).isDirectory()) {
-            copyDirContents(src, dest);
-        } else {
-            fs.copyFileSync(src, dest);
-            try {
-                fs.chmodSync(dest, 0o755);
-            } catch {
-                // windows
-            }
-        }
-    }
 }
 
 function writeJson(filePath, data) {
@@ -103,7 +86,7 @@ const platforms = [
 ];
 
 for (const [pkg, binding] of platforms) {
-    const destDir = path.join(root, "projects", "packages", pkg, "lib");
+    const destDir = path.join(root, "projects", "yyds.ts", "platforms", pkg, "lib");
     fs.mkdirSync(destDir, { recursive: true });
     for (const existing of fs.readdirSync(destDir).filter((name) => name.endsWith(".node"))) {
         fs.unlinkSync(path.join(destDir, existing));
@@ -115,11 +98,14 @@ for (const [pkg, binding] of platforms) {
     } catch {
         // windows
     }
-    preparePackageJson(path.join(root, "projects", "packages", pkg));
+    preparePackageJson(path.join(root, "projects", "yyds.ts", "platforms", pkg));
 }
 
 for (const dir of ["yyds", "redis", "mysql", "postgresql"]) {
-    preparePackageJson(path.join(root, "projects", "packages", dir));
+    const pkgDir = EMULATOR_DIRS.has(dir)
+        ? path.join(root, "projects", "yyds.ts", "emulators", dir)
+        : path.join(root, "projects", "yyds.ts", "packages", dir);
+    preparePackageJson(pkgDir);
 }
 
 console.log("npm packages prepared", version || "(package.json versions)");

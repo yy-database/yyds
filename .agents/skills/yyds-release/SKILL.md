@@ -17,7 +17,7 @@ Maintainer skill. Integrators use `@yyds/yyds-skills`, not this file.
 | Check TypeScript | `.github/workflows/check-typescript.yml` | push/PR `dev` / `master` | wasm, pnpm typecheck, napi, tests |
 | Release | `.github/workflows/release-npm.yml` | push tag `v*.*.*` | npm OIDC for `publish.packages` |
 
-Release does **not** gate on CI. Tag `vX.Y.Z` → npm version `X.Y.Z`.
+Release does **not** gate on CI. Tag `vX.Y.Z` �?npm version `X.Y.Z`.
 
 ## `nifty.config.ts`
 
@@ -28,7 +28,7 @@ Release does **not** gate on CI. Tag `vX.Y.Z` → npm version `X.Y.Z`.
 | `trust.npm.environment` | `NPM_PUBLISH` |
 | `publish.packages` | Engine + gateways for tag release and **`pnpm placeholder:trust`** |
 
-Integrator skills: **`projects/packages/yyds-skills`** (`@yyds/yyds-skills`). Use **`pnpm placeholder:trust:skills`** (`nifty trust --only @yyds/yyds-skills`).
+Integrator skills: **`projects/yyds.ts/packages/yyds-skills`** (`@yyds/yyds-skills`). Use **`pnpm placeholder:trust:skills`** (`nifty trust --only @yyds/yyds-skills`).
 
 ## Placeholder bootstrap
 

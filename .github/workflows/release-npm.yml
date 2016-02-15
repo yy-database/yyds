@@ -50,15 +50,16 @@ jobs:
         run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
+          workspaces: projects/yyds.rs
           key: ${{ matrix.target }}
       - name: Build yyds-napi
-        run: cargo build -p yyds-napi --release --target ${{ matrix.target }}
+        run: cargo build --manifest-path projects/yyds.rs/Cargo.toml -p yyds-napi --release --target ${{ matrix.target }}
       - name: Stage native binding
         shell: bash
         run: |
           set -euo pipefail
-          SRC="target/${{ matrix.target }}/release/${{ matrix.lib }}"
-          DEST="projects/packages/${{ matrix.pkg }}/lib/${{ matrix.node_file }}"
+          SRC="projects/yyds.rs/target/${{ matrix.target }}/release/${{ matrix.lib }}"
+          DEST="projects/yyds.ts/platforms/${{ matrix.pkg }}/lib/${{ matrix.node_file }}"
           mkdir -p "$(dirname "$DEST")"
           cp "$SRC" "$DEST"
           chmod +x "$DEST" || true
@@ -66,7 +67,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: engine-${{ matrix.pkg }}
-          path: projects/packages/${{ matrix.pkg }}/lib/${{ matrix.node_file }}
+          path: projects/yyds.ts/platforms/${{ matrix.pkg }}/lib/${{ matrix.node_file }}
           if-no-files-found: error
 
   build-engine-macos:
@@ -79,6 +80,7 @@ jobs:
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
+          workspaces: projects/yyds.rs
           key: macos-latest-both
       - name: Build and stage both dylibs
         shell: bash
@@ -89,9 +91,9 @@ jobs:
               "x86_64-apple-darwin    yyds-darwin-x64    index.darwin-x64.node    libyyds_napi.dylib"; do
             read -r target pkg node_file lib <<< "$spec"
             echo "=== Building $pkg ($target) ==="
-            cargo build -p yyds-napi --release --target "$target"
-            SRC="target/$target/release/$lib"
-            DEST="projects/packages/$pkg/lib/$node_file"
+            cargo build --manifest-path projects/yyds.rs/Cargo.toml -p yyds-napi --release --target "$target"
+            SRC="projects/yyds.rs/target/$target/release/$lib"
+            DEST="projects/yyds.ts/platforms/$pkg/lib/$node_file"
             mkdir -p "$(dirname "$DEST")"
             cp "$SRC" "$DEST"
             chmod +x "$DEST" || true
@@ -100,12 +102,12 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: engine-yyds-darwin-arm64
-          path: projects/packages/yyds-darwin-arm64/lib/index.darwin-arm64.node
+          path: projects/yyds.ts/platforms/yyds-darwin-arm64/lib/index.darwin-arm64.node
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
           name: engine-yyds-darwin-x64
-          path: projects/packages/yyds-darwin-x64/lib/index.darwin-x64.node
+          path: projects/yyds.ts/platforms/yyds-darwin-x64/lib/index.darwin-x64.node
           if-no-files-found: error
 
   publish-npm:

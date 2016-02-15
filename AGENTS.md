@@ -1,6 +1,6 @@
 # AGENTS
 
-YYDS hybrid monorepo: `projects/crates/` (Rust), `projects/packages/` (`@yyds/*` npm).
+YYDS hybrid monorepo: `projects/yyds.rs/` (Rust), `projects/yyds.ts/` (`@yydb/*` npm).
 
 ## Maintainer skills (`.agents/skills/`)
 
@@ -12,7 +12,7 @@ For repository agents only. Do not link these from user-facing READMEs.
 
 ## Downstream skills (`@yyds/yyds-skills`)
 
-User- and integrator-facing Agent Skills live in `projects/packages/yyds-skills/`.
+User- and integrator-facing Agent Skills live in `projects/yyds.ts/packages/yyds-skills/`.
 
 Do not recreate root `documentation/` or `/docs`.
 

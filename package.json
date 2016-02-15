@@ -2,10 +2,10 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "check": "cargo check --workspace",
+        "check": "cargo check --manifest-path projects/yyds.rs/Cargo.toml --workspace",
         "fmt": "node scripts/format.mjs",
         "fmt:check": "node scripts/format.mjs --check",
-        "test": "cargo test --release --workspace",
+        "test": "cargo test --manifest-path projects/yyds.rs/Cargo.toml --release --workspace",
         "build:napi": "node scripts/build-napi.mjs",
         "typecheck": "pnpm -r --filter @yydb/yyds --filter @yydb/redis --filter @yydb/mysql --filter @yydb/postgresql run typecheck",
         "test:ts": "pnpm -r --filter @yydb/yyds --filter @yydb/redis --filter @yydb/mysql --filter @yydb/postgresql run test",
@@ -19,8 +19,7 @@
     },
     "packageManager": "pnpm@10.18.3",
     "devDependencies": {
-        "@biomejs/biome": "^2.4.8",
-        "@doki-land/nifty": "^0.1.7",
+        "@doki-land/nifty": "^0.1.9",
         "@napi-rs/cli": "^2.18.4"
     }
 }

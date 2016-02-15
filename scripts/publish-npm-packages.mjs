@@ -1,5 +1,5 @@
 /**
- * Publish prepared projects/packages/* packages. Skips versions already on the registry
+ * Publish prepared projects/yyds.ts/* packages. Skips versions already on the registry
  * (idempotent retry after partial failure).
  *
  * Env:
@@ -10,6 +10,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
+const PLATFORM_DIRS = new Set(["yyds-win32-x64", "yyds-linux-x64", "yyds-darwin-x64", "yyds-darwin-arm64"]);
+const EMULATOR_DIRS = new Set(["redis", "mysql", "postgresql"]);
 const dirs = (
     process.env.PUBLISH_PACKAGES ||
     "yyds-win32-x64 yyds-linux-x64 yyds-darwin-x64 yyds-darwin-arm64 yyds redis mysql postgresql"
@@ -17,6 +19,16 @@ const dirs = (
     .trim()
     .split(/\s+/)
     .filter(Boolean);
+
+function resolvePackageDir(dirName) {
+    if (PLATFORM_DIRS.has(dirName)) {
+        return path.join(root, "projects", "yyds.ts", "platforms", dirName);
+    }
+    if (EMULATOR_DIRS.has(dirName)) {
+        return path.join(root, "projects", "yyds.ts", "emulators", dirName);
+    }
+    return path.join(root, "projects", "yyds.ts", "packages", dirName);
+}
 
 function npmViewVersion(name, version) {
     const r = spawnSync(
@@ -29,7 +41,7 @@ function npmViewVersion(name, version) {
 }
 
 function publishDir(dirName) {
-    const dir = path.join(root, "projects", "packages", dirName);
+    const dir = resolvePackageDir(dirName);
     const pkgPath = path.join(dir, "package.json");
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
     const { name, version } = pkg;

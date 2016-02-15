@@ -1,2 +1,4 @@
 packages:
-  - "projects/packages/*"
+  - "projects/yyds.ts/packages/*"
+  - "projects/yyds.ts/platforms/*"
+  - "projects/yyds.ts/emulators/*"

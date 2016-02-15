@@ -1,12 +1,15 @@
 import { execSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const napiDir = join(root, "projects/crates/yyds-napi");
+import { NAPI_MANIFEST, RUST_WS_DIR } from "./rust-manifest.mjs";
 
-/** @type {Record<string, { packageDir: string, fileName: string }>} */
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const napiDir = join(root, RUST_WS_DIR, "ffis/yyds-napi");
+const manifestPath = join(root, NAPI_MANIFEST);
+
+/** @type {Record<string, { packageDir: string; fileName: string }>} */
 const ARTIFACTS = {
     "index.win32-x64-msvc.node": {
         packageDir: "yyds-win32-x64",
@@ -30,11 +33,17 @@ function findBuiltNodes(dir) {
     return readdirSync(dir).filter((name) => name.endsWith(".node"));
 }
 
-execSync("pnpm exec napi build --platform --release", {
-    cwd: napiDir,
-    stdio: "inherit",
-    shell: true,
-});
+execSync(
+    `pnpm exec napi build --platform --release --manifest-path "${manifestPath.replace(/\\/g, "/")}"`,
+    { cwd: root, stdio: "inherit", shell: true },
+);
+
+for (const generated of ["index.js", "index.d.ts"]) {
+    const path = join(napiDir, generated);
+    if (existsSync(path)) {
+        unlinkSync(path);
+    }
+}
 
 const built = findBuiltNodes(napiDir);
 if (built.length === 0) {
@@ -48,7 +57,7 @@ for (const name of built) {
         console.warn(`skip unmapped artifact: ${name}`);
         continue;
     }
-    const libDir = join(root, "projects/packages", mapping.packageDir, "lib");
+    const libDir = join(root, "projects/yyds.ts/platforms", mapping.packageDir, "lib");
     mkdirSync(libDir, { recursive: true });
     for (const existing of readdirSync(libDir).filter((entry) => entry.endsWith(".node"))) {
         unlinkSync(join(libDir, existing));
