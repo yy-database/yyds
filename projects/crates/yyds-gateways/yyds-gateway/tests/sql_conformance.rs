@@ -14,7 +14,7 @@ use yyds_gateway::{
 };
 use yyds_gateway_conformance::{
     crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, rows, type_cases, Case, Driver, Lit,
-    DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -188,10 +188,19 @@ fn sql_distinct_unsupported_shapes_are_rejected() {
         "SELECT DISTINCT age, COUNT(*) FROM users GROUP BY age",
         "SELECT DISTINCT COUNT(*) FROM users",
         "SELECT DISTINCT age FROM users ORDER BY id",
-        "SELECT COUNT(DISTINCT age) FROM users",
     ] {
         let error = fixture.execute(None, sql).expect_err(sql);
         assert!(!error.is_empty(), "`{sql}` must report a reason");
+    }
+}
+
+/// 共享矩阵中列出的上游形式必须在本进程路径上被显式拒绝，而不是被静默改写或
+/// 解析成另一种语义。真实客户端套件对同一批语句断言协议错误码。
+#[test]
+fn sql_rejected_upstream_forms_report_a_reason() {
+    let fixture = Fixture::new();
+    for (label, sql) in REJECTED_SQL {
+        assert!(fixture.execute(None, sql).is_err(), "`{label}` must be rejected explicitly");
     }
 }
 

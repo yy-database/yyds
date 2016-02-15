@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/*",
+    "crates/yyds-gateways/yyds-gateway",
+    "crates/yyds-gateways/yyds-gateway-redis",
+    "crates/yyds-gateways/yyds-gateway-mysql",
+    "crates/yyds-gateways/yyds-gateway-pgsql",
+    "crates/yyds-gateways/yyds-gateway-mongo",
+    "crates/yyds-gateways/yyds-gateway-conformance",
+    "ffis/yyds-napi",
+    "ffis/yyds-pyo3",
+]
+exclude = ["crates/yyds-gateways"]
+
+[workspace.package]
+version = "0.0.15"
+edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/yy-database/yyds"
+
+[workspace.dependencies]
+# Shared VOS schema contract. Keep the revision explicit so Oak-backed syntax
+# changes are reproducible in CI and never become a forked dialect.
+vos = { version = "0.0.3", git = "https://github.com/voml/vos-language.git", rev = "b5794e1f40d47af49bc125c97aa3235e84aedd84" }
+yyds-types = { path = "crates/yyds-types" }
+yyds-kv = { path = "crates/yyds-kv" }
+yyds-catalog = { path = "crates/yyds-catalog" }
+yyds-control = { path = "crates/yyds-control" }
+yyds-execution = { path = "crates/yyds-execution" }
+yyds-gateway = { path = "crates/yyds-gateways/yyds-gateway" }
+yyds-gateway-conformance = { path = "crates/yyds-gateways/yyds-gateway-conformance" }
+serde_json = "1"
+oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "6d8d3023452d22ac1ac80cb3340e94ee3931edb5", package = "oak-sql" }
+# Overlaid by local path `projects/yyds.rs/.cargo/config.toml` (git ignored).
+boost-fs = { git = "https://github.com/oovm/rust-boost", rev = "9aa52745d6eae2d7748c76e4e3e6555e1f6e4b86" }
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
+napi = { version = "2", default-features = false, features = ["napi4"] }
+pyo3 = { version = "0.30.1", features = ["extension-module"] }
+napi-derive = "2"
+napi-build = "2"
+
+[profile.release]
+lto = true
+panic = "abort"
