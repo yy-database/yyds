@@ -1,0 +1,24 @@
+{
+    "name": "@yydb-examples/integration-mongo",
+    "version": "0.0.0",
+    "description": "Real mongodb driver coverage for the YYDS MongoDB handshake probe.",
+    "license": "MPL-2.0",
+    "private": true,
+    "type": "module",
+    "sideEffects": false,
+    "scripts": {
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\""
+    },
+    "dependencies": {
+        "@yydb-examples/harness": "workspace:*",
+        "mongodb": "^7.7.0"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.0",
+        "typescript": "^5.9.2"
+    },
+    "engines": {
+        "node": ">=22"
+    }
+}
