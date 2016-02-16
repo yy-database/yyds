@@ -1,0 +1,21 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "yyds"
+version = "0.0.0"
+description = "Python control-plane client for local YYDS nodes."
+readme = "readme.md"
+requires-python = ">=3.11"
+license = { text = "MPL-2.0" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Typing :: Typed",
+]
+
+[tool.maturin]
+manifest-path = "../../../yyds.rs/ffis/yyds-pyo3/Cargo.toml"
+module-name = "yyds_pyo3"
+python-source = "src"

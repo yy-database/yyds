@@ -1,0 +1,17 @@
+[package]
+name = "yyds-pyo3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python extension for YYDS node lifecycle and control-plane inspection."
+publish = false
+
+[lib]
+name = "yyds_pyo3"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+serde_json = { workspace = true }
+yyds-control = { workspace = true }

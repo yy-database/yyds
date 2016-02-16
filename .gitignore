@@ -11,6 +11,12 @@ dist/
 .cache/
 pnpm-lock.yaml
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
 # IDEs
 .idea/
 .vscode/
