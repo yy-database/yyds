@@ -3,7 +3,7 @@ import { loadYydsNative } from "../src/node/load.ts";
 import { parseStartOptions, runNodeStart } from "../src/node/runtime.ts";
 
 function usage() {
-    return "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--wire-port PORT]";
+    return "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--mongo-port PORT] [--wire-port PORT]";
 }
 
 function parseCommonArgs(command, args) {
@@ -14,6 +14,7 @@ function parseCommonArgs(command, args) {
         redisPort: 6379,
         pgsqlPort: undefined,
         mysqlPort: undefined,
+        mongoPort: undefined,
         wirePort: undefined,
     };
     for (let index = 0; index < args.length; index += 1) {
@@ -49,6 +50,12 @@ function parseCommonArgs(command, args) {
                 if (command !== "start")
                     throw new Error(`option ${flag} is not valid for this command`);
                 options.mysqlPort = Number(value);
+                index += 1;
+                break;
+            case "--mongo-port":
+                if (command !== "start")
+                    throw new Error(`option ${flag} is not valid for this command`);
+                options.mongoPort = Number(value);
                 index += 1;
                 break;
             case "--wire-port":
@@ -89,6 +96,7 @@ async function main(args) {
                 redisPort: options.redisPort,
                 pgsqlPort: options.pgsqlPort,
                 mysqlPort: options.mysqlPort,
+                mongoPort: options.mongoPort,
                 wirePort: options.wirePort,
             });
             return;

@@ -12,6 +12,7 @@ export interface StartNodeOptions {
     redisPort?: number;
     pgsqlPort?: number;
     mysqlPort?: number;
+    mongoPort?: number;
     wirePort?: number;
 }
 
@@ -64,6 +65,10 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
             options.mysqlPort = Number(args[++index]);
             continue;
         }
+        if (argument === "--mongo-port") {
+            options.mongoPort = Number(args[++index]);
+            continue;
+        }
         if (argument === "--wire-port") {
             options.wirePort = Number(args[++index]);
             continue;
@@ -103,6 +108,10 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
         options.mysqlPort === undefined
             ? undefined
             : new native.MysqlServiceHandle(lease, options.mysqlPort);
+    const mongo =
+        options.mongoPort === undefined
+            ? undefined
+            : new native.MongoServiceHandle(lease, options.mongoPort, executor);
     const wire =
         options.wirePort === undefined
             ? undefined
@@ -121,7 +130,7 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     native.nodeWriteRuntimeStatus(options.dataDir, JSON.stringify(runtime));
 
     process.stdout.write(
-        `yyds running pid=${runtime.pid} redis=${runtime.redisAddress} pgsql=${runtime.pgsqlAddress ?? "null"} mysql=${runtime.mysqlAddress ?? "null"} wire=${runtime.wireAddress ?? "null"}\n`,
+        `yyds running pid=${runtime.pid} redis=${runtime.redisAddress} pgsql=${runtime.pgsqlAddress ?? "null"} mysql=${runtime.mysqlAddress ?? "null"} mongo=${mongo?.address() ?? "null"} wire=${runtime.wireAddress ?? "null"}\n`,
     );
 
     while (true) {
@@ -129,6 +138,7 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
         if (redis.isFinished()) break;
         if (pgsql?.isFinished()) break;
         if (mysql?.isFinished()) break;
+        if (mongo?.isFinished()) break;
         if (wire?.isFinished()) break;
         await sleep(50);
     }
@@ -136,6 +146,7 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     redis.stop();
     pgsql?.stop();
     mysql?.stop();
+    mongo?.stop();
     wire?.stop();
     native.nodeClearRuntimeArtifacts(options.dataDir, runtime.generation);
 }

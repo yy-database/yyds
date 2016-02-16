@@ -91,9 +91,13 @@ fn hello_command_returns_is_writable_primary() {
     assert_eq!(reply.header.response_to, 1);
     assert_eq!(reply.header.opcode, wire::OP_MSG);
 
+    // OP_MSG replies start with flag bits and a section kind before BSON.
+    assert_eq!(&reply.body[..4], &0_u32.to_le_bytes());
+    assert_eq!(reply.body[4], 0x00);
+
     // BSON body 里必须有 ok >= 1 和 isWritablePrimary: true
     let body = &reply.body;
-    let mut pos = 4; // skip doc length
+    let mut pos = 5 + 4; // skip flag bits, section kind and doc length
     let mut found_ok = false;
     let mut found_writable = false;
     while pos < body.len() - 1 {
@@ -177,9 +181,9 @@ fn ping_command_returns_ok_document() {
     let reply = wire::read_frame(&mut reader, FrameLimits::default()).unwrap().unwrap();
     assert_eq!(reply.header.response_to, 7);
 
-    // body 应该是 { ok: 1 }
+    // body 应该是 { ok: 1 }，前面带 OP_MSG 的 flag bits 与 section kind
     let body = &reply.body;
-    let mut pos = 4;
+    let mut pos = 5 + 4;
     let mut found_ok = false;
     while pos < body.len() - 1 {
         let elem_type = body[pos];
@@ -250,9 +254,9 @@ fn unknown_command_returns_error_document() {
     let reply = wire::read_frame(&mut reader, FrameLimits::default()).unwrap().unwrap();
     assert_eq!(reply.header.response_to, 99);
 
-    // body 应该是 generic_error_body: { ok: 0, errmsg: "unsupported" }
+    // body 应该是 generic_error_body: { ok: 0, errmsg: "unsupported" }，前面带 OP_MSG 的 flag bits 与 section kind
     let body = &reply.body;
-    let mut pos = 4;
+    let mut pos = 5 + 4;
     let mut ok_val: Option<i32> = None;
     let mut errmsg: Option<String> = None;
     while pos < body.len() - 1 {

@@ -6,6 +6,7 @@ use napi_derive::napi;
 use yyds_types::version;
 
 mod executor;
+mod mongo;
 mod mysql;
 mod node;
 mod node_runtime;

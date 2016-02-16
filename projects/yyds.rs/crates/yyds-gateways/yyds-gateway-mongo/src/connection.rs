@@ -63,7 +63,14 @@ fn serve_inner(
             None => crate::generic_error_body("unknown"),
         };
 
-        if let Err(error) = write_frame(&mut stream, 0, frame.header.request_id, &body) {
+        // OP_MSG replies carry flag bits and a section kind before the BSON
+        // document. Drivers reject a bare document as a malformed message.
+        let mut message = Vec::with_capacity(5 + body.len());
+        message.extend_from_slice(&0_u32.to_le_bytes());
+        message.push(0);
+        message.extend_from_slice(&body);
+
+        if let Err(error) = write_frame(&mut stream, 0, frame.header.request_id, &message) {
             tracing_command_error(error);
             return Ok(());
         }

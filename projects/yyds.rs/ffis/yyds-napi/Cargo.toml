@@ -18,6 +18,7 @@ yyds-gateway = { workspace = true }
 yyds-gateway-redis = { path = "../../crates/yyds-gateways/yyds-gateway-redis" }
 yyds-gateway-pgsql = { path = "../../crates/yyds-gateways/yyds-gateway-pgsql" }
 yyds-gateway-mysql = { path = "../../crates/yyds-gateways/yyds-gateway-mysql" }
+yyds-gateway-mongo = { path = "../../crates/yyds-gateways/yyds-gateway-mongo" }
 yyds-execution = { workspace = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 serde = { version = "1", features = ["derive"] }

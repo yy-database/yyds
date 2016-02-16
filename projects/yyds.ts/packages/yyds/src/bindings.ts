@@ -14,6 +14,11 @@ export interface YydsBindings {
     ) => RedisServiceBinding;
     PgsqlServiceHandle: new (lease: unknown, port: number) => PgsqlServiceBinding;
     MysqlServiceHandle: new (lease: unknown, port: number) => MysqlServiceBinding;
+    MongoServiceHandle: new (
+        lease: unknown,
+        port: number,
+        executor: unknown,
+    ) => MongoServiceBinding;
     WireServerHandle: new (port: number, executor: unknown) => WireServiceBinding;
     nodeInit(dataDir: string, identity: unknown): void;
     nodeInspect(dataDir: string): NodeStatusBinding;
@@ -34,6 +39,7 @@ export interface ServiceBinding {
 export type RedisServiceBinding = ServiceBinding;
 export type PgsqlServiceBinding = ServiceBinding;
 export type MysqlServiceBinding = ServiceBinding;
+export type MongoServiceBinding = ServiceBinding;
 export type WireServiceBinding = ServiceBinding;
 
 export interface NodeStatusBinding {
