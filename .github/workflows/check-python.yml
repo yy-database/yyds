@@ -1,0 +1,76 @@
+name: Check Python
+
+# Python extension and client checks. Rust fmt/test: check-rust.yml
+# TypeScript checks: check-typescript.yml
+on:
+  push:
+    branches: [dev]
+    paths:
+      - "projects/yyds.py/**"
+      - "projects/yyds.rs/ffis/yyds-pyo3/**"
+      - "projects/yyds.rs/Cargo.toml"
+      - ".github/workflows/check-python.yml"
+      - "package.json"
+      - "pnpm-workspace.yaml"
+  pull_request:
+    branches: [dev]
+    paths:
+      - "projects/yyds.py/**"
+      - "projects/yyds.rs/ffis/yyds-pyo3/**"
+      - "projects/yyds.rs/Cargo.toml"
+      - ".github/workflows/check-python.yml"
+      - "package.json"
+      - "pnpm-workspace.yaml"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: nightly-2026-07-20
+
+jobs:
+  python:
+    name: yyds-pyo3 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-20
+          components: rustfmt
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: projects/yyds.rs
+      - name: Install maturin
+        run: python -m pip install --upgrade maturin
+      - name: Check formatting
+        working-directory: projects/yyds.rs
+        run: cargo fmt -p yyds-pyo3 -- --check
+      - name: Cargo check
+        working-directory: projects/yyds.rs
+        run: cargo check -p yyds-pyo3
+      - name: Cargo test
+        working-directory: projects/yyds.rs
+        run: cargo test -p yyds-pyo3
+      - name: Build wheel
+        working-directory: projects/yyds.py/packages/yyds
+        run: maturin build --release --out ../../../../dist
+      - name: Install wheel in a clean venv
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [ -f .venv/bin/python ]; then VENV_PY=.venv/bin/python; else VENV_PY=.venv/Scripts/python.exe; fi
+          "$VENV_PY" -m pip install --upgrade pip
+          "$VENV_PY" -m pip install dist/*.whl
+          echo "VENV_PY=$VENV_PY" >> "$GITHUB_ENV"
+      - name: Run unittest suite
+        shell: bash
+        run: '"$VENV_PY" -m unittest discover -s projects/yyds.py/packages/yyds/tests -v'
+      - name: Smoke test the example
+        shell: bash
+        run: '"$VENV_PY" projects/yyds.py/packages/yyds/examples/local-node/main.py'
