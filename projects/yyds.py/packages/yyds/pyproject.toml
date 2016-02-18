@@ -19,3 +19,5 @@ classifiers = [
 manifest-path = "../../../yyds.rs/ffis/yyds-pyo3/Cargo.toml"
 module-name = "yyds_pyo3"
 python-source = "src"
+python-packages = ["yyds"]
+exclude = ["**/__pycache__/**", "**/*.pyc", "dist/**"]
