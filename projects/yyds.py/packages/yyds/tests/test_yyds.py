@@ -25,14 +25,6 @@ except ImportError as error:
         SKIP_REASON = f"native module yyds_pyo3 is not built: {fallback_error or error}"
 
 
-def normalized(path: str | os.PathLike[str]) -> str:
-    """Compares paths after dropping the Windows verbatim prefix Rust adds."""
-    text = os.fspath(path)
-    if text.startswith("\\\\?\\"):
-        text = text[4:]
-    return os.path.normcase(os.path.abspath(text))
-
-
 def status_payload(generation: str) -> dict[str, Any]:
     return {
         "version": 1,
@@ -72,7 +64,7 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(status["ownership"], "available")
         self.assertEqual(status["identity"], {"clusterId": "example-cluster", "nodeId": "example-node"})
         self.assertIsNone(status["runtime"])
-        self.assertEqual(normalized(status["directory"]), normalized(self.data_dir))
+        self.assertTrue(os.path.samefile(status["directory"], self.data_dir))
 
     def test_init_rejects_identity_change(self) -> None:
         node = Node(self.data_dir)
