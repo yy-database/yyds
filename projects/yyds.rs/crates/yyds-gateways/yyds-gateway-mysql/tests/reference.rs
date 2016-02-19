@@ -90,7 +90,7 @@ fn catalog(source: &str) -> SqlCatalog {
         .types
         .iter()
         .enumerate()
-        .map(|(type_index, entry)| vos::contract::TypeIdentity {
+        .map(|(type_index, entry)| vos::types::TypeIdentity {
             canonical_path: entry.canonical_path.clone(),
             type_id: type_index as u64 + 1,
             kind: entry.kind,
@@ -101,16 +101,16 @@ fn catalog(source: &str) -> SqlCatalog {
                 .map(|(field_index, field)| {
                     let field_id = next_field_id;
                     next_field_id += 1;
-                    vos::contract::FieldIdentity {
+                    vos::types::FieldIdentity {
                         canonical_name: field.canonical_name.clone(),
                         field_id,
-                        virtual_field_index: field_index as u32,
+                        virtual_field_index: Some(field_index as u32),
                     }
                 })
                 .collect(),
         })
         .collect();
-    let manifest = vos::contract::IdentityManifest { format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(), types };
+    let manifest = vos::types::IdentityManifest { format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(), types };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     SqlCatalog::from_resolved_contract(SCHEMA_VERSION, &contract).expect("gateway catalog")
 }

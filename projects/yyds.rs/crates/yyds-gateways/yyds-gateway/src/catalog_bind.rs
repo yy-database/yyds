@@ -5,10 +5,7 @@ use crate::sql::{
     SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
     SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
 };
-use vos::{
-    ast::{BuiltinType, TypeExpr},
-    contract::{CanonicalType, ResolvedCanonicalType},
-};
+use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
 /// Scalar types the gateway can project from a VOS field contract.
 ///
@@ -54,13 +51,16 @@ impl SqlFieldType {
 /// Map a resolved VOS type to a gateway-facing [`SqlFieldType`].
 fn project_resolved_type(ty: &ResolvedCanonicalType) -> SqlFieldType {
     match ty {
-        ResolvedCanonicalType::Builtin(path) => match path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice() {
-            ["i64"] | ["int64"] | ["Int64"] => SqlFieldType::Int64,
-            ["i32"] | ["int32"] | ["Int32"] => SqlFieldType::Int32,
-            ["f64"] | ["float64"] | ["Float64"] => SqlFieldType::Float64,
-            ["utf8"] | ["String"] | ["string"] => SqlFieldType::String,
-            ["bool"] | ["Bool"] => SqlFieldType::Bool,
-            ["bytes"] | ["Bytes"] => SqlFieldType::Bytes,
+        ResolvedCanonicalType::Scalar(scalar) => match scalar {
+            CanonicalScalar::I8 | CanonicalScalar::I16 | CanonicalScalar::I32 => SqlFieldType::Int32,
+            CanonicalScalar::I64 | CanonicalScalar::U8 | CanonicalScalar::U16 | CanonicalScalar::U32 => SqlFieldType::Int64,
+            CanonicalScalar::F32 | CanonicalScalar::F64 => SqlFieldType::Float64,
+            CanonicalScalar::Utf8 | CanonicalScalar::Utf16 => SqlFieldType::String,
+            CanonicalScalar::Bool => SqlFieldType::Bool,
+            CanonicalScalar::Bytes => SqlFieldType::Bytes,
+            CanonicalScalar::Uuid | CanonicalScalar::Date | CanonicalScalar::Time | CanonicalScalar::DateTime => {
+                SqlFieldType::String
+            }
             _ => SqlFieldType::Unknown,
         },
         ResolvedCanonicalType::Optional(inner) => SqlFieldType::Optional(Box::new(project_resolved_type(inner))),
@@ -81,29 +81,6 @@ fn project_projection_type(ty: &CanonicalType) -> SqlFieldType {
             _ => SqlFieldType::Unknown,
         },
         CanonicalType::Optional(inner) => SqlFieldType::Optional(Box::new(project_projection_type(inner))),
-        _ => SqlFieldType::Unknown,
-    }
-}
-
-/// Map an AST type expression from a published catalog snapshot to a gateway-facing type.
-///
-/// Snapshot-only catalogs still carry enough type information to decode integer columns
-/// exactly. Types whose SQL value semantics the gateway does not model (for example
-/// `decimal` and `u64`) stay [`SqlFieldType::Unknown`] rather than being guessed.
-fn project_type_expr(ty: &TypeExpr) -> SqlFieldType {
-    match ty {
-        TypeExpr::Builtin(builtin) => match builtin {
-            BuiltinType::I8 | BuiltinType::I16 | BuiltinType::I32 => SqlFieldType::Int32,
-            BuiltinType::I64 | BuiltinType::U8 | BuiltinType::U16 | BuiltinType::U32 => SqlFieldType::Int64,
-            BuiltinType::F32 | BuiltinType::F64 => SqlFieldType::Float64,
-            BuiltinType::Bool => SqlFieldType::Bool,
-            BuiltinType::Utf8 | BuiltinType::Utf16 => SqlFieldType::String,
-            BuiltinType::Bytes => SqlFieldType::Bytes,
-            BuiltinType::Uuid | BuiltinType::Date | BuiltinType::Time | BuiltinType::DateTimeUtc => SqlFieldType::String,
-            _ => SqlFieldType::Unknown,
-        },
-        TypeExpr::Optional(inner) => SqlFieldType::Optional(Box::new(project_type_expr(inner))),
-        TypeExpr::Reference(inner) => project_type_expr(inner),
         _ => SqlFieldType::Unknown,
     }
 }
@@ -141,27 +118,27 @@ impl SqlCatalog {
     /// Builds a gateway view from the newest contract published by YYDS.
     pub fn from_yyds_catalog(catalog: &yyds_catalog::Catalog) -> Result<Self, SqlFrontendError> {
         let schema = catalog.schema().ok_or_else(|| catalog_error("YYDS catalog has no published schema"))?;
-        if let Some(contract) = catalog.resolved_contract() {
-            return Self::from_resolved_contract(schema.version, contract);
-        }
-        let identity = catalog.identity().ok_or_else(|| catalog_error("YYDS catalog has no published identity snapshot"))?;
-        Self::from_snapshot(schema.version, identity)
+        let contract = catalog.resolved_contract().ok_or_else(|| catalog_error("YYDS catalog has no resolved contract"))?;
+        Self::from_resolved_contract(schema.version, contract)
     }
 
     /// Projects gateway table identities from a validated resolved contract.
-    pub fn from_resolved_contract(schema_version: u32, contract: &vos::ResolvedContract) -> Result<Self, SqlFrontendError> {
+    pub fn from_resolved_contract(
+        schema_version: u32,
+        contract: &vos::types::ResolvedContract,
+    ) -> Result<Self, SqlFrontendError> {
         if schema_version == 0 {
             return Err(catalog_error("catalog schema version must be nonzero"));
         }
         let artifact = contract.to_json().map_err(|_| catalog_error("resolved contract encode failed"))?;
-        vos::ResolvedContract::from_json(&artifact)
+        vos::types::ResolvedContract::from_json(&artifact)
             .map_err(|error| catalog_error(&format!("invalid resolved VOS contract {}: {}", error.code, error.message)))?;
         let mut type_ids = std::collections::BTreeSet::new();
         let mut field_ids = std::collections::BTreeSet::new();
         let tables = contract
             .types
             .iter()
-            .filter(|entry| entry.kind == vos::contract::TypeContractKind::Table)
+            .filter(|entry| entry.kind == vos::types::TypeContractKind::Table)
             .map(|entry| {
                 if entry.type_id == 0 || !type_ids.insert(entry.type_id) {
                     return Err(catalog_error("invalid or duplicate catalog type identity"));
@@ -185,47 +162,6 @@ impl SqlCatalog {
                 Ok(SqlCatalogTable { type_id: entry.type_id, name, fields })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self { schema_version, tables })
-    }
-
-    /// Projects identities supplied by the catalog publisher, without reallocating them.
-    pub fn from_snapshot(schema_version: u32, snapshot: &vos::ast::CatalogSnapshot) -> Result<Self, SqlFrontendError> {
-        if schema_version == 0 {
-            return Err(catalog_error("catalog schema version must be nonzero"));
-        }
-        let mut type_ids = std::collections::BTreeSet::new();
-        let mut field_ids = std::collections::BTreeSet::new();
-        for entry in &snapshot.types {
-            if entry.type_id.0 == 0 || !type_ids.insert(entry.type_id.0) {
-                return Err(catalog_error("invalid or duplicate catalog type identity"));
-            }
-            for field in &entry.fields {
-                if field.field_id.0 == 0 || !field_ids.insert(field.field_id.0) {
-                    return Err(catalog_error("invalid or duplicate catalog field identity"));
-                }
-            }
-        }
-        let tables = snapshot
-            .types
-            .iter()
-            .filter(|entry| entry.kind == vos::ast::TypeKind::Table)
-            .map(|entry| SqlCatalogTable {
-                type_id: entry.type_id.0,
-                name: entry.name.clone(),
-                fields: entry
-                    .fields
-                    .iter()
-                    .map(|field| SqlCatalogField {
-                        field_id: field.field_id.0,
-                        name: field.current_name.clone(),
-                        // Snapshot fields carry the AST `TypeExpr`, which still distinguishes
-                        // integers, floats, strings and booleans. Project it so snapshot-only
-                        // catalogs do not fall back to untyped row inference.
-                        field_type: project_type_expr(&field.ty),
-                    })
-                    .collect(),
-            })
-            .collect();
         Ok(Self { schema_version, tables })
     }
 

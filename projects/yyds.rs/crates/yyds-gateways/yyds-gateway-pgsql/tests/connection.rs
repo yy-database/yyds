@@ -187,37 +187,37 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
 
     let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64 }\ntable metrics { @@id: i64, score: f64, active: bool, blob: bytes, small: i32 }\n";
     let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+    let manifest = vos::types::IdentityManifest {
+        format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(),
         types: vec![
-            vos::contract::TypeIdentity {
+            vos::types::TypeIdentity {
                 canonical_path: vec!["users".into()],
                 type_id: 1,
-                kind: vos::contract::TypeContractKind::Table,
+                kind: vos::types::TypeContractKind::Table,
                 fields: vec![
-                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
-                    vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+                    vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: Some(0) },
+                    vos::types::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: Some(1) },
                 ],
             },
-            vos::contract::TypeIdentity {
+            vos::types::TypeIdentity {
                 canonical_path: vec!["orders".into()],
                 type_id: 2,
-                kind: vos::contract::TypeContractKind::Table,
+                kind: vos::types::TypeContractKind::Table,
                 fields: vec![
-                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 3, virtual_field_index: 0 },
-                    vos::contract::FieldIdentity { canonical_name: "user_id".into(), field_id: 4, virtual_field_index: 1 },
+                    vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 3, virtual_field_index: Some(0) },
+                    vos::types::FieldIdentity { canonical_name: "user_id".into(), field_id: 4, virtual_field_index: Some(1) },
                 ],
             },
-            vos::contract::TypeIdentity {
+            vos::types::TypeIdentity {
                 canonical_path: vec!["metrics".into()],
                 type_id: 3,
-                kind: vos::contract::TypeContractKind::Table,
+                kind: vos::types::TypeContractKind::Table,
                 fields: vec![
-                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 5, virtual_field_index: 0 },
-                    vos::contract::FieldIdentity { canonical_name: "score".into(), field_id: 6, virtual_field_index: 1 },
-                    vos::contract::FieldIdentity { canonical_name: "active".into(), field_id: 7, virtual_field_index: 2 },
-                    vos::contract::FieldIdentity { canonical_name: "blob".into(), field_id: 8, virtual_field_index: 3 },
-                    vos::contract::FieldIdentity { canonical_name: "small".into(), field_id: 9, virtual_field_index: 4 },
+                    vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 5, virtual_field_index: Some(0) },
+                    vos::types::FieldIdentity { canonical_name: "score".into(), field_id: 6, virtual_field_index: Some(1) },
+                    vos::types::FieldIdentity { canonical_name: "active".into(), field_id: 7, virtual_field_index: Some(2) },
+                    vos::types::FieldIdentity { canonical_name: "blob".into(), field_id: 8, virtual_field_index: Some(3) },
+                    vos::types::FieldIdentity { canonical_name: "small".into(), field_id: 9, virtual_field_index: Some(4) },
                 ],
             },
         ],

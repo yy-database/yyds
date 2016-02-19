@@ -7,18 +7,17 @@ use yyds_types::{CatalogSchema, Error, Result, ShardEpoch, ShardId};
 /// Catalog file magic (`YYDS` catalog plane, not `.yydb`).
 pub const MAGIC: &[u8] = b"YYDS\x01";
 
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 
 /// Serialize catalog state to `.yyds` bytes.
 pub fn encode(
     schema: Option<&CatalogSchema>,
-    identity: Option<&vos::ast::CatalogSnapshot>,
     routing_epoch: Option<ShardEpoch>,
     shards: &[ShardId],
-    resolved_contract: Option<&vos::ResolvedContract>,
+    resolved_contract: Option<&vos::types::ResolvedContract>,
 ) -> Result<Vec<u8>> {
     if let Some(contract) = resolved_contract {
-        crate::catalog::validate_contract(schema, identity, contract)?;
+        crate::catalog::validate_contract(schema, contract)?;
     }
     let mut out = Vec::new();
     out.write_all(MAGIC)?;
@@ -34,19 +33,6 @@ pub fn encode(
             }
             out.write_all(&(doc.len() as u32).to_le_bytes())?;
             out.write_all(doc)?;
-        }
-        None => out.write_all(&0u32.to_le_bytes())?,
-    }
-
-    match identity {
-        Some(identity) => {
-            let json = serde_json::to_vec(identity).map_err(|_| Error::Corrupt("catalog identity encode"))?;
-            if json.len() > u32::MAX as usize {
-                return Err(Error::Unsupported("catalog identity too large"));
-            }
-            out.write_all(&1u32.to_le_bytes())?;
-            out.write_all(&(json.len() as u32).to_le_bytes())?;
-            out.write_all(&json)?;
         }
         None => out.write_all(&0u32.to_le_bytes())?,
     }
@@ -95,13 +81,7 @@ pub fn encode(
 /// Parse catalog bytes previously written by [`encode`].
 pub fn decode(
     bytes: &[u8],
-) -> Result<(
-    Option<CatalogSchema>,
-    Option<vos::ast::CatalogSnapshot>,
-    Option<ShardEpoch>,
-    Vec<ShardId>,
-    Option<vos::ResolvedContract>,
-)> {
+) -> Result<(Option<CatalogSchema>, Option<ShardEpoch>, Vec<ShardId>, Option<vos::types::ResolvedContract>)> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0u8; MAGIC.len()];
     read_exact(&mut cursor, &mut magic)?;
@@ -110,8 +90,8 @@ pub fn decode(
     }
 
     let format_version = read_u32(&mut cursor)?;
-    if format_version != 1 && format_version != 2 && format_version != 3 && format_version != FORMAT_VERSION {
-        return Err(Error::Corrupt("unsupported catalog format version"));
+    if format_version != FORMAT_VERSION {
+        return Err(Error::Unsupported("catalog format version requires regeneration"));
     }
 
     let schema = match read_u32(&mut cursor)? {
@@ -127,37 +107,16 @@ pub fn decode(
         _ => return Err(Error::Corrupt("invalid catalog schema presence flag")),
     };
 
-    let identity = if format_version >= 2 {
-        match read_u32(&mut cursor)? {
-            0 => None,
-            1 => {
-                let len = read_u32(&mut cursor)? as usize;
-                let mut json = vec![0u8; len];
-                read_exact(&mut cursor, &mut json)?;
-                Some(serde_json::from_slice(&json).map_err(|_| Error::Corrupt("catalog identity decode"))?)
+    let routing_epoch = match read_u32(&mut cursor)? {
+        0 => None,
+        1 => {
+            let epoch = read_u64(&mut cursor)?;
+            if epoch == 0 {
+                return Err(Error::Corrupt("invalid catalog routing epoch"));
             }
-            _ => return Err(Error::Corrupt("invalid catalog identity presence flag")),
+            Some(ShardEpoch(epoch))
         }
-    }
-    else {
-        None
-    };
-
-    let routing_epoch = if format_version >= 3 {
-        match read_u32(&mut cursor)? {
-            0 => None,
-            1 => {
-                let epoch = read_u64(&mut cursor)?;
-                if epoch == 0 {
-                    return Err(Error::Corrupt("invalid catalog routing epoch"));
-                }
-                Some(ShardEpoch(epoch))
-            }
-            _ => return Err(Error::Corrupt("invalid catalog routing presence flag")),
-        }
-    }
-    else {
-        None
+        _ => return Err(Error::Corrupt("invalid catalog routing presence flag")),
     };
 
     let shard_count = read_u32(&mut cursor)? as usize;
@@ -170,21 +129,16 @@ pub fn decode(
         shards.push(ShardId(id));
     }
 
-    let resolved_contract = if format_version >= 4 {
-        match read_u32(&mut cursor)? {
-            0 => None,
-            1 => {
-                let len = read_u32(&mut cursor)? as usize;
-                let mut json = vec![0u8; len];
-                read_exact(&mut cursor, &mut json)?;
-                let json = String::from_utf8(json).map_err(|_| Error::Corrupt("resolved contract utf8"))?;
-                Some(vos::ResolvedContract::from_json(&json).map_err(|_| Error::Corrupt("resolved contract decode"))?)
-            }
-            _ => return Err(Error::Corrupt("invalid resolved contract presence flag")),
+    let resolved_contract = match read_u32(&mut cursor)? {
+        0 => None,
+        1 => {
+            let len = read_u32(&mut cursor)? as usize;
+            let mut json = vec![0u8; len];
+            read_exact(&mut cursor, &mut json)?;
+            let json = String::from_utf8(json).map_err(|_| Error::Corrupt("resolved contract utf8"))?;
+            Some(vos::types::ResolvedContract::from_json(&json).map_err(|_| Error::Corrupt("resolved contract decode"))?)
         }
-    }
-    else {
-        None
+        _ => return Err(Error::Corrupt("invalid resolved contract presence flag")),
     };
 
     if cursor.position() != bytes.len() as u64 {
@@ -192,10 +146,10 @@ pub fn decode(
     }
 
     if let Some(contract) = &resolved_contract {
-        crate::catalog::validate_contract(schema.as_ref(), identity.as_ref(), contract)?;
+        crate::catalog::validate_contract(schema.as_ref(), contract)?;
     }
 
-    Ok((schema, identity, routing_epoch, shards, resolved_contract))
+    Ok((schema, routing_epoch, shards, resolved_contract))
 }
 
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {

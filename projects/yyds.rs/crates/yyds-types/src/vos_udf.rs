@@ -1,30 +1,27 @@
 use std::collections::HashMap;
 
-use vos::ast::{BuiltinType, Expr, FnDecl, FnKind, Literal, TypeExpr};
+use vos::syntax::{VosBinaryOp, VosExpr, VosFnDecl, VosFnKind, VosLiteral, VosTypeSyntax};
 
 use crate::{Error, Node, Program, Type, Udf, UdfEffect, UdfPlacement, Value};
 
 /// Lowers the Oak-validated VOS scalar subset into YYDS's shard execution model.
 pub fn lower_vos_udf(source: &str, version: u32) -> Result<crate::ValidatedUdf, Error> {
-    let parsed = vos::parser::parse_program(source).map_err(|diagnostics| Error::Udf {
-        name: "<vos>".into(),
-        message: diagnostics.errors.into_iter().map(|error| error.message).collect::<Vec<_>>().join(" | "),
-    })?;
+    let parsed = vos::parse_program(source).map_err(|diagnostics| Error::Udf { name: "<vos>".into(), message: diagnostics })?;
     if !parsed.statements.is_empty() || parsed.result.is_some() || parsed.micros.len() != 1 {
         return udf_error("<vos>", "VOS UDF source must contain exactly one micro declaration");
     }
     let declaration = &parsed.micros[0];
-    if declaration.kind != FnKind::Micro {
+    if declaration.kind != VosFnKind::Micro {
         return udf_error(&declaration.name, "only VOS micro declarations can bind as distributed UDFs");
     }
     lower_declaration(declaration, version)
 }
 
-fn lower_declaration(declaration: &FnDecl, version: u32) -> Result<crate::ValidatedUdf, Error> {
-    let mut inputs = Vec::with_capacity(declaration.params.len());
-    let mut names = HashMap::with_capacity(declaration.params.len());
-    for (index, parameter) in declaration.params.iter().enumerate() {
-        let ty = lower_type(&parameter.ty, &declaration.name)?;
+fn lower_declaration(declaration: &VosFnDecl, version: u32) -> Result<crate::ValidatedUdf, Error> {
+    let mut inputs = Vec::with_capacity(declaration.parameters.len());
+    let mut names = HashMap::with_capacity(declaration.parameters.len());
+    for (index, parameter) in declaration.parameters.iter().enumerate() {
+        let ty = lower_type(&parameter.type_expr, &declaration.name)?;
         if names.insert(parameter.name.clone(), (index as u32, ty)).is_some() {
             return udf_error(&declaration.name, "duplicate VOS UDF parameter");
         }
@@ -39,7 +36,7 @@ fn lower_declaration(declaration: &FnDecl, version: u32) -> Result<crate::Valida
     })?;
     let mut nodes = Vec::new();
     let output_type = lower_expr(expression, &names, &mut nodes, &declaration.name)?;
-    if let Some(return_ty) = &declaration.return_ty {
+    if let Some(return_ty) = &declaration.return_type {
         if lower_type(return_ty, &declaration.name)? != output_type {
             return udf_error(&declaration.name, "VOS UDF return type does not match its body");
         }
@@ -61,27 +58,27 @@ fn lower_declaration(declaration: &FnDecl, version: u32) -> Result<crate::Valida
 }
 
 fn lower_expr(
-    expression: &Expr,
+    expression: &VosExpr,
     inputs: &HashMap<String, (u32, Type)>,
     nodes: &mut Vec<Node>,
     name: &str,
 ) -> Result<Type, Error> {
     match expression {
-        Expr::Name { name: input, .. } => {
+        VosExpr::Name { name: input, .. } => {
             let (index, ty) = inputs
                 .get(input)
                 .ok_or_else(|| Error::Udf { name: name.into(), message: format!("unknown VOS UDF input `{input}`") })?;
             nodes.push(Node::Input { index: *index, ty: *ty });
             Ok(*ty)
         }
-        Expr::Literal(Literal::Int(value)) => {
+        VosExpr::Literal(VosLiteral::Int(value)) => {
             let value = value
                 .parse::<i64>()
                 .map_err(|_| Error::Udf { name: name.into(), message: "VOS UDF integer literal does not fit i64".into() })?;
             nodes.push(Node::Literal(Value::I64(value)));
             Ok(Type::I64)
         }
-        Expr::Binary { op: vos::ast::BinaryOp::Add, left, right, .. } => {
+        VosExpr::Binary { op: VosBinaryOp::Add, left, right, .. } => {
             let left_ty = lower_expr(left, inputs, nodes, name)?;
             let left_node = u32::try_from(nodes.len() - 1).expect("left expression has a node");
             let right_ty = lower_expr(right, inputs, nodes, name)?;
@@ -96,9 +93,9 @@ fn lower_expr(
     }
 }
 
-fn lower_type(ty: &TypeExpr, name: &str) -> Result<Type, Error> {
+fn lower_type(ty: &VosTypeSyntax, name: &str) -> Result<Type, Error> {
     match ty {
-        TypeExpr::Builtin(BuiltinType::I64) => Ok(Type::I64),
+        VosTypeSyntax::Named { path, .. } if path.len() == 1 && path[0] == "i64" => Ok(Type::I64),
         _ => udf_error(name, "YYDS shard UDF currently accepts only i64 types"),
     }
 }

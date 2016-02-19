@@ -19,7 +19,7 @@ fn catalog(source: &str) -> yyds_gateway::SqlCatalog {
         .types
         .iter()
         .enumerate()
-        .map(|(type_index, entry)| vos::contract::TypeIdentity {
+        .map(|(type_index, entry)| vos::types::TypeIdentity {
             canonical_path: entry.canonical_path.clone(),
             type_id: type_index as u64 + 1,
             kind: entry.kind,
@@ -30,16 +30,16 @@ fn catalog(source: &str) -> yyds_gateway::SqlCatalog {
                 .map(|(field_index, field)| {
                     let field_id = next_field_id;
                     next_field_id += 1;
-                    vos::contract::FieldIdentity {
+                    vos::types::FieldIdentity {
                         canonical_name: field.canonical_name.clone(),
                         field_id,
-                        virtual_field_index: field_index as u32,
+                        virtual_field_index: Some(field_index as u32),
                     }
                 })
                 .collect(),
         })
         .collect();
-    let manifest = vos::contract::IdentityManifest { format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(), types };
+    let manifest = vos::types::IdentityManifest { format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(), types };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     yyds_gateway::SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog")
 }
@@ -57,13 +57,13 @@ fn sql_catalog_binding_consumes_published_yyds_identity() {
 fn sql_catalog_binding_prefers_published_resolved_contract() {
     let source = "table users { @@id: i64 }\n";
     let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
-        types: vec![vos::contract::TypeIdentity {
+    let manifest = vos::types::IdentityManifest {
+        format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::types::TypeIdentity {
             canonical_path: vec!["users".into()],
             type_id: 1,
-            kind: vos::contract::TypeContractKind::Table,
-            fields: vec![vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 }],
+            kind: vos::types::TypeContractKind::Table,
+            fields: vec![vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: Some(0) }],
         }],
     };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
@@ -166,23 +166,6 @@ fn sql_catalog_binding_rejects_unknown_names_and_schema_versions() {
     assert!(unknown_column.message.contains("unknown SQL column"));
     let version = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 8).expect_err("schema version mismatch");
     assert!(version.message.contains("schema version mismatch"));
-}
-
-#[test]
-fn sql_catalog_binding_rejects_ambiguous_unqualified_columns() {
-    let snapshot: vos::ast::CatalogSnapshot = serde_json::from_value(serde_json::json!({
-        "revisions": { "ddl": 1, "semantic": 1, "layout_epoch": 0 },
-        "types": [{
-            "type_id": 1, "name": "users", "kind": "table",
-            "fields": [
-                { "field_id": 1, "virtual_field": 0, "current_name": "id", "source_order": 0, "ty": { "Builtin": "I64" }, "attrs": [] },
-                { "field_id": 2, "virtual_field": 1, "current_name": "id", "source_order": 1, "ty": { "Builtin": "I64" }, "attrs": [] }
-            ]
-        }]
-    })).expect("legacy snapshot");
-    let catalog = yyds_gateway::SqlCatalog::from_snapshot(7, &snapshot).expect("gateway catalog");
-    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7).expect_err("ambiguous column");
-    assert!(error.message.contains("ambiguous SQL column"));
 }
 
 // --- SQL → KV 执行层适配器 ---
@@ -470,26 +453,15 @@ fn sql_int64_round_trip_preserves_precision_beyond_f64() {
 }
 
 #[test]
-fn sql_snapshot_catalog_projects_integer_types_for_exact_decode() {
-    let snapshot: vos::ast::CatalogSnapshot = serde_json::from_value(serde_json::json!({
-        "revisions": { "ddl": 1, "semantic": 1, "layout_epoch": 0 },
-        "types": [{
-            "type_id": 1, "name": "users", "kind": "table",
-            "fields": [
-                { "field_id": 1, "virtual_field": 0, "current_name": "id", "source_order": 0, "ty": { "Builtin": "I64" }, "attrs": [] },
-                { "field_id": 2, "virtual_field": 1, "current_name": "age", "source_order": 1, "ty": { "Builtin": "I64" }, "attrs": [] }
-            ]
-        }]
-    }))
-    .expect("snapshot");
-    let catalog = yyds_gateway::SqlCatalog::from_snapshot(7, &snapshot).expect("gateway catalog");
+fn sql_contract_catalog_projects_integer_types_for_exact_decode() {
+    let catalog = catalog("table users { @@id: i64, age: i64 }\n");
     assert_eq!(catalog.tables()[0].fields[0].field_type, yyds_gateway::SqlFieldType::Int64);
     assert_eq!(catalog.tables()[0].fields[1].field_type, yyds_gateway::SqlFieldType::Int64);
 
     let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"9007199254740993")]);
     let bound = yyds_gateway::bind_sql_catalog("SELECT age FROM users", &catalog, 7).expect("scan bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("scan plan");
-    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("snapshot typed decode");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("contract typed decode");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(9_007_199_254_740_993)]);
 }
 

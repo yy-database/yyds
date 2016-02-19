@@ -112,16 +112,16 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
 
     let source = "table users { @@id: i64, name: utf8, age: i64 }\n";
     let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
-        types: vec![vos::contract::TypeIdentity {
+    let manifest = vos::types::IdentityManifest {
+        format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::types::TypeIdentity {
             canonical_path: vec!["users".into()],
             type_id: 1,
-            kind: vos::contract::TypeContractKind::Table,
+            kind: vos::types::TypeContractKind::Table,
             fields: vec![
-                vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
-                vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
-                vos::contract::FieldIdentity { canonical_name: "age".into(), field_id: 3, virtual_field_index: 2 },
+                vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: Some(0) },
+                vos::types::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: Some(1) },
+                vos::types::FieldIdentity { canonical_name: "age".into(), field_id: 3, virtual_field_index: Some(2) },
             ],
         }],
     };
@@ -186,26 +186,26 @@ fn start_server_with_join_runtime() -> (TcpStream, thread::JoinHandle<()>) {
 
     let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n";
     let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+    let manifest = vos::types::IdentityManifest {
+        format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(),
         types: vec![
-            vos::contract::TypeIdentity {
+            vos::types::TypeIdentity {
                 canonical_path: vec!["users".into()],
                 type_id: 1,
-                kind: vos::contract::TypeContractKind::Table,
+                kind: vos::types::TypeContractKind::Table,
                 fields: vec![
-                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
-                    vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+                    vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: Some(0) },
+                    vos::types::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: Some(1) },
                 ],
             },
-            vos::contract::TypeIdentity {
+            vos::types::TypeIdentity {
                 canonical_path: vec!["orders".into()],
                 type_id: 2,
-                kind: vos::contract::TypeContractKind::Table,
+                kind: vos::types::TypeContractKind::Table,
                 fields: vec![
-                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 3, virtual_field_index: 0 },
-                    vos::contract::FieldIdentity { canonical_name: "user_id".into(), field_id: 4, virtual_field_index: 1 },
-                    vos::contract::FieldIdentity { canonical_name: "total".into(), field_id: 5, virtual_field_index: 2 },
+                    vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 3, virtual_field_index: Some(0) },
+                    vos::types::FieldIdentity { canonical_name: "user_id".into(), field_id: 4, virtual_field_index: Some(1) },
+                    vos::types::FieldIdentity { canonical_name: "total".into(), field_id: 5, virtual_field_index: Some(2) },
                 ],
             },
         ],
@@ -809,15 +809,15 @@ fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
 
     let source = "table users { @@id: i64, name: utf8 }\n";
     let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
-        types: vec![vos::contract::TypeIdentity {
+    let manifest = vos::types::IdentityManifest {
+        format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::types::TypeIdentity {
             canonical_path: vec!["users".into()],
             type_id: 1,
-            kind: vos::contract::TypeContractKind::Table,
+            kind: vos::types::TypeContractKind::Table,
             fields: vec![
-                vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
-                vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+                vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: Some(0) },
+                vos::types::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: Some(1) },
             ],
         }],
     };
