@@ -3,11 +3,10 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { NAPI_MANIFEST, RUST_WS_DIR } from "./rust-manifest.mjs";
+import { RUST_WS_DIR } from "./rust-manifest.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const napiDir = join(root, RUST_WS_DIR, "ffis/yyds-napi");
-const manifestPath = join(root, NAPI_MANIFEST);
 
 /** @type {Record<string, { packageDir: string; fileName: string }>} */
 const ARTIFACTS = {
@@ -33,10 +32,11 @@ function findBuiltNodes(dir) {
     return readdirSync(dir).filter((name) => name.endsWith(".node"));
 }
 
-execSync(
-    `pnpm exec napi build --platform --release --manifest-path "${manifestPath.replace(/\\/g, "/")}"`,
-    { cwd: root, stdio: "inherit", shell: true },
-);
+execSync("pnpm exec napi build --platform --release", {
+    cwd: napiDir,
+    stdio: "inherit",
+    shell: true,
+});
 
 for (const generated of ["index.js", "index.d.ts"]) {
     const path = join(napiDir, generated);
