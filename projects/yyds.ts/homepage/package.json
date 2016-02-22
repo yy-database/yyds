@@ -1,0 +1,39 @@
+{
+    "name": "@yydb/yyds-homepage",
+    "version": "0.1.5",
+    "description": "YYDS product homepage and Chinese user documentation",
+    "license": "MPL-2.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "postinstall": "node ./scripts/fix-ui-icons-registry.mjs",
+        "check": "vmz check .",
+        "dev": "vmz dev .",
+        "build": "vmz build . --release --profile static",
+        "document:check": "vmz document check . --strict",
+        "preview": "vmz serve . --profile static"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/yyds.ts/homepage"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/homepage#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "dependencies": {
+        "@vmz/core": "0.3.8",
+        "@vmz/plugin": "0.3.8",
+        "@vmz/plugin-shiki": "0.3.8",
+        "@vmz/ui": "0.3.8",
+        "@vmz/ui-icons": "0.3.8",
+        "@yydb/yydb-client": "^0.1.7",
+        "shiki": "^3.12.2"
+    },
+    "devDependencies": {
+        "@vmz/plugin-markdown-it": "0.3.8",
+        "@vmz/vmz": "0.3.8",
+        "typescript": "^5.9.2"
+    }
+}
