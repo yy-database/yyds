@@ -18,6 +18,7 @@ export default defineConfig({
             '**/pnpm-lock.yaml',
             '**/*.md',
             'projects/yyds.ts/platforms/**/lib/**',
+            'projects/yyds.ts/packages/yyds/webui/**',
         ],
     },
     trust: {
