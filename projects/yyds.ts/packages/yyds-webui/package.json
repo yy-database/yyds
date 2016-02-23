@@ -1,0 +1,43 @@
+{
+    "name": "@yydb/yyds-webui",
+    "version": "0.1.5",
+    "description": "Local browser UI for inspecting a running YYDS wire endpoint",
+    "license": "MPL-2.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "postinstall": "node ./scripts/fix-ui-icons-registry.mjs",
+        "check": "vmz check .",
+        "dev": "vmz dev .",
+        "build": "vmz build . --release --profile static",
+        "preview": "vmz serve . --profile static"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "exports": {
+        "./package.json": "./package.json",
+        "./dist/cdn/*": "./dist/cdn/*"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/yyds.ts/packages/yyds-webui"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/yyds-webui#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "dependencies": {
+        "@vmz/core": "0.3.8",
+        "@vmz/plugin": "0.3.8",
+        "@vmz/ui": "0.3.8",
+        "@vmz/ui-icons": "0.3.8",
+        "@yydb/yydb-client": "^0.1.7"
+    },
+    "devDependencies": {
+        "@vmz/vmz": "0.3.8",
+        "typescript": "^5.9.2"
+    }
+}
