@@ -10,7 +10,7 @@ Node.js facade for running a local YYDS node: native lifecycle blocks, a small C
 | `@yydb/yyds/node/cluster` | `launchYydsServer` for `redis-server`, `mysqld`, `postgres` |
 | `@yydb/yyds/node/runtime` | `runNodeStart`, `parseStartOptions` |
 
-The `yyds` binary provides `init`, `start`, `status`, and `stop`. Native addons for your platform are pulled in automatically as optional dependencies.
+The `yyds` binary provides `init`, `start`, `status`, `stop`, and `webui`. Native addons for your platform are pulled in automatically as optional dependencies.
 
 ## Example
 
@@ -30,10 +30,11 @@ yyds init --data-dir ./node-data --cluster-id local --node-id node-1
 yyds start --data-dir ./node-data --cluster-id local --node-id node-1
 yyds status --data-dir ./node-data
 yyds stop --data-dir ./node-data
+yyds webui --data-dir ./node-data --cluster-id local --node-id node-1
 ```
 
 ## Related packages
 
-- [`@yydb/redis`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/redis) â€?Redis protocol disguise
-- [`@yydb/mysql`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/mysql) â€?MySQL protocol disguise
-- [`@yydb/postgresql`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/postgresql) â€?PostgreSQL protocol disguise
+- [`@yydb/redis`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/redis) ï¿½?Redis protocol disguise
+- [`@yydb/mysql`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/mysql) ï¿½?MySQL protocol disguise
+- [`@yydb/postgresql`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/postgresql) ï¿½?PostgreSQL protocol disguise

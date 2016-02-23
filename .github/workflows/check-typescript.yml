@@ -25,3 +25,7 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build:napi
       - run: pnpm test:ts
+      - run: pnpm --filter @yydb/yyds-webui check
+      - run: pnpm --filter @yydb/yyds-homepage check
+      - run: pnpm --filter @yydb/yyds build
+      - run: pnpm --filter @yydb/yyds-homepage build

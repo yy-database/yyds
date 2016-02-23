@@ -3,3 +3,4 @@ packages:
   - "projects/yyds.ts/platforms/*"
   - "projects/yyds.ts/emulators/*"
   - "projects/yyds.ts/examples/*"
+  - "projects/yyds.ts/homepage"

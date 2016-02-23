@@ -7,6 +7,7 @@ target/
 # Node
 node_modules/
 dist/
+projects/yyds.ts/packages/yyds/webui/
 .env.placeholder.local
 .cache/
 pnpm-lock.yaml

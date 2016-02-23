@@ -1,9 +1,18 @@
 #!/usr/bin/env node
 import { loadYydsNative } from "../src/node/load.ts";
 import { parseStartOptions, runNodeStart } from "../src/node/runtime.ts";
+import { parseWebuiArgs, runWebui } from "../src/node/webui-cmd.ts";
 
 function usage() {
-    return "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--mongo-port PORT] [--wire-port PORT]";
+    return "usage: yyds <init|start|status|stop|webui> ...";
+}
+
+function startUsage() {
+    return "usage: yyds start --data-dir DIR --cluster-id ID --node-id ID [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--mongo-port PORT] [--wire-port PORT]";
+}
+
+function webuiUsage() {
+    return "usage: yyds webui [--endpoint URL | --data-dir DIR --cluster-id ID --node-id ID [--wire-port PORT]] [--port NUMBER] [--no-open]";
 }
 
 function parseCommonArgs(command, args) {
@@ -70,7 +79,7 @@ function parseCommonArgs(command, args) {
     }
     if (!options.dataDir) throw new Error(usage());
     if ((command === "init" || command === "start") && (!options.clusterId || !options.nodeId)) {
-        throw new Error(usage());
+        throw new Error(startUsage());
     }
     return options;
 }
@@ -78,6 +87,12 @@ function parseCommonArgs(command, args) {
 async function main(args) {
     const command = args[0];
     const rest = args.slice(1);
+
+    if (command === "webui") {
+        await runWebui(parseWebuiArgs(rest));
+        return;
+    }
+
     const native = loadYydsNative();
     const options = parseCommonArgs(command, rest);
 
@@ -124,7 +139,7 @@ async function main(args) {
             return;
         }
         default:
-            throw new Error(command ? `unknown command '${command}'` : usage());
+            throw new Error(command ? `unknown command '${command}'` : `${usage()}\n${startUsage()}\n${webuiUsage()}`);
     }
 }
 
