@@ -10,11 +10,11 @@ For repository agents only. Do not link these from user-facing READMEs.
 |-------|------|--------------|
 | YYDS release | `.agents/skills/yyds-release/SKILL.md` | npm publish, placeholders, Trusted Publisher, tag `v*.*.*` |
 
-## Downstream skills (`@yyds/yyds-skills`)
+## Downstream skills (`@yydb/yyds-skills`)
 
 User- and integrator-facing Agent Skills live in `projects/yyds.ts/packages/yyds-skills/`.
 
-Do not recreate root `documentation/` or `/docs`.
+Architecture, contracts and roadmaps are internal and live outside this repository — locate them from the workspace root `AGENTS.md` index. Do not recreate root `documentation/`, `docs/` or design notes here.
 
 ## Quick commands
 
@@ -22,7 +22,7 @@ Do not recreate root `documentation/` or `/docs`.
 pnpm install
 pnpm test
 pnpm placeholder:publish          # nifty publish --placeholder (publish.packages)
-pnpm placeholder:publish:skills   # nifty publish --placeholder --package @yyds/yyds-skills
+pnpm placeholder:publish:skills   # nifty publish --placeholder --package @yydb/yyds-skills
 pnpm placeholder:trust            # OIDC trust for publish.packages
-pnpm placeholder:trust:skills     # OIDC trust for @yyds/yyds-skills
+pnpm placeholder:trust:skills     # OIDC trust for @yydb/yyds-skills
 ```
