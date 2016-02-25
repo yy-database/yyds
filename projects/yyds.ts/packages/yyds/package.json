@@ -1,38 +1,39 @@
 {
-  "name": "@yydb/yyds",
-  "version": "0.0.16",
-  "description": "Node.js facade, CLI, and native bindings for local YYDS nodes.",
-  "license": "MPL-2.0",
-  "type": "module",
-  "sideEffects": false,
-  "exports": {
-    ".": {
-      "types": "./src/node/index.ts",
-      "node": "./src/node/index.ts",
-      "default": "./src/node/unsupported.ts"
+    "name": "@yydb/yyds",
+    "version": "0.0.16",
+    "description": "Node.js facade, CLI, and native bindings for local YYDS nodes.",
+    "license": "MPL-2.0",
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./src/node/index.ts",
+            "node": "./src/node/index.ts",
+            "default": "./src/node/unsupported.ts"
+        },
+        "./node": {
+            "types": "./src/node/index.ts",
+            "node": "./src/node/index.ts",
+            "default": "./src/node/unsupported.ts"
+        },
+        "./node/cluster": {
+            "types": "./src/node/cluster.ts",
+            "node": "./src/node/cluster.ts",
+            "default": "./src/node/unsupported.ts"
+        },
+        "./node/runtime": {
+            "types": "./src/node/runtime.ts",
+            "node": "./src/node/runtime.ts",
+            "default": "./src/node/unsupported.ts"
+        }
     },
-    "./node": {
-      "types": "./src/node/index.ts",
-      "node": "./src/node/index.ts",
-      "default": "./src/node/unsupported.ts"
+    "bin": {
+        "yyds": "bin/yyds.mjs"
     },
-    "./node/cluster": {
-      "types": "./src/node/cluster.ts",
-      "node": "./src/node/cluster.ts",
-      "default": "./src/node/unsupported.ts"
-    },
-    "./node/runtime": {
-      "types": "./src/node/runtime.ts",
-      "node": "./src/node/runtime.ts",
-      "default": "./src/node/unsupported.ts"
-    }
-  },
-  "bin": {
-    "yyds": "bin/yyds.mjs"
-  },
-  "files": [
-    "bin",
-    "src"
+    "files": [
+        "bin",
+        "src",
+        "webui"
     ],
     "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
