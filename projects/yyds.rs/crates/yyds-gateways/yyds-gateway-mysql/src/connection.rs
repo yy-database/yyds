@@ -650,7 +650,7 @@ fn execute_sql(
         SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_)
     );
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
-    let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan) {
+    let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan, SqlDialect::Mysql) {
         Ok(result) => result,
         Err(error) => {
             session.fail();
@@ -687,6 +687,7 @@ fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
         UniqueViolation => (1062, "23000"),
         Conflict => (1213, "40001"),
         Execution => (1105, "HY000"),
+        DivisionByZero => (1365, "22012"),
     }
 }
 

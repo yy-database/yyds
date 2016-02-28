@@ -439,7 +439,7 @@ fn run_statement(
     // reports the declared type instead of falling back to `text`.
     let description = describe_plan(&plan);
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
-    let result = execute_plan(runtime.executor.as_ref(), handle_ref, &plan).map_err(|error| {
+    let result = execute_plan(runtime.executor.as_ref(), handle_ref, &plan, SqlDialect::Postgres).map_err(|error| {
         session.fail();
         statement_error("execution", error)
     })?;
@@ -480,6 +480,7 @@ fn pg_sqlstate(kind: SqlErrorKind) -> &'static str {
         UniqueViolation => "23505",
         Conflict => "40001",
         Execution => "XX000",
+        DivisionByZero => "22012",
     }
 }
 

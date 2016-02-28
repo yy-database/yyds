@@ -44,6 +44,8 @@ pub enum SqlErrorKind {
     Conflict,
     /// The storage layer failed while executing the statement.
     Execution,
+    /// Division or modulo by zero — PostgreSQL raises an error, MySQL returns NULL.
+    DivisionByZero,
 }
 
 /// Structured failure from the Oak SQL frontend or gateway binder.

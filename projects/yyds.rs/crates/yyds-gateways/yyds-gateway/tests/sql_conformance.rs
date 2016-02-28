@@ -42,7 +42,7 @@ impl Fixture {
     fn execute(&self, transaction: Option<&dyn TransactionHandle>, sql: &str) -> Result<SqlResult, String> {
         let bound = bind_sql_catalog(sql, &self.catalog, SCHEMA_VERSION).map_err(|error| error.message)?;
         let plan = plan_statement_for_dialect(bound, &self.catalog, self.dialect).map_err(|error| error.message)?;
-        execute_plan(self.executor.as_ref(), transaction, &plan).map_err(|error| error.message)
+        execute_plan(self.executor.as_ref(), transaction, &plan, self.dialect).map_err(|error| error.message)
     }
 
     fn execute_with(&self, sql: &str, parameters: &[Lit], style: SqlParameterStyle) -> Result<SqlResult, String> {
