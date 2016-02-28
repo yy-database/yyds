@@ -32,6 +32,10 @@ const OID_FLOAT4: u32 = 700;
 const OID_FLOAT8: u32 = 701;
 const OID_VARCHAR: u32 = 1043;
 
+/// Reported PostgreSQL version — kept identical in the startup `server_version`
+/// parameter and `SHOW server_version` so the two sources agree.
+const PG_SERVER_VERSION: &str = "16.4";
+
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
 const GSSENC_REQUEST: u32 = 80_877_104;
@@ -105,7 +109,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
     };
 
     send_authentication_ok(&mut stream)?;
-    send_parameter(&mut stream, "server_version", "16.0")?;
+    send_parameter(&mut stream, "server_version", PG_SERVER_VERSION)?;
     send_parameter(&mut stream, "server_encoding", "UTF8")?;
     send_parameter(&mut stream, "client_encoding", "UTF8")?;
     send_parameter(&mut stream, "DateStyle", "ISO, MDY")?;
@@ -997,8 +1001,8 @@ const PG_PARAMETERS: &[(&str, &str)] = &[
     ("integer_datetimes", "on"),
     ("intervalstyle", "postgres"),
     ("server_encoding", "UTF8"),
-    ("server_version", "16.4"),
-    ("search_path", "yy_public"),
+    ("server_version", PG_SERVER_VERSION),
+    ("search_path", "public"),
     ("standard_conforming_strings", "on"),
     ("timezone", "UTC"),
     ("transaction_isolation", "read committed"),
