@@ -1,7 +1,7 @@
 import type { StartNodeOptions } from "./runtime.ts";
 import { parseStartOptions, runNodeStart } from "./runtime.ts";
 
-export type YydsProtocol = "redis" | "mysql" | "postgresql";
+export type YydsProtocol = "redis" | "mysql" | "postgresql" | "mongodb";
 
 /** Maps disguise-server `--port` flags to protocol-specific yyds start flags. */
 export function yydsStartArguments(protocol: YydsProtocol, args: string[]): string[] {
@@ -9,6 +9,7 @@ export function yydsStartArguments(protocol: YydsProtocol, args: string[]): stri
         redis: "--redis-port",
         mysql: "--mysql-port",
         postgresql: "--pgsql-port",
+        mongodb: "--mongo-port",
     };
     const defaultPorts: Partial<Record<YydsProtocol, number>> = {
         mysql: 3306,

@@ -27,6 +27,7 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
         redis: "--redis-port",
         mysql: "--mysql-port",
         postgresql: "--pgsql-port",
+        mongodb: "--mongo-port",
     };
     const defaultPorts: Partial<Record<YydsProtocol, number>> = { mysql: 3306, postgresql: 5432 };
 
@@ -39,6 +40,7 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
             if (protocol === "redis") options.redisPort = value;
             if (protocol === "mysql") options.mysqlPort = value;
             if (protocol === "postgresql") options.pgsqlPort = value;
+            if (protocol === "mongodb") options.mongoPort = value;
             continue;
         }
         if (argument === "--data-dir") {
