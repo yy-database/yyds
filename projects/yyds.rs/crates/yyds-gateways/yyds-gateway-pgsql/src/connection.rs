@@ -15,9 +15,9 @@ use crate::wire::{decode_message, decode_startup, encode_message, FrameError, St
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
-    plan_statement_for_dialect, substitute_sql_parameters, SqlCatalog, SqlCatalogBoundStatement, SqlColumn, SqlDialect,
-    SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction,
-    SqlValue,
+    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
+    SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
+    SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -195,6 +195,7 @@ enum TransactionStatus {
 
 /// Session-scoped transaction state: the PostgreSQL wire protocol ReadyForQuery byte
 /// plus a real storage transaction handle that writes and row reads are bound to.
+/// Also holds session-scoped GUC overrides that `SET` mutates and `SHOW` queries.
 struct TransactionSession {
     /// The executor Arc stays alive for as long as a transaction is open so the handle's
     /// internal references remain valid.
@@ -204,11 +205,19 @@ struct TransactionSession {
     /// (e.g. the PostgreSQL protocol test).
     protocol_only_transaction: bool,
     failed: bool,
+    /// `search_path` as last set via `SET search_path = ...`. Defaults to `"public"`.
+    search_path: String,
 }
 
 impl TransactionSession {
     fn new() -> Self {
-        Self { executor: None, handle: None, protocol_only_transaction: false, failed: false }
+        Self {
+            executor: None,
+            handle: None,
+            protocol_only_transaction: false,
+            failed: false,
+            search_path: "public".to_string(),
+        }
     }
 
     fn as_status(&self) -> TransactionStatus {
@@ -332,13 +341,40 @@ fn handle_simple_query(
                 write_command_complete(stream, "ROLLBACK")
             }
         },
-        Ok(Some(SqlSessionCommand::SetVariable { .. })) => {
+        Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
             if session.failed {
                 return write_error_response(
                     stream,
                     "25P02",
                     "current transaction is aborted, commands ignored until end of transaction block",
                 );
+            }
+            let needle = name.trim().to_ascii_lowercase();
+            match needle.as_str() {
+                "search_path" => match value {
+                    SqlBoundExpression::Literal(SqlBoundLiteral::String(path)) => {
+                        session.search_path = path.clone();
+                    }
+                    _ => {
+                        session.fail();
+                        return write_error_response(
+                            stream,
+                            "22P02",
+                            &format!("invalid value for parameter \"search_path\": expected string literal"),
+                        );
+                    }
+                },
+                _ => {
+                    if pg_parameter(&name).is_none() {
+                        session.fail();
+                        return write_error_response(
+                            stream,
+                            "42704",
+                            &format!("unrecognized configuration parameter \"{name}\""),
+                        );
+                    }
+                    // 其他 PG_PARAMETERS 已知参数接受为 no-op（gateway 不模拟写入）
+                }
             }
             write_command_complete(stream, "SET")
         }
@@ -350,12 +386,19 @@ fn handle_simple_query(
                     "current transaction is aborted, commands ignored until end of transaction block",
                 );
             }
-            match pg_parameter(&name) {
+            let needle = name.trim().to_ascii_lowercase();
+            let value: Option<String> = if needle == "search_path" {
+                Some(session.search_path.clone())
+            }
+            else {
+                pg_parameter(&name).map(|s| s.to_string())
+            };
+            match value {
                 Some(value) => {
                     write_row_description(stream, &[SqlColumn { name: name.clone(), field_type: SqlFieldType::String }], &[0])?;
                     write_data_row(
                         stream,
-                        &[SqlValue::String(value.to_string())],
+                        &[SqlValue::String(value)],
                         &[SqlColumn { name: name.clone(), field_type: SqlFieldType::String }],
                         &[0],
                     )?;
