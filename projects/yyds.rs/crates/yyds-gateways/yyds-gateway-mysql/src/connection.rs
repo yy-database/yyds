@@ -15,7 +15,7 @@ use std::{
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
-    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
+    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundLiteral, SqlCatalog,
     SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
     SqlParameterStyle, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
@@ -144,10 +144,13 @@ fn normalize_session_boolean(sql: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{} {replacement}{terminator}", &statement[..=index]))
 }
 
-/// Whether a `SET` target names `autocommit`, including the `@@session.` form.
-fn is_autocommit_variable(name: &str) -> bool {
+/// Whether a `SET` target names a known MySQL session variable the gateway
+/// emulates via `MYSQL_VARIABLES`. Rejects unknown names with `1193` at the
+/// protocol layer instead of silently accepting them.
+fn is_known_mysql_variable(name: &str) -> bool {
     let bare = name.strip_prefix("@@").unwrap_or(name);
-    bare.rsplit('.').next().is_some_and(|variable| variable.eq_ignore_ascii_case("autocommit"))
+    let short = bare.rsplit('.').next().unwrap_or(bare);
+    MYSQL_VARIABLES.iter().any(|(key, _)| key.eq_ignore_ascii_case(short))
 }
 
 /// Performs a loopback-only unauthenticated startup and executes SQL against the provided runtime.
@@ -404,21 +407,22 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         write_result_set(&mut stream, sequence.wrapping_add(1), &result, &[], false)?;
                     }
                     Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
-                        // 引擎没有隐式事务：每条语句立即提交，因此 `autocommit=0` 会造成
-                        // 客户端误判事务边界，必须显式拒绝而不是静默接受。
-                        if is_autocommit_variable(&name) && !variable_truthy(&value) {
+                        // MySQL 只接受已知 session 变量；未知变量应返回 1193。
+                        if !is_known_mysql_variable(&name) {
                             session.fail();
                             write_error(
                                 &mut stream,
                                 sequence.wrapping_add(1),
-                                1235,
-                                "42000",
-                                "autocommit=0 is not supported: statements commit immediately",
+                                1193,
+                                "42S02",
+                                &format!("Unknown system variable '{name}'"),
                             )?;
+                            continue;
                         }
-                        else {
-                            write_ok(&mut stream, sequence.wrapping_add(1))?;
-                        }
+                        // autocommit=0 在 YYDS 上是空操作：引擎每条语句立即提交，
+                        // 没有隐式事务，因此接受但不记录 warning。
+                        let _ = value;
+                        write_ok(&mut stream, sequence.wrapping_add(1))?;
                     }
                     Ok(Some(SqlSessionCommand::ShowParameter { name, .. })) => {
                         session.fail();
@@ -1210,20 +1214,6 @@ fn like_matches(pattern: &str, value: &str) -> bool {
     walk(pattern.to_ascii_lowercase().as_bytes(), value.to_ascii_lowercase().as_bytes())
 }
 
-/// Whether a `SET` value means "on" in MySQL boolean spelling.
-fn variable_truthy(value: &SqlBoundExpression) -> bool {
-    fn word(text: &str) -> bool {
-        matches!(text.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes" | "default")
-    }
-    match value {
-        SqlBoundExpression::Literal(SqlBoundLiteral::Boolean(flag)) => *flag,
-        SqlBoundExpression::Literal(SqlBoundLiteral::Integer(number)) => *number != 0,
-        SqlBoundExpression::Literal(SqlBoundLiteral::Number(number)) => word(number),
-        SqlBoundExpression::Literal(SqlBoundLiteral::String(text)) => word(text),
-        SqlBoundExpression::Identifier(name) => word(name),
-        _ => true,
-    }
-}
 
 fn packet_error(error: PacketError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid MySQL packet: {error:?}"))
