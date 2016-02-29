@@ -423,12 +423,9 @@ fn session_variable_statements_report_gateway_capabilities() {
     client.write_all(&encode_packet(0, b"\x03SET autocommit = 1").unwrap()).unwrap();
     assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
 
-    // SET autocommit = 0 与引擎「语句立即提交」矛盾，必须显式拒绝
+    // SET autocommit = 0 — YYDS 每条语句立即提交，接受为 no-op
     client.write_all(&encode_packet(0, b"\x03SET autocommit = 0").unwrap()).unwrap();
-    let (sequence, error) = read_packet(&mut client);
-    assert_eq!(sequence, 1);
-    assert_eq!(error[0], 0xff);
-    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1235);
+    assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
 
     // PRAGMA 不是 MySQL 语法
     client.write_all(&encode_packet(0, b"\x03PRAGMA user_version").unwrap()).unwrap();

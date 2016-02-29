@@ -404,7 +404,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         }
                         let result =
                             SqlResult { columns: vec!["Variable_name".into(), "Value".into()], rows, affected_rows: 0 };
-                        write_result_set(&mut stream, sequence.wrapping_add(1), &result, &[], false)?;
+                        write_result_set(&mut stream, sequence.wrapping_add(1), &result, &[], &[false, false], false)?;
                     }
                     Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
                         // MySQL 只接受已知 session 变量；未知变量应返回 1193。
@@ -462,7 +462,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             continue;
                         }
                         match runtime.as_ref() {
-                            Some(rt) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, rt, &mut session, &[], false)?,
+                            Some(rt) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, rt, &mut session, &[], false, &[])?,
                             None => write_error(
                                 &mut stream,
                                 sequence.wrapping_add(1),
@@ -630,6 +630,7 @@ fn execute_sql(
     session: &mut MysqlTransactionSession,
     column_types: &[u8],
     binary_rows: bool,
+    column_nullables: &[bool],
 ) -> io::Result<()> {
     let bound = match bind_sql_catalog_with_variables(sql, &runtime.catalog, runtime.schema_version, &mysql_system_variable) {
         Ok(bound) => bound,
@@ -668,9 +669,12 @@ fn execute_sql(
     }
     // Text protocol (`COM_QUERY`) has no prepare-time description, so derive the
     // declared column types from the plan instead of guessing from row values.
-    let declared: Vec<u8> = describe_plan(&plan).iter().map(|column| mysql_field_type(&column.field_type)).collect();
-    let column_types = if column_types.is_empty() { &declared } else { column_types };
-    write_result_set(stream, sequence, &result, column_types, binary_rows)
+    let declared_columns = describe_plan(&plan);
+    let declared_types: Vec<u8> = declared_columns.iter().map(|column| mysql_field_type(&column.field_type)).collect();
+    let declared_nullables: Vec<bool> = declared_columns.iter().map(|column| column.field_type.is_nullable()).collect();
+    let column_types = if column_types.is_empty() { &declared_types } else { column_types };
+    let column_nullables = if column_nullables.is_empty() { &declared_nullables } else { column_nullables };
+    write_result_set(stream, sequence, &result, column_types, column_nullables, binary_rows)
 }
 
 /// Maps a structured gateway failure to its MySQL error number and SQLSTATE.
@@ -759,7 +763,7 @@ fn handle_prepare(
     let mut next = sequence.wrapping_add(1);
     if parameter_count > 0 {
         for _ in 0..parameter_count {
-            write_packet(stream, next, &encode_column_definition("?", MYSQL_TYPE_VAR_STRING))?;
+            write_packet(stream, next, &encode_column_definition("?", MYSQL_TYPE_VAR_STRING, false))?;
             next = next.wrapping_add(1);
         }
         write_eof(stream, next)?;
@@ -767,7 +771,11 @@ fn handle_prepare(
     }
     if !description.is_empty() {
         for column in &description {
-            write_packet(stream, next, &encode_column_definition(&column.name, mysql_field_type(&column.field_type)))?;
+            write_packet(
+                stream,
+                next,
+                &encode_column_definition(&column.name, mysql_field_type(&column.field_type), column.field_type.is_nullable()),
+            )?;
             next = next.wrapping_add(1);
         }
         write_eof(stream, next)?;
@@ -908,7 +916,8 @@ fn handle_execute(
         }
     };
     let column_types: Vec<u8> = description.iter().map(|column| mysql_field_type(&column.field_type)).collect();
-    execute_sql(stream, sequence, &rendered, runtime, session, &column_types, true)
+    let column_nullables: Vec<bool> = description.iter().map(|column| column.field_type.is_nullable()).collect();
+    execute_sql(stream, sequence, &rendered, runtime, session, &column_types, true, &column_nullables)
 }
 
 /// `COM_STMT_RESET` clears the cached parameter binding and returns OK.
@@ -1041,6 +1050,7 @@ fn write_result_set(
     mut sequence: u8,
     result: &SqlResult,
     column_types: &[u8],
+    column_nullables: &[bool],
     binary_rows: bool,
 ) -> io::Result<()> {
     // 包 1: column count
@@ -1053,7 +1063,8 @@ fn write_result_set(
     // 包 2..N: column definitions
     for (index, col) in result.columns.iter().enumerate() {
         let declared = column_types.get(index).copied();
-        let def = encode_column_definition(col, declared.unwrap_or_else(|| column_type(&result.rows, index)));
+        let nullable = column_nullables.get(index).copied().unwrap_or(true);
+        let def = encode_column_definition(col, declared.unwrap_or_else(|| column_type(&result.rows, index)), nullable);
         write_packet(stream, sequence, &def)?;
         sequence = sequence.wrapping_add(1);
     }
@@ -1129,7 +1140,8 @@ fn column_type(rows: &[Vec<SqlValue>], index: usize) -> u8 {
         .unwrap_or(MYSQL_TYPE_VAR_STRING)
 }
 
-fn encode_column_definition(name: &str, column_type: u8) -> Vec<u8> {
+/// MySQL wire protocol ColumnDefinition 编码。`NOT_NULL = 0x0002` 在列不可空时设置。
+fn encode_column_definition(name: &str, column_type: u8, nullable: bool) -> Vec<u8> {
     let mut out = Vec::new();
     encode_length_encoded(&mut out, b"def".len() as u64);
     out.extend_from_slice(b"def");
@@ -1143,7 +1155,8 @@ fn encode_column_definition(name: &str, column_type: u8) -> Vec<u8> {
     out.extend_from_slice(&0x000C_u16.to_le_bytes()); // charset = utf8_bin
     out.extend_from_slice(&255_u32.to_le_bytes()); // column_length
     out.push(column_type);
-    out.extend_from_slice(&0_u16.to_le_bytes()); // flags
+    let flags: u16 = if !nullable { 0x0002 } else { 0 };
+    out.extend_from_slice(&flags.to_le_bytes());
     out.push(if column_type == MYSQL_TYPE_DOUBLE { 31 } else { 0 }); // decimals
     out.extend_from_slice(&[0u8; 2]); // filler
     out
