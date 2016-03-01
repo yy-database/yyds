@@ -301,3 +301,51 @@ fn sql_conformance_transaction_commit_and_rollback() {
         ])
     );
 }
+
+/// MySQL `/ 0` 与 `% 0` 返回 NULL 值（wire 层另上报 1365 + 22012）。
+/// PostgreSQL `/ 0` 与 `% 0` 抛 DivisionByZero 错误。
+#[test]
+fn sql_division_by_zero_is_dialect_aware() {
+    use Lit::Null;
+
+    let mysql = Fixture::with_dialect(SqlDialect::Mysql);
+    let mysql_vals = |sql: &str| {
+        mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows
+    };
+    assert_eq!(mysql_vals("SELECT 1/0"), rows(&[&[Null]]));
+    assert_eq!(mysql_vals("SELECT 0/0"), rows(&[&[Null]]));
+    assert_eq!(mysql_vals("SELECT 10 % 0"), rows(&[&[Null]]));
+    assert_eq!(mysql_vals("SELECT 3.14 / 0"), rows(&[&[Null]]));
+    assert_eq!(mysql_vals("SELECT 3.14 % 0"), rows(&[&[Null]]));
+
+    let pg = Fixture::with_dialect(SqlDialect::Postgres);
+    for sql in ["SELECT 1/0", "SELECT 0/0", "SELECT 10 % 0", "SELECT 3.14 / 0", "SELECT 3.14 % 0"] {
+        let result = pg.execute(None, sql).expect_err(sql);
+        assert!(
+            result.contains("division by zero"),
+            "`{sql}` under PostgreSQL must surface the division-by-zero reason got: {result}"
+        );
+    }
+}
+
+/// 普通除法与模运算走方言正确分支：MySQL 整数除法返回浮点，PostgreSQL 整数除法截断。
+#[test]
+fn sql_division_and_modulo_keep_dialect_defaults() {
+    use Lit::{Float, Int};
+
+    let mysql = Fixture::with_dialect(SqlDialect::Mysql);
+    let mysql_vals = |sql: &str| {
+        mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows
+    };
+    assert_eq!(mysql_vals("SELECT 7 / 2"), rows(&[&[Float(3.5)]]));
+    assert_eq!(mysql_vals("SELECT 7 % 2"), rows(&[&[Int(1)]]));
+    assert_eq!(mysql_vals("SELECT -7 % 2"), rows(&[&[Int(-1)]]));
+    assert_eq!(mysql_vals("SELECT 7.0 / 2"), rows(&[&[Float(3.5)]]));
+
+    let pg = Fixture::with_dialect(SqlDialect::Postgres);
+    let pg_vals = |sql: &str| pg.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under Postgres: {error}")).rows;
+    assert_eq!(pg_vals("SELECT 7 / 2"), rows(&[&[Int(3)]]));
+    assert_eq!(pg_vals("SELECT 7 % 2"), rows(&[&[Int(1)]]));
+    assert_eq!(pg_vals("SELECT -7 % 2"), rows(&[&[Int(-1)]]));
+    assert_eq!(pg_vals("SELECT 7.0 / 2"), rows(&[&[Float(3.5)]]));
+}
