@@ -1165,6 +1165,7 @@ fn column_type(rows: &[Vec<SqlValue>], index: usize) -> u8 {
 }
 
 /// MySQL wire protocol ColumnDefinition 编码。`NOT_NULL = 0x0002` 在列不可空时设置。
+/// TINY 列的 column_length 设置为 1，等价于 TINYINT(1)，驱动程序据此把 BOOLEAN 当成 0/1。
 fn encode_column_definition(name: &str, column_type: u8, nullable: bool) -> Vec<u8> {
     let mut out = Vec::new();
     encode_length_encoded(&mut out, b"def".len() as u64);
@@ -1177,7 +1178,8 @@ fn encode_column_definition(name: &str, column_type: u8, nullable: bool) -> Vec<
     encode_length_encoded(&mut out, 0); // org_name
     out.push(0x0C); // fixed length
     out.extend_from_slice(&0x000C_u16.to_le_bytes()); // charset = utf8_bin
-    out.extend_from_slice(&255_u32.to_le_bytes()); // column_length
+    let column_length: u32 = if column_type == MYSQL_TYPE_TINY { 1 } else { 255 };
+    out.extend_from_slice(&column_length.to_le_bytes());
     out.push(column_type);
     let flags: u16 = if !nullable { 0x0002 } else { 0 };
     out.extend_from_slice(&flags.to_le_bytes());
