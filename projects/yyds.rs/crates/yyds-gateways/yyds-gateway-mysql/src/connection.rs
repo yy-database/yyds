@@ -27,6 +27,8 @@ const SERVER_CAPABILITIES: u32 =
 const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
 const CLIENT_SSL: u32 = 0x0000_0800;
 const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
+const SERVER_STATUS_AUTOCOMMIT: u16 = 0x0002;
 const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
 const CLIENT_PLUGIN_AUTH_LENENC: u32 = 0x0020_0000;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
@@ -200,6 +202,13 @@ impl MysqlTransactionSession {
             self.failed = true;
         }
     }
+
+    /// MySQL server-status flags for the current OK / EOF response.
+    /// In YYDS the implicit autocommit is always on (each statement commits by itself);
+    /// an explicit `BEGIN` flips the status to `IN_TRANS` until `COMMIT` or `ROLLBACK`.
+    fn status_flags(&self) -> u16 {
+        if self.handle.is_some() { SERVER_STATUS_IN_TRANS } else { SERVER_STATUS_AUTOCOMMIT }
+    }
 }
 
 impl Default for MysqlTransactionSession {
@@ -260,7 +269,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
         write_error(&mut stream, 2, 1045, "28000", "access denied: loopback accepts only an empty password")?;
         return Ok(());
     }
-    write_ok(&mut stream, 2)?;
+    write_ok(&mut stream, 2, SERVER_STATUS_AUTOCOMMIT)?;
 
     loop {
         let Some((sequence, payload)) = read_packet(&mut stream)?
@@ -280,7 +289,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
             // Drivers issue COM_PING to prove liveness before creating a cursor
             // and COM_INIT_DB when switching schema. The gateway keeps a single
             // catalog, so both are answered with the protocol OK packet.
-            COM_PING | COM_INIT_DB => write_ok(&mut stream, sequence.wrapping_add(1))?,
+            COM_PING | COM_INIT_DB => write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?,
             COM_STMT_PREPARE => handle_prepare(
                 &mut stream,
                 sequence.wrapping_add(1),
@@ -302,7 +311,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                     statements.entries.remove(&id);
                 }
             }
-            COM_STMT_RESET => handle_reset(&mut stream, sequence.wrapping_add(1), &payload, &statements)?,
+            COM_STMT_RESET => handle_reset(&mut stream, sequence.wrapping_add(1), &payload, &statements, session.status_flags())?,
             COM_QUERY => {
                 let sql = match std::str::from_utf8(&payload[1..]) {
                     Ok(sql) => sql,
@@ -322,7 +331,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             .as_deref()
                             .is_none_or(|collation| collation.eq_ignore_ascii_case("utf8mb4_general_ci")) =>
                     {
-                        write_ok(&mut stream, sequence.wrapping_add(1))?;
+                        write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
                     }
                     Ok(Some(SqlSessionCommand::SetNames { .. })) => {
                         write_error(&mut stream, sequence.wrapping_add(1), 1273, "HY000", "unsupported utf8mb4 collation")?;
@@ -348,7 +357,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             session.executor = Some(executor);
                             session.handle = Some(Box::new(handle));
                             session.failed = false;
-                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_IN_TRANS)?;
                         }
                         SqlTransactionAction::Commit if session.failed => {
                             if let Some(handle) = session.handle.take() {
@@ -356,7 +365,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             }
                             session.executor = None;
                             session.failed = false;
-                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?;
                         }
                         SqlTransactionAction::Commit => {
                             let mut commit_error = None;
@@ -383,7 +392,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                                     "HY000",
                                     &format!("COMMIT failed: {err}"),
                                 )?,
-                                None => write_ok(&mut stream, sequence.wrapping_add(1))?,
+                                None => write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?,
                             }
                         }
                         SqlTransactionAction::Rollback => {
@@ -392,7 +401,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             }
                             session.executor = None;
                             session.failed = false;
-                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?;
                         }
                     },
                     Ok(Some(SqlSessionCommand::ShowVariables { pattern, .. })) => {
@@ -404,7 +413,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         }
                         let result =
                             SqlResult { columns: vec!["Variable_name".into(), "Value".into()], rows, affected_rows: 0 };
-                        write_result_set(&mut stream, sequence.wrapping_add(1), &result, &[], &[false, false], false)?;
+                        write_result_set(&mut stream, sequence.wrapping_add(1), &result, &[], &[false, false], false, session.status_flags())?;
                     }
                     Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
                         // MySQL 只接受已知 session 变量；未知变量应返回 1193。
@@ -422,7 +431,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         // autocommit=0 在 YYDS 上是空操作：引擎每条语句立即提交，
                         // 没有隐式事务，因此接受但不记录 warning。
                         let _ = value;
-                        write_ok(&mut stream, sequence.wrapping_add(1))?;
+                        write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
                     }
                     Ok(Some(SqlSessionCommand::ShowParameter { name, .. })) => {
                         session.fail();
@@ -604,8 +613,15 @@ fn write_packet(stream: &mut impl Write, sequence: u8, payload: &[u8]) -> io::Re
     stream.write_all(&packet)
 }
 
-fn write_ok(stream: &mut impl Write, sequence: u8) -> io::Result<()> {
-    write_packet(stream, sequence, &[0, 0, 0, 2, 0, 0, 0])
+fn write_ok(stream: &mut impl Write, sequence: u8, status_flags: u16) -> io::Result<()> {
+    // OK identifier + affected_rows (length-encoded 0) + last_insert_id (length-encoded 0) + status_flags + warnings
+    let mut payload = Vec::with_capacity(9);
+    payload.push(0x00);
+    payload.push(0x00); // affected_rows = 0
+    payload.push(0x00); // last_insert_id = 0
+    payload.extend_from_slice(&status_flags.to_le_bytes());
+    payload.extend_from_slice(&0_u16.to_le_bytes());
+    write_packet(stream, sequence, &payload)
 }
 
 fn write_error(stream: &mut impl Write, sequence: u8, code: u16, state: &str, message: &str) -> io::Result<()> {
@@ -664,7 +680,7 @@ fn execute_sql(
         }
     };
     if is_write {
-        write_ok_with_affected(stream, sequence, result.affected_rows)?;
+        write_ok_with_affected(stream, sequence, result.affected_rows, session.status_flags())?;
         return Ok(());
     }
     // Text protocol (`COM_QUERY`) has no prepare-time description, so derive the
@@ -674,7 +690,7 @@ fn execute_sql(
     let declared_nullables: Vec<bool> = declared_columns.iter().map(|column| column.field_type.is_nullable()).collect();
     let column_types = if column_types.is_empty() { &declared_types } else { column_types };
     let column_nullables = if column_nullables.is_empty() { &declared_nullables } else { column_nullables };
-    write_result_set(stream, sequence, &result, column_types, column_nullables, binary_rows)
+    write_result_set(stream, sequence, &result, column_types, column_nullables, binary_rows, session.status_flags())
 }
 
 /// Maps a structured gateway failure to its MySQL error number and SQLSTATE.
@@ -766,7 +782,7 @@ fn handle_prepare(
             write_packet(stream, next, &encode_column_definition("?", MYSQL_TYPE_VAR_STRING, false))?;
             next = next.wrapping_add(1);
         }
-        write_eof(stream, next)?;
+        write_eof(stream, next, session.status_flags())?;
         next = next.wrapping_add(1);
     }
     if !description.is_empty() {
@@ -778,7 +794,7 @@ fn handle_prepare(
             )?;
             next = next.wrapping_add(1);
         }
-        write_eof(stream, next)?;
+        write_eof(stream, next, session.status_flags())?;
     }
     statements
         .entries
@@ -921,13 +937,19 @@ fn handle_execute(
 }
 
 /// `COM_STMT_RESET` clears the cached parameter binding and returns OK.
-fn handle_reset(stream: &mut impl Write, sequence: u8, payload: &[u8], statements: &PreparedStatements) -> io::Result<()> {
+fn handle_reset(
+    stream: &mut impl Write,
+    sequence: u8,
+    payload: &[u8],
+    statements: &PreparedStatements,
+    status_flags: u16,
+) -> io::Result<()> {
     let Some(statement_id) = take_u32(&payload[1..])
     else {
         return write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_RESET command");
     };
     if statements.entries.contains_key(&statement_id) {
-        write_ok(stream, sequence)
+        write_ok(stream, sequence, status_flags)
     }
     else {
         write_error(stream, sequence, 1243, "HY000", &format!("Unknown prepared statement handler ({statement_id})"))
@@ -1035,12 +1057,13 @@ fn mysql_field_type(field_type: &SqlFieldType) -> u8 {
 }
 
 /// 带 affected_rows 的 MySQL OK packet（INSERT/UPDATE/DELETE）。
-fn write_ok_with_affected(stream: &mut impl Write, sequence: u8, affected: u64) -> io::Result<()> {
-    let mut payload = Vec::with_capacity(11);
+fn write_ok_with_affected(stream: &mut impl Write, sequence: u8, affected: u64, status_flags: u16) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(13);
     payload.push(0x00); // OK identifier
     encode_length_encoded(&mut payload, affected);
-    payload.extend_from_slice(&0_u64.to_le_bytes()); // last_insert_id = 0
-    payload.extend_from_slice(&0x0002_u16.to_le_bytes()); // status flags (AUTOCOMMIT)
+    encode_length_encoded(&mut payload, 0); // last_insert_id = 0
+    payload.extend_from_slice(&status_flags.to_le_bytes());
+    payload.extend_from_slice(&0_u16.to_le_bytes()); // warnings = 0
     write_packet(stream, sequence, &payload)
 }
 
@@ -1052,6 +1075,7 @@ fn write_result_set(
     column_types: &[u8],
     column_nullables: &[bool],
     binary_rows: bool,
+    status_flags: u16,
 ) -> io::Result<()> {
     // 包 1: column count
     let count = result.columns.len();
@@ -1070,7 +1094,7 @@ fn write_result_set(
     }
 
     // EOF after columns
-    write_eof(stream, sequence)?;
+    write_eof(stream, sequence, status_flags)?;
     sequence = sequence.wrapping_add(1);
 
     // Row packets
@@ -1090,7 +1114,7 @@ fn write_result_set(
     }
 
     // EOF after rows
-    write_eof(stream, sequence)
+    write_eof(stream, sequence, status_flags)
 }
 
 /// 按列声明类型把一行编码成 MySQL binary protocol row（prepared statement 结果）。
@@ -1206,9 +1230,11 @@ fn encode_length_encoded(out: &mut Vec<u8>, value: u64) {
     }
 }
 
-fn write_eof(stream: &mut impl Write, sequence: u8) -> io::Result<()> {
-    // 简化 EOF packet: 0xFE + 0x0000 (warnings) + 0x0200 (status: SERVER_STATUS_AUTOCOMMIT)
-    write_packet(stream, sequence, &[0xFE, 0x00, 0x00, 0x02, 0x00])
+fn write_eof(stream: &mut impl Write, sequence: u8, status_flags: u16) -> io::Result<()> {
+    // 简化 EOF packet: 0xFE + 0x0000 (warnings) + status_flags
+    let mut payload = [0xFE, 0x00, 0x00, 0x00, 0x00];
+    payload[3..].copy_from_slice(&status_flags.to_le_bytes());
+    write_packet(stream, sequence, &payload)
 }
 
 /// MySQL `LIKE` matching for `SHOW VARIABLES LIKE 'pattern'` — `%` matches any
