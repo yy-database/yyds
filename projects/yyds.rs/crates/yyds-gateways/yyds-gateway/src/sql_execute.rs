@@ -319,6 +319,7 @@ pub fn execute_plan(
         SqlExecutionPlan::Join(join_plan) => execute_join(executor, transaction, join_plan, dialect),
         SqlExecutionPlan::Scalar(scalar_plan) => execute_scalar(scalar_plan, dialect),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan, dialect),
+        SqlExecutionPlan::MultiInsert(write_plans) => execute_multi_insert(executor, transaction, write_plans, dialect),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan, dialect),
         SqlExecutionPlan::UpdateScan(update_plan) => execute_update_scan(executor, transaction, update_plan, dialect),
         SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, transaction, delete_plan, dialect),
@@ -377,7 +378,7 @@ fn resolve_subqueries(
                 lower_in_place(expression, executor, transaction, dialect)?;
             }
         }
-        SqlExecutionPlan::Insert(_) => {}
+        SqlExecutionPlan::Insert(_) | SqlExecutionPlan::MultiInsert(_) => {}
         SqlExecutionPlan::Update(plan) => {
             lower_optional(&mut plan.remaining_predicate, executor, transaction, dialect)?;
         }
@@ -538,10 +539,9 @@ fn execute_read(
     Ok(SqlResult { columns, rows: vec![row_values], affected_rows: 0 })
 }
 
-/// 执行一个多表内连接计划：每个来源先整表扫描，再按 JOIN 顺序做嵌套循环合并。
+/// 执行一个多表 JOIN 计划：每个来源先整表扫描，再按 JOIN 顺序做嵌套循环合并。
 ///
-/// 合并后的行同时携带两侧表的字段（field_id 全局唯一），因此投影 / WHERE /
-/// ORDER BY 全部复用单表路径的 `eval_expression`。
+/// INNER JOIN 只保留两侧匹配的组合；LEFT JOIN 额外保留左侧未匹配行（右侧字段缺失 → NULL）。
 fn execute_join(
     executor: &dyn KeyValueExecutor,
     transaction: Option<&dyn TransactionHandle>,
@@ -555,17 +555,24 @@ fn execute_join(
     let mut rows = scan_join_source(executor, transaction, &plan.base)?;
     for source in &plan.joins {
         let right_rows = scan_join_source(executor, transaction, source)?;
+        let is_left = matches!(source.kind, crate::sql::SqlBoundJoinKind::Left);
         let mut merged = Vec::new();
         for left in &rows {
+            let mut matched_any = false;
             for right in &right_rows {
                 let mut row = left.clone();
                 row.merge(right);
                 if let Some(on) = &source.on {
-                    if !truthy(&eval_expression(on, &row,&plan.field_types, dialect)?) {
+                    if !truthy(&eval_expression(on, &row, &plan.field_types, dialect)?) {
                         continue;
                     }
                 }
                 merged.push(row);
+                matched_any = true;
+            }
+            if is_left && !matched_any {
+                // LEFT JOIN: 左行未匹配任何右行时仍然保留，右表字段缺失 → NULL
+                merged.push(left.clone());
             }
         }
         rows = merged;
@@ -981,6 +988,20 @@ fn execute_insert(
         _ => 0,
     };
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
+}
+
+fn execute_multi_insert(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plans: &[WritePlan],
+    dialect: SqlDialect,
+) -> Result<SqlResult, SqlFrontendError> {
+    let mut total_affected = 0u64;
+    for plan in plans {
+        let single = execute_insert(executor, transaction, plan, dialect)?;
+        total_affected = total_affected.saturating_add(single.affected_rows);
+    }
+    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: total_affected })
 }
 
 fn execute_update(

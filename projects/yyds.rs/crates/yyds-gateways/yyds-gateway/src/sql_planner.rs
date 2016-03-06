@@ -241,10 +241,10 @@ fn plan_join_select(
 
     // 3. 每个来源只解码自己表的字段。
     let mut field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> = std::collections::BTreeMap::new();
-    let base = join_source_plan(base, None, catalog, &needed, &mut field_types)?;
+    let base = join_source_plan(base, None, crate::sql::SqlBoundJoinKind::Inner, catalog, &needed, &mut field_types)?;
     let mut join_sources = Vec::with_capacity(joins.len());
     for join in joins {
-        join_sources.push(join_source_plan(join.table, Some(join.on), catalog, &needed, &mut field_types)?);
+        join_sources.push(join_source_plan(join.table, Some(join.on), join.kind, catalog, &needed, &mut field_types)?);
     }
 
     Ok(SqlExecutionPlan::Join(JoinPlan {
@@ -267,6 +267,7 @@ fn plan_join_select(
 fn join_source_plan(
     table: SqlCatalogBoundTable,
     on: Option<SqlCatalogBoundExpression>,
+    kind: crate::sql::SqlBoundJoinKind,
     catalog: &SqlCatalog,
     needed: &[u64],
     field_types: &mut std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
@@ -279,7 +280,7 @@ fn join_source_plan(
             needed_field_ids.push(field.field_id);
         }
     }
-    Ok(JoinSourcePlan { namespace: format!("table:{}", catalog_table.type_id), needed_field_ids, on })
+    Ok(JoinSourcePlan { namespace: format!("table:{}", catalog_table.type_id), needed_field_ids, on, kind })
 }
 
 /// 计划一个没有 FROM 的 SELECT：只允许常量与内建函数，不访问任何 namespace。
@@ -313,27 +314,40 @@ fn plan_source_less_select(select: SqlCatalogBoundSelect) -> Result<SqlExecution
     Ok(SqlExecutionPlan::Scalar(ScalarPlan { projections, suppress_row }))
 }
 
-/// 计划一个 INSERT。要求 VALUES 里第一个值是主键 literal。
+/// 计划一个 INSERT。每行 VALUES 要求第一个值是主键 literal。多行 VALUES 会产出
+/// `SqlExecutionPlan::MultiInsert`，单行保持 `SqlExecutionPlan::Insert`。
 pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, insert.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
         table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
-    let pk_bound = insert.fields.first().ok_or_else(|| planner_error("INSERT has no fields"))?;
-    let pk_value = insert.values.first().ok_or_else(|| planner_error("INSERT has no values"))?;
-    let rowid = literal_from_expression(pk_value)?;
-    let rowid_bytes = pk_literal_to_rowid(&rowid)?;
+    let mut plans = Vec::with_capacity(insert.rows.len());
+    for row_values in insert.rows {
+        let pk_value = row_values.first().ok_or_else(|| planner_error("INSERT row has no values"))?;
+        let rowid = literal_from_expression(pk_value)?;
+        let rowid_bytes = pk_literal_to_rowid(&rowid)?;
 
-    let mut write_fields = Vec::with_capacity(insert.fields.len());
-    for (field, value) in insert.fields.iter().zip(insert.values.iter()) {
-        let lit = literal_from_expression(value)?;
-        let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
-        check_write_literal(&lit, &field_type, &field.field_name)?;
-        write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
-        let _ = pk_bound;
+        let mut write_fields = Vec::with_capacity(insert.fields.len());
+        for (field, value) in insert.fields.iter().zip(row_values.iter()) {
+            let lit = literal_from_expression(value)?;
+            let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+            check_write_literal(&lit, &field_type, &field.field_name)?;
+            write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
+        }
+        plans.push(WritePlan {
+            namespace: namespace.clone(),
+            rowid: rowid_bytes,
+            fields: write_fields,
+            field_types: field_types.clone(),
+        });
     }
-    Ok(SqlExecutionPlan::Insert(WritePlan { namespace, rowid: rowid_bytes, fields: write_fields, field_types }))
+    if plans.len() == 1 {
+        Ok(SqlExecutionPlan::Insert(plans.into_iter().next().unwrap()))
+    }
+    else {
+        Ok(SqlExecutionPlan::MultiInsert(plans))
+    }
 }
 
 /// 计划一个 UPDATE。`pk = literal` 走单点路径；其他 WHERE 都退化为范围扫描逐行改写。
@@ -496,6 +510,8 @@ pub enum SqlExecutionPlan {
     Scalar(ScalarPlan),
     /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
     Insert(WritePlan),
+    /// 多行 INSERT — 依次 PutIfAbsent。
+    MultiInsert(Vec<WritePlan>),
     /// UPDATE — 先 Get 再 remaining_predicate 再 Put。
     Update(UpdatePlan),
     /// UPDATE — 扫描匹配行后逐行改写。
@@ -606,6 +622,8 @@ pub struct JoinSourcePlan {
     pub needed_field_ids: Vec<u64>,
     /// 该来源的 ON 条件；基表为 `None`。
     pub on: Option<SqlCatalogBoundExpression>,
+    /// 基表为 `Inner`；连接表可为 `Inner` 或 `Left`。
+    pub kind: crate::sql::SqlBoundJoinKind,
 }
 
 /// SELECT without FROM 执行计划：纯常量与标量内建函数求值，产出单行结果。

@@ -318,8 +318,8 @@ pub struct SqlCatalogBoundInsert {
     pub table: SqlCatalogBoundTable,
     /// Catalog fields in the order VALUES supplies them.
     pub fields: Vec<SqlCatalogBoundColumn>,
-    /// Bound value expressions in the same order as `fields`.
-    pub values: Vec<SqlCatalogBoundExpression>,
+    /// Bound value expressions grouped by row. Every inner vec has length `fields.len()`.
+    pub rows: Vec<Vec<SqlCatalogBoundExpression>>,
 }
 
 /// SQL UPDATE request after catalog binding.
@@ -428,16 +428,31 @@ fn bind_insert(
                 .collect()
         }
     };
-    if bound_fields.len() != insert.values.len() {
+    let field_count = bound_fields.len();
+    if field_count == 0 {
+        return Err(SqlFrontendError::syntax("INSERT has no target columns".to_string()));
+    }
+    let flat: Vec<SqlBoundExpression> = insert.rows.into_iter().flatten().collect();
+    if flat.len() % field_count != 0 {
         return Err(SqlFrontendError::syntax(format!(
-            "INSERT column/value count mismatch: {} columns, {} values",
-            bound_fields.len(),
-            insert.values.len()
+            "INSERT column/value count mismatch: {} columns, {} values (not divisible)",
+            field_count,
+            flat.len()
         )));
     }
-    let values =
-        insert.values.into_iter().map(|v| bind_expression(v, &source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
-    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, values })
+    let row_count = flat.len() / field_count;
+    if row_count == 0 {
+        return Err(SqlFrontendError::syntax("INSERT has no VALUES".to_string()));
+    }
+    let mut rows = Vec::with_capacity(row_count);
+    for chunk in flat.chunks(field_count) {
+        let bound_row = chunk
+            .iter()
+            .map(|v| bind_expression(v.clone(), &source, catalog, variables))
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.push(bound_row);
+    }
+    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows })
 }
 
 fn bind_update(
@@ -481,8 +496,14 @@ fn bind_select(
     let mut sources: Vec<SqlCatalogBoundTable> = source.iter().cloned().collect();
     let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
     for join in select.joins {
-        if join.kind != SqlBoundJoinKind::Inner {
-            return Err(SqlFrontendError::unsupported("SQL gateway supports INNER JOIN only"));
+        match join.kind {
+            SqlBoundJoinKind::Inner | SqlBoundJoinKind::Left => {}
+            SqlBoundJoinKind::Right => {
+                return Err(SqlFrontendError::unsupported("SQL gateway does not support RIGHT JOIN yet"));
+            }
+            SqlBoundJoinKind::Full => {
+                return Err(SqlFrontendError::unsupported("SQL gateway does not support FULL JOIN yet"));
+            }
         }
         let table = find_table(catalog, &join.table)?;
         if sources.iter().any(|visible| visible.type_id == table.type_id) {

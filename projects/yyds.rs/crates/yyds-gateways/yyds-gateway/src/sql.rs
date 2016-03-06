@@ -362,8 +362,8 @@ pub struct SqlBoundInsert {
     pub table: String,
     /// Optional explicit column list. When absent the catalog will infer order.
     pub columns: Option<Vec<String>>,
-    /// Values to insert, in column-list order (or catalog order when no columns).
-    pub values: Vec<SqlBoundExpression>,
+    /// Bound values grouped by row.
+    pub rows: Vec<Vec<SqlBoundExpression>>,
 }
 
 /// SQL UPDATE request owned by the compatibility gateway.
@@ -621,17 +621,34 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     match &root.statements[0] {
         SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(select)?)),
         SqlStatement::Insert(insert) => {
-            let columns = if insert.columns.is_empty() {
+            let columns: Option<Vec<String>> = if insert.columns.is_empty() {
                 None
             }
             else {
                 Some(insert.columns.iter().map(|id| normalize_identifier(id.name.as_ref())).collect())
             };
-            let values = insert.values.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
+            let flat_values = insert.values.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
+            let rows = if let Some(cols) = &columns {
+                let n = cols.len();
+                if n == 0 {
+                    return Err(bind_error("INSERT has no columns"));
+                }
+                if flat_values.len() % n != 0 {
+                    return Err(bind_error(&format!(
+                        "INSERT column/value count mismatch: {} columns, {} values (not divisible)",
+                        n,
+                        flat_values.len()
+                    )));
+                }
+                flat_values.chunks(n).map(|chunk| chunk.to_vec()).collect()
+            }
+            else {
+                vec![flat_values]
+            };
             Ok(SqlBoundStatement::Insert(SqlBoundInsert {
                 table: normalize_identifier(insert.table_name.name.name.as_ref()),
                 columns,
-                values,
+                rows,
             }))
         }
         SqlStatement::Update(update) => {

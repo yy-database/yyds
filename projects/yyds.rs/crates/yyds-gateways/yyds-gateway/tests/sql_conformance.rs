@@ -302,6 +302,33 @@ fn sql_conformance_transaction_commit_and_rollback() {
     );
 }
 
+#[test]
+fn sql_multi_row_insert_values_are_split_and_executed_together() {
+    use Lit::{Int, Text};
+
+    let fixture = Fixture::new();
+    let result = fixture
+        .execute(
+            None,
+            "INSERT INTO users VALUES (101, 'ana', 31, 1.0, TRUE, 'x'), (102, 'bob2', 32, 2.0, FALSE, NULL), (103, 'carol2', 33, 3.0, TRUE, '')",
+        )
+        .expect("multi-row insert");
+    assert_eq!(result.affected_rows, 3, "multi-row insert must affect 3 rows");
+
+    let count = fixture.execute(None, "SELECT COUNT(*) FROM users").expect("count after insert");
+    assert_eq!(count.rows, rows(&[&[Int(3)]]), "three rows must be visible");
+
+    let all = fixture.execute(None, "SELECT id, name FROM users ORDER BY id").expect("ordered rows");
+    assert_eq!(
+        all.rows,
+        rows(&[
+            &[Int(101), Text("ana")],
+            &[Int(102), Text("bob2")],
+            &[Int(103), Text("carol2")],
+        ])
+    );
+}
+
 /// MySQL `/ 0` 与 `% 0` 返回 NULL 值（wire 层另上报 1365 + 22012）。
 /// PostgreSQL `/ 0` 与 `% 0` 抛 DivisionByZero 错误。
 #[test]
