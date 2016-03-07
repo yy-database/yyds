@@ -1811,6 +1811,36 @@ fn sql_inner_join_without_matching_rows_returns_empty() {
 }
 
 #[test]
+fn sql_left_join_preserves_unmatched_left_rows() {
+    let (catalog, executor) = join_fixture();
+
+    // 所有左行都匹配时，LEFT JOIN 与 INNER JOIN 等价。
+    let sql = "SELECT users.name, orders.total FROM users LEFT JOIN orders ON users.id = orders.user_id ORDER BY orders.total";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Join(_)));
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(result.rows.len(), 3, "two users match three orders");
+
+    // ON 条件永远不命中：每个左行保留，右列全部 NULL。
+    let sql = "SELECT users.name, orders.total FROM users LEFT JOIN orders ON 1 = 0";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(result.rows.len(), 2, "both users must appear even with zero right matches");
+    for row in &result.rows {
+        assert_eq!(row[1], yyds_gateway::SqlValue::Null, "right side should be NULL on unmatched left row");
+    }
+
+    // 与 INNER JOIN 对比：同 ON 条件下 INNER JOIN 返回空集。
+    let sql_inner = "SELECT users.name FROM users JOIN orders ON 1 = 0";
+    let bound = yyds_gateway::bind_sql_catalog(sql_inner, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let inner_result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert!(inner_result.rows.is_empty(), "inner join with never-match ON must be empty");
+}
+
+#[test]
 fn sql_join_rejects_ambiguous_unqualified_columns() {
     let (catalog, _executor) = join_fixture();
 
@@ -1830,13 +1860,37 @@ fn sql_join_rejects_ambiguous_unqualified_columns() {
 fn sql_join_rejects_outer_join_aggregates_and_self_join() {
     let (catalog, _executor) = join_fixture();
 
-    let outer = yyds_gateway::bind_sql_catalog(
+    // RIGHT JOIN 继续被拒绝（尚未实现）。
+    let right = yyds_gateway::bind_sql_catalog(
+        "SELECT users.name FROM users RIGHT JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+    )
+    .expect_err("right join");
+    assert!(right.message.contains("RIGHT JOIN"), "{}", right.message);
+
+    // FULL JOIN 继续被拒绝（尚未实现）。
+    let full = yyds_gateway::bind_sql_catalog(
+        "SELECT users.name FROM users FULL JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+    )
+    .expect_err("full join");
+    assert!(full.message.contains("FULL JOIN"), "{}", full.message);
+
+    // LEFT JOIN 现已支持，bind 层应通过。
+    let left = yyds_gateway::bind_sql_catalog(
         "SELECT users.name FROM users LEFT JOIN orders ON users.id = orders.user_id",
         &catalog,
         7,
     )
-    .expect_err("left join");
-    assert!(outer.message.contains("INNER JOIN only"), "{}", outer.message);
+    .expect("left join should bind");
+    if let yyds_gateway::SqlCatalogBoundStatement::Select(sel) = &left {
+        assert!(matches!(sel.joins[0].kind, yyds_gateway::SqlBoundJoinKind::Left));
+    }
+    else {
+        panic!("expected Select statement");
+    }
 
     let self_join =
         yyds_gateway::bind_sql_catalog("SELECT users.name FROM users JOIN users ON users.id = users.id", &catalog, 7)
