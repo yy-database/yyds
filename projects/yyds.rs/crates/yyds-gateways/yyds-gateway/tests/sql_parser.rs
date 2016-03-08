@@ -55,7 +55,6 @@ fn unsupported_upstream_forms_are_rejected_explicitly() {
     use yyds_gateway::bind_sql;
 
     for sql in [
-        "SELECT COUNT(DISTINCT age) FROM users",
         "SELECT DISTINCT ON (age) id FROM users",
         "SELECT age FROM users GROUP BY GROUPING SETS ((age))",
         "SELECT age FROM users GROUP BY ROLLUP(age)",
@@ -96,8 +95,10 @@ fn select_distinct_modifier_is_bound() {
         panic!("expected IN (SELECT ...) predicate")
     };
     assert!(select.distinct);
-    // `DISTINCT` other than the leading SELECT quantifier has no gateway semantics.
-    assert!(bind_sql("SELECT COUNT(DISTINCT id) FROM users").is_err());
+    // `COUNT(DISTINCT ...)` 现已在网关绑定期通过。
+    let r = bind_sql("SELECT COUNT(DISTINCT id) FROM users");
+    assert!(r.is_ok(), "expected COUNT(DISTINCT) to bind");
+    // `DISTINCT ON` 仍然不被支持。
     assert!(bind_sql("SELECT DISTINCT ON (id) id FROM users").is_err());
 }
 

@@ -441,6 +441,8 @@ pub enum SqlBoundExpression {
         name: String,
         /// Bound argument expressions.
         args: Vec<SqlBoundExpression>,
+        /// Whether the aggregate uses `DISTINCT` quantifier. Only meaningful on COUNT/SUM/AVG.
+        distinct: bool,
     },
     /// `expr IN (<subquery>)` / `expr NOT IN (<subquery>)`.
     InSubquery {
@@ -887,21 +889,27 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 Ok(in_expr)
             }
         }
-        Expression::FunctionCall { name, args, .. } => {
+        Expression::FunctionCall { name, args, distinct, .. } => {
             // Canonical lower-case name: description inference matches the
             // documented spelling, while execution stays case-insensitive.
             // Diagnostics keep the spelling the query used.
             let display = normalize_identifier(name.name.as_ref());
             let fname = display.to_ascii_lowercase();
+
             let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
             if SqlAggregateFunction::from_name(&fname).is_some() {
                 if bound_args.is_empty() {
                     return Err(SqlFrontendError::unsupported(
-                        "aggregate functions require an argument, and aggregate DISTINCT forms such as COUNT(DISTINCT x) are outside the gateway subset",
+                        "aggregate functions require an argument",
                     ));
                 }
-                return Ok(SqlBoundExpression::Function { name: fname, args: bound_args });
+                if *distinct && fname != "count" {
+                    return Err(SqlFrontendError::unsupported(
+                        "only COUNT supports the DISTINCT quantifier",
+                    ));
+                }
+                return Ok(SqlBoundExpression::Function { name: fname, args: bound_args, distinct: *distinct });
             }
             let scalar = SqlScalarFunction::from_name(&fname).ok_or_else(|| {
                 SqlFrontendError::new(
@@ -927,7 +935,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                     ),
                 ));
             }
-            Ok(SqlBoundExpression::Function { name: fname, args: bound_args })
+            Ok(SqlBoundExpression::Function { name: fname, args: bound_args, distinct: false })
         }
         Expression::InSubquery { expr, query, negated, .. } => Ok(SqlBoundExpression::InSubquery {
             expression: Box::new(bind_expression(expr)?),

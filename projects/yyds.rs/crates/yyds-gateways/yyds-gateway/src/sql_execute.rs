@@ -430,9 +430,10 @@ fn lower_expression(
         SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
             expression
         }
-        SqlCatalogBoundExpression::Function { name, args } => SqlCatalogBoundExpression::Function {
+        SqlCatalogBoundExpression::Function { name, args, distinct } => SqlCatalogBoundExpression::Function {
             name,
             args: args.into_iter().map(|arg| lower_expression(arg, executor, transaction, dialect)).collect::<Result<Vec<_>, _>>()?,
+            distinct,
         },
         SqlCatalogBoundExpression::Binary { left, operator, right } => SqlCatalogBoundExpression::Binary {
             left: Box::new(lower_expression(*left, executor, transaction, dialect)?),
@@ -1300,8 +1301,8 @@ fn eval_aggregate(
     field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
     dialect: SqlDialect,
 ) -> Result<SqlValue, SqlFrontendError> {
-    let (name, args) = match expr {
-        SqlCatalogBoundExpression::Function { name, args } => (name.clone(), args.clone()),
+    let (name, args, distinct) = match expr {
+        SqlCatalogBoundExpression::Function { name, args, distinct } => (name.clone(), args.clone(), *distinct),
         _ => return Err(execute_error(&format!("eval_aggregate: non-Function expression encountered: {expr:?}"))),
     };
 
@@ -1312,26 +1313,42 @@ fn eval_aggregate(
     if agg != SqlAggregateFunction::COUNT && args.iter().any(|arg| matches!(arg, SqlCatalogBoundExpression::Wildcard)) {
         return Err(execute_error(&format!("{} does not accept `*` as its argument", agg.name())));
     }
+    if distinct && agg != SqlAggregateFunction::COUNT {
+        return Err(execute_error(&format!("DISTINCT quantifier is only supported on COUNT for now ({})", agg.name())));
+    }
 
     match agg {
         SqlAggregateFunction::COUNT => {
             if args.is_empty() || matches!(args.as_slice(), [SqlCatalogBoundExpression::Wildcard]) {
-                // COUNT(*) — total row count after filter.
+                // COUNT(*) — total row count after filter (DISTINCT 对 * 无意义).
                 Ok(SqlValue::Integer(i64::try_from(rows.len()).unwrap_or(i64::MAX)))
             }
             else {
                 if args.len() != 1 {
                     return Err(execute_error("COUNT accepts exactly one argument"));
                 }
-                // COUNT(col) — count rows where col is not NULL.
-                let mut non_null: usize = 0;
-                for row in rows {
-                    let v = eval_expression(&args[0], row,field_types, dialect)?;
-                    if !matches!(v, SqlValue::Null) {
-                        non_null += 1;
+                if distinct {
+                    // COUNT(DISTINCT col) — count distinct non-NULL values.
+                    let mut seen: Vec<SqlValue> = Vec::new();
+                    for row in rows {
+                        let v = eval_expression(&args[0], row, field_types, dialect)?;
+                        if !matches!(v, SqlValue::Null) && !seen.contains(&v) {
+                            seen.push(v);
+                        }
                     }
+                    Ok(SqlValue::Integer(i64::try_from(seen.len()).unwrap_or(i64::MAX)))
                 }
-                Ok(SqlValue::Integer(i64::try_from(non_null).unwrap_or(i64::MAX)))
+                else {
+                    // COUNT(col) — count rows where col is not NULL.
+                    let mut non_null: usize = 0;
+                    for row in rows {
+                        let v = eval_expression(&args[0], row, field_types, dialect)?;
+                        if !matches!(v, SqlValue::Null) {
+                            non_null += 1;
+                        }
+                    }
+                    Ok(SqlValue::Integer(i64::try_from(non_null).unwrap_or(i64::MAX)))
+                }
             }
         }
         SqlAggregateFunction::SUM => {
@@ -1440,7 +1457,7 @@ fn eval_expression(
             let r = eval_expression(right, row, field_types, dialect)?;
             eval_binary(*operator, &l, &r, dialect)?
         }
-        SqlCatalogBoundExpression::Function { name, args } => {
+        SqlCatalogBoundExpression::Function { name, args, distinct } => {
             let scalar = SqlScalarFunction::from_name(name)
                 .ok_or_else(|| execute_error(&format!("aggregate function {name} cannot be evaluated on a single row")))?;
             let mut values = Vec::with_capacity(args.len());
@@ -1923,7 +1940,7 @@ fn eval_having(
         SqlCatalogBoundExpression::Wildcard => {
             return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
         }
-        SqlCatalogBoundExpression::Function { name, args } => {
+        SqlCatalogBoundExpression::Function { name, args, distinct } => {
             if SqlAggregateFunction::from_name(name).is_some() {
                 eval_aggregate(expr, bucket_rows, field_types, dialect)?
             }

@@ -727,7 +727,6 @@ pub fn group_cases() -> Vec<Case> {
 /// Upstream forms that the gateway must reject explicitly instead of guessing.
 pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("DISTINCT ON", "SELECT DISTINCT ON (age) id FROM users ORDER BY age"),
-    ("COUNT(DISTINCT x)", "SELECT COUNT(DISTINCT age) FROM users"),
     ("GROUPING SETS", "SELECT age FROM users GROUP BY GROUPING SETS ((age))"),
     ("UNION", "SELECT id FROM users UNION SELECT id FROM users"),
     ("FOR UPDATE", "SELECT id FROM users FOR UPDATE"),

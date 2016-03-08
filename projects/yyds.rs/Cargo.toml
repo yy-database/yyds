@@ -43,3 +43,6 @@ napi-build = "2"
 [profile.release]
 lto = true
 panic = "abort"
+
+[patch."https://github.com/yggdrasil-language/oaks.git"]
+oak-sql = { path = "../../../oaks/examples/oak-sql" }

@@ -120,7 +120,7 @@ fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &B
             SqlBoundLiteral::Null => SqlFieldType::Unknown,
         },
         Wildcard => SqlFieldType::Unknown,
-        Function { name, args } => match name.as_str() {
+        Function { name, args, distinct } => match name.as_str() {
             "count" | "length" => SqlFieldType::Int64,
             "avg" => SqlFieldType::Float64,
             "sum" | "max" | "min" | "abs" | "round" | "coalesce" => {

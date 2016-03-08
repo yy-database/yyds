@@ -955,7 +955,7 @@ fn expression_default_label(expr: &SqlCatalogBoundExpression) -> String {
 /// 表达式里是否出现聚合函数（含嵌套在运算里）。
 fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
     match expr {
-        SqlCatalogBoundExpression::Function { name, args } => {
+        SqlCatalogBoundExpression::Function { name, args, distinct } => {
             SqlAggregateFunction::from_name(name).is_some() || args.iter().any(expression_has_aggregate)
         }
         SqlCatalogBoundExpression::Binary { left, right, .. } => {
@@ -1040,7 +1040,7 @@ fn grouped_expression_allowed(
         SqlCatalogBoundExpression::Literal(_) => true,
         SqlCatalogBoundExpression::Wildcard => false,
         SqlCatalogBoundExpression::Function { name, .. } if SqlAggregateFunction::from_name(name).is_some() => true,
-        SqlCatalogBoundExpression::Function { name, args } => {
+        SqlCatalogBoundExpression::Function { name, args, distinct } => {
             SqlScalarFunction::from_name(name).is_some()
                 && args.iter().all(|arg| grouped_expression_allowed(arg, group_expressions, group_columns))
         }

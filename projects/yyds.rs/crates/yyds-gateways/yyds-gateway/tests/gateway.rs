@@ -518,6 +518,62 @@ fn sql_aggregate_functions_count_sum_avg_max_min() {
 }
 
 #[test]
+fn sql_count_distinct_deduplicates_non_null_values() {
+    // nullable_users() seed: (1, NULL, NULL), (2, '', 0), (3, 'x', 10)
+    let (catalog, executor) = nullable_users();
+
+    // Verify fixture has the expected seed (3 rows)
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(3)]);
+
+    // COUNT(age) — non-NULL ages = 2 rows (age=0 and age=10)
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT(col)");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(2)]);
+
+    // COUNT(DISTINCT age) — unique non-NULL ages = 2 distinct values (0 and 10)
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7).expect("bind COUNT DISTINCT");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(2)], "COUNT(DISTINCT age) on default fixture");
+
+    // Now insert duplicates: age=10 twice and age=5 once
+    for (id, name, age) in [(17i64, "d", 10i64), (19, "e", 10), (23, "f", 5)] {
+        let sql = format!("INSERT INTO users VALUES ({id}, '{name}', {age})");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind insert");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan insert");
+        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert");
+    }
+
+    // COUNT(*) = 6 now
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7).expect("bind COUNT*");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT*");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT*");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(6)]);
+
+    // COUNT(age) = 5 (original 2 non-NULL + 3 inserted)
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7).expect("bind COUNT col after insert");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT col");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT col after insert");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(5)]);
+
+    // COUNT(DISTINCT age) = 3 (unique non-NULL: 0, 10, 5)
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7).expect("bind COUNT DISTINCT after insert");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT after insert");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(3)], "COUNT(DISTINCT age) must dedup 10s and ignore NULL");
+
+    // COUNT(DISTINCT *) is not semantically different from COUNT(*) — still 6 rows
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT *) FROM users", &catalog, 7).expect("bind COUNT DISTINCT star");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT star");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT star");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(6)], "COUNT(DISTINCT *) should behave as COUNT(*) for row count");
+}
+
+#[test]
 fn sql_aggregate_rejects_wildcard_for_non_count_functions() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     let executor = empty_executor();

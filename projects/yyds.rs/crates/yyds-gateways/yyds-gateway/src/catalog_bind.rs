@@ -213,6 +213,8 @@ pub enum SqlCatalogBoundExpression {
         name: String,
         /// Catalog-bound arguments.
         args: Vec<SqlCatalogBoundExpression>,
+        /// Whether the aggregate uses `DISTINCT` quantifier.
+        distinct: bool,
     },
     /// A binary SQL expression.
     Binary {
@@ -603,10 +605,10 @@ fn bind_expression(
             operator,
             expression: Box::new(bind_expression(*expression, sources, catalog, variables)?),
         }),
-        SqlBoundExpression::Function { name, args } => {
+        SqlBoundExpression::Function { name, args, distinct } => {
             let bound_args =
                 args.into_iter().map(|arg| bind_expression(arg, sources, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
-            Ok(SqlCatalogBoundExpression::Function { name, args: bound_args })
+            Ok(SqlCatalogBoundExpression::Function { name, args: bound_args, distinct })
         }
         SqlBoundExpression::InSubquery { expression, select, negated } => {
             // 子查询自带 FROM 作用域，不继承外层 sources，因此不支持相关子查询。
