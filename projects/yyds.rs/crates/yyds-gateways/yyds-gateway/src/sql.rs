@@ -453,6 +453,20 @@ pub enum SqlBoundExpression {
         /// Whether the predicate is spelled `NOT IN`.
         negated: bool,
     },
+    /// `CASE WHEN cond THEN result ... [ELSE fallback] END`.
+    Case {
+        /// `(when, then)` branches in source order.
+        branches: Vec<(Box<Self>, Box<Self>)>,
+        /// Optional ELSE fallback.
+        else_branch: Option<Box<Self>>,
+    },
+    /// `CAST(expr AS type_name)`.
+    Cast {
+        /// The expression being cast.
+        expr: Box<Self>,
+        /// The target type spelling as written (e.g. `INTEGER`, `TEXT`, `REAL`, `BLOB`).
+        target: String,
+    },
 }
 
 /// SQL aggregate function identity recognized by the gateway.
@@ -942,6 +956,27 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             select: Box::new(bind_select_statement(query)?),
             negated: *negated,
         }),
+        Expression::Case { branches, else_branch, .. } => {
+            let bound_branches = branches
+                .iter()
+                .map(|(when, then)| {
+                    let w = bind_expression(when)?;
+                    let t = bind_expression(then)?;
+                    Ok((Box::new(w), Box::new(t)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let bound_else = match else_branch {
+                Some(els) => Some(Box::new(bind_expression(els)?)),
+                None => None,
+            };
+            Ok(SqlBoundExpression::Case { branches: bound_branches, else_branch: bound_else })
+        }
+        Expression::Cast { expr, target, .. } => {
+            Ok(SqlBoundExpression::Cast {
+                expr: Box::new(bind_expression(expr)?),
+                target: target.to_string(),
+            })
+        }
         // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
         Expression::Subquery { .. } => {
             Err(SqlFrontendError::unsupported("SQL subquery is only supported as the right side of IN"))

@@ -250,6 +250,20 @@ pub enum SqlCatalogBoundExpression {
         /// Whether the predicate is spelled `NOT IN`.
         negated: bool,
     },
+    /// `CASE WHEN cond THEN result ... [ELSE fallback] END`.
+    Case {
+        /// `(when, then)` branches in source order.
+        branches: Vec<(Box<Self>, Box<Self>)>,
+        /// Optional ELSE fallback.
+        else_branch: Option<Box<Self>>,
+    },
+    /// `CAST(expr AS type_name)`.
+    Cast {
+        /// The expression being cast.
+        expr: Box<Self>,
+        /// The target type spelling as written (e.g. `INTEGER`, `TEXT`, `REAL`, `BLOB`).
+        target: String,
+    },
 }
 
 /// SQL projection after catalog binding.
@@ -620,6 +634,27 @@ fn bind_expression(
                 negated,
             })
         }
+        SqlBoundExpression::Case { branches, else_branch } => {
+            let bound_branches = branches
+                .into_iter()
+                .map(|(when, then)| {
+                    let w = bind_expression(*when, sources, catalog, variables)?;
+                    let t = bind_expression(*then, sources, catalog, variables)?;
+                    Ok((Box::new(w), Box::new(t)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let bound_else = match else_branch {
+                Some(els) => Some(Box::new(bind_expression(*els, sources, catalog, variables)?)),
+                None => None,
+            };
+            Ok(SqlCatalogBoundExpression::Case { branches: bound_branches, else_branch: bound_else })
+        }
+        SqlBoundExpression::Cast { expr, target } => {
+            Ok(SqlCatalogBoundExpression::Cast {
+                expr: Box::new(bind_expression(*expr, sources, catalog, variables)?),
+                target,
+            })
+        }
     }
 }
 
@@ -717,6 +752,16 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
         SqlCatalogBoundExpression::InSubquery { expression, .. } | SqlCatalogBoundExpression::InValues { expression, .. } => {
             collect_column_ids(expression, out)
         }
+        SqlCatalogBoundExpression::Case { branches, else_branch } => {
+            for (w, t) in branches {
+                collect_column_ids(w, out);
+                collect_column_ids(t, out);
+            }
+            if let Some(els) = else_branch {
+                collect_column_ids(els, out);
+            }
+        }
+        SqlCatalogBoundExpression::Cast { expr, .. } => collect_column_ids(expr, out),
         SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
     }
 }

@@ -464,6 +464,25 @@ fn lower_expression(
                 .collect();
             SqlCatalogBoundExpression::InValues { expression, values, negated }
         }
+        SqlCatalogBoundExpression::Case { branches, else_branch } => {
+            let bound_branches = branches
+                .into_iter()
+                .map(|(w, t)| {
+                    let w = Box::new(lower_expression(*w, executor, transaction, dialect)?);
+                    let t = Box::new(lower_expression(*t, executor, transaction, dialect)?);
+                    Ok((w, t))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let bound_else = match else_branch {
+                Some(els) => Some(Box::new(lower_expression(*els, executor, transaction, dialect)?)),
+                None => None,
+            };
+            SqlCatalogBoundExpression::Case { branches: bound_branches, else_branch: bound_else }
+        }
+        SqlCatalogBoundExpression::Cast { expr, target } => SqlCatalogBoundExpression::Cast {
+            expr: Box::new(lower_expression(*expr, executor, transaction, dialect)?),
+            target,
+        },
     })
 }
 
@@ -1474,10 +1493,123 @@ fn eval_expression(
         SqlCatalogBoundExpression::InSubquery { .. } => {
             return Err(execute_error("IN subquery was not materialized before execution"))
         }
+        SqlCatalogBoundExpression::Case { branches, else_branch } => {
+            eval_case(branches, else_branch, row, field_types, dialect)?
+        }
+        SqlCatalogBoundExpression::Cast { expr, target } => {
+            let inner = eval_expression(expr, row, field_types, dialect)?;
+            eval_cast(inner, target)?
+        }
     })
 }
 
-/// `IN` 成员判断：左值是 NULL 时结果未知，列表里的 NULL 让未命中变成未知。
+/// 对 CASE WHEN ... THEN ... [ELSE ...] END 求值。
+///
+/// 依次检查每个 WHEN 条件：第一个求值为 TRUE 的触发对应 THEN 分支；
+/// 条件为 FALSE 或 NULL 都继续下一个分支。全部落空时走 ELSE（若有）
+/// 否则返回 NULL。
+fn eval_case(
+    branches: &[(Box<SqlCatalogBoundExpression>, Box<SqlCatalogBoundExpression>)],
+    else_branch: &Option<Box<SqlCatalogBoundExpression>>,
+    row: &RowFieldValues,
+    field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    dialect: SqlDialect,
+) -> Result<SqlValue, SqlFrontendError> {
+    for (when, then) in branches {
+        let cond = eval_expression(when, row, field_types, dialect)?;
+        match cond {
+            SqlValue::Boolean(true) => return eval_expression(then, row, field_types, dialect),
+            SqlValue::Null | SqlValue::Boolean(false) => {}
+            _ => {
+                return Err(execute_error("CASE WHEN condition must be boolean"));
+            }
+        }
+    }
+    match else_branch {
+        Some(els) => eval_expression(els, row, field_types, dialect),
+        None => Ok(SqlValue::Null),
+    }
+}
+
+fn eval_case_having(
+    branches: &[(Box<SqlCatalogBoundExpression>, Box<SqlCatalogBoundExpression>)],
+    else_branch: &Option<Box<SqlCatalogBoundExpression>>,
+    bucket_rows: &[RowFieldValues],
+    group_exprs: &[SqlCatalogBoundExpression],
+    field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    dialect: SqlDialect,
+) -> Result<SqlValue, SqlFrontendError> {
+    for (when, then) in branches {
+        let cond = eval_having(when, bucket_rows, group_exprs, field_types, dialect)?;
+        match cond {
+            SqlValue::Boolean(true) => return eval_having(then, bucket_rows, group_exprs, field_types, dialect),
+            SqlValue::Null | SqlValue::Boolean(false) => {}
+            _ => {
+                return Err(execute_error("CASE WHEN condition must be boolean"));
+            }
+        }
+    }
+    match else_branch {
+        Some(els) => eval_having(els, bucket_rows, group_exprs, field_types, dialect),
+        None => Ok(SqlValue::Null),
+    }
+}
+
+/// CAST(expr AS type_name) 求值。支持 INTEGER/INT, REAL/DOUBLE/FLOAT/NUMBER, TEXT/STRING/VARCHAR/CHAR, BLOB/BINARY 互转。
+///
+/// 类型不支持或无法转换时返回 NULL（与 SQLite/Postgres CAST 行为一致），而不是报错。
+fn eval_cast(value: SqlValue, target: &str) -> Result<SqlValue, SqlFrontendError> {
+    let t = target.trim().to_ascii_uppercase();
+    // 忽略括号里的长度修饰，如 VARCHAR(32)
+    let base_type = t.split('(').next().unwrap_or(&t);
+    match (value, base_type) {
+        (SqlValue::Null, _) => Ok(SqlValue::Null),
+        (SqlValue::Integer(n), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
+            Ok(SqlValue::Integer(n))
+        }
+        (SqlValue::Integer(n), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => {
+            Ok(SqlValue::Number(n as f64))
+        }
+        (SqlValue::Integer(n), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
+            Ok(SqlValue::String(n.to_string()))
+        }
+        (SqlValue::Number(n), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
+            Ok(SqlValue::Integer(n as i64))
+        }
+        (SqlValue::Number(n), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => Ok(SqlValue::Number(n)),
+        (SqlValue::Number(n), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
+            Ok(SqlValue::String(format_number(n)))
+        }
+        (SqlValue::String(s), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
+            Ok(s.trim().parse::<i64>().map(SqlValue::Integer).unwrap_or(SqlValue::Null))
+        }
+        (SqlValue::String(s), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => {
+            Ok(s.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(SqlValue::Number).unwrap_or(SqlValue::Null))
+        }
+        (SqlValue::String(s), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
+            Ok(SqlValue::String(s))
+        }
+        (SqlValue::Boolean(b), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
+            Ok(SqlValue::Integer(if b { 1 } else { 0 }))
+        }
+        (SqlValue::Boolean(b), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => {
+            Ok(SqlValue::Number(if b { 1.0 } else { 0.0 }))
+        }
+        (SqlValue::Boolean(b), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
+            Ok(SqlValue::String(if b { "TRUE".to_string() } else { "FALSE".to_string() }))
+        }
+        (_, "BLOB" | "BINARY") => {
+            // BLOB 在本网关里没有原生承载，退化成 TEXT 表示
+            Ok(SqlValue::Null)
+        }
+        _ => {
+            // 不支持的目标类型：静默返回 NULL（SQLite 行为）
+            Ok(SqlValue::Null)
+        }
+    }
+}
+
+
 fn eval_in_values(target: SqlValue, values: &[SqlBoundLiteral], negated: bool, dialect: SqlDialect) -> Result<SqlValue, SqlFrontendError> {
     if matches!(target, SqlValue::Null) {
         return Ok(SqlValue::Null);
@@ -1970,6 +2102,13 @@ fn eval_having(
         }
         SqlCatalogBoundExpression::InSubquery { .. } => {
             return Err(execute_error("IN subquery was not materialized before execution"))
+        }
+        SqlCatalogBoundExpression::Case { branches, else_branch } => {
+            eval_case_having(branches, else_branch, bucket_rows, group_exprs, field_types, dialect)?
+        }
+        SqlCatalogBoundExpression::Cast { expr, target } => {
+            let inner = eval_having(expr, bucket_rows, group_exprs, field_types, dialect)?;
+            eval_cast(inner, target)?
         }
     })
 }

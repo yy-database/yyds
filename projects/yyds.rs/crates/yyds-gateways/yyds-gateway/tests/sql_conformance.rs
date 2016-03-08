@@ -376,3 +376,77 @@ fn sql_division_and_modulo_keep_dialect_defaults() {
     assert_eq!(pg_vals("SELECT -7 % 2"), rows(&[&[Int(-1)]]));
     assert_eq!(pg_vals("SELECT 7.0 / 2"), rows(&[&[Float(3.5)]]));
 }
+
+#[test]
+fn sql_conformance_case_when() {
+    use Lit::{Float, Int, Null, Text};
+    let fixture = Fixture::new();
+    let vals = |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}`: {error}")).rows;
+
+    // 单 WHEN 命中
+    assert_eq!(vals("SELECT CASE WHEN 1 = 1 THEN 'yes' ELSE 'no' END"), rows(&[&[Text("yes")]]));
+
+    // 单 WHEN 不命中走 ELSE
+    assert_eq!(vals("SELECT CASE WHEN 1 = 2 THEN 'yes' ELSE 'no' END"), rows(&[&[Text("no")]]));
+
+    // 多 WHEN 取第一个命中
+    assert_eq!(
+        vals("SELECT CASE WHEN 1 = 2 THEN 'a' WHEN 1 = 1 THEN 'b' ELSE 'c' END"),
+        rows(&[&[Text("b")]])
+    );
+
+    // 无 ELSE：全部落空返回 NULL
+    assert_eq!(vals("SELECT CASE WHEN 1 = 2 THEN 'hit' END"), rows(&[&[Null]]));
+
+    // 条件为 NULL 继续下一分支
+    assert_eq!(
+        vals("SELECT CASE WHEN NULL THEN 'a' WHEN 1 = 1 THEN 'b' END"),
+        rows(&[&[Text("b")]])
+    );
+
+    // THEN 分支求值为 NULL 也是合法返回
+    assert_eq!(vals("SELECT CASE WHEN 1 = 1 THEN NULL ELSE 'no' END"), rows(&[&[Null]]));
+
+    // 与数字运算组合
+    assert_eq!(
+        vals("SELECT CASE WHEN 1 = 1 THEN 10 ELSE 20 END + 5"),
+        rows(&[&[Int(15)]])
+    );
+}
+
+#[test]
+fn sql_conformance_cast() {
+    use Lit::{Float, Int, Null, Text};
+    let fixture = Fixture::new();
+    let vals = |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}`: {error}")).rows;
+
+    // INTEGER → TEXT
+    assert_eq!(vals("SELECT CAST(42 AS TEXT)"), rows(&[&[Text("42")]]));
+
+    // TEXT → INTEGER
+    assert_eq!(vals("SELECT CAST('99' AS INTEGER)"), rows(&[&[Int(99)]]));
+
+    // REAL → INTEGER (truncation via i64 cast)
+    assert_eq!(vals("SELECT CAST(3.7 AS INTEGER)"), rows(&[&[Int(3)]]));
+
+    // INTEGER → REAL
+    assert_eq!(vals("SELECT CAST(7 AS REAL)"), rows(&[&[Float(7.0)]]));
+
+    // TEXT → REAL
+    assert_eq!(vals("SELECT CAST('3.14' AS FLOAT)"), rows(&[&[Float(3.14)]]));
+
+    // NULL 输入始终返回 NULL
+    assert_eq!(vals("SELECT CAST(NULL AS INTEGER)"), rows(&[&[Null]]));
+    assert_eq!(vals("SELECT CAST(NULL AS TEXT)"), rows(&[&[Null]]));
+
+    // 无法转换的字符串返回 NULL（与 SQLite 行为一致）
+    assert_eq!(vals("SELECT CAST('oops' AS INTEGER)"), rows(&[&[Null]]));
+
+    // 类型别名
+    assert_eq!(vals("SELECT CAST(1 AS INT)"), rows(&[&[Int(1)]]));
+    assert_eq!(vals("SELECT CAST('42' AS STRING)"), rows(&[&[Text("42")]]));
+
+    // 布尔 → INTEGER
+    assert_eq!(vals("SELECT CAST(TRUE AS INTEGER)"), rows(&[&[Int(1)]]));
+    assert_eq!(vals("SELECT CAST(FALSE AS INT)"), rows(&[&[Int(0)]]));
+}

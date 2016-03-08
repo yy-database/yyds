@@ -151,6 +151,15 @@ fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &B
             SqlBoundUnaryOperator::Plus | SqlBoundUnaryOperator::Minus => infer_expression_type(expression, field_types),
         },
         InSubquery { .. } | InValues { .. } => SqlFieldType::Bool,
+        Case { branches, else_branch } => {
+            // 取第一个 THEN 分支的类型作为推断结果；更精确的类型合并留给执行期。
+            branches
+                .first()
+                .map(|(_, then)| infer_expression_type(then, field_types))
+                .or_else(|| else_branch.as_ref().map(|e| infer_expression_type(e, field_types)))
+                .unwrap_or(SqlFieldType::Unknown)
+        }
+        Cast { target, .. } => cast_target_to_field_type(target),
     }
 }
 
@@ -162,5 +171,16 @@ fn merge_numeric(left: SqlFieldType, right: SqlFieldType) -> SqlFieldType {
         (Int32, _) | (_, Int32) => Int32,
         (String, _) | (_, String) => String,
         _ => Unknown,
+    }
+}
+
+fn cast_target_to_field_type(target: &str) -> SqlFieldType {
+    let t = target.trim().to_ascii_uppercase();
+    let base_type = t.split('(').next().unwrap_or(&t);
+    match base_type {
+        "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT" => SqlFieldType::Int64,
+        "REAL" | "DOUBLE" | "FLOAT" | "NUMBER" => SqlFieldType::Float64,
+        "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER" => SqlFieldType::String,
+        _ => SqlFieldType::Unknown,
     }
 }
