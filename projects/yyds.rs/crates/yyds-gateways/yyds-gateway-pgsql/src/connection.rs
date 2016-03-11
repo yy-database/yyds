@@ -496,7 +496,7 @@ fn run_statement(
     else {
         let affected = result.affected_rows;
         match &plan {
-            SqlExecutionPlan::Insert(_) => format!("INSERT 0 {affected}"),
+            SqlExecutionPlan::Insert(_) | SqlExecutionPlan::MultiInsert(_) => format!("INSERT 0 {affected}"),
             SqlExecutionPlan::Update(_) | SqlExecutionPlan::UpdateScan(_) => format!("UPDATE {affected}"),
             SqlExecutionPlan::Delete(_) | SqlExecutionPlan::DeleteScan(_) => format!("DELETE {affected}"),
             SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_) => {
