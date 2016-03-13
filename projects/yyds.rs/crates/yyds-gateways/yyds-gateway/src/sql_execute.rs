@@ -561,7 +561,9 @@ fn execute_read(
 
 /// 执行一个多表 JOIN 计划：每个来源先整表扫描，再按 JOIN 顺序做嵌套循环合并。
 ///
-/// INNER JOIN 只保留两侧匹配的组合；LEFT JOIN 额外保留左侧未匹配行（右侧字段缺失 → NULL）。
+/// INNER JOIN 只保留两侧匹配的组合；LEFT JOIN 额外保留左侧未匹配行（右侧字段缺失 → NULL），
+/// RIGHT JOIN 额外保留右侧未匹配行（左侧字段缺失 → NULL），FULL JOIN 两侧未匹配行都保留。
+/// 未匹配行只携带本侧表的字段，因此投影顺序仍然是「基表在前、JOIN 表在后」。
 fn execute_join(
     executor: &dyn KeyValueExecutor,
     transaction: Option<&dyn TransactionHandle>,
@@ -575,11 +577,19 @@ fn execute_join(
     let mut rows = scan_join_source(executor, transaction, &plan.base)?;
     for source in &plan.joins {
         let right_rows = scan_join_source(executor, transaction, source)?;
-        let is_left = matches!(source.kind, crate::sql::SqlBoundJoinKind::Left);
+        let keep_left = matches!(
+            source.kind,
+            crate::sql::SqlBoundJoinKind::Left | crate::sql::SqlBoundJoinKind::Full
+        );
+        let keep_right = matches!(
+            source.kind,
+            crate::sql::SqlBoundJoinKind::Right | crate::sql::SqlBoundJoinKind::Full
+        );
+        let mut right_matched = vec![false; right_rows.len()];
         let mut merged = Vec::new();
         for left in &rows {
             let mut matched_any = false;
-            for right in &right_rows {
+            for (index, right) in right_rows.iter().enumerate() {
                 let mut row = left.clone();
                 row.merge(right);
                 if let Some(on) = &source.on {
@@ -589,10 +599,19 @@ fn execute_join(
                 }
                 merged.push(row);
                 matched_any = true;
+                right_matched[index] = true;
             }
-            if is_left && !matched_any {
-                // LEFT JOIN: 左行未匹配任何右行时仍然保留，右表字段缺失 → NULL
+            if keep_left && !matched_any {
+                // LEFT / FULL JOIN: 左行未匹配任何右行时仍然保留，右表字段缺失 → NULL
                 merged.push(left.clone());
+            }
+        }
+        if keep_right {
+            for (index, right) in right_rows.iter().enumerate() {
+                if !right_matched[index] {
+                    // RIGHT / FULL JOIN: 右行未匹配任何左行时仍然保留，左表字段缺失 → NULL
+                    merged.push(right.clone());
+                }
             }
         }
         rows = merged;

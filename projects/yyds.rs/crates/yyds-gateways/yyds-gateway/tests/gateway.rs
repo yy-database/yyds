@@ -1897,6 +1897,134 @@ fn sql_left_join_preserves_unmatched_left_rows() {
 }
 
 #[test]
+fn sql_right_join_preserves_unmatched_right_rows() {
+    let (catalog, executor) = join_fixture();
+
+    // orders.user_id = 9 没有 users 匹配：该右行保留，左表字段全 NULL。
+    let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON users.id = orders.user_id \
+               ORDER BY orders.total";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Join(_)));
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+
+    assert_eq!(result.columns, vec!["name".to_string(), "total".to_string()], "基表列在前、JOIN 表列在后");
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(5)],
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(50)],
+            vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Integer(70)],
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(100)],
+        ]
+    );
+
+    // ON 永不命中：左行全部丢弃，每个右行以 NULL 左字段保留。
+    let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON 1 = 0";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(result.rows.len(), 4, "every right row must survive with no left match");
+    for row in &result.rows {
+        assert_eq!(row[0], yyds_gateway::SqlValue::Null, "left side should be NULL on unmatched right row");
+    }
+}
+
+#[test]
+fn sql_full_join_preserves_both_unmatched_sides() {
+    let (catalog, executor) = join_fixture();
+
+    // ON 只让 alice 的订单匹配：bob 成为未匹配左行，user_id = 2 / 9 的订单成为未匹配右行。
+    let sql = "SELECT users.name, orders.total FROM users FULL JOIN orders \
+               ON users.id = orders.user_id AND users.id = 1 ORDER BY orders.total";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+
+    assert_eq!(result.rows.len(), 5, "two matches plus one left-only and two right-only rows");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(5)]);
+    assert_eq!(result.rows[1], vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(50)]);
+    assert_eq!(result.rows[2], vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(70)]);
+    assert_eq!(result.rows[3], vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(100)]);
+    assert_eq!(
+        result.rows[4],
+        vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Null],
+        "unmatched left row keeps NULL right columns"
+    );
+}
+
+#[test]
+fn sql_outer_join_keeps_present_side_when_other_table_is_empty() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n");
+    let query = |executor: &dyn yyds_execution::KeyValueExecutor, sql: &str| {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        yyds_gateway::execute_plan(executor, None, &plan, SqlDialect::Postgres).expect("execute")
+    };
+
+    // 左表为空：RIGHT / FULL JOIN 仍返回全部右行，左字段 NULL；INNER JOIN 为空。
+    let orders_only = make_executor_with_tables(&[("table:2", &[(b"10", &[(3, b"10"), (4, b"1"), (5, b"100")])])]);
+    let expected = vec![vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(100)]];
+    let right = query(
+        &orders_only,
+        "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON users.id = orders.user_id",
+    );
+    assert_eq!(right.rows, expected);
+    let full = query(
+        &orders_only,
+        "SELECT users.name, orders.total FROM users FULL JOIN orders ON users.id = orders.user_id",
+    );
+    assert_eq!(full.rows, expected);
+    let inner = query(&orders_only, "SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id");
+    assert!(inner.rows.is_empty(), "inner join with an empty left table must be empty");
+
+    // 右表为空：LEFT / FULL JOIN 仍返回全部左行，右字段 NULL；RIGHT JOIN 为空。
+    let users_only = make_executor_with_tables(&[("table:1", &[(b"1", &[(1, b"1"), (2, b"alice")])])]);
+    let expected = vec![vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Null]];
+    let left = query(&users_only, "SELECT users.name, orders.total FROM users LEFT JOIN orders ON users.id = orders.user_id");
+    assert_eq!(left.rows, expected);
+    let full = query(&users_only, "SELECT users.name, orders.total FROM users FULL JOIN orders ON users.id = orders.user_id");
+    assert_eq!(full.rows, expected);
+    let right = query(&users_only, "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON users.id = orders.user_id");
+    assert!(right.rows.is_empty(), "right join cannot invent right rows");
+}
+
+#[test]
+fn sql_outer_join_on_and_where_differ_for_unmatched_rows() {
+    let (catalog, executor) = join_fixture();
+
+    // 过滤写在 ON 里：只决定「是否算匹配」，未匹配右行仍以 NULL 左字段保留。
+    let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders \
+               ON users.id = orders.user_id AND orders.total > 60 ORDER BY orders.total";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let on_filter = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(
+        on_filter.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(5)],
+            vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(50)],
+            vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Integer(70)],
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(100)],
+        ]
+    );
+
+    // 同样的过滤写在 WHERE 里：未匹配行同样被 total 过滤掉，结果只剩真正命中的组合。
+    let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders \
+               ON users.id = orders.user_id WHERE orders.total > 60 ORDER BY orders.total";
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let where_filter = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(
+        where_filter.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Integer(70)],
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(100)],
+        ]
+    );
+}
+
+#[test]
 fn sql_join_rejects_ambiguous_unqualified_columns() {
     let (catalog, _executor) = join_fixture();
 
@@ -1913,28 +2041,37 @@ fn sql_join_rejects_ambiguous_unqualified_columns() {
 }
 
 #[test]
-fn sql_join_rejects_outer_join_aggregates_and_self_join() {
+fn sql_join_rejects_aggregate_and_self_join() {
     let (catalog, _executor) = join_fixture();
 
-    // RIGHT JOIN 继续被拒绝（尚未实现）。
+    // RIGHT JOIN / FULL JOIN 现已支持，bind 层保留原样 kind。
     let right = yyds_gateway::bind_sql_catalog(
         "SELECT users.name FROM users RIGHT JOIN orders ON users.id = orders.user_id",
         &catalog,
         7,
     )
-    .expect_err("right join");
-    assert!(right.message.contains("RIGHT JOIN"), "{}", right.message);
+    .expect("right join should bind");
+    if let yyds_gateway::SqlCatalogBoundStatement::Select(sel) = &right {
+        assert!(matches!(sel.joins[0].kind, yyds_gateway::SqlBoundJoinKind::Right));
+    }
+    else {
+        panic!("expected Select statement");
+    }
 
-    // FULL JOIN 继续被拒绝（尚未实现）。
     let full = yyds_gateway::bind_sql_catalog(
         "SELECT users.name FROM users FULL JOIN orders ON users.id = orders.user_id",
         &catalog,
         7,
     )
-    .expect_err("full join");
-    assert!(full.message.contains("FULL JOIN"), "{}", full.message);
+    .expect("full join should bind");
+    if let yyds_gateway::SqlCatalogBoundStatement::Select(sel) = &full {
+        assert!(matches!(sel.joins[0].kind, yyds_gateway::SqlBoundJoinKind::Full));
+    }
+    else {
+        panic!("expected Select statement");
+    }
 
-    // LEFT JOIN 现已支持，bind 层应通过。
+    // LEFT JOIN 同样在 bind 层通过。
     let left = yyds_gateway::bind_sql_catalog(
         "SELECT users.name FROM users LEFT JOIN orders ON users.id = orders.user_id",
         &catalog,

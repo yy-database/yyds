@@ -512,15 +512,6 @@ fn bind_select(
     let mut sources: Vec<SqlCatalogBoundTable> = source.iter().cloned().collect();
     let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
     for join in select.joins {
-        match join.kind {
-            SqlBoundJoinKind::Inner | SqlBoundJoinKind::Left => {}
-            SqlBoundJoinKind::Right => {
-                return Err(SqlFrontendError::unsupported("SQL gateway does not support RIGHT JOIN yet"));
-            }
-            SqlBoundJoinKind::Full => {
-                return Err(SqlFrontendError::unsupported("SQL gateway does not support FULL JOIN yet"));
-            }
-        }
         let table = find_table(catalog, &join.table)?;
         if sources.iter().any(|visible| visible.type_id == table.type_id) {
             return Err(SqlFrontendError::unsupported(

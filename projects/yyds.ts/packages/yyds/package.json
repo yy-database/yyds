@@ -36,39 +36,39 @@
         "webui"
     ],
     "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\" "
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/yy-database/yyds.git",
-    "directory": "projects/yyds.ts/packages/yyds"
-  },
-  "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/yyds#readme",
-  "bugs": {
-    "url": "https://github.com/yy-database/yyds/issues"
-  },
-  "keywords": [
-    "yyds",
-    "scripting",
-    "typescript",
-    "napi"
-  ],
-  "publishConfig": {
-    "access": "public"
-  },
-  "optionalDependencies": {
-    "@yydb/yyds-win32-x64": "workspace:*",
-    "@yydb/yyds-linux-x64": "workspace:*",
-    "@yydb/yyds-darwin-x64": "workspace:*",
-    "@yydb/yyds-darwin-arm64": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^22.15.0",
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\" "
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/yyds.ts/packages/yyds"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/yyds#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "keywords": [
+        "yyds",
+        "scripting",
+        "typescript",
+        "napi"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "optionalDependencies": {
+        "@yydb/yyds-win32-x64": "workspace:*",
+        "@yydb/yyds-linux-x64": "workspace:*",
+        "@yydb/yyds-darwin-x64": "workspace:*",
+        "@yydb/yyds-darwin-arm64": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.0",
 
-    "typescript": "^5.9.2"
-  },
-  "engines": {
-    "node": ">=18"
-  }
+        "typescript": "^5.9.2"
+    },
+    "engines": {
+        "node": ">=18"
+    }
 }

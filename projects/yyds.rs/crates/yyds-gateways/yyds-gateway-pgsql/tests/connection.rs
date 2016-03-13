@@ -163,7 +163,10 @@ fn sqlstate_reflects_structured_gateway_errors() {
     assert_sqlstate(&mut client, "SELECT id FROM users INNER JOIN orders ON users.id = orders.user_id", b"42702");
     assert_sqlstate(&mut client, "SELECT ( FROM users", b"42601");
     assert_sqlstate(&mut client, "SELECT nope_fn(name) FROM users", b"42883");
-    assert_sqlstate(&mut client, "SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", b"0A000");
+    // 外连接已受支持：未限定列名报歧义，而不是「不支持」。
+    assert_sqlstate(&mut client, "SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", b"42702");
+    assert_sqlstate(&mut client, "SELECT id FROM users RIGHT JOIN orders ON users.id = orders.user_id", b"42702");
+    assert_sqlstate(&mut client, "SELECT id FROM users FULL JOIN orders ON users.id = orders.user_id", b"42702");
     assert_sqlstate(&mut client, "INSERT INTO users VALUES (1, 42)", b"42804");
     assert_sqlstate(&mut client, "INSERT INTO users VALUES (NULL, 'x')", b"23502");
 

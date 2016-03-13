@@ -173,8 +173,8 @@ pub fn plan_select_for_dialect(
 
 /// 计划一个带 JOIN 的 SELECT。
 ///
-/// 目前只做内连接：基表与每张连接表各自全表扫描，按 JOIN 顺序做嵌套循环合并，
-/// 再套用 WHERE / 投影 / ORDER BY / LIMIT。主键下推、外连接、聚合暂不在网关子集内。
+/// 基表与每张连接表各自全表扫描，按 JOIN 顺序做嵌套循环合并（INNER / LEFT / RIGHT / FULL），
+/// 再套用 WHERE / 投影 / ORDER BY / LIMIT。主键下推、聚合暂不在网关子集内。
 fn plan_join_select(
     select: SqlCatalogBoundSelect,
     catalog: &SqlCatalog,

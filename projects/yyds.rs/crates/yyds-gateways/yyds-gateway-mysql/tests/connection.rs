@@ -896,7 +896,10 @@ fn error_numbers_reflect_structured_gateway_errors() {
         ("SELECT id FROM users INNER JOIN orders ON users.id = orders.user_id", 1052, "23000"),
         ("PRAGMA user_version", 1064, "42000"),
         ("SELECT nope_fn(name) FROM users", 1305, "42000"),
-        ("SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", 1235, "42000"),
+        // 外连接已受支持：未限定列名报歧义，而不是「不支持」。
+        ("SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", 1052, "23000"),
+        ("SELECT id FROM users RIGHT JOIN orders ON users.id = orders.user_id", 1052, "23000"),
+        ("SELECT id FROM users FULL JOIN orders ON users.id = orders.user_id", 1052, "23000"),
         ("INSERT INTO users (id, name) VALUES (3, 42)", 1366, "HY000"),
         ("INSERT INTO users (id, name) VALUES (NULL, 'x')", 1048, "23000"),
         ("INSERT INTO users (id, name) VALUES (1, 'dup')", 1062, "23000"),
