@@ -54,7 +54,7 @@
     "devDependencies": {
         "@types/node": "^22.15.0",
         "@types/pg": "^8.18.0",
-        "@yydb-examples/harness": "workspace:*",
+        "@yydb/yyds-node-harness": "workspace:*",
         "pg": "^8.23.1",
         "typescript": "^5.9.2"
     },

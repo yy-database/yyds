@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startYydsNode } from "@yydb-examples/harness";
+import { startYydsNode } from "@yydb/yyds-node-harness";
 import { MongoClient } from "mongodb";
 
 test("mongodb driver completes the handshake and sees unsupported collection commands", { timeout: 60_000 }, async (t) => {

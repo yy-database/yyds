@@ -7,7 +7,7 @@
         "fmt:check": "node scripts/format.mjs --check",
         "test": "cargo test --manifest-path projects/yyds.rs/Cargo.toml --release --workspace",
         "build:napi": "node scripts/build-napi.mjs",
-        "typecheck": "pnpm -r --filter @yydb/yyds --filter @yydb/redis --filter @yydb/mysql --filter @yydb/postgresql --filter @yydb/mongodb --filter @yydb-examples/harness run typecheck",
+        "typecheck": "pnpm -r --filter @yydb/yyds --filter @yydb/redis --filter @yydb/mysql --filter @yydb/postgresql --filter @yydb/mongodb --filter @yydb/yyds-node-harness run typecheck",
         "test:ts": "pnpm -r --filter @yydb/yyds --filter @yydb/redis --filter @yydb/mysql --filter @yydb/postgresql --filter @yydb/mongodb run test",
         "test:integration": "pnpm --filter @yydb/redis test && pnpm --filter @yydb/mysql test && pnpm --filter @yydb/postgresql test && pnpm --filter @yydb/mongodb test",
         "test:py": "python -m unittest discover -s projects/yyds.py/packages/yyds/tests",

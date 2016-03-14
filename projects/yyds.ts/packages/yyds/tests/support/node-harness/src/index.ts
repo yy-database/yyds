@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const REPO_CLI = fileURLToPath(
-    new URL("../../../packages/yyds/bin/yyds.mjs", import.meta.url),
+    new URL("../../../../bin/yyds.mjs", import.meta.url),
 );
 const DEFAULT_STARTUP_TIMEOUT_MS = 20_000;
 const STATUS_INTERVAL_MS = 200;

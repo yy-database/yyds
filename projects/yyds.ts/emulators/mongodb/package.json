@@ -52,7 +52,7 @@
     },
     "devDependencies": {
         "@types/node": "^22.15.0",
-        "@yydb-examples/harness": "workspace:*",
+        "@yydb/yyds-node-harness": "workspace:*",
         "mongodb": "^7.7.0",
         "typescript": "^5.9.2"
     },

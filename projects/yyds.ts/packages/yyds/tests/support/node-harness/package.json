@@ -1,7 +1,7 @@
 {
-    "name": "@yydb-examples/harness",
+    "name": "@yydb/yyds-node-harness",
     "version": "0.0.0",
-    "description": "Shared local node harness for the YYDS real-client integration examples.",
+    "description": "Shared local node harness for the YYDS real-client integration tests.",
     "license": "MPL-2.0",
     "private": true,
     "type": "module",
