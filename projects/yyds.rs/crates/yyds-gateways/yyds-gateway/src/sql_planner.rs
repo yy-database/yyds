@@ -18,11 +18,12 @@
 use crate::{
     catalog_bind::{
         collect_column_ids, SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
-        SqlCatalogBoundOrderByItem, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement,
-        SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlFieldType,
+        SqlCatalogBoundOrderByItem, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperation,
+        SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlFieldType,
     },
     sql::{
-        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlDialect, SqlErrorKind, SqlFrontendError,
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundOrderByItem,
+        SqlBoundOrderDirection, SqlBoundSetOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
         SqlScalarFunction,
     },
 };
@@ -43,6 +44,7 @@ pub fn plan_statement_for_dialect(
         SqlCatalogBoundStatement::Insert(insert) => plan_insert(insert, catalog),
         SqlCatalogBoundStatement::Update(update) => plan_update(update, catalog),
         SqlCatalogBoundStatement::Delete(delete) => plan_delete(delete, catalog),
+        SqlCatalogBoundStatement::SetOperation(set) => plan_set_operation(set, catalog, dialect),
     }
 }
 
@@ -169,6 +171,91 @@ pub fn plan_select_for_dialect(
         distinct: select.distinct,
         field_types,
     }))
+}
+
+/// 计划一个集合运算。两侧各自完整计划，合并语义与结果集 `ORDER BY` / `LIMIT`
+/// 由执行层承担。
+///
+/// 两侧的列数与列类型必须匹配：列数不符按语句错误拒绝，类型不符按类型错误拒绝，
+/// 都带方言映射后的错误码，不做隐式转换或截断。
+fn plan_set_operation(
+    set: SqlCatalogBoundSetOperation,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    let left = plan_select_for_dialect(*set.left, catalog, dialect)?;
+    let right = plan_select_for_dialect(*set.right, catalog, dialect)?;
+    let left_columns = crate::sql_describe::describe_plan(&left);
+    let right_columns = crate::sql_describe::describe_plan(&right);
+    if left_columns.len() != right_columns.len() {
+        return Err(SqlFrontendError::syntax(format!(
+            "set operation column count mismatch: left side selects {} columns, right side selects {}",
+            left_columns.len(),
+            right_columns.len()
+        )));
+    }
+    for (index, (left_column, right_column)) in left_columns.iter().zip(right_columns.iter()).enumerate() {
+        let left_type = left_column.field_type.inner();
+        let right_type = right_column.field_type.inner();
+        if left_type == SqlFieldType::Unknown || right_type == SqlFieldType::Unknown || left_type == right_type {
+            continue;
+        }
+        return Err(SqlFrontendError::type_mismatch(format!(
+            "set operation column {} type mismatch: `{}` is {left_type:?}, `{}` is {right_type:?}",
+            index + 1,
+            left_column.name,
+            right_column.name
+        )));
+    }
+    let order_by = resolve_set_operation_order_by(set.order_by, &left_columns)?;
+    Ok(SqlExecutionPlan::SetOperation(SetOperationPlan {
+        left: Box::new(left),
+        right: Box::new(right),
+        operator: set.operator,
+        order_by,
+        limit_after_sort: set.limit.unwrap_or(0),
+        offset_after_sort: set.offset.unwrap_or(0),
+        nulls_first: dialect.nulls_sort_first(),
+        suppress_rows: set.limit == Some(0),
+    }))
+}
+
+/// 把集合运算的 `ORDER BY` 解析成合并结果上的列序号。SQL 只允许在这里引用结果列名
+/// 或序号，任意表达式都没有可以求值的行上下文，因此显式拒绝。
+fn resolve_set_operation_order_by(
+    order_by: Option<Vec<SqlBoundOrderByItem>>,
+    columns: &[crate::sql_describe::SqlColumn],
+) -> Result<Option<Vec<SqlSetOrderByItem>>, SqlFrontendError> {
+    let Some(items) = order_by
+    else {
+        return Ok(None);
+    };
+    let mut resolved = Vec::with_capacity(items.len());
+    for item in items {
+        let column = match &item.expr {
+            SqlBoundExpression::Identifier(name) => columns
+                .iter()
+                .position(|column| column.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| {
+                    planner_error(&format!("ORDER BY `{name}` is not a column of the set operation result"))
+                })?,
+            SqlBoundExpression::Literal(SqlBoundLiteral::Integer(position)) => {
+                let position = usize::try_from(*position).ok().filter(|value| *value >= 1 && *value <= columns.len());
+                let Some(position) = position
+                else {
+                    return Err(planner_error("ORDER BY ordinal position is outside the set operation result"));
+                };
+                position - 1
+            }
+            _ => {
+                return Err(planner_error(
+                    "set operation ORDER BY accepts result column names and ordinal positions only",
+                ));
+            }
+        };
+        resolved.push(SqlSetOrderByItem { column, direction: item.direction, nulls: item.nulls });
+    }
+    Ok(Some(resolved))
 }
 
 /// 计划一个带 JOIN 的 SELECT。
@@ -510,6 +597,8 @@ pub enum SqlExecutionPlan {
     Join(JoinPlan),
     /// SELECT without FROM — constant and scalar builtin evaluation.
     Scalar(ScalarPlan),
+    /// SELECT — set operation combining two complete result plans.
+    SetOperation(SetOperationPlan),
     /// INSERT — PutIfAbsent（pk 必须由 VALUES 提供）。
     Insert(WritePlan),
     /// 多行 INSERT — 依次 PutIfAbsent。
@@ -635,6 +724,38 @@ pub struct ScalarPlan {
     pub projections: Vec<(SqlCatalogBoundExpression, String)>,
     /// `LIMIT 0` 时按 SQL 语义返回空结果集。
     pub suppress_row: bool,
+}
+
+/// SELECT 集合运算执行计划：两侧结果已完整计划，执行层按运算符合并。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetOperationPlan {
+    /// 左操作数执行计划。
+    pub left: Box<SqlExecutionPlan>,
+    /// 右操作数执行计划。
+    pub right: Box<SqlExecutionPlan>,
+    /// 合并运算符。
+    pub operator: SqlBoundSetOperator,
+    /// 合并结果上的 `ORDER BY`，已解析为输出列序号。
+    pub order_by: Option<Vec<SqlSetOrderByItem>>,
+    /// 排序之后应用的 `LIMIT`。0 = 无上限。
+    pub limit_after_sort: usize,
+    /// 排序之后应用的 `OFFSET`。默认 0。
+    pub offset_after_sort: usize,
+    /// 本方言下 `NULL` 是否排在任何非 NULL 值之前。
+    pub nulls_first: bool,
+    /// `LIMIT 0`：结果集必须为空。
+    pub suppress_rows: bool,
+}
+
+/// 集合运算结果上的一列 `ORDER BY` 项。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlSetOrderByItem {
+    /// 结果列序号（从 0 开始）。
+    pub column: usize,
+    /// 排序方向。
+    pub direction: SqlBoundOrderDirection,
+    /// 显式 `NULLS FIRST` / `NULLS LAST`，当写入时。
+    pub nulls: Option<SqlNullsOrder>,
 }
 
 /// INSERT 执行计划。payload 由 execute 层做 TLV 编码。

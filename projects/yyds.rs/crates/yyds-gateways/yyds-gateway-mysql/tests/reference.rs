@@ -480,6 +480,7 @@ errno_is("SELECT DISTINCT ON (age) id FROM users ORDER BY age", 1235)
 errno_is("SELECT name FROM users GROUP BY age", 1235)
 errno_is("SELECT * FROM users GROUP BY age", 1235)
 errno_is("SELECT age FROM users HAVING COUNT(*) > 1", 1235)
+errno_is("SELECT id FROM users UNION SELECT id, name FROM users", 1064)
 errno_is("INSERT INTO users VALUES (NULL, 'x', 0, 0.0, TRUE, NULL)", 1048)
 errno_is("INSERT INTO users VALUES (1, 42, 0, 0.0, TRUE, NULL)", 1366)
 

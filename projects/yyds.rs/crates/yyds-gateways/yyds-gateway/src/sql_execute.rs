@@ -18,12 +18,12 @@ use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 use crate::{
     catalog_bind::{collect_column_ids, SqlCatalogBoundExpression},
     sql::{
-        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundUnaryOperator,
-        SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundSetOperator,
+        SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
     },
     sql_planner::{
-        DeletePlan, DeleteScanPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScalarPlan, ScanPlan, SqlExecutionPlan, UpdatePlan,
-        UpdateScanPlan, WritePlan,
+        DeletePlan, DeleteScanPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScalarPlan, ScanPlan, SetOperationPlan,
+        SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WritePlan,
     },
 };
 
@@ -318,6 +318,7 @@ pub fn execute_plan(
         SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, transaction, scan_plan, dialect),
         SqlExecutionPlan::Join(join_plan) => execute_join(executor, transaction, join_plan, dialect),
         SqlExecutionPlan::Scalar(scalar_plan) => execute_scalar(scalar_plan, dialect),
+        SqlExecutionPlan::SetOperation(set_plan) => execute_set_operation(executor, transaction, set_plan, dialect),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan, dialect),
         SqlExecutionPlan::MultiInsert(write_plans) => execute_multi_insert(executor, transaction, write_plans, dialect),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan, dialect),
@@ -377,6 +378,10 @@ fn resolve_subqueries(
             for (expression, _) in &mut plan.projections {
                 lower_in_place(expression, executor, transaction, dialect)?;
             }
+        }
+        SqlExecutionPlan::SetOperation(plan) => {
+            resolve_subqueries(&mut plan.left, executor, transaction, dialect)?;
+            resolve_subqueries(&mut plan.right, executor, transaction, dialect)?;
         }
         SqlExecutionPlan::Insert(_) | SqlExecutionPlan::MultiInsert(_) => {}
         SqlExecutionPlan::Update(plan) => {
@@ -510,6 +515,85 @@ fn execute_scalar(plan: &ScalarPlan, dialect: SqlDialect) -> Result<SqlResult, S
         row.push(eval_expression(expression, &row_values, &field_types, dialect)?);
     }
     Ok(SqlResult { columns, rows: vec![row], affected_rows: 0 })
+}
+
+/// 执行一个集合运算：两侧先各自完整执行，再按运算符合并结果。
+///
+/// `UNION ALL` 保留重复，`UNION` / `INTERSECT` / `EXCEPT` 都按 SQL 语义先去重再筛选。
+/// 合并结果上的 `ORDER BY` / `OFFSET` / `LIMIT` 最后依次应用。
+fn execute_set_operation(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &SetOperationPlan,
+    dialect: SqlDialect,
+) -> Result<SqlResult, SqlFrontendError> {
+    let left = execute_plan(executor, transaction, &plan.left, dialect)?;
+    let right = execute_plan(executor, transaction, &plan.right, dialect)?;
+    let columns = left.columns;
+    if plan.suppress_rows {
+        return Ok(SqlResult { columns, rows: Vec::new(), affected_rows: 0 });
+    }
+    let mut rows = match plan.operator {
+        SqlBoundSetOperator::UnionAll => {
+            let mut rows = left.rows;
+            rows.extend(right.rows);
+            rows
+        }
+        SqlBoundSetOperator::Union => {
+            let mut rows = left.rows;
+            rows.extend(right.rows);
+            retain_distinct_rows(&mut rows);
+            rows
+        }
+        SqlBoundSetOperator::Intersect => {
+            let mut rows = left.rows;
+            retain_distinct_rows(&mut rows);
+            rows.retain(|row| right.rows.iter().any(|candidate| projected_rows_equal(candidate, row)));
+            rows
+        }
+        SqlBoundSetOperator::Except => {
+            let mut rows = left.rows;
+            retain_distinct_rows(&mut rows);
+            rows.retain(|row| !right.rows.iter().any(|candidate| projected_rows_equal(candidate, row)));
+            rows
+        }
+    };
+    if let Some(items) = &plan.order_by {
+        let orderings: Vec<(usize, SqlBoundOrderDirection, bool)> = items
+            .iter()
+            .map(|item| (item.column, item.direction.clone(), order_nulls_first(&item.direction, item.nulls, plan.nulls_first)))
+            .collect();
+        rows.sort_by(move |a, b| {
+            for (column, direction, nulls_first) in &orderings {
+                let ordering = compare_values_with_nulls(a.get(*column), b.get(*column), *nulls_first);
+                if ordering != std::cmp::Ordering::Equal {
+                    return match direction {
+                        SqlBoundOrderDirection::Asc => ordering,
+                        SqlBoundOrderDirection::Desc => ordering.reverse(),
+                    };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+    let limit = plan.limit_after_sort;
+    let rows: Vec<Vec<SqlValue>> =
+        rows.into_iter().skip(plan.offset_after_sort).take(if limit == 0 { usize::MAX } else { limit }).collect();
+    Ok(SqlResult { columns, rows, affected_rows: 0 })
+}
+
+/// 保留每行的首次出现，去掉后续重复行（集合运算的 `UNION` / `INTERSECT` / `EXCEPT` 语义）。
+fn retain_distinct_rows(rows: &mut Vec<Vec<SqlValue>>) {
+    let mut seen: Vec<Vec<SqlValue>> = Vec::new();
+    rows.retain(|row| {
+        if seen.iter().any(|candidate| projected_rows_equal(candidate, row)) {
+            false
+        }
+        else {
+            seen.push(row.clone());
+            true
+        }
+    });
 }
 
 fn execute_read(

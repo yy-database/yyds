@@ -265,6 +265,8 @@ pub enum SqlBoundStatement {
     Update(SqlBoundUpdate),
     /// One SQL DELETE request awaiting YYDS catalog binding.
     Delete(SqlBoundDelete),
+    /// One SQL set operation awaiting YYDS catalog binding.
+    SetOperation(SqlBoundSetOperation),
 }
 
 /// SQL dialect that owns protocol-visible ordering rules.
@@ -393,6 +395,36 @@ pub struct SqlBoundDelete {
     pub table: String,
     /// Optional SQL WHERE expression.
     pub predicate: Option<SqlBoundExpression>,
+}
+
+/// SQL set operator retained by the gateway binder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlBoundSetOperator {
+    /// `UNION` — concatenation with duplicate elimination.
+    Union,
+    /// `UNION ALL` — concatenation keeping duplicates.
+    UnionAll,
+    /// `INTERSECT` — distinct rows present on both sides.
+    Intersect,
+    /// `EXCEPT` — distinct left rows absent from the right side.
+    Except,
+}
+
+/// SQL set operation request owned by the compatibility gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundSetOperation {
+    /// Left operand.
+    pub left: Box<SqlBoundSelect>,
+    /// Operator combining both operands.
+    pub operator: SqlBoundSetOperator,
+    /// Right operand.
+    pub right: Box<SqlBoundSelect>,
+    /// `ORDER BY` applied to the combined result.
+    pub order_by: Option<Vec<SqlBoundOrderByItem>>,
+    /// Optional `LIMIT` applied to the combined result.
+    pub limit: Option<usize>,
+    /// Optional `OFFSET` applied to the combined result.
+    pub offset: Option<usize>,
 }
 
 /// One SQL projection expression.
@@ -702,9 +734,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
             table: normalize_identifier(delete.table_name.name.name.as_ref()),
             predicate: delete.selection.as_ref().map(bind_expression).transpose()?,
         })),
-        SqlStatement::SetOperation(_) => {
-            Err(SqlFrontendError::unsupported("SQL gateway does not support set operations yet"))
-        }
+        SqlStatement::SetOperation(set) => Ok(SqlBoundStatement::SetOperation(bind_set_operation(set)?)),
         _ => Err(SqlFrontendError::unsupported("SQL gateway binding accepts SELECT/INSERT/UPDATE/DELETE only")),
     }
 }
@@ -719,38 +749,8 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
         }
     };
     let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
-    let (limit, offset) = match &select.limit {
-        Some(clause) => {
-            let n = extract_u64(&clause.limit).ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))?
-                as usize;
-            let off = clause.offset.as_ref().and_then(extract_u64).map(|v| v as usize);
-            (Some(n), off)
-        }
-        None => (None, None),
-    };
-    let order_by = match &select.order_by {
-        Some(clause) if !clause.items.is_empty() => {
-            let items = clause
-                .items
-                .iter()
-                .map(|item| {
-                    Ok(SqlBoundOrderByItem {
-                        expr: bind_expression(&item.expr)?,
-                        direction: match item.direction {
-                            oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
-                            oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
-                        },
-                        nulls: item.nulls.map(|nulls| match nulls {
-                            oak_sql::ast::NullsOrder::First => SqlNullsOrder::First,
-                            oak_sql::ast::NullsOrder::Last => SqlNullsOrder::Last,
-                        }),
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Some(items)
-        }
-        _ => None,
-    };
+    let (limit, offset) = bind_limit_clause(select.limit.as_ref())?;
+    let order_by = bind_order_by_clause(select.order_by.as_ref())?;
     let group_by = match &select.group_by {
         Some(clause) if !clause.items.is_empty() => {
             let mut expressions = Vec::with_capacity(clause.items.len());
@@ -811,6 +811,67 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
         offset,
         order_by,
         distinct,
+    })
+}
+
+/// Binds one Oak set operation. `ORDER BY` stays in surface form because it
+/// references the combined output columns rather than catalog columns.
+fn bind_set_operation(set: &oak_sql::ast::SetOperationStatement) -> Result<SqlBoundSetOperation, SqlFrontendError> {
+    let (limit, offset) = bind_limit_clause(set.limit.as_ref())?;
+    Ok(SqlBoundSetOperation {
+        left: Box::new(bind_select_statement(&set.left)?),
+        operator: match set.operator {
+            oak_sql::ast::SetOperator::Union => SqlBoundSetOperator::Union,
+            oak_sql::ast::SetOperator::UnionAll => SqlBoundSetOperator::UnionAll,
+            oak_sql::ast::SetOperator::Intersect => SqlBoundSetOperator::Intersect,
+            oak_sql::ast::SetOperator::Except => SqlBoundSetOperator::Except,
+        },
+        right: Box::new(bind_select_statement(&set.right)?),
+        order_by: bind_order_by_clause(set.order_by.as_ref())?,
+        limit,
+        offset,
+    })
+}
+
+/// Binds an Oak `LIMIT` clause into a count and an optional offset.
+fn bind_limit_clause(clause: Option<&oak_sql::ast::LimitClause>) -> Result<(Option<usize>, Option<usize>), SqlFrontendError> {
+    Ok(match clause {
+        Some(clause) => {
+            let count = extract_u64(&clause.limit).ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))?
+                as usize;
+            let offset = clause.offset.as_ref().and_then(extract_u64).map(|value| value as usize);
+            (Some(count), offset)
+        }
+        None => (None, None),
+    })
+}
+
+/// Binds an Oak `ORDER BY` clause into gateway order items.
+fn bind_order_by_clause(
+    clause: Option<&oak_sql::ast::OrderByClause>,
+) -> Result<Option<Vec<SqlBoundOrderByItem>>, SqlFrontendError> {
+    Ok(match clause {
+        Some(clause) if !clause.items.is_empty() => {
+            let items = clause
+                .items
+                .iter()
+                .map(|item| {
+                    Ok(SqlBoundOrderByItem {
+                        expr: bind_expression(&item.expr)?,
+                        direction: match item.direction {
+                            oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
+                            oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
+                        },
+                        nulls: item.nulls.map(|nulls| match nulls {
+                            oak_sql::ast::NullsOrder::First => SqlNullsOrder::First,
+                            oak_sql::ast::NullsOrder::Last => SqlNullsOrder::Last,
+                        }),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Some(items)
+        }
+        _ => None,
     })
 }
 

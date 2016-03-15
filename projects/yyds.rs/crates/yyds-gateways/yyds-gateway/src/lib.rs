@@ -19,15 +19,15 @@ mod sql_planner;
 pub use crate::{
     catalog_bind::{
         bind_sql_catalog, bind_sql_catalog_with_variables, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression,
-        SqlCatalogBoundJoin, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement, SqlCatalogBoundTable,
-        SqlCatalogField, SqlCatalogTable, SqlFieldType,
+        SqlCatalogBoundJoin, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperation,
+        SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable, SqlFieldType,
     },
     sql_describe::{describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
     sql_parameters::{neutralized_sql_parameters, substitute_sql_parameters, SqlParameterStyle},
     sql_planner::{
         plan_select, plan_select_for_dialect, plan_statement, plan_statement_for_dialect, DeletePlan, JoinPlan, JoinSourcePlan,
-        ReadPlan, ScanPlan, SqlExecutionPlan, UpdatePlan, WritePlan,
+        ReadPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, SqlSetOrderByItem, UpdatePlan, WritePlan,
     },
 };
 
@@ -36,8 +36,9 @@ pub use crate::{
     kind::{GatewayKind, ALL_GATEWAY_KINDS},
     sql::{
         bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundJoin, SqlBoundJoinKind,
-        SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlDialect,
-        SqlErrorKind, SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
+        SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundStatement,
+        SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlSessionCommand, SqlTransactionAction,
+        SqlVariableScope,
     },
 };
 

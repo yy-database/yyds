@@ -724,11 +724,44 @@ pub fn group_cases() -> Vec<Case> {
     ]
 }
 
+/// Set-operation behavior: `UNION` de-duplicates, `UNION ALL` keeps duplicates,
+/// `INTERSECT` keeps common rows and `EXCEPT` keeps the left-only rows.
+///
+/// Every case carries an `ORDER BY` on the combined result because the merged row
+/// order is otherwise implementation-defined.
+pub fn set_operation_cases() -> Vec<Case> {
+    use Lit::Int;
+
+    vec![
+        case("union removes duplicates")
+            .sql("SELECT age FROM users WHERE id <= 2 UNION SELECT age FROM users WHERE id >= 2 ORDER BY age")
+            .rows(&[&[Int(20)], &[Int(30)], &[Int(40)]])
+            .build(),
+        case("union all keeps duplicates")
+            .sql("SELECT id FROM users WHERE id <= 2 UNION ALL SELECT id FROM users WHERE id >= 2 ORDER BY id")
+            .rows(&[&[Int(1)], &[Int(2)], &[Int(2)], &[Int(3)]])
+            .build(),
+        case("intersect keeps common rows once")
+            .sql("SELECT id FROM users WHERE id <= 2 INTERSECT SELECT id FROM users WHERE id >= 2 ORDER BY id")
+            .rows(&[&[Int(2)]])
+            .build(),
+        case("except keeps left only rows")
+            .sql("SELECT id FROM users WHERE id <= 2 EXCEPT SELECT id FROM users WHERE id >= 2 ORDER BY id")
+            .rows(&[&[Int(1)]])
+            .build(),
+        case("set operation order by and limit cover the merged result")
+            .sql("SELECT id FROM users UNION ALL SELECT id FROM users ORDER BY id DESC LIMIT 2")
+            .rows(&[&[Int(3)], &[Int(3)]])
+            .build(),
+    ]
+}
+
 /// Upstream forms that the gateway must reject explicitly instead of guessing.
 pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("DISTINCT ON", "SELECT DISTINCT ON (age) id FROM users ORDER BY age"),
     ("GROUPING SETS", "SELECT age FROM users GROUP BY GROUPING SETS ((age))"),
-    ("UNION", "SELECT id FROM users UNION SELECT id FROM users"),
+    ("set operation column count", "SELECT id FROM users UNION SELECT id, name FROM users"),
+    ("set operation column type", "SELECT id FROM users UNION SELECT name FROM users"),
     ("FOR UPDATE", "SELECT id FROM users FOR UPDATE"),
 ];
 
@@ -740,6 +773,7 @@ pub fn all_cases() -> Vec<Case> {
     cases.extend(group_cases());
     cases.extend(order_cases());
     cases.extend(null_order_cases());
+    cases.extend(set_operation_cases());
     cases
 }
 

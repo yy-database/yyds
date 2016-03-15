@@ -13,8 +13,8 @@ use yyds_gateway::{
     SqlParameterStyle, SqlResult, SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, rows, type_cases, Case, Driver, Lit,
-    DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, rows, set_operation_cases, type_cases, Case,
+    Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -163,6 +163,11 @@ fn sql_conformance_order_by() {
 #[test]
 fn sql_conformance_null_ordering() {
     run_cases(&null_order_cases());
+}
+
+#[test]
+fn sql_conformance_set_operations() {
+    run_cases(&set_operation_cases());
 }
 
 #[test]

@@ -59,11 +59,38 @@ fn unsupported_upstream_forms_are_rejected_explicitly() {
         "SELECT age FROM users GROUP BY GROUPING SETS ((age))",
         "SELECT age FROM users GROUP BY ROLLUP(age)",
         "SELECT age FROM users GROUP BY CUBE(age)",
-        "SELECT id FROM users UNION SELECT id FROM users",
         "SELECT id FROM users FOR UPDATE",
     ] {
         assert!(bind_sql(sql).is_err(), "`{sql}` must be rejected explicitly");
     }
+}
+
+/// 集合运算两侧分别绑定，合并结果上的 `ORDER BY` / `LIMIT` 挂在集合运算本身。
+#[test]
+fn set_operations_bind_both_operands_and_the_combined_tail() {
+    use yyds_gateway::{bind_sql, SqlBoundSetOperator, SqlBoundStatement};
+
+    for (sql, expected) in [
+        ("SELECT id FROM users UNION SELECT id FROM users", SqlBoundSetOperator::Union),
+        ("SELECT id FROM users UNION ALL SELECT id FROM users", SqlBoundSetOperator::UnionAll),
+        ("SELECT id FROM users INTERSECT SELECT id FROM users", SqlBoundSetOperator::Intersect),
+        ("SELECT id FROM users EXCEPT SELECT id FROM users", SqlBoundSetOperator::Except),
+    ] {
+        let SqlBoundStatement::SetOperation(set) = bind_sql(sql).expect("bind")
+        else {
+            panic!("expected set operation for `{sql}`")
+        };
+        assert_eq!(set.operator, expected, "{sql}");
+        assert!(set.order_by.is_none() && set.limit.is_none(), "{sql}");
+    }
+
+    let SqlBoundStatement::SetOperation(set) =
+        bind_sql("SELECT id FROM users UNION SELECT id FROM users ORDER BY id DESC LIMIT 2").expect("bind")
+    else {
+        panic!("expected set operation")
+    };
+    assert!(set.order_by.is_some_and(|items| items.len() == 1));
+    assert_eq!(set.limit, Some(2));
 }
 
 /// Oak 现在把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关本轮

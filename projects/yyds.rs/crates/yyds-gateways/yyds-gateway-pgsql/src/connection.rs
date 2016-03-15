@@ -480,7 +480,11 @@ fn run_statement(
     })?;
     let is_read = matches!(
         &plan,
-        SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_)
+        SqlExecutionPlan::Read(_)
+            | SqlExecutionPlan::Scan(_)
+            | SqlExecutionPlan::Join(_)
+            | SqlExecutionPlan::Scalar(_)
+            | SqlExecutionPlan::SetOperation(_)
     );
     // Derive the result shape from the catalog plan so an empty result set
     // reports the declared type instead of falling back to `text`.
@@ -499,7 +503,11 @@ fn run_statement(
             SqlExecutionPlan::Insert(_) | SqlExecutionPlan::MultiInsert(_) => format!("INSERT 0 {affected}"),
             SqlExecutionPlan::Update(_) | SqlExecutionPlan::UpdateScan(_) => format!("UPDATE {affected}"),
             SqlExecutionPlan::Delete(_) | SqlExecutionPlan::DeleteScan(_) => format!("DELETE {affected}"),
-            SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_) => {
+            SqlExecutionPlan::Read(_)
+            | SqlExecutionPlan::Scan(_)
+            | SqlExecutionPlan::Join(_)
+            | SqlExecutionPlan::Scalar(_)
+            | SqlExecutionPlan::SetOperation(_) => {
                 format!("SELECT {}", result.rows.len())
             }
         }
@@ -803,7 +811,7 @@ fn statement_description(sql: &str, runtime: Option<&Arc<PgsqlSqlRuntime>>) -> R
         .map_err(|error| statement_error("parameter", error))?;
     let bound = bind_sql_catalog(&neutral_sql, &runtime.catalog, runtime.schema_version)
         .map_err(|error| statement_error("bind", error))?;
-    if !matches!(bound, SqlCatalogBoundStatement::Select(_)) {
+    if !matches!(bound, SqlCatalogBoundStatement::Select(_) | SqlCatalogBoundStatement::SetOperation(_)) {
         return Ok(Vec::new());
     }
     let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres)

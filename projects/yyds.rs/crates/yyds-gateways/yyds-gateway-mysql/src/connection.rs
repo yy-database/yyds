@@ -668,7 +668,11 @@ fn execute_sql(
     // DML 写操作 —— 先 execute 再回 OK packet
     let is_write = !matches!(
         plan,
-        SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_)
+        SqlExecutionPlan::Read(_)
+            | SqlExecutionPlan::Scan(_)
+            | SqlExecutionPlan::Join(_)
+            | SqlExecutionPlan::Scalar(_)
+            | SqlExecutionPlan::SetOperation(_)
     );
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
     let result = match execute_plan(runtime.executor.as_ref(), handle_ref, &plan, SqlDialect::Mysql) {
@@ -763,14 +767,16 @@ fn handle_prepare(
     // 写入语句的值类型检查推迟到 execute，因为只有执行时才知道参数的真实类型，
     // 因此这里只为 SELECT 推导结果列。
     let description = match bound {
-        SqlCatalogBoundStatement::Select(_) => match plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Mysql) {
-            Ok(plan) => describe_plan(&plan),
-            Err(error) => {
-                session.fail();
-                write_statement_error(stream, sequence, "plan", error)?;
-                return Ok(());
+        SqlCatalogBoundStatement::Select(_) | SqlCatalogBoundStatement::SetOperation(_) => {
+            match plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Mysql) {
+                Ok(plan) => describe_plan(&plan),
+                Err(error) => {
+                    session.fail();
+                    write_statement_error(stream, sequence, "plan", error)?;
+                    return Ok(());
+                }
             }
-        },
+        }
         _ => Vec::new(),
     };
 

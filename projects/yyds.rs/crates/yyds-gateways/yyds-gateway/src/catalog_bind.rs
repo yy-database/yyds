@@ -2,8 +2,9 @@
 
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind,
-    SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
-    SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
+    SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation,
+    SqlBoundSetOperator, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlErrorKind, SqlFrontendError,
+    SqlNullsOrder,
 };
 use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
@@ -358,6 +359,27 @@ pub struct SqlCatalogBoundDelete {
     pub predicate: Option<SqlCatalogBoundExpression>,
 }
 
+/// SQL set operation after catalog binding.
+///
+/// `ORDER BY` on a set operation references the combined output columns rather
+/// than catalog columns, so it stays in surface form until the planner resolves
+/// it against the left operand's result shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundSetOperation {
+    /// Catalog-bound left operand.
+    pub left: Box<SqlCatalogBoundSelect>,
+    /// Operator combining both operands.
+    pub operator: SqlBoundSetOperator,
+    /// Catalog-bound right operand.
+    pub right: Box<SqlCatalogBoundSelect>,
+    /// `ORDER BY` applied to the combined result, resolved during planning.
+    pub order_by: Option<Vec<SqlBoundOrderByItem>>,
+    /// Optional `LIMIT` applied to the combined result.
+    pub limit: Option<usize>,
+    /// Optional `OFFSET` applied to the combined result.
+    pub offset: Option<usize>,
+}
+
 /// Gateway-owned SQL request after names are bound to a YYDS catalog revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlCatalogBoundStatement {
@@ -369,6 +391,8 @@ pub enum SqlCatalogBoundStatement {
     Update(SqlCatalogBoundUpdate),
     /// One catalog-bound DELETE request awaiting planning.
     Delete(SqlCatalogBoundDelete),
+    /// One catalog-bound set operation awaiting planning.
+    SetOperation(SqlCatalogBoundSetOperation),
 }
 
 /// Binds a parsed SQL surface to a specific catalog revision.
@@ -406,6 +430,9 @@ pub fn bind_sql_catalog_with_variables(
         SqlBoundStatement::Insert(insert) => bind_insert(insert, catalog, variables).map(SqlCatalogBoundStatement::Insert),
         SqlBoundStatement::Update(update) => bind_update(update, catalog, variables).map(SqlCatalogBoundStatement::Update),
         SqlBoundStatement::Delete(delete) => bind_delete(delete, catalog, variables).map(SqlCatalogBoundStatement::Delete),
+        SqlBoundStatement::SetOperation(set) => {
+            bind_set_operation(set, catalog, variables).map(SqlCatalogBoundStatement::SetOperation)
+        }
     }
 }
 
@@ -496,6 +523,21 @@ fn bind_delete(
     let source = [table.clone()];
     let predicate = delete.predicate.map(|p| bind_expression(p, &source, catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundDelete { table, predicate })
+}
+
+fn bind_set_operation(
+    set: SqlBoundSetOperation,
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+) -> Result<SqlCatalogBoundSetOperation, SqlFrontendError> {
+    Ok(SqlCatalogBoundSetOperation {
+        left: Box::new(bind_select(*set.left, catalog, variables)?),
+        operator: set.operator,
+        right: Box::new(bind_select(*set.right, catalog, variables)?),
+        order_by: set.order_by,
+        limit: set.limit,
+        offset: set.offset,
+    })
 }
 
 fn bind_select(
