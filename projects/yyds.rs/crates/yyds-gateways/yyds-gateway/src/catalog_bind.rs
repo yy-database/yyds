@@ -448,24 +448,20 @@ fn bind_insert(
     if field_count == 0 {
         return Err(SqlFrontendError::syntax("INSERT has no target columns".to_string()));
     }
-    let flat: Vec<SqlBoundExpression> = insert.rows.into_iter().flatten().collect();
-    if flat.len() % field_count != 0 {
-        return Err(SqlFrontendError::syntax(format!(
-            "INSERT column/value count mismatch: {} columns, {} values (not divisible)",
-            field_count,
-            flat.len()
-        )));
-    }
-    let row_count = flat.len() / field_count;
-    if row_count == 0 {
+    if insert.rows.is_empty() {
         return Err(SqlFrontendError::syntax("INSERT has no VALUES".to_string()));
     }
-    let mut rows = Vec::with_capacity(row_count);
-    for chunk in flat.chunks(field_count) {
-        let bound_row = chunk
-            .iter()
-            .map(|v| bind_expression(v.clone(), &source, catalog, variables))
-            .collect::<Result<Vec<_>, _>>()?;
+    let mut rows = Vec::with_capacity(insert.rows.len());
+    for row in insert.rows {
+        if row.len() != field_count {
+            return Err(SqlFrontendError::syntax(format!(
+                "INSERT column/value count mismatch: {} columns, {} values",
+                field_count,
+                row.len()
+            )));
+        }
+        let bound_row =
+            row.iter().map(|v| bind_expression(v.clone(), &source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
         rows.push(bound_row);
     }
     Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows })

@@ -66,6 +66,31 @@ fn unsupported_upstream_forms_are_rejected_explicitly() {
     }
 }
 
+/// Oak 现在把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关本轮
+/// 不实现它们，必须显式拒绝，不能静默丢掉这些字段。
+#[test]
+fn insert_clauses_outside_the_subset_are_rejected_explicitly() {
+    use yyds_gateway::{bind_sql, SqlErrorKind};
+
+    let on_conflict =
+        bind_sql("INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO NOTHING").expect_err("ON CONFLICT must be rejected");
+    assert_eq!(on_conflict.kind, SqlErrorKind::Unsupported);
+    assert!(on_conflict.message.contains("ON CONFLICT"), "{}", on_conflict.message);
+
+    let returning =
+        bind_sql("INSERT INTO users (name) VALUES ('John') RETURNING id, name AS alias").expect_err("RETURNING must be rejected");
+    assert_eq!(returning.kind, SqlErrorKind::Unsupported);
+    assert!(returning.message.contains("RETURNING"), "{}", returning.message);
+
+    let insert_select = bind_sql("INSERT INTO users (id, name) SELECT id, name FROM users").expect_err("INSERT ... SELECT must be rejected");
+    assert_eq!(insert_select.kind, SqlErrorKind::Unsupported);
+    assert!(insert_select.message.contains("INSERT ... SELECT"), "{}", insert_select.message);
+
+    // 多行 VALUES 的每行必须与列数一致。
+    let mismatched = bind_sql("INSERT INTO users (id, name) VALUES (1, 'one'), (2)").expect_err("ragged VALUES");
+    assert!(mismatched.message.contains("INSERT"), "{}", mismatched.message);
+}
+
 #[test]
 fn select_distinct_modifier_is_bound() {
     use yyds_gateway::{bind_sql, SqlBoundStatement};

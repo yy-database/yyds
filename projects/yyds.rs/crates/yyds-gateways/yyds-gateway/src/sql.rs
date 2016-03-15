@@ -637,30 +637,44 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     match &root.statements[0] {
         SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(select)?)),
         SqlStatement::Insert(insert) => {
+            if insert.on_conflict.is_some() {
+                return Err(SqlFrontendError::unsupported("SQL gateway does not support the ON CONFLICT clause"));
+            }
+            if insert.returning.is_some() {
+                return Err(SqlFrontendError::unsupported("SQL gateway does not support the RETURNING clause"));
+            }
+            if let oak_sql::ast::InsertSource::Select(_) = insert.source {
+                return Err(SqlFrontendError::unsupported("SQL gateway does not support INSERT ... SELECT"));
+            }
             let columns: Option<Vec<String>> = if insert.columns.is_empty() {
                 None
             }
             else {
                 Some(insert.columns.iter().map(|id| normalize_identifier(id.name.as_ref())).collect())
             };
-            let flat_values = insert.values.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
-            let rows = if let Some(cols) = &columns {
-                let n = cols.len();
-                if n == 0 {
+            let mut rows = Vec::with_capacity(insert.rows.len());
+            for row in &insert.rows {
+                rows.push(row.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?);
+            }
+            let Some(width) = rows.first().map(Vec::len)
+            else {
+                return Err(bind_error("INSERT has no VALUES rows"));
+            };
+            if rows.iter().any(|row| row.len() != width) {
+                return Err(bind_error("INSERT VALUES rows must all carry the same number of values"));
+            }
+            if let Some(cols) = &columns {
+                if cols.is_empty() {
                     return Err(bind_error("INSERT has no columns"));
                 }
-                if flat_values.len() % n != 0 {
+                if cols.len() != width {
                     return Err(bind_error(&format!(
-                        "INSERT column/value count mismatch: {} columns, {} values (not divisible)",
-                        n,
-                        flat_values.len()
+                        "INSERT column/value count mismatch: {} columns, {} values per row",
+                        cols.len(),
+                        width
                     )));
                 }
-                flat_values.chunks(n).map(|chunk| chunk.to_vec()).collect()
             }
-            else {
-                vec![flat_values]
-            };
             Ok(SqlBoundStatement::Insert(SqlBoundInsert {
                 table: normalize_identifier(insert.table_name.name.name.as_ref()),
                 columns,
@@ -688,6 +702,9 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
             table: normalize_identifier(delete.table_name.name.name.as_ref()),
             predicate: delete.selection.as_ref().map(bind_expression).transpose()?,
         })),
+        SqlStatement::SetOperation(_) => {
+            Err(SqlFrontendError::unsupported("SQL gateway does not support set operations yet"))
+        }
         _ => Err(SqlFrontendError::unsupported("SQL gateway binding accepts SELECT/INSERT/UPDATE/DELETE only")),
     }
 }
