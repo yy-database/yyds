@@ -179,6 +179,34 @@ fn sqlstate_reflects_structured_gateway_errors() {
     server.join().unwrap();
 }
 
+/// `INSERT ... SELECT` 必须按写语句返回 `INSERT 0 N` 命令标签，而不是结果集。
+#[test]
+fn insert_select_reports_affected_rows_as_a_write() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "INSERT INTO users (id, name) SELECT 1, 'alice'");
+    let inserted = receive_until_ready(&mut client);
+    assert_eq!(inserted[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    assert_eq!(inserted.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // 源查询读同一张表，写入另一张表。
+    send_query(&mut client, "INSERT INTO orders (id, user_id) SELECT id, id FROM users WHERE id = 1");
+    let copied = receive_until_ready(&mut client);
+    assert_eq!(copied[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    assert_eq!(copied.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    send_query(&mut client, "SELECT user_id FROM orders WHERE id = 1");
+    let rows = receive_until_ready(&mut client);
+    assert_eq!(rows[0].0, b'T');
+
+    assert_sqlstate(&mut client, "INSERT INTO users (id, name) SELECT 1, 'bob'", b"23505");
+    assert_sqlstate(&mut client, "INSERT INTO users (id, name) SELECT id FROM users", b"42601");
+    assert_sqlstate(&mut client, "INSERT INTO users (id, name) SELECT name, name FROM users", b"42804");
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 带 SQL runtime 的服务端，用于验证 PostgreSQL 语法下 `@@` 必须被拒绝。
 fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;

@@ -39,6 +39,7 @@ pub fn describe_plan(plan: &SqlExecutionPlan) -> Vec<SqlColumn> {
             .collect(),
         SqlExecutionPlan::Insert(_)
         | SqlExecutionPlan::MultiInsert(_)
+        | SqlExecutionPlan::InsertSelect(_)
         | SqlExecutionPlan::Update(_)
         | SqlExecutionPlan::UpdateScan(_)
         | SqlExecutionPlan::Delete(_)

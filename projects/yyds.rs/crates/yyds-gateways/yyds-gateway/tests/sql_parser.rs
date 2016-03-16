@@ -93,11 +93,11 @@ fn set_operations_bind_both_operands_and_the_combined_tail() {
     assert_eq!(set.limit, Some(2));
 }
 
-/// Oak 现在把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关本轮
-/// 不实现它们，必须显式拒绝，不能静默丢掉这些字段。
+/// Oak 现在把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关仍显式拒绝
+/// `ON CONFLICT` 与 `RETURNING`，而 `INSERT ... SELECT` 复用 SELECT 绑定并保留源查询。
 #[test]
 fn insert_clauses_outside_the_subset_are_rejected_explicitly() {
-    use yyds_gateway::{bind_sql, SqlErrorKind};
+    use yyds_gateway::{bind_sql, SqlBoundStatement, SqlErrorKind};
 
     let on_conflict =
         bind_sql("INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO NOTHING").expect_err("ON CONFLICT must be rejected");
@@ -109,9 +109,17 @@ fn insert_clauses_outside_the_subset_are_rejected_explicitly() {
     assert_eq!(returning.kind, SqlErrorKind::Unsupported);
     assert!(returning.message.contains("RETURNING"), "{}", returning.message);
 
-    let insert_select = bind_sql("INSERT INTO users (id, name) SELECT id, name FROM users").expect_err("INSERT ... SELECT must be rejected");
-    assert_eq!(insert_select.kind, SqlErrorKind::Unsupported);
-    assert!(insert_select.message.contains("INSERT ... SELECT"), "{}", insert_select.message);
+    let insert_select = bind_sql("INSERT INTO users (id, name) SELECT id, name FROM users").expect("INSERT ... SELECT binds");
+    let SqlBoundStatement::Insert(insert) = insert_select
+    else {
+        panic!("expected insert");
+    };
+    assert_eq!(insert.table, "users");
+    assert_eq!(insert.columns, Some(vec!["id".to_string(), "name".to_string()]));
+    assert!(insert.rows.is_empty(), "a SELECT source has no VALUES rows");
+    let select = insert.select.expect("SELECT source is retained");
+    assert_eq!(select.source.as_deref(), Some("users"));
+    assert_eq!(select.projections.len(), 2);
 
     // 多行 VALUES 的每行必须与列数一致。
     let mismatched = bind_sql("INSERT INTO users (id, name) VALUES (1, 'one'), (2)").expect_err("ragged VALUES");

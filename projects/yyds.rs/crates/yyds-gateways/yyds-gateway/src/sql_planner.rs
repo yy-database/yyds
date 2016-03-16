@@ -41,7 +41,7 @@ pub fn plan_statement_for_dialect(
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
     match statement {
         SqlCatalogBoundStatement::Select(select) => plan_select_for_dialect(select, catalog, dialect),
-        SqlCatalogBoundStatement::Insert(insert) => plan_insert(insert, catalog),
+        SqlCatalogBoundStatement::Insert(insert) => plan_insert(insert, catalog, dialect),
         SqlCatalogBoundStatement::Update(update) => plan_update(update, catalog),
         SqlCatalogBoundStatement::Delete(delete) => plan_delete(delete, catalog),
         SqlCatalogBoundStatement::SetOperation(set) => plan_set_operation(set, catalog, dialect),
@@ -403,20 +403,31 @@ fn plan_source_less_select(select: SqlCatalogBoundSelect) -> Result<SqlExecution
 
 /// 计划一个 INSERT。每行 VALUES 要求第一个值是主键 literal。多行 VALUES 会产出
 /// `SqlExecutionPlan::MultiInsert`，单行保持 `SqlExecutionPlan::Insert`。
-pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+///
+/// `INSERT ... SELECT` 先按既有 SELECT 计划执行源查询，再在 planner 层对齐目标列。
+pub fn plan_insert(
+    insert: SqlCatalogBoundInsert,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, insert.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
         table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
-    let mut plans = Vec::with_capacity(insert.rows.len());
-    for row_values in insert.rows {
+    let SqlCatalogBoundInsert { table: _, fields: target_fields, rows, select } = insert;
+    if let Some(select) = select {
+        return plan_insert_select(*select, target_fields, namespace, field_types, catalog, dialect);
+    }
+
+    let mut plans = Vec::with_capacity(rows.len());
+    for row_values in rows {
         let pk_value = row_values.first().ok_or_else(|| planner_error("INSERT row has no values"))?;
         let rowid = literal_from_expression(pk_value)?;
         let rowid_bytes = pk_literal_to_rowid(&rowid)?;
 
-        let mut write_fields = Vec::with_capacity(insert.fields.len());
-        for (field, value) in insert.fields.iter().zip(row_values.iter()) {
+        let mut write_fields = Vec::with_capacity(target_fields.len());
+        for (field, value) in target_fields.iter().zip(row_values.iter()) {
             let lit = literal_from_expression(value)?;
             let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
             check_write_literal(&lit, &field_type, &field.field_name)?;
@@ -435,6 +446,67 @@ pub fn plan_insert(insert: SqlCatalogBoundInsert, catalog: &SqlCatalog) -> Resul
     else {
         Ok(SqlExecutionPlan::MultiInsert(plans))
     }
+}
+
+/// 计划 `INSERT ... SELECT`：源查询走既有 SELECT 计划，目标列按源结果形状对齐。
+///
+/// 列数不符按语句错误拒绝，声明类型不兼容按类型错误拒绝，不做隐式截断。
+fn plan_insert_select(
+    select: SqlCatalogBoundSelect,
+    target_fields: Vec<crate::catalog_bind::SqlCatalogBoundColumn>,
+    namespace: String,
+    field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    if target_fields.is_empty() {
+        return Err(SqlFrontendError::syntax("INSERT has no target columns"));
+    }
+    let source = plan_select_for_dialect(select, catalog, dialect)?;
+    let source_columns = crate::sql_describe::describe_plan(&source);
+    if source_columns.len() != target_fields.len() {
+        return Err(SqlFrontendError::syntax(format!(
+            "INSERT ... SELECT column count mismatch: target supplies {} columns, source selects {}",
+            target_fields.len(),
+            source_columns.len()
+        )));
+    }
+    let mut fields = Vec::with_capacity(target_fields.len());
+    for (field, source_column) in target_fields.iter().zip(source_columns.iter()) {
+        let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
+        let source_type = source_column.field_type.inner();
+        if !write_types_compatible(&field_type, &source_type) {
+            return Err(SqlFrontendError::new(
+                SqlErrorKind::TypeMismatch,
+                format!(
+                    "INSERT ... SELECT source column `{}` is {source_type:?} but target column `{}` is {field_type:?}",
+                    source_column.name, field.field_name
+                ),
+            ));
+        }
+        fields.push(InsertSelectColumn { field_id: field.field_id, field_name: field.field_name.clone(), field_type });
+    }
+    Ok(SqlExecutionPlan::InsertSelect(InsertSelectPlan {
+        namespace,
+        fields,
+        source: Box::new(source),
+        field_types,
+    }))
+}
+
+/// `INSERT ... SELECT` 的源列类型能否写进目标列：同类型，或整数向更宽的数值类型提升。
+fn write_types_compatible(target: &crate::catalog_bind::SqlFieldType, source: &crate::catalog_bind::SqlFieldType) -> bool {
+    use crate::catalog_bind::SqlFieldType;
+    let target = target.inner();
+    let source = source.inner();
+    target == SqlFieldType::Unknown
+        || source == SqlFieldType::Unknown
+        || target == source
+        || matches!(
+            (&target, &source),
+            (SqlFieldType::Int64, SqlFieldType::Int32)
+                | (SqlFieldType::Float64, SqlFieldType::Int32 | SqlFieldType::Int64)
+        )
 }
 
 /// 计划一个 UPDATE。`pk = literal` 走单点路径；其他 WHERE 都退化为范围扫描逐行改写。
@@ -528,7 +600,11 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
 
 /// Rejects a write literal that the declared column type cannot represent, so a
 /// string never lands in an integer column and reads back as the wrong value.
-fn check_write_literal(literal: &SqlBoundLiteral, field_type: &SqlFieldType, column: &str) -> Result<(), SqlFrontendError> {
+pub(crate) fn check_write_literal(
+    literal: &SqlBoundLiteral,
+    field_type: &SqlFieldType,
+    column: &str,
+) -> Result<(), SqlFrontendError> {
     let fits = match field_type.inner() {
         SqlFieldType::Unknown => true,
         SqlFieldType::Int64 | SqlFieldType::Int32 => match literal {
@@ -603,6 +679,8 @@ pub enum SqlExecutionPlan {
     Insert(WritePlan),
     /// 多行 INSERT — 依次 PutIfAbsent。
     MultiInsert(Vec<WritePlan>),
+    /// `INSERT ... SELECT` — 先执行源查询，校验通过后再逐行 PutIfAbsent。
+    InsertSelect(InsertSelectPlan),
     /// UPDATE — 先 Get 再 remaining_predicate 再 Put。
     Update(UpdatePlan),
     /// UPDATE — 扫描匹配行后逐行改写。
@@ -769,6 +847,30 @@ pub struct WritePlan {
     pub fields: Vec<WriteField>,
     /// field_id → SqlFieldType 映射，execute 层 encode/eval 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+}
+
+/// `INSERT ... SELECT` 执行计划：源查询先按读路径执行，再逐行对齐写入。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertSelectPlan {
+    /// 目标 namespace 标签。
+    pub namespace: String,
+    /// 目标列，与源查询输出列按下标一一对应。
+    pub fields: Vec<InsertSelectColumn>,
+    /// 源查询执行计划。
+    pub source: Box<SqlExecutionPlan>,
+    /// field_id → SqlFieldType 映射，execute 层编码用。
+    pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+}
+
+/// `INSERT ... SELECT` 的一个目标列绑定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsertSelectColumn {
+    /// 目标 field_id。
+    pub field_id: u64,
+    /// 目标列名，用于类型错误诊断。
+    pub field_name: String,
+    /// 目标列声明类型。
+    pub field_type: crate::catalog_bind::SqlFieldType,
 }
 
 /// UPDATE 执行计划。payload 由 execute 层做 TLV 编码。
@@ -1006,7 +1108,7 @@ fn combine_remaining(
     }
 }
 
-fn pk_literal_to_rowid(literal: &SqlBoundLiteral) -> Result<Vec<u8>, SqlFrontendError> {
+pub(crate) fn pk_literal_to_rowid(literal: &SqlBoundLiteral) -> Result<Vec<u8>, SqlFrontendError> {
     match literal {
         SqlBoundLiteral::Integer(value) => Ok(value.to_string().into_bytes()),
         SqlBoundLiteral::Number(text) => Ok(text.as_bytes().to_vec()),

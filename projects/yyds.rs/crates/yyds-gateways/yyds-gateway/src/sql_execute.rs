@@ -10,7 +10,7 @@
 //!    行级过滤（如果有）。
 //! 6. 收集列名和行值组成 `SqlResult`。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
@@ -22,8 +22,8 @@ use crate::{
         SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
     },
     sql_planner::{
-        DeletePlan, DeleteScanPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScalarPlan, ScanPlan, SetOperationPlan,
-        SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WritePlan,
+        check_write_literal, pk_literal_to_rowid, DeletePlan, DeleteScanPlan, InsertSelectPlan, JoinPlan, JoinSourcePlan,
+        ReadPlan, ScalarPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WriteField, WritePlan,
     },
 };
 
@@ -321,6 +321,7 @@ pub fn execute_plan(
         SqlExecutionPlan::SetOperation(set_plan) => execute_set_operation(executor, transaction, set_plan, dialect),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan, dialect),
         SqlExecutionPlan::MultiInsert(write_plans) => execute_multi_insert(executor, transaction, write_plans, dialect),
+        SqlExecutionPlan::InsertSelect(insert_plan) => execute_insert_select(executor, transaction, insert_plan, dialect),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan, dialect),
         SqlExecutionPlan::UpdateScan(update_plan) => execute_update_scan(executor, transaction, update_plan, dialect),
         SqlExecutionPlan::Delete(delete_plan) => execute_delete(executor, transaction, delete_plan, dialect),
@@ -384,6 +385,8 @@ fn resolve_subqueries(
             resolve_subqueries(&mut plan.right, executor, transaction, dialect)?;
         }
         SqlExecutionPlan::Insert(_) | SqlExecutionPlan::MultiInsert(_) => {}
+        // 源查询在 `execute_insert_select` 内部再次经过 `execute_plan`，子查询在那一步展开。
+        SqlExecutionPlan::InsertSelect(_) => {}
         SqlExecutionPlan::Update(plan) => {
             lower_optional(&mut plan.remaining_predicate, executor, transaction, dialect)?;
         }
@@ -1125,6 +1128,81 @@ fn execute_multi_insert(
         total_affected = total_affected.saturating_add(single.affected_rows);
     }
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: total_affected })
+}
+
+/// 执行 `INSERT ... SELECT`：源查询走既有读路径，全部行通过宽度、类型与主键唯一性
+/// 校验后才开始写入，保证语句级原子性。
+fn execute_insert_select(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &InsertSelectPlan,
+    dialect: SqlDialect,
+) -> Result<SqlResult, SqlFrontendError> {
+    let source = execute_plan(executor, transaction, &plan.source, dialect)?;
+    let mut write_plans = Vec::with_capacity(source.rows.len());
+    for row in source.rows {
+        if row.len() != plan.fields.len() {
+            return Err(SqlFrontendError::syntax(format!(
+                "INSERT ... SELECT produced {} values for {} target columns",
+                row.len(),
+                plan.fields.len()
+            )));
+        }
+        let literals: Vec<SqlBoundLiteral> = row.into_iter().map(value_to_literal).collect();
+        let rowid = pk_literal_to_rowid(&literals[0])?;
+        let mut fields = Vec::with_capacity(plan.fields.len());
+        for (column, value) in plan.fields.iter().zip(literals) {
+            check_write_literal(&value, &column.field_type, &column.field_name)?;
+            fields.push(WriteField { field_id: column.field_id, value, field_type: column.field_type.clone() });
+        }
+        write_plans.push(WritePlan {
+            namespace: plan.namespace.clone(),
+            rowid,
+            fields,
+            field_types: plan.field_types.clone(),
+        });
+    }
+    ensure_insert_targets_absent(executor, transaction, &write_plans)?;
+    execute_multi_insert(executor, transaction, &write_plans, dialect)
+}
+
+/// 写入前确认源行之间与目标表内都不存在重复主键，让唯一约束冲突整条语句不发布。
+fn ensure_insert_targets_absent(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plans: &[WritePlan],
+) -> Result<(), SqlFrontendError> {
+    let Some(first) = plans.first()
+    else {
+        return Ok(());
+    };
+    let conflict = |plan: &WritePlan| {
+        SqlFrontendError::new(
+            SqlErrorKind::UniqueViolation,
+            format!("duplicate key value violates unique constraint: {}", plan.namespace),
+        )
+    };
+    let namespace = Namespace(first.namespace.clone());
+    let mut seen = BTreeSet::new();
+    let mut commands = Vec::with_capacity(plans.len());
+    for plan in plans {
+        if !seen.insert(plan.rowid.clone()) {
+            return Err(conflict(plan));
+        }
+        commands.push(KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Get });
+    }
+    let results = match transaction {
+        Some(handle) => handle
+            .execute_read_batch(&commands)
+            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+        None => executor
+            .execute_read_batch(&commands)
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+    };
+    if results.iter().any(|result| matches!(result, yyds_types::KeyValueResult::Get(Some(_)))) {
+        return Err(conflict(first));
+    }
+    Ok(())
 }
 
 fn execute_update(

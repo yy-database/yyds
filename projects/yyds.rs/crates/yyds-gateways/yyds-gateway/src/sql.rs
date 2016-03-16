@@ -364,8 +364,10 @@ pub struct SqlBoundInsert {
     pub table: String,
     /// Optional explicit column list. When absent the catalog will infer order.
     pub columns: Option<Vec<String>>,
-    /// Bound values grouped by row.
+    /// Bound values grouped by row. Empty when the source is a SELECT.
     pub rows: Vec<Vec<SqlBoundExpression>>,
+    /// `INSERT ... SELECT` source query. `None` for a `VALUES` insert.
+    pub select: Option<Box<SqlBoundSelect>>,
 }
 
 /// SQL UPDATE request owned by the compatibility gateway.
@@ -675,9 +677,6 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
             if insert.returning.is_some() {
                 return Err(SqlFrontendError::unsupported("SQL gateway does not support the RETURNING clause"));
             }
-            if let oak_sql::ast::InsertSource::Select(_) = insert.source {
-                return Err(SqlFrontendError::unsupported("SQL gateway does not support INSERT ... SELECT"));
-            }
             let columns: Option<Vec<String>> = if insert.columns.is_empty() {
                 None
             }
@@ -688,29 +687,34 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
             for row in &insert.rows {
                 rows.push(row.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?);
             }
-            let Some(width) = rows.first().map(Vec::len)
-            else {
-                return Err(bind_error("INSERT has no VALUES rows"));
+            // `INSERT ... SELECT` 复用唯一一份 SELECT 绑定，不另造一套值绑定。
+            let select = match &insert.source {
+                oak_sql::ast::InsertSource::Values => None,
+                oak_sql::ast::InsertSource::Select(select) => Some(Box::new(bind_select_statement(select)?)),
             };
-            if rows.iter().any(|row| row.len() != width) {
-                return Err(bind_error("INSERT VALUES rows must all carry the same number of values"));
-            }
-            if let Some(cols) = &columns {
-                if cols.is_empty() {
-                    return Err(bind_error("INSERT has no columns"));
+            if select.is_none() {
+                let Some(width) = rows.first().map(Vec::len)
+                else {
+                    return Err(bind_error("INSERT has no VALUES rows"));
+                };
+                if rows.iter().any(|row| row.len() != width) {
+                    return Err(bind_error("INSERT VALUES rows must all carry the same number of values"));
                 }
-                if cols.len() != width {
-                    return Err(bind_error(&format!(
-                        "INSERT column/value count mismatch: {} columns, {} values per row",
-                        cols.len(),
-                        width
-                    )));
+                if let Some(cols) = &columns {
+                    if cols.len() != width {
+                        return Err(bind_error(&format!(
+                            "INSERT column/value count mismatch: {} columns, {} values per row",
+                            cols.len(),
+                            width
+                        )));
+                    }
                 }
             }
             Ok(SqlBoundStatement::Insert(SqlBoundInsert {
                 table: normalize_identifier(insert.table_name.name.name.as_ref()),
                 columns,
                 rows,
+                select,
             }))
         }
         SqlStatement::Update(update) => {

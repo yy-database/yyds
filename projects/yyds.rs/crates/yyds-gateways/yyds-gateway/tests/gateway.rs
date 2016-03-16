@@ -875,6 +875,115 @@ fn sql_insert_pk_must_be_first_value() {
     let _bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (1, 'one')", &catalog, 7).expect("insert bind");
 }
 
+// --- INSERT ... SELECT ---
+
+#[test]
+fn sql_insert_select_from_constants_writes_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+
+    let inserted = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) SELECT 7, 'alice'");
+    assert_eq!(inserted.affected_rows, 1);
+    assert!(inserted.rows.is_empty());
+
+    let selected = run_sql(&executor, None, &catalog, "SELECT id, name FROM users WHERE id = 7");
+    assert_eq!(
+        selected.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(7), yyds_gateway::SqlValue::String("alice".into())]]
+    );
+}
+
+#[test]
+fn sql_insert_select_copies_filtered_rows_from_a_table() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
+    );
+
+    // 源查询走既有 SELECT 读路径，命中 WHERE 的两行写入目标表。
+    let inserted = run_sql(&executor, None, &catalog, "INSERT INTO admins (id, name) SELECT id, name FROM users WHERE id > 1");
+    assert_eq!(inserted.affected_rows, 2);
+
+    let copied = run_sql(&executor, None, &catalog, "SELECT id, name FROM admins ORDER BY id");
+    assert_eq!(
+        copied.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("bob".into())],
+            vec![yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::String("carol".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_insert_select_requires_matching_column_counts() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let bound =
+        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT id FROM users", &catalog, 7).expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("column count mismatch");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+    assert!(error.message.contains("column count mismatch"), "{}", error.message);
+}
+
+#[test]
+fn sql_insert_select_rejects_incompatible_column_types() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT name, name FROM users", &catalog, 7)
+        .expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("type mismatch");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::TypeMismatch);
+}
+
+#[test]
+fn sql_insert_select_unique_conflict_publishes_nothing() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO admins VALUES (1, 'existing')");
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (2, 'bob')");
+
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO admins (id, name) SELECT id, name FROM users", &catalog, 7)
+        .expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let error =
+        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("duplicate primary key");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
+
+    // 第一条冲突时整条语句不发布，id=2 不能落到目标表。
+    let admins = run_sql(&executor, None, &catalog, "SELECT id FROM admins");
+    assert_eq!(admins.rows, vec![vec![yyds_gateway::SqlValue::Integer(1)]]);
+}
+
+#[test]
+fn sql_insert_select_inside_transaction_rolls_back() {
+    use std::sync::Arc;
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(empty_executor());
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+
+    run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (1, 'alice')");
+    let inserted = run_sql(
+        executor.as_ref(),
+        Some(handle.as_ref()),
+        &catalog,
+        "INSERT INTO admins (id, name) SELECT id, name FROM users",
+    );
+    assert_eq!(inserted.affected_rows, 1);
+
+    // 源查询读到本事务未提交的行，写入也留在事务缓冲里。
+    let inside = run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "SELECT id, name FROM admins");
+    assert_eq!(
+        inside.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())]]
+    );
+    let outside = run_sql(executor.as_ref(), None, &catalog, "SELECT id FROM admins");
+    assert!(outside.rows.is_empty());
+
+    handle.rollback();
+}
+
 #[test]
 fn sql_select_star_from_table_scans_all_rows() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");

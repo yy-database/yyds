@@ -337,6 +337,8 @@ pub struct SqlCatalogBoundInsert {
     pub fields: Vec<SqlCatalogBoundColumn>,
     /// Bound value expressions grouped by row. Every inner vec has length `fields.len()`.
     pub rows: Vec<Vec<SqlCatalogBoundExpression>>,
+    /// Catalog-bound `INSERT ... SELECT` source. `None` for a `VALUES` insert.
+    pub select: Option<Box<SqlCatalogBoundSelect>>,
 }
 
 /// SQL UPDATE request after catalog binding.
@@ -475,6 +477,11 @@ fn bind_insert(
     if field_count == 0 {
         return Err(SqlFrontendError::syntax("INSERT has no target columns".to_string()));
     }
+    // `INSERT ... SELECT` 复用既有 SELECT 绑定；源查询的列数/类型在 planner 层对齐。
+    if let Some(select) = insert.select {
+        let select = bind_select(*select, catalog, variables)?;
+        return Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows: Vec::new(), select: Some(Box::new(select)) });
+    }
     if insert.rows.is_empty() {
         return Err(SqlFrontendError::syntax("INSERT has no VALUES".to_string()));
     }
@@ -491,7 +498,7 @@ fn bind_insert(
             row.iter().map(|v| bind_expression(v.clone(), &source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
         rows.push(bound_row);
     }
-    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows })
+    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None })
 }
 
 fn bind_update(

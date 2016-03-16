@@ -795,6 +795,33 @@ fn expect_single_value(client: &mut TcpStream, sql: &str) -> Vec<u8> {
     value
 }
 
+/// `INSERT ... SELECT` 必须按写语句回 OK 包，affected rows 即源查询命中行数。
+#[test]
+fn mysql_insert_select_writes_rows_and_reports_affected_rows() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    let (_, ok) = exchange(&mut client, "INSERT INTO users (id, name, age) SELECT 43, 'bob', 20");
+    assert_eq!(ok[0], 0x00, "expected OK packet, got {:?}", ok);
+    assert_eq!(ok[1], 1, "inserted row must be reported as affected rows");
+    assert_eq!(expect_single_value(&mut client, "SELECT name FROM users WHERE id = 43"), b"bob");
+
+    // 源查询命中已存在的主键 → 唯一约束错误。
+    assert_eq!(expect_error(&mut client, "INSERT INTO users (id, name, age) SELECT id, name, age FROM users"), (1062, "23000".into()));
+    // 列数不符 → 语法错误，类型不符 → 类型错误。
+    assert_eq!(expect_error(&mut client, "INSERT INTO users (id, name, age) SELECT id FROM users"), (1064, "42000".into()));
+    assert_eq!(
+        expect_error(&mut client, "INSERT INTO users (id, name, age) SELECT name, name, name FROM users"),
+        (1366, "HY000".into())
+    );
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 两条连接共享同一个 runtime，接受两次连接后各起一个服务线程。
 fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;
