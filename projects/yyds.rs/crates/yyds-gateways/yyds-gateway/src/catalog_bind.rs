@@ -339,6 +339,8 @@ pub struct SqlCatalogBoundInsert {
     pub rows: Vec<Vec<SqlCatalogBoundExpression>>,
     /// Catalog-bound `INSERT ... SELECT` source. `None` for a `VALUES` insert.
     pub select: Option<Box<SqlCatalogBoundSelect>>,
+    /// `ON CONFLICT DO NOTHING` target columns. Empty means the clause omitted its target.
+    pub conflict_do_nothing: Option<Vec<String>>,
 }
 
 /// SQL UPDATE request after catalog binding.
@@ -480,7 +482,13 @@ fn bind_insert(
     // `INSERT ... SELECT` 复用既有 SELECT 绑定；源查询的列数/类型在 planner 层对齐。
     if let Some(select) = insert.select {
         let select = bind_select(*select, catalog, variables)?;
-        return Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows: Vec::new(), select: Some(Box::new(select)) });
+        return Ok(SqlCatalogBoundInsert {
+            table,
+            fields: bound_fields,
+            rows: Vec::new(),
+            select: Some(Box::new(select)),
+            conflict_do_nothing: insert.conflict_do_nothing,
+        });
     }
     if insert.rows.is_empty() {
         return Err(SqlFrontendError::syntax("INSERT has no VALUES".to_string()));
@@ -498,7 +506,7 @@ fn bind_insert(
             row.iter().map(|v| bind_expression(v.clone(), &source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
         rows.push(bound_row);
     }
-    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None })
+    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None, conflict_do_nothing: insert.conflict_do_nothing })
 }
 
 fn bind_update(

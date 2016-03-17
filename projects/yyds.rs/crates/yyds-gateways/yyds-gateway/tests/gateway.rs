@@ -984,6 +984,85 @@ fn sql_insert_select_inside_transaction_rolls_back() {
     handle.rollback();
 }
 
+// --- ON CONFLICT DO NOTHING ---
+
+#[test]
+fn sql_on_conflict_do_nothing_skips_existing_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
+
+    // 冲突行被跳过，affected rows 只统计真正写入的行。
+    let skipped =
+        run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (1, 'other') ON CONFLICT (id) DO NOTHING");
+    assert_eq!(skipped.affected_rows, 0);
+    let inserted = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (2, 'bob') ON CONFLICT DO NOTHING");
+    assert_eq!(inserted.affected_rows, 1);
+
+    let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("bob".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_on_conflict_do_nothing_skips_conflicting_insert_select_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
+    );
+    run_sql(&executor, None, &catalog, "INSERT INTO admins VALUES (2, 'stale')");
+
+    // 只有 id=1 与 id=3 落库，已存在的 id=2 保持原值。
+    let inserted =
+        run_sql(&executor, None, &catalog, "INSERT INTO admins (id, name) SELECT id, name FROM users ON CONFLICT (id) DO NOTHING");
+    assert_eq!(inserted.affected_rows, 2);
+
+    let copied = run_sql(&executor, None, &catalog, "SELECT id, name FROM admins ORDER BY id");
+    assert_eq!(
+        copied.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("stale".into())],
+            vec![yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::String("carol".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_on_conflict_do_update_and_unknown_targets_stay_rejected() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+
+    let update =
+        yyds_gateway::bind_sql("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id) DO UPDATE SET name = 'x'")
+            .expect_err("DO UPDATE must be rejected");
+    assert_eq!(update.kind, yyds_gateway::SqlErrorKind::Unsupported);
+
+    // 唯一约束只有主键，指向其他列的目标在 planner 层显式拒绝。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (name) DO NOTHING",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("target is not unique");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported);
+    assert!(error.message.contains("unique constraint"), "{}", error.message);
+
+    // MySQL 没有 ON CONFLICT 语法。
+    let bound =
+        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT DO NOTHING", &catalog, 7)
+            .expect("bind");
+    let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
+        .expect_err("MySQL has no ON CONFLICT");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+}
+
 #[test]
 fn sql_select_star_from_table_scans_all_rows() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");

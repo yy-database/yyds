@@ -93,16 +93,31 @@ fn set_operations_bind_both_operands_and_the_combined_tail() {
     assert_eq!(set.limit, Some(2));
 }
 
-/// Oak 现在把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关仍显式拒绝
-/// `ON CONFLICT` 与 `RETURNING`，而 `INSERT ... SELECT` 复用 SELECT 绑定并保留源查询。
+/// Oak 现在把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关接受
+/// `ON CONFLICT DO NOTHING`，显式拒绝 `DO UPDATE` 与 `RETURNING`，而 `INSERT ... SELECT`
+/// 复用 SELECT 绑定并保留源查询。
 #[test]
 fn insert_clauses_outside_the_subset_are_rejected_explicitly() {
     use yyds_gateway::{bind_sql, SqlBoundStatement, SqlErrorKind};
 
-    let on_conflict =
-        bind_sql("INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO NOTHING").expect_err("ON CONFLICT must be rejected");
+    let on_conflict = bind_sql("INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO UPDATE SET name = 'Jane'")
+        .expect_err("ON CONFLICT DO UPDATE must be rejected");
     assert_eq!(on_conflict.kind, SqlErrorKind::Unsupported);
     assert!(on_conflict.message.contains("ON CONFLICT"), "{}", on_conflict.message);
+
+    let do_nothing = bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT (id) DO NOTHING").expect("DO NOTHING binds");
+    let SqlBoundStatement::Insert(insert) = do_nothing
+    else {
+        panic!("expected insert");
+    };
+    assert_eq!(insert.conflict_do_nothing, Some(vec!["id".to_string()]));
+
+    let no_target = bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT DO NOTHING").expect("target is optional");
+    let SqlBoundStatement::Insert(insert) = no_target
+    else {
+        panic!("expected insert");
+    };
+    assert_eq!(insert.conflict_do_nothing, Some(Vec::new()));
 
     let returning =
         bind_sql("INSERT INTO users (name) VALUES ('John') RETURNING id, name AS alias").expect_err("RETURNING must be rejected");

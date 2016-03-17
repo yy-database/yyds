@@ -368,6 +368,9 @@ pub struct SqlBoundInsert {
     pub rows: Vec<Vec<SqlBoundExpression>>,
     /// `INSERT ... SELECT` source query. `None` for a `VALUES` insert.
     pub select: Option<Box<SqlBoundSelect>>,
+    /// `ON CONFLICT DO NOTHING` target columns, normalized. The vector is empty when the
+    /// clause omitted its target, and `None` means the statement has no `ON CONFLICT` clause.
+    pub conflict_do_nothing: Option<Vec<String>>,
 }
 
 /// SQL UPDATE request owned by the compatibility gateway.
@@ -671,9 +674,19 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     match &root.statements[0] {
         SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(select)?)),
         SqlStatement::Insert(insert) => {
-            if insert.on_conflict.is_some() {
-                return Err(SqlFrontendError::unsupported("SQL gateway does not support the ON CONFLICT clause"));
-            }
+            // `DO NOTHING` 只是跳过冲突行，不需要改写赋值，因此可以绑定。`DO UPDATE`
+            // 会引入第二套写入表达式，网关继续显式拒绝。
+            let conflict_do_nothing = match &insert.on_conflict {
+                None => None,
+                Some(conflict) => match &conflict.action {
+                    oak_sql::ast::OnConflictAction::DoNothing => Some(
+                        conflict.columns.iter().map(|id| normalize_identifier(id.name.as_ref())).collect(),
+                    ),
+                    oak_sql::ast::OnConflictAction::DoUpdate { .. } => {
+                        return Err(SqlFrontendError::unsupported("SQL gateway does not support the ON CONFLICT DO UPDATE clause"));
+                    }
+                },
+            };
             if insert.returning.is_some() {
                 return Err(SqlFrontendError::unsupported("SQL gateway does not support the RETURNING clause"));
             }
@@ -715,6 +728,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 columns,
                 rows,
                 select,
+                conflict_do_nothing,
             }))
         }
         SqlStatement::Update(update) => {

@@ -1105,6 +1105,7 @@ fn execute_insert(
     };
     let affected = match result {
         yyds_types::KeyValueResult::PutIfAbsent { revision: Some(_) } => 1,
+        yyds_types::KeyValueResult::PutIfAbsent { revision: None } if plan.on_conflict_do_nothing => 0,
         yyds_types::KeyValueResult::PutIfAbsent { revision: None } => {
             return Err(SqlFrontendError::new(
                 SqlErrorKind::UniqueViolation,
@@ -1160,9 +1161,13 @@ fn execute_insert_select(
             rowid,
             fields,
             field_types: plan.field_types.clone(),
+            on_conflict_do_nothing: plan.on_conflict_do_nothing,
         });
     }
-    ensure_insert_targets_absent(executor, transaction, &write_plans)?;
+    // `DO NOTHING` 逐行跳过冲突即可，预检只服务于「整条语句不发布」的唯一约束错误。
+    if !plan.on_conflict_do_nothing {
+        ensure_insert_targets_absent(executor, transaction, &write_plans)?;
+    }
     execute_multi_insert(executor, transaction, &write_plans, dialect)
 }
 

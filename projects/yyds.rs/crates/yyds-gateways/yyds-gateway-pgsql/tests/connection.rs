@@ -203,6 +203,25 @@ fn insert_select_reports_affected_rows_as_a_write() {
     assert_sqlstate(&mut client, "INSERT INTO users (id, name) SELECT id FROM users", b"42601");
     assert_sqlstate(&mut client, "INSERT INTO users (id, name) SELECT name, name FROM users", b"42804");
 
+    // `ON CONFLICT DO NOTHING` 跳过冲突行，命令标签的计数只含真正写入的行。
+    send_query(&mut client, "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO NOTHING");
+    let skipped = receive_until_ready(&mut client);
+    assert_eq!(skipped[0], (b'C', b"INSERT 0 0\0".to_vec()));
+    send_query(&mut client, "INSERT INTO orders (id, user_id) SELECT id, id FROM users ON CONFLICT (id) DO NOTHING");
+    let skipped_many = receive_until_ready(&mut client);
+    assert_eq!(skipped_many[0], (b'C', b"INSERT 0 0\0".to_vec()));
+    // `DO UPDATE` 与不符唯一约束的目标继续显式拒绝。
+    assert_sqlstate(
+        &mut client,
+        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'x'",
+        b"0A000",
+    );
+    assert_sqlstate(
+        &mut client,
+        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (name) DO NOTHING",
+        b"0A000",
+    );
+
     drop(client);
     server.join().unwrap();
 }

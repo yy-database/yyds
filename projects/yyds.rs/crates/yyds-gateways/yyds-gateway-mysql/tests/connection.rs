@@ -817,6 +817,11 @@ fn mysql_insert_select_writes_rows_and_reports_affected_rows() {
         expect_error(&mut client, "INSERT INTO users (id, name, age) SELECT name, name, name FROM users"),
         (1366, "HY000".into())
     );
+    // MySQL 没有 `ON CONFLICT` 语法，必须按语法错误拒绝而不是近似成 `INSERT IGNORE`。
+    assert_eq!(
+        expect_error(&mut client, "INSERT INTO users (id, name, age) VALUES (44, 'carol', 40) ON CONFLICT (id) DO NOTHING"),
+        (1064, "42000".into())
+    );
 
     drop(client);
     server.join().unwrap();

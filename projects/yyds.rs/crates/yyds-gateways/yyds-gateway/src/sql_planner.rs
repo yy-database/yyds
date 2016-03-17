@@ -415,9 +415,10 @@ pub fn plan_insert(
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
         table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
-    let SqlCatalogBoundInsert { table: _, fields: target_fields, rows, select } = insert;
+    let SqlCatalogBoundInsert { table: _, fields: target_fields, rows, select, conflict_do_nothing } = insert;
+    let do_nothing = plan_on_conflict(conflict_do_nothing, table, dialect)?;
     if let Some(select) = select {
-        return plan_insert_select(*select, target_fields, namespace, field_types, catalog, dialect);
+        return plan_insert_select(*select, target_fields, namespace, field_types, catalog, dialect, do_nothing);
     }
 
     let mut plans = Vec::with_capacity(rows.len());
@@ -438,6 +439,7 @@ pub fn plan_insert(
             rowid: rowid_bytes,
             fields: write_fields,
             field_types: field_types.clone(),
+            on_conflict_do_nothing: do_nothing,
         });
     }
     if plans.len() == 1 {
@@ -446,6 +448,31 @@ pub fn plan_insert(
     else {
         Ok(SqlExecutionPlan::MultiInsert(plans))
     }
+}
+
+/// 计划 `ON CONFLICT DO NOTHING`：只有主键这一条唯一约束，目标列必须与之相符。
+///
+/// MySQL 没有 `ON CONFLICT` 语法，同一语句在该方言下按语法错误拒绝。
+fn plan_on_conflict(
+    conflict: Option<Vec<String>>,
+    table: &crate::SqlCatalogTable,
+    dialect: SqlDialect,
+) -> Result<bool, SqlFrontendError> {
+    let Some(columns) = conflict
+    else {
+        return Ok(false);
+    };
+    if dialect != SqlDialect::Postgres {
+        return Err(SqlFrontendError::syntax("ON CONFLICT is only supported by the PostgreSQL dialect"));
+    }
+    let pk = primary_key_of(table)?;
+    if !columns.is_empty() && columns.as_slice() != [pk.name.as_str()] {
+        return Err(SqlFrontendError::unsupported(format!(
+            "ON CONFLICT target does not match a unique constraint: {}",
+            columns.join(", ")
+        )));
+    }
+    Ok(true)
 }
 
 /// 计划 `INSERT ... SELECT`：源查询走既有 SELECT 计划，目标列按源结果形状对齐。
@@ -458,6 +485,7 @@ fn plan_insert_select(
     field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
     catalog: &SqlCatalog,
     dialect: SqlDialect,
+    on_conflict_do_nothing: bool,
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
     if target_fields.is_empty() {
         return Err(SqlFrontendError::syntax("INSERT has no target columns"));
@@ -491,6 +519,7 @@ fn plan_insert_select(
         fields,
         source: Box::new(source),
         field_types,
+        on_conflict_do_nothing,
     }))
 }
 
@@ -847,6 +876,8 @@ pub struct WritePlan {
     pub fields: Vec<WriteField>,
     /// field_id → SqlFieldType 映射，execute 层 encode/eval 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    /// 冲突时跳过该行（`ON CONFLICT DO NOTHING`），而不是报唯一约束错误。
+    pub on_conflict_do_nothing: bool,
 }
 
 /// `INSERT ... SELECT` 执行计划：源查询先按读路径执行，再逐行对齐写入。
@@ -860,6 +891,8 @@ pub struct InsertSelectPlan {
     pub source: Box<SqlExecutionPlan>,
     /// field_id → SqlFieldType 映射，execute 层编码用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    /// 冲突时跳过该行（`ON CONFLICT DO NOTHING`），而不是报唯一约束错误。
+    pub on_conflict_do_nothing: bool,
 }
 
 /// `INSERT ... SELECT` 的一个目标列绑定。
