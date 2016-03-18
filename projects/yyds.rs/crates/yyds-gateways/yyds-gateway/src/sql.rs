@@ -796,6 +796,9 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
 
 /// Binds one Oak `SELECT` — shared by top-level statements and `IN (SELECT ...)` subqueries.
 fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBoundSelect, SqlFrontendError> {
+    if select.with.is_some() {
+        return Err(SqlFrontendError::unsupported("SQL common table expressions are outside the gateway subset"));
+    }
     let distinct = match &select.quantifier {
         None | Some(oak_sql::ast::SelectQuantifier::All { .. }) => false,
         Some(oak_sql::ast::SelectQuantifier::Distinct { .. }) => true,
@@ -846,7 +849,7 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
                     oak_sql::ast::JoinType::Right => SqlBoundJoinKind::Right,
                     oak_sql::ast::JoinType::Full => SqlBoundJoinKind::Full,
                 },
-                table: normalize_identifier(join.table.name.name.as_ref()),
+                table: bind_table_source(&join.table)?,
                 on: join
                     .on
                     .as_ref()
@@ -856,7 +859,7 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SqlBoundSelect {
-        source: select.from.as_ref().map(|table| normalize_identifier(table.name.name.as_ref())),
+        source: select.from.as_ref().map(bind_table_source).transpose()?,
         joins,
         projections,
         predicate: select.expr.as_ref().map(bind_expression).transpose()?,
@@ -928,6 +931,24 @@ fn bind_order_by_clause(
         }
         _ => None,
     })
+}
+
+/// Binds an Oak `FROM` / `JOIN` row source as a plain catalog table name.
+///
+/// Aliases and derived tables are separate shapes that the gateway binds
+/// explicitly, so a bare table name is the only thing this helper accepts.
+fn bind_table_source(source: &oak_sql::ast::TableSource) -> Result<String, SqlFrontendError> {
+    match source {
+        oak_sql::ast::TableSource::Table(table) => {
+            if table.alias.is_some() {
+                return Err(SqlFrontendError::unsupported("SQL table aliases are outside the gateway subset"));
+            }
+            Ok(normalize_identifier(table.name.name.as_ref()))
+        }
+        oak_sql::ast::TableSource::Derived { .. } => {
+            Err(SqlFrontendError::unsupported("SQL derived tables are outside the gateway subset"))
+        }
+    }
 }
 
 fn bind_projection(item: &SelectItem) -> Result<SqlBoundProjection, SqlFrontendError> {
@@ -1113,6 +1134,9 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
         // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
         Expression::Subquery { .. } => {
             Err(SqlFrontendError::unsupported("SQL subquery is only supported as the right side of IN"))
+        }
+        Expression::Exists { .. } => {
+            Err(SqlFrontendError::unsupported("SQL EXISTS predicates are outside the gateway subset"))
         }
         Expression::Vector { .. } => {
             Err(SqlFrontendError::unsupported("SQL vector literals are outside the gateway binding subset"))
