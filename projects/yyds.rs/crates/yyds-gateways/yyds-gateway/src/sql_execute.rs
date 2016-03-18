@@ -22,8 +22,9 @@ use crate::{
         SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
     },
     sql_planner::{
-        check_write_literal, pk_literal_to_rowid, DeletePlan, DeleteScanPlan, InsertSelectPlan, JoinPlan, JoinSourcePlan,
-        ReadPlan, ScalarPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WriteField, WritePlan,
+        check_write_literal, pk_literal_to_rowid, ConflictPolicy, DeletePlan, DeleteScanPlan, InsertSelectPlan, JoinPlan,
+        JoinSourcePlan, ReadPlan, ReturningProjections, ScalarPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, UpdatePlan,
+        UpdateScanPlan, WriteField, WritePlan,
     },
 };
 
@@ -384,9 +385,25 @@ fn resolve_subqueries(
             resolve_subqueries(&mut plan.left, executor, transaction, dialect)?;
             resolve_subqueries(&mut plan.right, executor, transaction, dialect)?;
         }
-        SqlExecutionPlan::Insert(_) | SqlExecutionPlan::MultiInsert(_) => {}
+        SqlExecutionPlan::Insert(plan) => {
+            lower_write_plan(plan, executor, transaction, dialect)?;
+        }
+        SqlExecutionPlan::MultiInsert(plans) => {
+            // 同一语句的各行共享冲突策略与 RETURNING 投影，lower 一次再同步即可，
+            // 否则同一个子查询会按行数重复执行。
+            if let Some((first, rest)) = plans.split_first_mut() {
+                lower_write_plan(first, executor, transaction, dialect)?;
+                for plan in rest {
+                    plan.conflict = first.conflict.clone();
+                    plan.returning = first.returning.clone();
+                }
+            }
+        }
         // 源查询在 `execute_insert_select` 内部再次经过 `execute_plan`，子查询在那一步展开。
-        SqlExecutionPlan::InsertSelect(_) => {}
+        SqlExecutionPlan::InsertSelect(plan) => {
+            lower_conflict(&mut plan.conflict, executor, transaction, dialect)?;
+            lower_returning(&mut plan.returning, executor, transaction, dialect)?;
+        }
         SqlExecutionPlan::Update(plan) => {
             lower_optional(&mut plan.remaining_predicate, executor, transaction, dialect)?;
         }
@@ -411,6 +428,43 @@ fn lower_optional(
 ) -> Result<(), SqlFrontendError> {
     if let Some(expression) = slot.take() {
         *slot = Some(lower_expression(expression, executor, transaction, dialect)?);
+    }
+    Ok(())
+}
+
+/// INSERT 计划里的冲突谓词与 `RETURNING` 投影同样可能带子查询，执行前一并物化。
+fn lower_write_plan(
+    plan: &mut WritePlan,
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    dialect: SqlDialect,
+) -> Result<(), SqlFrontendError> {
+    lower_conflict(&mut plan.conflict, executor, transaction, dialect)?;
+    lower_returning(&mut plan.returning, executor, transaction, dialect)
+}
+
+fn lower_conflict(
+    conflict: &mut Option<ConflictPolicy>,
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    dialect: SqlDialect,
+) -> Result<(), SqlFrontendError> {
+    if let Some(ConflictPolicy::DoUpdate { predicate, .. }) = conflict {
+        lower_optional(predicate, executor, transaction, dialect)?;
+    }
+    Ok(())
+}
+
+fn lower_returning(
+    returning: &mut Option<ReturningProjections>,
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    dialect: SqlDialect,
+) -> Result<(), SqlFrontendError> {
+    if let Some(projections) = returning {
+        for (expression, _) in projections {
+            lower_in_place(expression, executor, transaction, dialect)?;
+        }
     }
     Ok(())
 }
@@ -1092,29 +1146,169 @@ fn execute_insert(
     executor: &dyn KeyValueExecutor,
     transaction: Option<&dyn TransactionHandle>,
     plan: &WritePlan,
-    _dialect: SqlDialect,
+    dialect: SqlDialect,
+) -> Result<SqlResult, SqlFrontendError> {
+    match &plan.conflict {
+        None => insert_row_if_absent(executor, transaction, plan, false, dialect),
+        Some(ConflictPolicy::DoNothing) => insert_row_if_absent(executor, transaction, plan, true, dialect),
+        Some(ConflictPolicy::DoUpdate { fields, predicate }) => {
+            upsert_row(executor, transaction, plan, fields, predicate.as_ref(), dialect)
+        }
+    }
+}
+
+/// 无冲突改写的插入：`PutIfAbsent` 保证并发下也只有一行落地。
+///
+/// `do_nothing` 为真时冲突按「跳过」处理，否则按唯一约束错误上报。
+fn insert_row_if_absent(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &WritePlan,
+    do_nothing: bool,
+    dialect: SqlDialect,
 ) -> Result<SqlResult, SqlFrontendError> {
     let row = write_plan_to_row(plan);
     let bytes = encode_row(&row);
-    let namespace = Namespace(plan.namespace.clone());
-    let action = KeyValueAction::PutIfAbsent(bytes);
-    let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
-    let result = match transaction {
-        Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
-        None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
-    };
-    let affected = match result {
-        yyds_types::KeyValueResult::PutIfAbsent { revision: Some(_) } => 1,
-        yyds_types::KeyValueResult::PutIfAbsent { revision: None } if plan.on_conflict_do_nothing => 0,
-        yyds_types::KeyValueResult::PutIfAbsent { revision: None } => {
+    let affected = match put_if_absent(executor, transaction, &plan.namespace, &plan.rowid, bytes)? {
+        true => 1,
+        false if do_nothing => 0,
+        false => {
             return Err(SqlFrontendError::new(
                 SqlErrorKind::UniqueViolation,
                 format!("duplicate key value violates unique constraint: {}", plan.namespace),
             ));
         }
-        _ => 0,
     };
-    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
+    let written = if affected == 1 { vec![row] }
+    else {
+        Vec::new()
+    };
+    returning_result(&plan.returning, &plan.field_types, written, affected, dialect)
+}
+
+/// `ON CONFLICT DO UPDATE`：命中既有行时按 `SET` 改写，否则插入新行。
+///
+/// 事务内改写走 read-modify-write：把读到的 pre-image 交给 OCC，另一个事务
+/// 并发提交同一行时 COMMIT 会被拒绝，而不是静默覆盖。`WHERE` 不成立时按
+/// 0 行处理，既有行保持原值。
+fn upsert_row(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &WritePlan,
+    fields: &[WriteField],
+    predicate: Option<&SqlCatalogBoundExpression>,
+    dialect: SqlDialect,
+) -> Result<SqlResult, SqlFrontendError> {
+    let namespace = Namespace(plan.namespace.clone());
+    // 读到的行可能刚好被并发事务插入，重新读一次即可命中改写路径。
+    for _ in 0..2 {
+        let existing_bytes = read_row_bytes(executor, transaction, &namespace, &plan.rowid)?;
+        let Some(existing_bytes) = existing_bytes
+        else {
+            let row = write_plan_to_row(plan);
+            let bytes = encode_row(&row);
+            if put_if_absent(executor, transaction, &plan.namespace, &plan.rowid, bytes)? {
+                return returning_result(&plan.returning, &plan.field_types, vec![row], 1, dialect);
+            }
+            continue;
+        };
+        let mut row = decode_row(&existing_bytes)?;
+        if let Some(predicate) = predicate {
+            let value = eval_expression(predicate, &row, &plan.field_types, dialect)?;
+            if !truthy(&value) {
+                return returning_result(&plan.returning, &plan.field_types, Vec::new(), 0, dialect);
+            }
+        }
+        for field in fields {
+            match sql_value_to_bytes(&field.value) {
+                Some(bytes) => row.insert(field.field_id, bytes),
+                None => row.remove(field.field_id),
+            }
+        }
+        let encoded = encode_row(&row);
+        let command = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
+        match transaction {
+            Some(handle) => handle
+                .write_if_unchanged(command, Some(existing_bytes))
+                .map_err(|e| write_error(format!("TransactionHandle.upsert failed: {e}"), &e))?,
+            None => {
+                executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?
+            }
+        };
+        return returning_result(&plan.returning, &plan.field_types, vec![row], 1, dialect);
+    }
+    Err(SqlFrontendError::new(
+        SqlErrorKind::Conflict,
+        format!("concurrent write to row in {} prevented the conflict update", plan.namespace),
+    ))
+}
+
+fn put_if_absent(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    namespace: &str,
+    rowid: &[u8],
+    bytes: Vec<u8>,
+) -> Result<bool, SqlFrontendError> {
+    let command =
+        KeyValueCommand { namespace: Namespace(namespace.to_string()), key: rowid.to_vec(), action: KeyValueAction::PutIfAbsent(bytes) };
+    let result = match transaction {
+        Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
+        None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
+    };
+    match result {
+        yyds_types::KeyValueResult::PutIfAbsent { revision } => Ok(revision.is_some()),
+        other => Err(execute_error(&format!("unexpected storage result for insert: {other:?}"))),
+    }
+}
+
+fn read_row_bytes(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    namespace: &Namespace,
+    rowid: &[u8],
+) -> Result<Option<Vec<u8>>, SqlFrontendError> {
+    let command = KeyValueCommand { namespace: namespace.clone(), key: rowid.to_vec(), action: KeyValueAction::Get };
+    let results = match transaction {
+        Some(handle) => handle
+            .execute_read_batch(&[command])
+            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+        None => executor
+            .execute_read_batch(&[command])
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+    };
+    Ok(match results.into_iter().next() {
+        Some(yyds_types::KeyValueResult::Get(bytes)) => bytes,
+        _ => None,
+    })
+}
+
+/// 把 `RETURNING` 投影应用到真正落库的行上。没有 `RETURNING` 时写语句不返回结果集。
+fn returning_result(
+    returning: &Option<ReturningProjections>,
+    field_types: &BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    written: Vec<RowFieldValues>,
+    affected_rows: u64,
+    dialect: SqlDialect,
+) -> Result<SqlResult, SqlFrontendError> {
+    let Some(projections) = returning
+    else {
+        return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows });
+    };
+    let columns = returning_column_labels(projections);
+    let mut rows = Vec::with_capacity(written.len());
+    for row in &written {
+        let mut values = Vec::with_capacity(projections.len());
+        for (expression, _) in projections {
+            values.push(eval_expression(expression, row, field_types, dialect)?);
+        }
+        rows.push(values);
+    }
+    Ok(SqlResult { columns, rows, affected_rows })
+}
+
+fn returning_column_labels(projections: &ReturningProjections) -> Vec<String> {
+    projections.iter().map(|(_, label)| label.clone()).collect()
 }
 
 fn execute_multi_insert(
@@ -1123,12 +1317,15 @@ fn execute_multi_insert(
     plans: &[WritePlan],
     dialect: SqlDialect,
 ) -> Result<SqlResult, SqlFrontendError> {
+    let columns = plans.first().and_then(|plan| plan.returning.as_ref()).map(returning_column_labels).unwrap_or_default();
+    let mut rows = Vec::new();
     let mut total_affected = 0u64;
     for plan in plans {
         let single = execute_insert(executor, transaction, plan, dialect)?;
+        rows.extend(single.rows);
         total_affected = total_affected.saturating_add(single.affected_rows);
     }
-    Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: total_affected })
+    Ok(SqlResult { columns, rows, affected_rows: total_affected })
 }
 
 /// 执行 `INSERT ... SELECT`：源查询走既有读路径，全部行通过宽度、类型与主键唯一性
@@ -1161,12 +1358,19 @@ fn execute_insert_select(
             rowid,
             fields,
             field_types: plan.field_types.clone(),
-            on_conflict_do_nothing: plan.on_conflict_do_nothing,
+            conflict: plan.conflict.clone(),
+            returning: plan.returning.clone(),
         });
     }
-    // `DO NOTHING` 逐行跳过冲突即可，预检只服务于「整条语句不发布」的唯一约束错误。
-    if !plan.on_conflict_do_nothing {
+    // 没有冲突策略时，源行之间与目标表内都不能出现重复主键，预检保证整条语句不发布。
+    // 有策略时逐行按策略处理冲突，预检会让 `DO NOTHING` / `DO UPDATE` 失效。
+    if plan.conflict.is_none() {
         ensure_insert_targets_absent(executor, transaction, &write_plans)?;
+    }
+    // 源查询没有产出行时写语句仍有结果形状（`RETURNING` 列定义，0 行）。
+    if write_plans.is_empty() {
+        let columns = plan.returning.as_ref().map(returning_column_labels).unwrap_or_default();
+        return Ok(SqlResult { columns, rows: Vec::new(), affected_rows: 0 });
     }
     execute_multi_insert(executor, transaction, &write_plans, dialect)
 }

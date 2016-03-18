@@ -822,6 +822,11 @@ fn mysql_insert_select_writes_rows_and_reports_affected_rows() {
         expect_error(&mut client, "INSERT INTO users (id, name, age) VALUES (44, 'carol', 40) ON CONFLICT (id) DO NOTHING"),
         (1064, "42000".into())
     );
+    // `INSERT ... RETURNING` 同样不在 MySQL 语法里，不能静默丢掉投影。
+    assert_eq!(
+        expect_error(&mut client, "INSERT INTO users (id, name, age) VALUES (45, 'dave', 50) RETURNING id"),
+        (1064, "42000".into())
+    );
 
     drop(client);
     server.join().unwrap();

@@ -1035,13 +1035,8 @@ fn sql_on_conflict_do_nothing_skips_conflicting_insert_select_rows() {
 }
 
 #[test]
-fn sql_on_conflict_do_update_and_unknown_targets_stay_rejected() {
+fn sql_on_conflict_rejects_non_unique_targets_and_mysql() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-
-    let update =
-        yyds_gateway::bind_sql("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id) DO UPDATE SET name = 'x'")
-            .expect_err("DO UPDATE must be rejected");
-    assert_eq!(update.kind, yyds_gateway::SqlErrorKind::Unsupported);
 
     // 唯一约束只有主键，指向其他列的目标在 planner 层显式拒绝。
     let bound = yyds_gateway::bind_sql_catalog(
@@ -1061,6 +1056,255 @@ fn sql_on_conflict_do_update_and_unknown_targets_stay_rejected() {
     let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
         .expect_err("MySQL has no ON CONFLICT");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+}
+
+#[test]
+fn sql_on_conflict_do_update_rewrites_existing_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
+
+    // 命中既有行：改写而不是新增。
+    let updated =
+        run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob'");
+    assert_eq!(updated.affected_rows, 1);
+
+    // 未命中：按普通插入落库。
+    let inserted =
+        run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (2, 'carol') ON CONFLICT (id) DO UPDATE SET name = 'x'");
+    assert_eq!(inserted.affected_rows, 1);
+
+    let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("bob".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("carol".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_on_conflict_do_update_where_false_leaves_the_row_untouched() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
+
+    let skipped = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob' WHERE name = 'carol'",
+    );
+    assert_eq!(skipped.affected_rows, 0);
+
+    let matched = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob' WHERE name = 'alice'",
+    );
+    assert_eq!(matched.affected_rows, 1);
+
+    let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM users");
+    assert_eq!(rows.rows, vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("bob".into())]]);
+}
+
+#[test]
+fn sql_on_conflict_do_update_applies_to_every_values_row() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')");
+
+    // 第一行命中改写、第二行未命中照常插入，影响行数统计两行。
+    let upserted = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'zed'), (3, 'carol') ON CONFLICT (id) DO UPDATE SET name = 'rewritten'",
+    );
+    assert_eq!(upserted.affected_rows, 2);
+
+    let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("rewritten".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("bob".into())],
+            vec![yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::String("carol".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_on_conflict_do_update_applies_to_insert_select_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_rows(
+        "table:1",
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")])],
+    );
+    run_sql(&executor, None, &catalog, "INSERT INTO admins VALUES (2, 'stale')");
+
+    let upserted = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO admins (id, name) SELECT id, name FROM users ON CONFLICT (id) DO UPDATE SET name = 'copied'",
+    );
+    assert_eq!(upserted.affected_rows, 2);
+
+    let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM admins ORDER BY id");
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("copied".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_on_conflict_do_update_rejects_invalid_shapes() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+
+    // 缺少冲突目标：PostgreSQL 只允许 DO NOTHING 省略目标。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT DO UPDATE SET name = 'x'",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("DO UPDATE requires a target");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+    assert!(error.message.contains("conflict target"), "{}", error.message);
+
+    // 改写主键等于删除加插入，网关显式拒绝而不是近似执行。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id) DO UPDATE SET id = 2",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("primary key cannot be reassigned");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported);
+    assert!(error.message.contains("primary key"), "{}", error.message);
+
+    // 结构不完整（`ON CONFLICT` 没有动作）由 Oak 拒绝。
+    let error = yyds_gateway::bind_sql("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id)")
+        .expect_err("ON CONFLICT requires an action");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+
+    // MySQL 方言显式拒绝，不退化成 ON DUPLICATE KEY UPDATE。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id) DO UPDATE SET name = 'x'",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
+        .expect_err("MySQL has no ON CONFLICT");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+}
+
+// --- INSERT ... RETURNING ---
+
+#[test]
+fn sql_insert_returning_reports_the_written_row() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+
+    let inserted = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING id, name");
+    assert_eq!(inserted.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(
+        inserted.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())]]
+    );
+    assert_eq!(inserted.affected_rows, 1);
+
+    // `RETURNING *` 按 catalog 字段顺序展开。
+    let star = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (2, 'bob') RETURNING *");
+    assert_eq!(star.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(
+        star.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("bob".into())]]
+    );
+
+    // 别名覆盖默认列名。
+    let aliased = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (3, 'carol') RETURNING name AS who");
+    assert_eq!(aliased.columns, vec!["who".to_string()]);
+    assert_eq!(aliased.rows, vec![vec![yyds_gateway::SqlValue::String("carol".into())]]);
+}
+
+#[test]
+fn sql_multi_row_insert_returning_reports_every_row() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+
+    let inserted =
+        run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob') RETURNING id");
+    assert_eq!(inserted.columns, vec!["id".to_string()]);
+    assert_eq!(inserted.rows, vec![vec![yyds_gateway::SqlValue::Integer(1)], vec![yyds_gateway::SqlValue::Integer(2)]]);
+    assert_eq!(inserted.affected_rows, 2);
+}
+
+#[test]
+fn sql_insert_returning_reports_the_skipped_and_updated_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
+
+    // `DO NOTHING` 跳过冲突行，结果集为空，但列定义仍按 RETURNING 上报。
+    let skipped = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO NOTHING RETURNING id, name",
+    );
+    assert_eq!(skipped.columns, vec!["id".to_string(), "name".to_string()]);
+    assert!(skipped.rows.is_empty());
+    assert_eq!(skipped.affected_rows, 0);
+
+    // `DO UPDATE` 返回改写后的行。
+    let updated = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob' RETURNING id, name",
+    );
+    assert_eq!(
+        updated.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("bob".into())]]
+    );
+    assert_eq!(updated.affected_rows, 1);
+}
+
+#[test]
+fn sql_insert_returning_rejects_unknown_columns_and_mysql() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+
+    // 未知列在 catalog 绑定层拒绝，语句不执行。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING missing",
+        &catalog,
+        7,
+    )
+    .expect_err("unknown RETURNING column");
+    assert_eq!(bound.kind, yyds_gateway::SqlErrorKind::UnknownColumn);
+    let rows = run_sql(&executor, None, &catalog, "SELECT id FROM users");
+    assert!(rows.rows.is_empty(), "the rejected statement must not write");
+
+    // MySQL 的 INSERT 没有 RETURNING。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING id",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
+        .expect_err("MySQL has no INSERT ... RETURNING");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+    assert!(error.message.contains("RETURNING"), "{}", error.message);
 }
 
 #[test]

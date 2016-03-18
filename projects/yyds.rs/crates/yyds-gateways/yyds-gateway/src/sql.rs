@@ -368,9 +368,33 @@ pub struct SqlBoundInsert {
     pub rows: Vec<Vec<SqlBoundExpression>>,
     /// `INSERT ... SELECT` source query. `None` for a `VALUES` insert.
     pub select: Option<Box<SqlBoundSelect>>,
-    /// `ON CONFLICT DO NOTHING` target columns, normalized. The vector is empty when the
-    /// clause omitted its target, and `None` means the statement has no `ON CONFLICT` clause.
-    pub conflict_do_nothing: Option<Vec<String>>,
+    /// `ON CONFLICT` clause, when one was written.
+    pub conflict: Option<SqlBoundConflict>,
+    /// `RETURNING` projection list, when one was written.
+    pub returning: Option<Vec<SqlBoundProjection>>,
+}
+
+/// `ON CONFLICT` clause retained by the gateway binder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundConflict {
+    /// Conflict target columns, normalized. Empty when the clause omitted its target.
+    pub columns: Vec<String>,
+    /// Action taken when the target row already exists.
+    pub action: SqlBoundConflictAction,
+}
+
+/// Conflict action of an `ON CONFLICT` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlBoundConflictAction {
+    /// `DO NOTHING` — skip the conflicting row.
+    DoNothing,
+    /// `DO UPDATE SET ... [WHERE ...]` — rewrite the conflicting row in place.
+    DoUpdate {
+        /// Column → expression assignments applied to the existing row.
+        assignments: Vec<SqlBoundAssignment>,
+        /// Optional predicate restricting which conflicting rows are rewritten.
+        predicate: Option<SqlBoundExpression>,
+    },
 }
 
 /// SQL UPDATE request owned by the compatibility gateway.
@@ -674,22 +698,34 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     match &root.statements[0] {
         SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(select)?)),
         SqlStatement::Insert(insert) => {
-            // `DO NOTHING` 只是跳过冲突行，不需要改写赋值，因此可以绑定。`DO UPDATE`
-            // 会引入第二套写入表达式，网关继续显式拒绝。
-            let conflict_do_nothing = match &insert.on_conflict {
+            // `ON CONFLICT` 保留冲突目标与动作；方言与唯一约束校验在 planner 层完成。
+            let conflict = match &insert.on_conflict {
                 None => None,
-                Some(conflict) => match &conflict.action {
-                    oak_sql::ast::OnConflictAction::DoNothing => Some(
-                        conflict.columns.iter().map(|id| normalize_identifier(id.name.as_ref())).collect(),
-                    ),
-                    oak_sql::ast::OnConflictAction::DoUpdate { .. } => {
-                        return Err(SqlFrontendError::unsupported("SQL gateway does not support the ON CONFLICT DO UPDATE clause"));
-                    }
-                },
+                Some(conflict) => Some(SqlBoundConflict {
+                    columns: conflict.columns.iter().map(|id| normalize_identifier(id.name.as_ref())).collect(),
+                    action: match &conflict.action {
+                        oak_sql::ast::OnConflictAction::DoNothing => SqlBoundConflictAction::DoNothing,
+                        oak_sql::ast::OnConflictAction::DoUpdate { assignments, selection } => {
+                            SqlBoundConflictAction::DoUpdate {
+                                assignments: assignments
+                                    .iter()
+                                    .map(|assignment| {
+                                        Ok(SqlBoundAssignment {
+                                            column: normalize_identifier(assignment.column.name.as_ref()),
+                                            value: bind_expression(&assignment.value)?,
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, SqlFrontendError>>()?,
+                                predicate: selection.as_ref().map(bind_expression).transpose()?,
+                            }
+                        }
+                    },
+                }),
             };
-            if insert.returning.is_some() {
-                return Err(SqlFrontendError::unsupported("SQL gateway does not support the RETURNING clause"));
-            }
+            let returning = match &insert.returning {
+                None => None,
+                Some(clause) => Some(clause.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?),
+            };
             let columns: Option<Vec<String>> = if insert.columns.is_empty() {
                 None
             }
@@ -728,7 +764,8 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 columns,
                 rows,
                 select,
-                conflict_do_nothing,
+                conflict,
+                returning,
             }))
         }
         SqlStatement::Update(update) => {

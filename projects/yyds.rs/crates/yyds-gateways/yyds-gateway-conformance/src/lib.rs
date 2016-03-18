@@ -74,6 +74,8 @@ pub struct Case {
     pub state_columns: &'static str,
     /// Expected rows of the state check.
     pub expected_state: &'static [&'static [Lit]],
+    /// Driver this case applies to, when the syntax is dialect-specific.
+    pub only: Option<Driver>,
     /// Known gap in an upstream component, or `None` when the case must pass.
     pub pending: Option<&'static str>,
 }
@@ -121,6 +123,7 @@ pub fn case(name: &'static str) -> CaseBuilder {
             expected_affected_rows: 0,
             state_columns: DEFAULT_STATE_COLUMNS,
             expected_state: seed_state(),
+            only: None,
             pending: None,
         },
     }
@@ -178,6 +181,12 @@ impl CaseBuilder {
     pub fn state(mut self, columns: &'static str, state: &'static [&'static [Lit]]) -> Self {
         self.case.state_columns = columns;
         self.case.expected_state = state;
+        self
+    }
+
+    /// Marks the case as dialect-specific syntax for one driver.
+    pub fn only(mut self, driver: Driver) -> Self {
+        self.case.only = Some(driver);
         self
     }
 
@@ -756,6 +765,100 @@ pub fn set_operation_cases() -> Vec<Case> {
     ]
 }
 
+/// PostgreSQL `ON CONFLICT` semantics: `DO NOTHING` skips the conflicting row,
+/// `DO UPDATE` rewrites it, and a `DO UPDATE ... WHERE` that does not hold leaves
+/// the stored row untouched.
+///
+/// MySQL has no `ON CONFLICT` clause at all, so the driver matrix excludes these
+/// cases instead of pretending `ON DUPLICATE KEY UPDATE` is the same statement.
+pub fn upsert_cases() -> Vec<Case> {
+    use Lit::{Bool, Float, Int, Text};
+
+    let rewritten_state: &'static [&'static [Lit]] = &[
+        &[Int(1), Text("zoe"), Int(99), Float(1.5), Bool(true), Text("x")],
+        &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+        &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+    ];
+    let appended_state: &'static [&'static [Lit]] = &[
+        &[Int(1), Text("alice"), Int(30), Float(1.5), Bool(true), Text("x")],
+        &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+        &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+        &[Int(4), Text("zoe"), Int(99), Float(1.5), Bool(true), Text("x")],
+    ];
+
+    vec![
+        case("on conflict do nothing keeps the existing row")
+            .only(Driver::Postgres)
+            .sql("INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO NOTHING")
+            .affected(0)
+            .build(),
+        case("on conflict do update rewrites the existing row")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET name = 'zoe', age = 99",
+            )
+            .affected(1)
+            .state(DEFAULT_STATE_COLUMNS, rewritten_state)
+            .build(),
+        case("on conflict do update inserts when no row conflicts")
+            .only(Driver::Postgres)
+            .sql("INSERT INTO users VALUES (4, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET name = 'never'")
+            .affected(1)
+            .state(DEFAULT_STATE_COLUMNS, appended_state)
+            .build(),
+        case("on conflict do update where skips the rewrite")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET name = 'zoe' WHERE age = 20",
+            )
+            .affected(0)
+            .build(),
+    ]
+}
+
+/// PostgreSQL `INSERT ... RETURNING` reports the rows the statement wrote: the
+/// inserted row, the rewritten row for `DO UPDATE`, and nothing for a skipped
+/// `DO NOTHING` conflict.
+///
+/// MySQL has no `RETURNING` clause on `INSERT`, so the driver matrix excludes it.
+pub fn returning_cases() -> Vec<Case> {
+    use Lit::{Bool, Float, Int, Text};
+
+    vec![
+        case("insert returning reports the written row")
+            .only(Driver::Postgres)
+            .setup(&[])
+            .sql("INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x') RETURNING id, name")
+            .rows(&[&[Int(1), Text("alice")]])
+            .affected(1)
+            .state(DEFAULT_STATE_COLUMNS, &[&[Int(1), Text("alice"), Int(30), Float(1.5), Bool(true), Text("x")]])
+            .build(),
+        case("insert returning reports the rewritten row")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET name = 'zoe', age = 99 \
+                 RETURNING id, name, age",
+            )
+            .rows(&[&[Int(1), Text("zoe"), Int(99)]])
+            .affected(1)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("zoe"), Int(99), Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+                    &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
+        case("insert returning is empty for a skipped conflict")
+            .only(Driver::Postgres)
+            .sql("INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO NOTHING RETURNING id")
+            .rows(&[])
+            .affected(0)
+            .build(),
+    ]
+}
+
 /// Upstream forms that the gateway must reject explicitly instead of guessing.
 pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("DISTINCT ON", "SELECT DISTINCT ON (age) id FROM users ORDER BY age"),
@@ -774,6 +877,8 @@ pub fn all_cases() -> Vec<Case> {
     cases.extend(order_cases());
     cases.extend(null_order_cases());
     cases.extend(set_operation_cases());
+    cases.extend(upsert_cases());
+    cases.extend(returning_cases());
     cases
 }
 
@@ -838,6 +943,9 @@ impl ClientMode {
 /// placeholders are PostgreSQL syntax and the MySQL protocol has neither an
 /// equivalent placeholder nor a boolean parameter type.
 pub fn driver_exclusion(case: &Case, driver: Driver) -> Option<&'static str> {
+    if case.only.is_some_and(|only| only != driver) {
+        return Some("PostgreSQL-only syntax: MySQL has no `ON CONFLICT` / `INSERT ... RETURNING` clause");
+    }
     match (driver, case.style) {
         (Driver::Mysql, SqlParameterStyle::DollarNumber) => {
             Some("MySQL binds `?` placeholders only: `$n` is PostgreSQL syntax")

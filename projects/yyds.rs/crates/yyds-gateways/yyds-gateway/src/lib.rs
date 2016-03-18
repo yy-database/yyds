@@ -36,10 +36,10 @@ pub use crate::{
     config::GatewayConfig,
     kind::{GatewayKind, ALL_GATEWAY_KINDS},
     sql::{
-        bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundJoin, SqlBoundJoinKind,
-        SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundStatement,
-        SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlSessionCommand, SqlTransactionAction,
-        SqlVariableScope,
+        bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundConflict, SqlBoundConflictAction,
+        SqlBoundExpression, SqlBoundJoin, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect,
+        SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundStatement, SqlBoundUnaryOperator, SqlDialect, SqlErrorKind,
+        SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
     },
 };
 

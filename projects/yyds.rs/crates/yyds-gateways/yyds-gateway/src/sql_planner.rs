@@ -17,9 +17,10 @@
 
 use crate::{
     catalog_bind::{
-        collect_column_ids, SqlCatalog, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
-        SqlCatalogBoundOrderByItem, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperation,
-        SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlFieldType,
+        collect_column_ids, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundConflict, SqlCatalogBoundConflictAction,
+        SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert, SqlCatalogBoundOrderByItem,
+        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperation, SqlCatalogBoundStatement,
+        SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlFieldType,
     },
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundOrderByItem,
@@ -415,10 +416,20 @@ pub fn plan_insert(
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
         table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
 
-    let SqlCatalogBoundInsert { table: _, fields: target_fields, rows, select, conflict_do_nothing } = insert;
-    let do_nothing = plan_on_conflict(conflict_do_nothing, table, dialect)?;
+    let SqlCatalogBoundInsert { table: _, fields: target_fields, rows, select, conflict, returning } = insert;
+    let conflict = plan_on_conflict(conflict, table, dialect)?;
+    let returning = plan_returning(returning, table, dialect)?;
     if let Some(select) = select {
-        return plan_insert_select(*select, target_fields, namespace, field_types, catalog, dialect, do_nothing);
+        return plan_insert_select(
+            *select,
+            target_fields,
+            namespace,
+            field_types,
+            catalog,
+            dialect,
+            conflict,
+            returning,
+        );
     }
 
     let mut plans = Vec::with_capacity(rows.len());
@@ -439,7 +450,8 @@ pub fn plan_insert(
             rowid: rowid_bytes,
             fields: write_fields,
             field_types: field_types.clone(),
-            on_conflict_do_nothing: do_nothing,
+            conflict: conflict.clone(),
+            returning: returning.clone(),
         });
     }
     if plans.len() == 1 {
@@ -450,29 +462,105 @@ pub fn plan_insert(
     }
 }
 
-/// 计划 `ON CONFLICT DO NOTHING`：只有主键这一条唯一约束，目标列必须与之相符。
+/// 计划 `ON CONFLICT`：只有主键这一条唯一约束，目标列必须与之相符。
 ///
 /// MySQL 没有 `ON CONFLICT` 语法，同一语句在该方言下按语法错误拒绝。
 fn plan_on_conflict(
-    conflict: Option<Vec<String>>,
+    conflict: Option<SqlCatalogBoundConflict>,
     table: &crate::SqlCatalogTable,
     dialect: SqlDialect,
-) -> Result<bool, SqlFrontendError> {
-    let Some(columns) = conflict
+) -> Result<Option<ConflictPolicy>, SqlFrontendError> {
+    let Some(conflict) = conflict
     else {
-        return Ok(false);
+        return Ok(None);
     };
     if dialect != SqlDialect::Postgres {
         return Err(SqlFrontendError::syntax("ON CONFLICT is only supported by the PostgreSQL dialect"));
     }
+    // PostgreSQL 只允许 `DO NOTHING` 省略冲突目标，`DO UPDATE` 必须先声明目标。
+    if conflict.columns.is_empty() {
+        if matches!(conflict.action, SqlCatalogBoundConflictAction::DoUpdate { .. }) {
+            return Err(SqlFrontendError::syntax("ON CONFLICT DO UPDATE requires an explicit conflict target"));
+        }
+        return Ok(Some(ConflictPolicy::DoNothing));
+    }
     let pk = primary_key_of(table)?;
-    if !columns.is_empty() && columns.as_slice() != [pk.name.as_str()] {
+    if conflict.columns.as_slice() != [pk.name.as_str()] {
         return Err(SqlFrontendError::unsupported(format!(
             "ON CONFLICT target does not match a unique constraint: {}",
-            columns.join(", ")
+            conflict.columns.join(", ")
         )));
     }
-    Ok(true)
+    match conflict.action {
+        SqlCatalogBoundConflictAction::DoNothing => Ok(Some(ConflictPolicy::DoNothing)),
+        SqlCatalogBoundConflictAction::DoUpdate { assignments, predicate } => {
+            let mut fields = Vec::with_capacity(assignments.len());
+            for (column, expression) in assignments {
+                // 行以主键为 KV key，改写主键等于「删除 + 插入」，网关显式拒绝而不是近似执行。
+                if column.field_id == pk.field_id {
+                    return Err(SqlFrontendError::unsupported(
+                        "ON CONFLICT DO UPDATE cannot reassign the table primary key",
+                    ));
+                }
+                let lit = literal_from_expression(&expression)?;
+                let field_type = table
+                    .fields
+                    .iter()
+                    .find(|field| field.field_id == column.field_id)
+                    .map(|field| field.field_type.clone())
+                    .unwrap_or(SqlFieldType::Unknown);
+                check_write_literal(&lit, &field_type, &column.field_name)?;
+                fields.push(WriteField { field_id: column.field_id, value: lit, field_type });
+            }
+            Ok(Some(ConflictPolicy::DoUpdate { fields, predicate }))
+        }
+    }
+}
+
+/// 计划 `INSERT ... RETURNING`：把投影绑成可对最终落库行求值的表达式。
+///
+/// MySQL 的 `INSERT` 没有 `RETURNING` 子句，同一语句在该方言下按语法错误拒绝。
+fn plan_returning(
+    returning: Option<Vec<SqlCatalogBoundProjection>>,
+    table: &crate::SqlCatalogTable,
+    dialect: SqlDialect,
+) -> Result<Option<ReturningProjections>, SqlFrontendError> {
+    let Some(projections) = returning
+    else {
+        return Ok(None);
+    };
+    if dialect != SqlDialect::Postgres {
+        return Err(SqlFrontendError::syntax("INSERT ... RETURNING is only supported by the PostgreSQL dialect"));
+    }
+    let mut planned = Vec::new();
+    for projection in projections {
+        match projection {
+            SqlCatalogBoundProjection::Star(_) => {
+                for field in &table.fields {
+                    planned.push((
+                        SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
+                            type_id: table.type_id,
+                            field_id: field.field_id,
+                            table_name: table.name.clone(),
+                            field_name: field.name.clone(),
+                        }),
+                        field.name.clone(),
+                    ));
+                }
+            }
+            SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
+                SqlCatalogBoundExpression::Column(column) => {
+                    let label = alias.unwrap_or_else(|| column.field_name.clone());
+                    planned.push((SqlCatalogBoundExpression::Column(column), label));
+                }
+                other => {
+                    let label = alias.unwrap_or_else(|| expression_default_label(&other));
+                    planned.push((other, label));
+                }
+            },
+        }
+    }
+    Ok(Some(planned))
 }
 
 /// 计划 `INSERT ... SELECT`：源查询走既有 SELECT 计划，目标列按源结果形状对齐。
@@ -485,7 +573,8 @@ fn plan_insert_select(
     field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
     catalog: &SqlCatalog,
     dialect: SqlDialect,
-    on_conflict_do_nothing: bool,
+    conflict: Option<ConflictPolicy>,
+    returning: Option<ReturningProjections>,
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
     if target_fields.is_empty() {
         return Err(SqlFrontendError::syntax("INSERT has no target columns"));
@@ -519,7 +608,8 @@ fn plan_insert_select(
         fields,
         source: Box::new(source),
         field_types,
-        on_conflict_do_nothing,
+        conflict,
+        returning,
     }))
 }
 
@@ -876,8 +966,27 @@ pub struct WritePlan {
     pub fields: Vec<WriteField>,
     /// field_id → SqlFieldType 映射，execute 层 encode/eval 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
-    /// 冲突时跳过该行（`ON CONFLICT DO NOTHING`），而不是报唯一约束错误。
-    pub on_conflict_do_nothing: bool,
+    /// 冲突策略，`None` 表示冲突按唯一约束错误上报。
+    pub conflict: Option<ConflictPolicy>,
+    /// `RETURNING` 投影，`None` 表示语句不返回结果集。
+    pub returning: Option<ReturningProjections>,
+}
+
+/// `RETURNING` 投影：对最终落库行求值的表达式 + 展示列名。
+pub type ReturningProjections = Vec<(SqlCatalogBoundExpression, String)>;
+
+/// 冲突命中后的处理策略。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    /// `DO NOTHING` — 跳过冲突行。
+    DoNothing,
+    /// `DO UPDATE SET ... [WHERE ...]` — 用赋值改写既有行。
+    DoUpdate {
+        /// 要写入既有行的字段（此时是 SET 的结果）。
+        fields: Vec<WriteField>,
+        /// 只在既有行满足该谓词时才改写。
+        predicate: Option<SqlCatalogBoundExpression>,
+    },
 }
 
 /// `INSERT ... SELECT` 执行计划：源查询先按读路径执行，再逐行对齐写入。
@@ -891,8 +1000,10 @@ pub struct InsertSelectPlan {
     pub source: Box<SqlExecutionPlan>,
     /// field_id → SqlFieldType 映射，execute 层编码用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
-    /// 冲突时跳过该行（`ON CONFLICT DO NOTHING`），而不是报唯一约束错误。
-    pub on_conflict_do_nothing: bool,
+    /// 冲突策略，`None` 表示冲突按唯一约束错误上报。
+    pub conflict: Option<ConflictPolicy>,
+    /// `RETURNING` 投影，`None` 表示语句不返回结果集。
+    pub returning: Option<ReturningProjections>,
 }
 
 /// `INSERT ... SELECT` 的一个目标列绑定。

@@ -93,36 +93,58 @@ fn set_operations_bind_both_operands_and_the_combined_tail() {
     assert_eq!(set.limit, Some(2));
 }
 
-/// Oak 现在把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关接受
-/// `ON CONFLICT DO NOTHING`，显式拒绝 `DO UPDATE` 与 `RETURNING`，而 `INSERT ... SELECT`
-/// 复用 SELECT 绑定并保留源查询。
+/// Oak 把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关 bind 层保留
+/// 冲突目标与动作、`RETURNING` 投影，方言与唯一约束校验留给 planner。
 #[test]
-fn insert_clauses_outside_the_subset_are_rejected_explicitly() {
-    use yyds_gateway::{bind_sql, SqlBoundStatement, SqlErrorKind};
+fn insert_clauses_are_bound_for_dialect_planning() {
+    use yyds_gateway::{bind_sql, SqlBoundConflictAction, SqlBoundProjection, SqlBoundStatement};
 
-    let on_conflict = bind_sql("INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO UPDATE SET name = 'Jane'")
-        .expect_err("ON CONFLICT DO UPDATE must be rejected");
-    assert_eq!(on_conflict.kind, SqlErrorKind::Unsupported);
-    assert!(on_conflict.message.contains("ON CONFLICT"), "{}", on_conflict.message);
+    let do_update = bind_sql(
+        "INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO UPDATE SET name = 'Jane' WHERE name = 'John'",
+    )
+    .expect("ON CONFLICT DO UPDATE binds");
+    let SqlBoundStatement::Insert(insert) = do_update
+    else {
+        panic!("expected insert");
+    };
+    let conflict = insert.conflict.expect("conflict clause is retained");
+    assert_eq!(conflict.columns, vec!["name".to_string()]);
+    let SqlBoundConflictAction::DoUpdate { assignments, predicate } = conflict.action
+    else {
+        panic!("expected DO UPDATE");
+    };
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].column, "name");
+    assert!(predicate.is_some(), "the DO UPDATE WHERE predicate is retained");
 
     let do_nothing = bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT (id) DO NOTHING").expect("DO NOTHING binds");
     let SqlBoundStatement::Insert(insert) = do_nothing
     else {
         panic!("expected insert");
     };
-    assert_eq!(insert.conflict_do_nothing, Some(vec!["id".to_string()]));
+    let conflict = insert.conflict.expect("conflict clause is retained");
+    assert_eq!(conflict.columns, vec!["id".to_string()]);
+    assert!(matches!(conflict.action, SqlBoundConflictAction::DoNothing));
 
     let no_target = bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT DO NOTHING").expect("target is optional");
     let SqlBoundStatement::Insert(insert) = no_target
     else {
         panic!("expected insert");
     };
-    assert_eq!(insert.conflict_do_nothing, Some(Vec::new()));
+    assert_eq!(insert.conflict.expect("conflict clause is retained").columns, Vec::<String>::new());
 
-    let returning =
-        bind_sql("INSERT INTO users (name) VALUES ('John') RETURNING id, name AS alias").expect_err("RETURNING must be rejected");
-    assert_eq!(returning.kind, SqlErrorKind::Unsupported);
-    assert!(returning.message.contains("RETURNING"), "{}", returning.message);
+    let returning = bind_sql("INSERT INTO users (name) VALUES ('John') RETURNING id, name AS alias").expect("RETURNING binds");
+    let SqlBoundStatement::Insert(insert) = returning
+    else {
+        panic!("expected insert");
+    };
+    let items = insert.returning.expect("RETURNING list is retained");
+    assert_eq!(items.len(), 2);
+    let SqlBoundProjection::Expression { alias, .. } = &items[1]
+    else {
+        panic!("expected expression projection");
+    };
+    assert_eq!(alias.as_deref(), Some("alias"));
 
     let insert_select = bind_sql("INSERT INTO users (id, name) SELECT id, name FROM users").expect("INSERT ... SELECT binds");
     let SqlBoundStatement::Insert(insert) = insert_select

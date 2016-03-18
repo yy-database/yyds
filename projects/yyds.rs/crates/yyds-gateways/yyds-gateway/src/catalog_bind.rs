@@ -1,10 +1,10 @@
 //! SQL compatibility binding against a published YYDS VOS catalog.
 
 use crate::sql::{
-    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind,
-    SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation,
-    SqlBoundSetOperator, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlErrorKind, SqlFrontendError,
-    SqlNullsOrder,
+    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundDelete, SqlBoundExpression,
+    SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection, SqlBoundProjection,
+    SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate,
+    SqlErrorKind, SqlFrontendError, SqlNullsOrder,
 };
 use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
@@ -339,8 +339,33 @@ pub struct SqlCatalogBoundInsert {
     pub rows: Vec<Vec<SqlCatalogBoundExpression>>,
     /// Catalog-bound `INSERT ... SELECT` source. `None` for a `VALUES` insert.
     pub select: Option<Box<SqlCatalogBoundSelect>>,
-    /// `ON CONFLICT DO NOTHING` target columns. Empty means the clause omitted its target.
-    pub conflict_do_nothing: Option<Vec<String>>,
+    /// `ON CONFLICT` clause, when one was written.
+    pub conflict: Option<SqlCatalogBoundConflict>,
+    /// `RETURNING` projections, when one was written.
+    pub returning: Option<Vec<SqlCatalogBoundProjection>>,
+}
+
+/// `ON CONFLICT` clause after catalog binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundConflict {
+    /// Conflict target columns as written by the client.
+    pub columns: Vec<String>,
+    /// Action taken when the target row already exists.
+    pub action: SqlCatalogBoundConflictAction,
+}
+
+/// Catalog-bound conflict action of an `ON CONFLICT` clause.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlCatalogBoundConflictAction {
+    /// `DO NOTHING` — skip the conflicting row.
+    DoNothing,
+    /// `DO UPDATE SET ... [WHERE ...]` — rewrite the conflicting row in place.
+    DoUpdate {
+        /// Target column → catalog-bound assignment expression.
+        assignments: Vec<(SqlCatalogBoundColumn, SqlCatalogBoundExpression)>,
+        /// Optional predicate restricting which conflicting rows are rewritten.
+        predicate: Option<SqlCatalogBoundExpression>,
+    },
 }
 
 /// SQL UPDATE request after catalog binding.
@@ -479,6 +504,42 @@ fn bind_insert(
     if field_count == 0 {
         return Err(SqlFrontendError::syntax("INSERT has no target columns".to_string()));
     }
+    // `ON CONFLICT` 目标列保持表层拼写，唯一约束校验由 planner 完成；`DO UPDATE`
+    // 赋值与 `WHERE` 在目标表作用域内绑定，因此引用了未知列会显式报错。
+    let conflict = match insert.conflict {
+        None => None,
+        Some(conflict) => Some(SqlCatalogBoundConflict {
+            columns: conflict.columns,
+            action: match conflict.action {
+                SqlBoundConflictAction::DoNothing => SqlCatalogBoundConflictAction::DoNothing,
+                SqlBoundConflictAction::DoUpdate { assignments, predicate } => {
+                    let bound_assignments = assignments
+                        .into_iter()
+                        .map(|assignment| {
+                            Ok((
+                                find_field(&assignment.column, &source, catalog)?,
+                                bind_expression(assignment.value, &source, catalog, variables)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, SqlFrontendError>>()?;
+                    SqlCatalogBoundConflictAction::DoUpdate {
+                        assignments: bound_assignments,
+                        predicate: predicate.map(|predicate| bind_expression(predicate, &source, catalog, variables)).transpose()?,
+                    }
+                }
+            },
+        }),
+    };
+    let returning = match insert.returning {
+        None => None,
+        Some(projections) => {
+            let mut bound = Vec::new();
+            for projection in projections {
+                bound.extend(bind_projection(projection, &source, catalog, variables)?);
+            }
+            Some(bound)
+        }
+    };
     // `INSERT ... SELECT` 复用既有 SELECT 绑定；源查询的列数/类型在 planner 层对齐。
     if let Some(select) = insert.select {
         let select = bind_select(*select, catalog, variables)?;
@@ -487,7 +548,8 @@ fn bind_insert(
             fields: bound_fields,
             rows: Vec::new(),
             select: Some(Box::new(select)),
-            conflict_do_nothing: insert.conflict_do_nothing,
+            conflict,
+            returning,
         });
     }
     if insert.rows.is_empty() {
@@ -506,7 +568,7 @@ fn bind_insert(
             row.iter().map(|v| bind_expression(v.clone(), &source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
         rows.push(bound_row);
     }
-    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None, conflict_do_nothing: insert.conflict_do_nothing })
+    Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None, conflict, returning })
 }
 
 fn bind_update(

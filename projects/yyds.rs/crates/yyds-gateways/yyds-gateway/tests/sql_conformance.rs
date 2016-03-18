@@ -13,8 +13,9 @@ use yyds_gateway::{
     SqlParameterStyle, SqlResult, SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, rows, set_operation_cases, type_cases, Case,
-    Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, returning_cases, rows, set_operation_cases,
+    type_cases, upsert_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED,
+    USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -96,6 +97,9 @@ fn run_cases(cases: &[Case]) {
             continue;
         }
         for (dialect, driver) in [(SqlDialect::Postgres, Driver::Postgres), (SqlDialect::Mysql, Driver::Mysql)] {
+            if case.only.is_some_and(|only| only != driver) {
+                continue;
+            }
             let fixture = Fixture::with_dialect(dialect);
             for sql in case.setup {
                 fixture.execute(None, sql).unwrap_or_else(|error| panic!("{} setup `{sql}`: {error}", case.name));
@@ -168,6 +172,15 @@ fn sql_conformance_null_ordering() {
 #[test]
 fn sql_conformance_set_operations() {
     run_cases(&set_operation_cases());
+}
+
+/// `ON CONFLICT DO NOTHING` keeps the stored row and reports zero affected rows,
+/// while `DO UPDATE` rewrites it and reports one. `INSERT ... RETURNING` projects
+/// the rows the statement actually wrote.
+#[test]
+fn sql_conformance_upsert_and_returning() {
+    run_cases(&upsert_cases());
+    run_cases(&returning_cases());
 }
 
 #[test]

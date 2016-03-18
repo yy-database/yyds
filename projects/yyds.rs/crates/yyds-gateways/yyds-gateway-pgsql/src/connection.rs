@@ -15,9 +15,9 @@ use crate::wire::{decode_message, decode_startup, encode_message, FrameError, St
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
-    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
-    SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
-    SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlColumn,
+    SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSessionCommand,
+    SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -458,6 +458,14 @@ struct ExecutionOutcome {
     command_tag: String,
 }
 
+impl ExecutionOutcome {
+    /// Whether the statement reports a result set. Reads always do, and writes do
+    /// only when the statement carried a `RETURNING` projection.
+    fn returns_rows(&self) -> bool {
+        self.is_read || !self.description.is_empty()
+    }
+}
+
 /// bind → plan → execute，错误已映射为 SQLSTATE，并已标记事务失败。
 fn run_statement(
     sql: &str,
@@ -546,7 +554,7 @@ fn statement_error(stage: &str, error: SqlFrontendError) -> (String, String) {
 }
 
 fn write_execution_outcome(stream: &mut impl Write, outcome: &ExecutionOutcome) -> io::Result<()> {
-    if outcome.is_read {
+    if outcome.returns_rows() {
         let formats = vec![0_i16; outcome.description.len()];
         write_row_description(stream, &outcome.description, &formats)?;
         for row in &outcome.rows {
@@ -813,9 +821,6 @@ fn statement_description(sql: &str, runtime: Option<&Arc<PgsqlSqlRuntime>>) -> R
         .map_err(|error| statement_error("parameter", error))?;
     let bound = bind_sql_catalog(&neutral_sql, &runtime.catalog, runtime.schema_version)
         .map_err(|error| statement_error("bind", error))?;
-    if !matches!(bound, SqlCatalogBoundStatement::Select(_) | SqlCatalogBoundStatement::SetOperation(_)) {
-        return Ok(Vec::new());
-    }
     let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres)
         .map_err(|error| statement_error("plan", error))?;
     Ok(describe_plan(&plan))
@@ -849,7 +854,7 @@ fn handle_execute(
     match outcome {
         Ok(outcome) => {
             let command_tag = outcome.command_tag.clone();
-            if outcome.is_read {
+            if outcome.returns_rows() {
                 let start = portal.sent_rows.min(outcome.rows.len());
                 let end = if max_rows > 0 { (start + max_rows as usize).min(outcome.rows.len()) } else { outcome.rows.len() };
                 let formats = resolve_formats(&portal.result_formats, outcome.description.len());

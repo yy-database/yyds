@@ -210,17 +210,42 @@ fn insert_select_reports_affected_rows_as_a_write() {
     send_query(&mut client, "INSERT INTO orders (id, user_id) SELECT id, id FROM users ON CONFLICT (id) DO NOTHING");
     let skipped_many = receive_until_ready(&mut client);
     assert_eq!(skipped_many[0], (b'C', b"INSERT 0 0\0".to_vec()));
-    // `DO UPDATE` 与不符唯一约束的目标继续显式拒绝。
-    assert_sqlstate(
-        &mut client,
-        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'x'",
-        b"0A000",
-    );
+    // `DO UPDATE` 命中既有行时改写，并按写语句返回命令标签。
+    send_query(&mut client, "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob'");
+    let updated = receive_until_ready(&mut client);
+    assert_eq!(updated[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    send_query(&mut client, "INSERT INTO orders (id, user_id) SELECT id, id FROM users ON CONFLICT (id) DO UPDATE SET user_id = 7");
+    let updated_many = receive_until_ready(&mut client);
+    assert_eq!(updated_many[0], (b'C', b"INSERT 0 1\0".to_vec()));
+
+    send_query(&mut client, "SELECT name FROM users WHERE id = 1");
+    let rewritten = receive_until_ready(&mut client);
+    assert_eq!(rewritten[1].0, b'D');
+    assert!(rewritten[1].1.windows(3).any(|window| window == b"bob"), "the conflicting row is rewritten");
+
+    // 不符唯一约束的目标继续显式拒绝。
     assert_sqlstate(
         &mut client,
         "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (name) DO NOTHING",
         b"0A000",
     );
+
+    // `INSERT ... RETURNING` 在简单查询路径上返回列定义与数据行，命令标签仍是写语句。
+    send_query(&mut client, "INSERT INTO users (id, name) VALUES (2, 'carol') RETURNING id, name");
+    let returning = receive_until_ready(&mut client);
+    assert_eq!(returning.len(), 4, "RowDescription, DataRow, CommandComplete, ReadyForQuery");
+    assert_eq!(returning[0].0, b'T');
+    assert!(returning[0].1.windows(3).any(|window| window == b"id\0"), "the description names `id`");
+    assert!(returning[0].1.windows(5).any(|window| window == b"name\0"), "the description names `name`");
+    assert_eq!(returning[1].0, b'D');
+    assert!(returning[1].1.windows(5).any(|window| window == b"carol"), "the returned row carries the inserted value");
+    assert_eq!(returning[2], (b'C', b"INSERT 0 1\0".to_vec()));
+
+    // 多行 `RETURNING` 每行一条 DataRow。
+    send_query(&mut client, "INSERT INTO users (id, name) VALUES (3, 'dave'), (4, 'erin') RETURNING id");
+    let returned_many = receive_until_ready(&mut client);
+    assert_eq!(returned_many.iter().filter(|message| message.0 == b'D').count(), 2);
+    assert_eq!(returned_many.last().unwrap().0, b'Z');
 
     drop(client);
     server.join().unwrap();

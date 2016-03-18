@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use crate::{
     catalog_bind::SqlFieldType,
     sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator},
-    sql_planner::{JoinPlan, ReadPlan, ScanPlan, SqlExecutionPlan},
+    sql_planner::{JoinPlan, ReadPlan, ReturningProjections, ScanPlan, SqlExecutionPlan},
     SqlCatalogBoundExpression,
 };
 
@@ -37,14 +37,35 @@ pub fn describe_plan(plan: &SqlExecutionPlan) -> Vec<SqlColumn> {
                 field_type: infer_expression_type(expression, &BTreeMap::new()),
             })
             .collect(),
-        SqlExecutionPlan::Insert(_)
-        | SqlExecutionPlan::MultiInsert(_)
-        | SqlExecutionPlan::InsertSelect(_)
-        | SqlExecutionPlan::Update(_)
+        SqlExecutionPlan::Insert(plan) => describe_returning(&plan.returning, &plan.field_types),
+        SqlExecutionPlan::MultiInsert(plans) => plans
+            .first()
+            .map(|plan| describe_returning(&plan.returning, &plan.field_types))
+            .unwrap_or_default(),
+        SqlExecutionPlan::InsertSelect(plan) => describe_returning(&plan.returning, &plan.field_types),
+        SqlExecutionPlan::Update(_)
         | SqlExecutionPlan::UpdateScan(_)
         | SqlExecutionPlan::Delete(_)
         | SqlExecutionPlan::DeleteScan(_) => Vec::new(),
     }
+}
+
+/// `INSERT ... RETURNING` 的结果形状：写语句只有带 `RETURNING` 时才有列定义。
+fn describe_returning(
+    returning: &Option<ReturningProjections>,
+    field_types: &BTreeMap<u64, SqlFieldType>,
+) -> Vec<SqlColumn> {
+    let Some(projections) = returning
+    else {
+        return Vec::new();
+    };
+    projections
+        .iter()
+        .map(|(expression, label)| SqlColumn {
+            name: label.clone(),
+            field_type: infer_expression_type(expression, field_types),
+        })
+        .collect()
 }
 
 trait ProjectedPlan {
