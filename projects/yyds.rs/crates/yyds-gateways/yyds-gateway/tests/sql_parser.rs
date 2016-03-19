@@ -155,7 +155,7 @@ fn insert_clauses_are_bound_for_dialect_planning() {
     assert_eq!(insert.columns, Some(vec!["id".to_string(), "name".to_string()]));
     assert!(insert.rows.is_empty(), "a SELECT source has no VALUES rows");
     let select = insert.select.expect("SELECT source is retained");
-    assert_eq!(select.source.as_deref(), Some("users"));
+    assert_eq!(select.source.as_ref().map(|source| source.name.as_str()), Some("users"));
     assert_eq!(select.projections.len(), 2);
 
     // 多行 VALUES 的每行必须与列数一致。

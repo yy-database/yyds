@@ -3,8 +3,8 @@
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundDelete, SqlBoundExpression,
     SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection, SqlBoundProjection,
-    SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate,
-    SqlErrorKind, SqlFrontendError, SqlNullsOrder,
+    SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement, SqlBoundUnaryOperator,
+    SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
 };
 use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
@@ -177,6 +177,15 @@ impl SqlCatalog {
     }
 }
 
+/// Stride between two occurrences of the same catalog table inside one query.
+///
+/// A self join repeats one catalog table, whose `field_id`s are unique across the
+/// catalog. Row values are keyed by a synthesized *row id* so both occurrences can
+/// carry their own copy of the same column without overwriting each other. The
+/// first occurrence keeps slot `0`, which makes every row id equal to its catalog
+/// `field_id` and leaves single-table behavior untouched.
+pub const ROW_ID_STRIDE: u64 = 1 << 40;
+
 /// A table reference after SQL names are bound to YYDS catalog identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlCatalogBoundTable {
@@ -184,6 +193,22 @@ pub struct SqlCatalogBoundTable {
     pub type_id: u64,
     /// Catalog table name.
     pub name: String,
+    /// Alias that replaces [`Self::name`] in the column scope, when written.
+    pub alias: Option<String>,
+    /// Zero-based occurrence of this catalog table inside the query.
+    pub row_slot: u64,
+}
+
+impl SqlCatalogBoundTable {
+    /// The name columns are addressed by: the alias when present, the table name otherwise.
+    pub fn visible_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The row-value key for one catalog field of this occurrence.
+    pub fn row_id(&self, field_id: u64) -> u64 {
+        field_id + self.row_slot * ROW_ID_STRIDE
+    }
 }
 
 /// A column reference after SQL names are bound to YYDS catalog identity.
@@ -193,6 +218,8 @@ pub struct SqlCatalogBoundColumn {
     pub type_id: u64,
     /// Stable YYDS field identity.
     pub field_id: u64,
+    /// Row-value key: [`Self::field_id`] shifted by the table occurrence slot.
+    pub row_id: u64,
     /// Catalog table name.
     pub table_name: String,
     /// Catalog field name.
@@ -494,6 +521,7 @@ fn bind_insert(
                 .map(|f| SqlCatalogBoundColumn {
                     type_id: table.type_id,
                     field_id: f.field_id,
+                    row_id: f.field_id,
                     table_name: table.name.clone(),
                     field_name: f.name.clone(),
                 })
@@ -622,15 +650,20 @@ fn bind_select(
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
-    let source = select.source.as_deref().map(|name| find_table(catalog, name)).transpose()?;
+    let mut occurrences: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+    let source = select.source.as_ref().map(|source| bind_source(source, catalog, &mut occurrences)).transpose()?;
     // JOIN 之后列名作用域包含基表与所有已连接表，ON 条件只能引用此前已出现的表。
     let mut sources: Vec<SqlCatalogBoundTable> = source.iter().cloned().collect();
     let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
     for join in select.joins {
-        let table = find_table(catalog, &join.table)?;
-        if sources.iter().any(|visible| visible.type_id == table.type_id) {
-            return Err(SqlFrontendError::unsupported(
-                "SQL self join requires table aliases, which the gateway does not support",
+        let table = bind_source(&join.source, catalog, &mut occurrences)?;
+        if let Some(previous) = sources.iter().find(|visible| visible.visible_name() == table.visible_name()) {
+            return Err(SqlFrontendError::new(
+                SqlErrorKind::AmbiguousTable,
+                format!(
+                    "SQL table name `{}` appears more than once in FROM, give each occurrence a distinct alias",
+                    previous.visible_name()
+                ),
             ));
         }
         sources.push(table.clone());
@@ -764,11 +797,28 @@ fn bind_expression(
     }
 }
 
+/// Binds one `FROM` / `JOIN` source, assigning the occurrence slot used to build row ids.
+///
+/// Repeated occurrences of the same catalog table get distinct slots so a self join
+/// can keep both sides of a column in one merged row.
+fn bind_source(
+    source: &SqlBoundSource,
+    catalog: &SqlCatalog,
+    occurrences: &mut std::collections::BTreeMap<u64, u64>,
+) -> Result<SqlCatalogBoundTable, SqlFrontendError> {
+    let mut table = find_table(catalog, &source.name)?;
+    table.alias = source.alias.clone();
+    let slot = occurrences.entry(table.type_id).or_insert(0);
+    table.row_slot = *slot;
+    *slot += 1;
+    Ok(table)
+}
+
 fn find_table(catalog: &SqlCatalog, name: &str) -> Result<SqlCatalogBoundTable, SqlFrontendError> {
     let matches = catalog.tables.iter().filter(|table| table.name == name).collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Err(SqlFrontendError::new(SqlErrorKind::UnknownTable, format!("unknown SQL table: {name}"))),
-        [table] => Ok(SqlCatalogBoundTable { type_id: table.type_id, name: table.name.clone() }),
+        [table] => Ok(SqlCatalogBoundTable { type_id: table.type_id, name: table.name.clone(), alias: None, row_slot: 0 }),
         _ => Err(SqlFrontendError::new(SqlErrorKind::AmbiguousTable, format!("ambiguous SQL table: {name}"))),
     }
 }
@@ -789,7 +839,7 @@ fn find_field(
     if let Some((qualifier, column)) = name.split_once('.') {
         let qualifier = qualifier.trim();
         let column = column.trim();
-        let source = sources.iter().find(|source| source.name == qualifier).ok_or_else(|| {
+        let source = sources.iter().find(|source| source.visible_name() == qualifier).ok_or_else(|| {
             SqlFrontendError::new(SqlErrorKind::UnknownTableQualifier, format!("unknown SQL table qualifier: {qualifier}"))
         })?;
         return find_field_in_table(column, source, catalog)?.ok_or_else(|| {
@@ -829,6 +879,7 @@ fn find_field_in_table(
         [field] => Ok(Some(SqlCatalogBoundColumn {
             type_id: table.type_id,
             field_id: field.field_id,
+            row_id: source.row_id(field.field_id),
             table_name: table.name.clone(),
             field_name: field.name.clone(),
         })),
@@ -836,13 +887,13 @@ fn find_field_in_table(
     }
 }
 
-/// Recursively collects the `field_id` of every column reference in an expression,
+/// Recursively collects the row-value key of every column reference in an expression,
 /// preserving first-appearance order and skipping duplicates.
 pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec<u64>) {
     match expr {
         SqlCatalogBoundExpression::Column(col) => {
-            if !out.contains(&col.field_id) {
-                out.push(col.field_id);
+            if !out.contains(&col.row_id) {
+                out.push(col.row_id);
             }
         }
         SqlCatalogBoundExpression::Function { args, .. } => {

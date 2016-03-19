@@ -147,7 +147,7 @@ impl SqlValue {
     }
 }
 
-/// 一个 row 上各个字段的 bytes 值，key 是稳定的 field_id。
+/// 一个 row 上各个字段的 bytes 值，key 是该列在本查询里的 row id。
 #[derive(Debug, Default, Clone)]
 pub struct RowFieldValues {
     fields: BTreeMap<u64, Vec<u8>>,
@@ -176,7 +176,7 @@ impl RowFieldValues {
     }
 
     /// 合并另一行的字段。JOIN 后的一行同时携带两侧表的字段，
-    /// catalog 保证 field_id 全局唯一，所以按键覆盖即等价于拼行。
+    /// 每张表的 row id 段互不重叠，所以按键覆盖即等价于拼行。
     pub fn merge(&mut self, other: &Self) {
         for (field_id, bytes) in &other.fields {
             self.fields.insert(*field_id, bytes.clone());
@@ -812,7 +812,7 @@ fn execute_join(
     Ok(SqlResult { columns, rows, affected_rows: 0 })
 }
 
-/// 整表扫描一个 JOIN 来源，只解码该表参与的字段。
+/// 整表扫描一个 JOIN 来源，只解码该表参与的字段，并按来源的 row id 存进合并行。
 fn scan_join_source(
     executor: &dyn KeyValueExecutor,
     transaction: Option<&dyn TransactionHandle>,
@@ -822,7 +822,18 @@ fn scan_join_source(
     let scanned = scan_rows(executor, transaction, &namespace, &[], None, None, 0, "scan")?;
     let mut rows = Vec::with_capacity(scanned.len());
     for (_rowid, value_bytes) in scanned {
-        rows.push(decode_row_fields(&value_bytes, &source.needed_field_ids)?);
+        if source.needed_field_ids.is_empty() {
+            rows.push(RowFieldValues::new());
+            continue;
+        }
+        let decoded = decode_row_fields(&value_bytes, &source.needed_field_ids)?;
+        let mut row = RowFieldValues::new();
+        for (field_id, row_id) in source.needed_field_ids.iter().zip(source.row_ids.iter()) {
+            if let Some(bytes) = decoded.get(*field_id) {
+                row.insert(*row_id, bytes.to_vec());
+            }
+        }
+        rows.push(row);
     }
     Ok(rows)
 }
@@ -938,7 +949,7 @@ fn execute_scan(
                 let mut matched_key_idx: Option<usize> = None;
                 for (idx, ge) in group_exprs.iter().enumerate() {
                     if let SqlCatalogBoundExpression::Column(col) = ge {
-                        if col.field_id == *field_id {
+                        if col.row_id == *field_id {
                             matched_key_idx = Some(idx);
                             break;
                         }
@@ -1852,7 +1863,7 @@ fn eval_expression(
 ) -> Result<SqlValue, SqlFrontendError> {
     Ok(match expr {
         // 缺失字段就是 SQL NULL（写入 NULL 时字段会被省略），比较和投影都按 NULL 处理。
-        SqlCatalogBoundExpression::Column(col) => row.value_typed(col.field_id, field_types).unwrap_or(SqlValue::Null),
+        SqlCatalogBoundExpression::Column(col) => row.value_typed(col.row_id, field_types).unwrap_or(SqlValue::Null),
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Wildcard => {
             return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
@@ -2456,7 +2467,7 @@ fn eval_having(
     let first = bucket_rows.first();
     Ok(match expr {
         SqlCatalogBoundExpression::Column(col) => {
-            first.and_then(|row| row.value_typed(col.field_id, field_types)).unwrap_or(SqlValue::Null)
+            first.and_then(|row| row.value_typed(col.row_id, field_types)).unwrap_or(SqlValue::Null)
         }
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Wildcard => {

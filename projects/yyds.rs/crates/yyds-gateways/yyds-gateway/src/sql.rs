@@ -289,8 +289,8 @@ impl SqlDialect {
 /// SQL SELECT request owned by the compatibility gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundSelect {
-    /// Optional source table name as written by the client.
-    pub source: Option<String>,
+    /// Optional source row as written by the client.
+    pub source: Option<SqlBoundSource>,
     /// JOIN clauses in source order.
     pub joins: Vec<SqlBoundJoin>,
     /// Projection expressions in source order.
@@ -311,13 +311,22 @@ pub struct SqlBoundSelect {
     pub distinct: bool,
 }
 
+/// One `FROM` / `JOIN` row source retained by the gateway binder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundSource {
+    /// Catalog table name as written by the client.
+    pub name: String,
+    /// Optional alias that replaces the table name in the column scope.
+    pub alias: Option<String>,
+}
+
 /// One JOIN clause retained by the gateway binder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundJoin {
     /// Join kind as written by the client.
     pub kind: SqlBoundJoinKind,
-    /// Joined table name as written by the client.
-    pub table: String,
+    /// Joined row source as written by the client.
+    pub source: SqlBoundSource,
     /// Join condition from the `ON` clause.
     pub on: SqlBoundExpression,
 }
@@ -849,7 +858,7 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
                     oak_sql::ast::JoinType::Right => SqlBoundJoinKind::Right,
                     oak_sql::ast::JoinType::Full => SqlBoundJoinKind::Full,
                 },
-                table: bind_table_source(&join.table)?,
+                source: bind_table_source(&join.table)?,
                 on: join
                     .on
                     .as_ref()
@@ -933,18 +942,16 @@ fn bind_order_by_clause(
     })
 }
 
-/// Binds an Oak `FROM` / `JOIN` row source as a plain catalog table name.
+/// Binds an Oak `FROM` / `JOIN` table source as a catalog name plus its optional alias.
 ///
-/// Aliases and derived tables are separate shapes that the gateway binds
-/// explicitly, so a bare table name is the only thing this helper accepts.
-fn bind_table_source(source: &oak_sql::ast::TableSource) -> Result<String, SqlFrontendError> {
+/// Derived tables are a separate shape that the gateway binds explicitly, so a
+/// plain table reference is the only thing this helper accepts.
+fn bind_table_source(source: &oak_sql::ast::TableSource) -> Result<SqlBoundSource, SqlFrontendError> {
     match source {
-        oak_sql::ast::TableSource::Table(table) => {
-            if table.alias.is_some() {
-                return Err(SqlFrontendError::unsupported("SQL table aliases are outside the gateway subset"));
-            }
-            Ok(normalize_identifier(table.name.name.as_ref()))
-        }
+        oak_sql::ast::TableSource::Table(table) => Ok(SqlBoundSource {
+            name: normalize_identifier(table.name.name.as_ref()),
+            alias: table.alias.as_ref().map(|alias| normalize_identifier(alias.name.as_ref())),
+        }),
         oak_sql::ast::TableSource::Derived { .. } => {
             Err(SqlFrontendError::unsupported("SQL derived tables are outside the gateway subset"))
         }

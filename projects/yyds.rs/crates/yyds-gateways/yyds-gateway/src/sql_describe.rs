@@ -135,7 +135,7 @@ fn describe_projections(plan: &impl ProjectedPlan) -> Vec<SqlColumn> {
 fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &BTreeMap<u64, SqlFieldType>) -> SqlFieldType {
     use SqlCatalogBoundExpression::*;
     match expression {
-        Column(column) => field_types.get(&column.field_id).cloned().unwrap_or(SqlFieldType::Unknown).inner(),
+        Column(column) => field_types.get(&column.row_id).cloned().unwrap_or(SqlFieldType::Unknown).inner(),
         Literal(literal) => match literal {
             SqlBoundLiteral::Integer(_) => SqlFieldType::Int64,
             SqlBoundLiteral::Number(_) => SqlFieldType::Float64,

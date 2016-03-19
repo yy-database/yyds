@@ -10,7 +10,7 @@ use std::sync::Arc;
 use yyds_execution::{KeyValueExecutor, LocalExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, execute_plan, plan_statement_for_dialect, substitute_sql_parameters, SqlCatalog, SqlDialect,
-    SqlParameterStyle, SqlResult, SqlValue,
+    SqlErrorKind, SqlParameterStyle, SqlResult, SqlValue,
 };
 use yyds_gateway_conformance::{
     crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, returning_cases, rows, set_operation_cases,
@@ -219,6 +219,44 @@ fn sql_rejected_upstream_forms_report_a_reason() {
     let fixture = Fixture::new();
     for (label, sql) in REJECTED_SQL {
         assert!(fixture.execute(None, sql).is_err(), "`{label}` must be rejected explicitly");
+    }
+}
+
+/// 表别名与自连接在两方言下必须一致：同一份 SQL 都要接受，同一份歧义都要按
+/// `AmbiguousColumn` / `AmbiguousTable` 拒绝。wire 层再各自映射成 MySQL `1052` 与
+/// PostgreSQL `42702`，网关层不因方言而分叉。
+#[test]
+fn sql_table_alias_and_self_join_agree_across_dialects() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        for sql in SEED {
+            fixture.execute(None, sql).expect("seed");
+        }
+
+        let aliased = fixture
+            .execute(None, "SELECT u.name FROM users u WHERE u.id = 1")
+            .unwrap_or_else(|error| panic!("aliased read under {dialect:?}: {error}"));
+        assert_eq!(aliased.rows, rows(&[&[Lit::Text("alice")]]), "alias under {dialect:?}");
+
+        // 同一张表通过两个别名自连接，两侧各自保留自己的列值。
+        let self_joined = fixture
+            .execute(None, "SELECT a.id, b.name FROM users a JOIN users b ON a.id = b.id + 1 ORDER BY a.id")
+            .unwrap_or_else(|error| panic!("self join under {dialect:?}: {error}"));
+        assert_eq!(
+            self_joined.rows,
+            rows(&[&[Lit::Int(2), Lit::Text("alice")], &[Lit::Int(3), Lit::Text("bob")]]),
+            "self join under {dialect:?}"
+        );
+
+        let ambiguous_column =
+            bind_sql_catalog("SELECT name FROM users a JOIN users b ON a.id = b.id", &fixture.catalog, SCHEMA_VERSION)
+                .expect_err("ambiguous shared column");
+        assert_eq!(ambiguous_column.kind, SqlErrorKind::AmbiguousColumn, "under {dialect:?}: {}", ambiguous_column.message);
+
+        let ambiguous_table =
+            bind_sql_catalog("SELECT users.name FROM users JOIN users ON users.id = users.id", &fixture.catalog, SCHEMA_VERSION)
+                .expect_err("duplicate unaliased source");
+        assert_eq!(ambiguous_table.kind, SqlErrorKind::AmbiguousTable, "under {dialect:?}: {}", ambiguous_table.message);
     }
 }
 

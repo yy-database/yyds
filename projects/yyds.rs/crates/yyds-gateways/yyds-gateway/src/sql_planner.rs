@@ -84,13 +84,13 @@ pub fn plan_select_for_dialect(
                 has_non_aggregate = true;
                 let star_table = find_table(catalog, star_table.type_id)?;
                 for field in &star_table.fields {
-                    projection_fields.push((field.field_id, field.name.clone()));
+                    projection_fields.push((source.row_id(field.field_id), field.name.clone()));
                 }
             }
             SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
                 SqlCatalogBoundExpression::Column(col) => {
                     has_non_aggregate = true;
-                    projection_fields.push((col.field_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
+                    projection_fields.push((col.row_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
                 }
                 SqlCatalogBoundExpression::Function { .. } => {
                     has_aggregate = true;
@@ -118,13 +118,13 @@ pub fn plan_select_for_dialect(
     // 2. 递归解析 predicate 的 AND 树，把 pk 条件提取出来。
     let (pk_equality, pk_prefix, pk_after, pk_before, remaining_predicate) = match select.predicate {
         None => (None, None, None, None, None),
-        Some(expr) => extract_pk_range(expr, pk_field.field_id)?,
+        Some(expr) => extract_pk_range(expr, source.row_id(pk_field.field_id))?,
     };
 
     // 3. 分流：有精确 pk 等值 → Read；其他全部 → Scan。
-    // 先从 catalog table 收集 field_id → SqlFieldType 映射。
+    // 先从 catalog table 收集 row_id → SqlFieldType 映射。
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
-        table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
+        table.fields.iter().map(|f| (source.row_id(f.field_id), f.field_type.clone())).collect();
 
     if let Some(lit) = pk_equality {
         let rowid = pk_literal_to_rowid(&lit)?;
@@ -281,14 +281,14 @@ fn plan_join_select(
     for projection in projections {
         match projection {
             SqlCatalogBoundProjection::Star(table) => {
-                let table = find_table(catalog, table.type_id)?;
-                for field in &table.fields {
-                    projection_fields.push((field.field_id, field.name.clone()));
+                let catalog_table = find_table(catalog, table.type_id)?;
+                for field in &catalog_table.fields {
+                    projection_fields.push((table.row_id(field.field_id), field.name.clone()));
                 }
             }
             SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
                 SqlCatalogBoundExpression::Column(col) => {
-                    projection_fields.push((col.field_id, alias.unwrap_or_else(|| col.field_name.clone())));
+                    projection_fields.push((col.row_id, alias.unwrap_or_else(|| col.field_name.clone())));
                 }
                 other => {
                     if expression_has_aggregate(&other) {
@@ -352,6 +352,9 @@ fn plan_join_select(
 }
 
 /// 构造一个 JOIN 数据来源计划：记录 namespace、ON 条件与该表需要解码的字段。
+///
+/// `needed` 收集的是 row id。每个来源把自己的真实 `field_id` 解码出来，再按
+/// occurrence slot 映射成 row id，供合并行与表达式求值使用。
 fn join_source_plan(
     table: SqlCatalogBoundTable,
     on: Option<SqlCatalogBoundExpression>,
@@ -362,13 +365,22 @@ fn join_source_plan(
 ) -> Result<JoinSourcePlan, SqlFrontendError> {
     let catalog_table = find_table(catalog, table.type_id)?;
     let mut needed_field_ids = Vec::new();
+    let mut row_ids = Vec::new();
     for field in &catalog_table.fields {
-        field_types.insert(field.field_id, field.field_type.clone());
-        if needed.contains(&field.field_id) {
+        let row_id = table.row_id(field.field_id);
+        field_types.insert(row_id, field.field_type.clone());
+        if needed.contains(&row_id) {
             needed_field_ids.push(field.field_id);
+            row_ids.push(row_id);
         }
     }
-    Ok(JoinSourcePlan { namespace: format!("table:{}", catalog_table.type_id), needed_field_ids, on, kind })
+    Ok(JoinSourcePlan {
+        namespace: format!("table:{}", catalog_table.type_id),
+        needed_field_ids,
+        row_ids,
+        on,
+        kind,
+    })
 }
 
 /// 计划一个没有 FROM 的 SELECT：只允许常量与内建函数，不访问任何 namespace。
@@ -541,6 +553,7 @@ fn plan_returning(
                         SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
                             type_id: table.type_id,
                             field_id: field.field_id,
+                            row_id: field.field_id,
                             table_name: table.name.clone(),
                             field_name: field.name.clone(),
                         }),
@@ -908,6 +921,8 @@ pub struct JoinSourcePlan {
     pub namespace: String,
     /// 需要从该表 TLV payload 里解码的字段（其余字段跳过）。
     pub needed_field_ids: Vec<u64>,
+    /// 与 [`Self::needed_field_ids`] 平行的 row id，解码后按它写入合并行。
+    pub row_ids: Vec<u64>,
     /// 该来源的 ON 条件；基表为 `None`。
     pub on: Option<SqlCatalogBoundExpression>,
     /// 基表为 `Inner`；连接表可为 `Inner` 或 `Left`。
@@ -1104,7 +1119,7 @@ pub struct DeleteScanPlan {
 /// 冲突规则：两个等值 / 两个不同前缀 / after ≥ before → planner_error。
 fn extract_pk_range(
     predicate: SqlCatalogBoundExpression,
-    pk_field_id: u64,
+    pk_row_id: u64,
 ) -> Result<
     (Option<SqlBoundLiteral>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<SqlCatalogBoundExpression>),
     SqlFrontendError,
@@ -1112,8 +1127,8 @@ fn extract_pk_range(
     match predicate {
         // AND 拆分 — 两侧分别提取，再合并。
         SqlCatalogBoundExpression::Binary { left, operator: SqlBoundBinaryOperator::And, right } => {
-            let (l_eq, l_pre, l_after, l_before, l_rem) = extract_pk_range(*left, pk_field_id)?;
-            let (r_eq, r_pre, r_after, r_before, r_rem) = extract_pk_range(*right, pk_field_id)?;
+            let (l_eq, l_pre, l_after, l_before, l_rem) = extract_pk_range(*left, pk_row_id)?;
+            let (r_eq, r_pre, r_after, r_before, r_rem) = extract_pk_range(*right, pk_row_id)?;
             let eq = merge_opt(l_eq, r_eq, "conflicting primary-key equality inside AND")?;
             let prefix = merge_opt(l_pre, r_pre, "conflicting primary-key LIKE prefix inside AND")?;
             let after = merge_opt(l_after, r_after, "conflicting primary-key lower bound inside AND")?;
@@ -1135,7 +1150,7 @@ fn extract_pk_range(
                     SqlBoundBinaryOperator::Equal,
                     SqlCatalogBoundExpression::Literal(lit),
                     SqlCatalogBoundExpression::Column(col),
-                ) if col.field_id == pk_field_id => {
+                ) if col.row_id == pk_row_id => {
                     let _rowid = pk_literal_to_rowid(&lit)?;
                     Ok((Some(lit), None, None, None, None))
                 }
@@ -1145,7 +1160,7 @@ fn extract_pk_range(
                     SqlBoundBinaryOperator::Greater,
                     SqlCatalogBoundExpression::Column(col),
                     SqlCatalogBoundExpression::Literal(lit),
-                ) if col.field_id == pk_field_id => {
+                ) if col.row_id == pk_row_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, Some(rowid), None, None))
                 }
@@ -1155,7 +1170,7 @@ fn extract_pk_range(
                     SqlBoundBinaryOperator::GreaterEqual,
                     SqlCatalogBoundExpression::Column(col),
                     SqlCatalogBoundExpression::Literal(lit),
-                ) if col.field_id == pk_field_id => {
+                ) if col.row_id == pk_row_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, Some(rowid_decrement(&rowid)), None, None))
                 }
@@ -1165,7 +1180,7 @@ fn extract_pk_range(
                     SqlBoundBinaryOperator::Less,
                     SqlCatalogBoundExpression::Column(col),
                     SqlCatalogBoundExpression::Literal(lit),
-                ) if col.field_id == pk_field_id => {
+                ) if col.row_id == pk_row_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, None, Some(rowid), None))
                 }
@@ -1175,7 +1190,7 @@ fn extract_pk_range(
                     SqlBoundBinaryOperator::LessEqual,
                     SqlCatalogBoundExpression::Column(col),
                     SqlCatalogBoundExpression::Literal(lit),
-                ) if col.field_id == pk_field_id => {
+                ) if col.row_id == pk_row_id => {
                     let rowid = pk_literal_to_rowid(&lit)?;
                     Ok((None, None, None, Some(rowid_increment(&rowid)), None))
                 }
@@ -1185,7 +1200,7 @@ fn extract_pk_range(
                     SqlBoundBinaryOperator::Like,
                     SqlCatalogBoundExpression::Column(col),
                     SqlCatalogBoundExpression::Literal(lit),
-                ) if col.field_id == pk_field_id => {
+                ) if col.row_id == pk_row_id => {
                     let prefix = match &lit {
                         SqlBoundLiteral::String(s) if s.ends_with('%') && !s.ends_with("%%") => {
                             s[..s.len() - 1].as_bytes().to_vec()
@@ -1363,7 +1378,7 @@ fn validate_grouped_select(select: &SqlCatalogBoundSelect, has_aggregate: bool) 
     let group_columns: Vec<u64> = group_expressions
         .iter()
         .filter_map(|expression| match expression {
-            SqlCatalogBoundExpression::Column(column) => Some(column.field_id),
+            SqlCatalogBoundExpression::Column(column) => Some(column.row_id),
             _ => None,
         })
         .collect();
@@ -1410,7 +1425,7 @@ fn grouped_expression_allowed(
         return true;
     }
     match expression {
-        SqlCatalogBoundExpression::Column(column) => group_columns.contains(&column.field_id),
+        SqlCatalogBoundExpression::Column(column) => group_columns.contains(&column.row_id),
         SqlCatalogBoundExpression::Literal(_) => true,
         SqlCatalogBoundExpression::Wildcard => false,
         SqlCatalogBoundExpression::Function { name, .. } if SqlAggregateFunction::from_name(name).is_some() => true,
@@ -1473,7 +1488,7 @@ fn validate_distinct_order_by(
     for item in items {
         let projected = match &item.expression {
             SqlCatalogBoundExpression::Column(column) => {
-                projection_fields.iter().any(|(field_id, _)| *field_id == column.field_id)
+                projection_fields.iter().any(|(row_id, _)| *row_id == column.row_id)
             }
             other => projection_expressions.iter().any(|(candidate, _)| candidate == other),
         };

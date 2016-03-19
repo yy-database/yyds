@@ -112,7 +112,7 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
         SqlBoundStatement::Select(s) => s,
         other => panic!("expected SqlBoundStatement::Select, got {other:?}"),
     };
-    assert_eq!(select.source.as_deref(), Some("users"));
+    assert_eq!(select.source.as_ref().map(|source| source.name.as_str()), Some("users"));
     assert_eq!(select.projections.len(), 2);
     assert!(matches!(
         &select.projections[0],
@@ -2473,7 +2473,7 @@ fn sql_join_rejects_ambiguous_unqualified_columns() {
 }
 
 #[test]
-fn sql_join_rejects_aggregate_and_self_join() {
+fn sql_join_rejects_aggregate_and_duplicate_unaliased_source() {
     let (catalog, _executor) = join_fixture();
 
     // RIGHT JOIN / FULL JOIN 现已支持，bind 层保留原样 kind。
@@ -2517,10 +2517,12 @@ fn sql_join_rejects_aggregate_and_self_join() {
         panic!("expected Select statement");
     }
 
-    let self_join =
+    // 同一张表出现两次又都没写别名：两个 `users` 争同一个限定名，按歧义表拒绝。
+    let duplicate =
         yyds_gateway::bind_sql_catalog("SELECT users.name FROM users JOIN users ON users.id = users.id", &catalog, 7)
-            .expect_err("self join");
-    assert!(self_join.message.contains("self join"), "{}", self_join.message);
+            .expect_err("duplicate table without aliases");
+    assert_eq!(duplicate.kind, yyds_gateway::SqlErrorKind::AmbiguousTable, "{}", duplicate.message);
+    assert!(duplicate.message.contains("more than once"), "{}", duplicate.message);
 
     let aggregate = yyds_gateway::bind_sql_catalog(
         "SELECT SUM(orders.total) FROM users JOIN orders ON users.id = orders.user_id",
@@ -2530,6 +2532,79 @@ fn sql_join_rejects_aggregate_and_self_join() {
     .expect("catalog bind");
     let error = yyds_gateway::plan_statement(aggregate, &catalog).expect_err("aggregate over join");
     assert!(error.message.contains("aggregate projections"), "{}", error.message);
+}
+
+#[test]
+fn sql_table_alias_replaces_the_table_qualifier() {
+    let (catalog, executor) = join_fixture();
+
+    // 别名接管限定名：`u.id` 可用，主键等值仍然下推成单点读。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT u.name FROM users u WHERE u.id = 2", &catalog, 7)
+        .expect("aliased bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Read(_)), "got {plan:?}");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::String("bob".into())]]);
+
+    // `AS` 拼写等价。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT u.id FROM users AS u ORDER BY u.id", &catalog, 7)
+        .expect("AS alias bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(result.rows.len(), 2);
+
+    // 别名存在后，原表名不再是可见限定名。
+    let error = yyds_gateway::bind_sql_catalog("SELECT users.name FROM users u", &catalog, 7)
+        .expect_err("table name is hidden by its alias");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownTableQualifier, "{}", error.message);
+
+    // JOIN 两侧都可以用别名。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT u.name, o.total FROM users AS u JOIN orders AS o ON u.id = o.user_id ORDER BY o.total",
+        &catalog,
+        7,
+    )
+    .expect("aliased join bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(50)],
+            vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Integer(70)],
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(100)],
+        ]
+    );
+
+    // 别名只改限定名，不改 catalog 列名：拼错的列照常报未知列。
+    let error = yyds_gateway::bind_sql_catalog("SELECT u.nope FROM users u", &catalog, 7).expect_err("unknown column");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownColumn, "{}", error.message);
+}
+
+#[test]
+fn sql_self_join_keeps_both_occurrences_of_a_shared_column() {
+    let (catalog, executor) = join_fixture();
+
+    // 同一张表出现两次，两个别名各自保留一份 `id` / `name`。
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT a.id, a.name, b.name FROM users a JOIN users b ON a.id = b.id + 1", &catalog, 7)
+            .expect("self join bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(
+        result.rows,
+        vec![vec![
+            yyds_gateway::SqlValue::Integer(2),
+            yyds_gateway::SqlValue::String("bob".into()),
+            yyds_gateway::SqlValue::String("alice".into()),
+        ]]
+    );
+    assert_eq!(result.columns, vec!["id".to_string(), "name".to_string(), "name".to_string()]);
+
+    // 未限定同名列必须报歧义，而不是随便挑一侧。
+    let ambiguous = yyds_gateway::bind_sql_catalog("SELECT name FROM users a JOIN users b ON a.id = b.id", &catalog, 7)
+        .expect_err("ambiguous shared column");
+    assert_eq!(ambiguous.kind, yyds_gateway::SqlErrorKind::AmbiguousColumn, "{}", ambiguous.message);
 }
 
 #[test]

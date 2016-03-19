@@ -38,8 +38,8 @@ pub use crate::{
     sql::{
         bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundConflict, SqlBoundConflictAction,
         SqlBoundExpression, SqlBoundJoin, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect,
-        SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundStatement, SqlBoundUnaryOperator, SqlDialect, SqlErrorKind,
-        SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
+        SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement, SqlBoundUnaryOperator, SqlDialect,
+        SqlErrorKind, SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
     },
 };
 
