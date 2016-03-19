@@ -313,11 +313,21 @@ pub struct SqlBoundSelect {
 
 /// One `FROM` / `JOIN` row source retained by the gateway binder.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SqlBoundSource {
-    /// Catalog table name as written by the client.
-    pub name: String,
-    /// Optional alias that replaces the table name in the column scope.
-    pub alias: Option<String>,
+pub enum SqlBoundSource {
+    /// A catalog table reference, optionally renamed by an alias.
+    Table {
+        /// Catalog table name as written by the client.
+        name: String,
+        /// Optional alias that replaces the table name in the column scope.
+        alias: Option<String>,
+    },
+    /// A derived table `(SELECT ...) alias` — the inner query keeps its own binding.
+    Derived {
+        /// Bound inner query. Table sources are the only shape the planner accepts.
+        query: Box<SqlBoundSelect>,
+        /// Alias that names the derived table in the column scope.
+        alias: String,
+    },
 }
 
 /// One JOIN clause retained by the gateway binder.
@@ -942,18 +952,22 @@ fn bind_order_by_clause(
     })
 }
 
-/// Binds an Oak `FROM` / `JOIN` table source as a catalog name plus its optional alias.
-///
-/// Derived tables are a separate shape that the gateway binds explicitly, so a
-/// plain table reference is the only thing this helper accepts.
+/// Binds an Oak `FROM` / `JOIN` source into a catalog table reference or a
+/// derived table. A derived table is a full nested `SELECT`, so it is bound
+/// through the same [`bind_select_statement`] path as every other query.
 fn bind_table_source(source: &oak_sql::ast::TableSource) -> Result<SqlBoundSource, SqlFrontendError> {
     match source {
-        oak_sql::ast::TableSource::Table(table) => Ok(SqlBoundSource {
+        oak_sql::ast::TableSource::Table(table) => Ok(SqlBoundSource::Table {
             name: normalize_identifier(table.name.name.as_ref()),
             alias: table.alias.as_ref().map(|alias| normalize_identifier(alias.name.as_ref())),
         }),
-        oak_sql::ast::TableSource::Derived { .. } => {
-            Err(SqlFrontendError::unsupported("SQL derived tables are outside the gateway subset"))
+        oak_sql::ast::TableSource::Derived { query, alias, .. } => {
+            let alias =
+                alias.as_ref().ok_or_else(|| bind_error("SQL derived table requires an alias"))?;
+            Ok(SqlBoundSource::Derived {
+                query: Box::new(bind_select_statement(query)?),
+                alias: normalize_identifier(alias.name.as_ref()),
+            })
         }
     }
 }

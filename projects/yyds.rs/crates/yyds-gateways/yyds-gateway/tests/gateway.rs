@@ -112,7 +112,10 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
         SqlBoundStatement::Select(s) => s,
         other => panic!("expected SqlBoundStatement::Select, got {other:?}"),
     };
-    assert_eq!(select.source.as_ref().map(|source| source.name.as_str()), Some("users"));
+    assert!(matches!(
+        select.source.as_ref(),
+        Some(yyds_gateway::SqlBoundSource::Table { name, alias: None }) if name == "users"
+    ));
     assert_eq!(select.projections.len(), 2);
     assert!(matches!(
         &select.projections[0],
@@ -2605,6 +2608,71 @@ fn sql_self_join_keeps_both_occurrences_of_a_shared_column() {
     let ambiguous = yyds_gateway::bind_sql_catalog("SELECT name FROM users a JOIN users b ON a.id = b.id", &catalog, 7)
         .expect_err("ambiguous shared column");
     assert_eq!(ambiguous.kind, yyds_gateway::SqlErrorKind::AmbiguousColumn, "{}", ambiguous.message);
+}
+
+#[test]
+fn sql_derived_table_flattens_when_it_is_the_same_table_under_a_new_name() {
+    let (catalog, executor) = join_fixture();
+
+    // 内层过滤并入外层 `WHERE`，外层只看得见派生别名 `x`。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT x.name FROM (SELECT * FROM users WHERE id = 2) x", &catalog, 7)
+        .expect("derived bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
+    assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::String("bob".into())]]);
+    assert_eq!(result.columns, vec!["name".to_string()]);
+
+    // 派生表参与 INNER JOIN，内层过滤仍然生效。
+    let joined = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT x.name, o.total FROM (SELECT * FROM users WHERE id = 1) x JOIN orders o ON x.id = o.user_id \
+         ORDER BY o.total",
+    );
+    assert_eq!(
+        joined.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(50)],
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::Integer(100)],
+        ]
+    );
+
+    // `*` 展开与逐列投影在派生表上等价。
+    let star = run_sql(&executor, None, &catalog, "SELECT * FROM (SELECT id, name FROM users) x ORDER BY x.id");
+    assert_eq!(star.columns, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(star.rows.len(), 2);
+}
+
+#[test]
+fn sql_derived_table_reports_unflattenable_shapes() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+
+    // 方言语法本身就要求别名，缺失按 Syntax 拒绝。
+    let missing = yyds_gateway::bind_sql_catalog("SELECT * FROM (SELECT * FROM users)", &catalog, 7).expect_err("no alias");
+    assert_eq!(missing.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", missing.message);
+    assert!(missing.message.contains("requires an alias"), "{}", missing.message);
+
+    for (label, sql, reason) in [
+        ("inner LIMIT", "SELECT * FROM (SELECT * FROM users LIMIT 1) x", "LIMIT/OFFSET"),
+        ("inner DISTINCT", "SELECT * FROM (SELECT DISTINCT * FROM users) x", "DISTINCT"),
+        ("inner GROUP BY", "SELECT * FROM (SELECT id FROM users GROUP BY id) x", "GROUP BY"),
+        ("inner aggregate", "SELECT * FROM (SELECT COUNT(*) FROM users) x", "every column"),
+        ("narrow projection", "SELECT * FROM (SELECT id FROM users) x", "every column"),
+        ("aliased projection", "SELECT * FROM (SELECT id AS ident, name FROM users) x", "every column"),
+        ("nested derived", "SELECT * FROM (SELECT * FROM (SELECT * FROM users) y) x", "another derived table"),
+        (
+            "filtered derived in LEFT JOIN",
+            "SELECT * FROM users u LEFT JOIN (SELECT * FROM users WHERE id = 1) x ON u.id = x.id",
+            "INNER join",
+        ),
+    ] {
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+            .expect_err(&format!("{label} must stay outside the gateway subset"));
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{label}: {}", error.message);
+        assert!(error.message.contains("derived table"), "{label}: {}", error.message);
+        assert!(error.message.contains(reason), "{label}: {}", error.message);
+    }
 }
 
 #[test]

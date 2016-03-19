@@ -651,12 +651,31 @@ fn bind_select(
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
     let mut occurrences: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
-    let source = select.source.as_ref().map(|source| bind_source(source, catalog, &mut occurrences)).transpose()?;
+    // 派生表被扁平化成它自己的基表，内层 `WHERE` 改由外层 `WHERE` 表达。
+    let mut derived_predicates: Vec<SqlCatalogBoundExpression> = Vec::new();
+    let mut source = None;
+    if let Some(bound_source) = select.source.as_ref() {
+        let (table, predicate) = bind_source(bound_source, catalog, variables, &mut occurrences)?;
+        source = Some(table);
+        if let Some(predicate) = predicate {
+            // 保留侧的过滤移动到外层 `WHERE` 语义不变；可空侧会因 NULL 扩张丢行。
+            if select.joins.iter().any(|join| matches!(join.kind, SqlBoundJoinKind::Right | SqlBoundJoinKind::Full)) {
+                return Err(unsupported_derived("a filtered derived table cannot feed a RIGHT or FULL join"));
+            }
+            derived_predicates.push(predicate);
+        }
+    }
     // JOIN 之后列名作用域包含基表与所有已连接表，ON 条件只能引用此前已出现的表。
     let mut sources: Vec<SqlCatalogBoundTable> = source.iter().cloned().collect();
     let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
     for join in select.joins {
-        let table = bind_source(&join.source, catalog, &mut occurrences)?;
+        let (table, derived_predicate) = bind_source(&join.source, catalog, variables, &mut occurrences)?;
+        if let Some(predicate) = derived_predicate {
+            if !matches!(join.kind, SqlBoundJoinKind::Inner) {
+                return Err(unsupported_derived("a filtered derived table can only feed an INNER join"));
+            }
+            derived_predicates.push(predicate);
+        }
         if let Some(previous) = sources.iter().find(|visible| visible.visible_name() == table.visible_name()) {
             return Err(SqlFrontendError::new(
                 SqlErrorKind::AmbiguousTable,
@@ -674,7 +693,18 @@ fn bind_select(
     for projection in select.projections {
         projections.extend(bind_projection(projection, &sources, catalog, variables)?);
     }
-    let predicate = select.predicate.map(|expression| bind_expression(expression, &sources, catalog, variables)).transpose()?;
+    let mut predicate =
+        select.predicate.map(|expression| bind_expression(expression, &sources, catalog, variables)).transpose()?;
+    for derived in derived_predicates {
+        predicate = match predicate {
+            None => Some(derived),
+            Some(existing) => Some(SqlCatalogBoundExpression::Binary {
+                left: Box::new(existing),
+                operator: SqlBoundBinaryOperator::And,
+                right: Box::new(derived),
+            }),
+        };
+    }
     let group_by = select
         .group_by
         .map(|exprs| exprs.into_iter().map(|e| bind_expression(e, &sources, catalog, variables)).collect::<Result<Vec<_>, _>>())
@@ -800,18 +830,126 @@ fn bind_expression(
 /// Binds one `FROM` / `JOIN` source, assigning the occurrence slot used to build row ids.
 ///
 /// Repeated occurrences of the same catalog table get distinct slots so a self join
-/// can keep both sides of a column in one merged row.
+/// can keep both sides of a column in one merged row. A derived table also returns
+/// the predicate its inner query carried, for the caller to merge into the outer
+/// `WHERE`.
 fn bind_source(
     source: &SqlBoundSource,
     catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
     occurrences: &mut std::collections::BTreeMap<u64, u64>,
-) -> Result<SqlCatalogBoundTable, SqlFrontendError> {
-    let mut table = find_table(catalog, &source.name)?;
-    table.alias = source.alias.clone();
+) -> Result<(SqlCatalogBoundTable, Option<SqlCatalogBoundExpression>), SqlFrontendError> {
+    match source {
+        SqlBoundSource::Table { name, alias } => {
+            let mut table = find_table(catalog, name)?;
+            table.alias = alias.clone();
+            Ok((assign_row_slot(table, occurrences), None))
+        }
+        SqlBoundSource::Derived { query, alias } => flatten_derived(query, alias, catalog, variables, occurrences),
+    }
+}
+
+/// Assigns the next occurrence slot of one catalog table and returns the table.
+fn assign_row_slot(
+    mut table: SqlCatalogBoundTable,
+    occurrences: &mut std::collections::BTreeMap<u64, u64>,
+) -> SqlCatalogBoundTable {
     let slot = occurrences.entry(table.type_id).or_insert(0);
     table.row_slot = *slot;
     *slot += 1;
-    Ok(table)
+    table
+}
+
+/// Flattens a derived table into the single catalog table it selects from.
+///
+/// The gateway row source is one catalog table, so a derived table is expressible
+/// only when it is that same table seen through a new name: no join, no grouping,
+/// no ordering, no paging and a projection that exposes every column. The inner
+/// filter is returned to the caller, which ANDs it into the outer `WHERE` — sound
+/// only while the derived columns are never NULL-extended by an outer join, which
+/// the caller checks against the join kinds.
+fn flatten_derived(
+    query: &SqlBoundSelect,
+    alias: &str,
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+    occurrences: &mut std::collections::BTreeMap<u64, u64>,
+) -> Result<(SqlCatalogBoundTable, Option<SqlCatalogBoundExpression>), SqlFrontendError> {
+    if !query.joins.is_empty() {
+        return Err(unsupported_derived("its inner query joins more than one table"));
+    }
+    for (present, clause) in [
+        (query.group_by.is_some(), "GROUP BY"),
+        (query.having.is_some(), "HAVING"),
+        (query.distinct, "DISTINCT"),
+        (query.order_by.is_some(), "ORDER BY"),
+        (query.limit.is_some() || query.offset.is_some(), "LIMIT/OFFSET"),
+    ] {
+        if present {
+            return Err(unsupported_derived(&format!("its inner query carries {clause}")));
+        }
+    }
+    let Some(source) = query.source.as_ref()
+    else {
+        return Err(unsupported_derived("its inner query has no table source"));
+    };
+    let SqlBoundSource::Table { name, alias: inner_alias } = source
+    else {
+        return Err(unsupported_derived("its inner query selects from another derived table"));
+    };
+    let inner_table = find_table(catalog, name)?;
+    let inner_scope = [SqlCatalogBoundTable { alias: inner_alias.clone(), ..inner_table }];
+    if !projects_every_column(&query.projections, &inner_scope, catalog)? {
+        return Err(unsupported_derived("its inner projection must be `*` or every column of the source table"));
+    }
+    let predicate =
+        query.predicate.clone().map(|expression| bind_expression(expression, &inner_scope, catalog, variables)).transpose()?;
+    let mut table = assign_row_slot(inner_scope[0].clone(), occurrences);
+    table.alias = Some(alias.to_string());
+    Ok((table, predicate))
+}
+
+/// Whether a derived table's projection exposes exactly every column of its
+/// source table, which is what lets the outer query address the source table
+/// directly. `*` qualifies, and so does one unaliased column reference per
+/// catalog field in any order.
+fn projects_every_column(
+    projections: &[SqlBoundProjection],
+    source: &[SqlCatalogBoundTable],
+    catalog: &SqlCatalog,
+) -> Result<bool, SqlFrontendError> {
+    if matches!(projections, [SqlBoundProjection::Star]) {
+        return Ok(true);
+    }
+    let table = catalog
+        .tables
+        .iter()
+        .find(|candidate| candidate.type_id == source[0].type_id)
+        .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+    let mut covered = Vec::with_capacity(projections.len());
+    for projection in projections {
+        let SqlBoundProjection::Expression { expression, alias: None } = projection
+        else {
+            return Ok(false);
+        };
+        let SqlBoundExpression::Identifier(name) = expression
+        else {
+            return Ok(false);
+        };
+        let Ok(column) = find_field(name, source, catalog)
+        else {
+            return Ok(false);
+        };
+        if covered.contains(&column.field_id) {
+            return Ok(false);
+        }
+        covered.push(column.field_id);
+    }
+    Ok(covered.len() == table.fields.len() && table.fields.iter().all(|field| covered.contains(&field.field_id)))
+}
+
+fn unsupported_derived(reason: &str) -> SqlFrontendError {
+    SqlFrontendError::unsupported(format!("SQL derived table cannot be flattened: {reason}"))
 }
 
 fn find_table(catalog: &SqlCatalog, name: &str) -> Result<SqlCatalogBoundTable, SqlFrontendError> {

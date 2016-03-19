@@ -260,6 +260,38 @@ fn sql_table_alias_and_self_join_agree_across_dialects() {
     }
 }
 
+/// 派生表在两方言下必须一致：网关把 `(SELECT ...) x` 扁平化成同一张基表，内层过滤
+/// 并入外层 `WHERE`，所以没有任何方言分叉；无法扁平化的形状两方言都必须显式拒绝。
+#[test]
+fn sql_derived_table_agrees_across_dialects() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        for sql in SEED {
+            fixture.execute(None, sql).expect("seed");
+        }
+
+        let filtered = fixture
+            .execute(None, "SELECT x.name FROM (SELECT * FROM users WHERE id = 2) x")
+            .unwrap_or_else(|error| panic!("filtered derived table under {dialect:?}: {error}"));
+        assert_eq!(filtered.rows, rows(&[&[Lit::Text("bob")]]), "derived filter under {dialect:?}");
+
+        // 内层逐列投影覆盖整表时与 `*` 等价，列序不影响外层限定名。
+        let projected = fixture
+            .execute(None, "SELECT x.id, x.age FROM (SELECT name, age, id, score, active, tag FROM users) x ORDER BY x.id")
+            .unwrap_or_else(|error| panic!("derived projection under {dialect:?}: {error}"));
+        assert_eq!(
+            projected.rows,
+            rows(&[&[Lit::Int(1), Lit::Int(30)], &[Lit::Int(2), Lit::Int(20)], &[Lit::Int(3), Lit::Int(40)]]),
+            "derived projection under {dialect:?}"
+        );
+
+        let rejected = fixture
+            .execute(None, "SELECT * FROM (SELECT * FROM users LIMIT 1) x")
+            .expect_err("inner LIMIT cannot be flattened");
+        assert!(rejected.contains("derived table"), "under {dialect:?}: {rejected}");
+    }
+}
+
 /// `IS` 谓词直接由 Oak 的 `IsNull` / `IsTruth` 节点绑定，网关不再从源码 span 文本
 /// 回读关键字。这里只通过绑定后的表达式求值，验证 NULL 的三值逻辑。
 #[test]
