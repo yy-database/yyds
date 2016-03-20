@@ -292,6 +292,54 @@ fn sql_derived_table_agrees_across_dialects() {
     }
 }
 
+/// `[NOT] EXISTS` 只关心子查询是否产出行，两方言共用同一物化流程：返回行必须一致，
+/// 子查询内部的绑定错误也必须落到同一类别，wire 层再各自映射成对应错误码。
+#[test]
+fn sql_exists_predicates_agree_across_dialects() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        for sql in SEED {
+            fixture.execute(None, sql).expect("seed");
+        }
+
+        let present = fixture
+            .execute(None, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM users WHERE age = 20) ORDER BY id")
+            .unwrap_or_else(|error| panic!("EXISTS with rows under {dialect:?}: {error}"));
+        assert_eq!(
+            present.rows,
+            rows(&[&[Lit::Int(1)], &[Lit::Int(2)], &[Lit::Int(3)]]),
+            "EXISTS with rows under {dialect:?}"
+        );
+
+        let absent = fixture
+            .execute(None, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM users WHERE age = 99)")
+            .unwrap_or_else(|error| panic!("EXISTS without rows under {dialect:?}: {error}"));
+        assert!(absent.rows.is_empty(), "EXISTS without rows under {dialect:?}");
+
+        let negated_empty = fixture
+            .execute(None, "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM users WHERE age = 99) ORDER BY id")
+            .unwrap_or_else(|error| panic!("NOT EXISTS with rows under {dialect:?}: {error}"));
+        assert_eq!(
+            negated_empty.rows,
+            rows(&[&[Lit::Int(1)], &[Lit::Int(2)], &[Lit::Int(3)]]),
+            "NOT EXISTS with rows under {dialect:?}"
+        );
+
+        let negated_present = fixture
+            .execute(None, "SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM users WHERE age = 20)")
+            .unwrap_or_else(|error| panic!("NOT EXISTS without rows under {dialect:?}: {error}"));
+        assert!(negated_present.rows.is_empty(), "NOT EXISTS without rows under {dialect:?}");
+
+        let unknown = bind_sql_catalog(
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
+            &fixture.catalog,
+            SCHEMA_VERSION,
+        )
+        .expect_err("unknown inner table");
+        assert_eq!(unknown.kind, SqlErrorKind::UnknownTable, "under {dialect:?}: {}", unknown.message);
+    }
+}
+
 /// `IS` 谓词直接由 Oak 的 `IsNull` / `IsTruth` 节点绑定，网关不再从源码 span 文本
 /// 回读关键字。这里只通过绑定后的表达式求值，验证 NULL 的三值逻辑。
 #[test]

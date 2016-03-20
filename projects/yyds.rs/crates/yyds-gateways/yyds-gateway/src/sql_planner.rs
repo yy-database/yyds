@@ -788,6 +788,7 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
         | SqlCatalogBoundExpression::Binary { .. }
         | SqlCatalogBoundExpression::Unary { .. }
         | SqlCatalogBoundExpression::InSubquery { .. }
+        | SqlCatalogBoundExpression::Exists { .. }
         | SqlCatalogBoundExpression::InValues { .. }
         | SqlCatalogBoundExpression::Case { .. }
         | SqlCatalogBoundExpression::Cast { .. } => Err(planner_error("SQL gateway write values must be simple literals")),
@@ -1354,6 +1355,7 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
                 || else_branch.as_ref().is_some_and(|e| expression_has_aggregate(e))
         }
         SqlCatalogBoundExpression::Cast { expr, .. } => expression_has_aggregate(expr),
+        SqlCatalogBoundExpression::Exists { .. } => false,
         SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
             false
         }
@@ -1444,6 +1446,8 @@ fn grouped_expression_allowed(
             grouped_expression_allowed(expression, group_expressions, group_columns)
         }
         SqlCatalogBoundExpression::InSubquery { .. } => false,
+        // `EXISTS` 只依赖自己子查询的结果，对分组恒定，等同于常量布尔值。
+        SqlCatalogBoundExpression::Exists { .. } => true,
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             let branches_ok = branches.iter().all(|(w, t)| {
                 grouped_expression_allowed(w, group_expressions, group_columns)

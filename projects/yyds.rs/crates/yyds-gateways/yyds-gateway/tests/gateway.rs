@@ -2676,6 +2676,51 @@ fn sql_derived_table_reports_unflattenable_shapes() {
 }
 
 #[test]
+fn sql_exists_predicates_evaluate_against_subquery_rows() {
+    let (catalog, executor) = join_fixture();
+    let ids = |sql: &str| run_sql(&executor, None, &catalog, sql).rows;
+
+    // 子查询有行 → 谓词恒真，保留全部 users。
+    assert_eq!(
+        ids("SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = 1) ORDER BY id"),
+        vec![vec![yyds_gateway::SqlValue::Integer(1)], vec![yyds_gateway::SqlValue::Integer(2)]]
+    );
+
+    // 子查询无行 → 谓词恒假。
+    assert!(ids("SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = 999)").is_empty());
+
+    // `NOT EXISTS` 与 `EXISTS` 互补。
+    assert_eq!(
+        ids("SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE user_id = 999) ORDER BY id"),
+        vec![vec![yyds_gateway::SqlValue::Integer(1)], vec![yyds_gateway::SqlValue::Integer(2)]]
+    );
+    assert!(ids("SELECT id FROM users WHERE NOT EXISTS (SELECT 1 FROM orders WHERE user_id = 1)").is_empty());
+
+    // 投影位置与 `HAVING` 位置同样可求值。
+    let projected = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT id, EXISTS (SELECT 1 FROM orders WHERE total = 100) AS has FROM users ORDER BY id",
+    );
+    assert_eq!(projected.columns, vec!["id".to_string(), "has".to_string()]);
+    assert_eq!(
+        projected.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Boolean(true)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Boolean(true)],
+        ]
+    );
+    let having = run_sql(&executor, None, &catalog, "SELECT COUNT(*) FROM users HAVING EXISTS (SELECT 1 FROM users)");
+    assert_eq!(having.rows, vec![vec![yyds_gateway::SqlValue::Integer(2)]]);
+
+    // 写入路径的 `WHERE` 复用同一物化流程。
+    let deleted = run_sql(&executor, None, &catalog, "DELETE FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE user_id = 9)");
+    assert_eq!(deleted.affected_rows, 2);
+    assert!(run_sql(&executor, None, &catalog, "SELECT id FROM users").rows.is_empty());
+}
+
+#[test]
 fn sql_scalar_function_binding_rejects_unknown_name_and_bad_arity() {
     let catalog = catalog("table users { @@id: i64 }\n");
     let unknown = yyds_gateway::bind_sql_catalog("SELECT NO_SUCH_FN(1)", &catalog, 7).expect_err("unknown fn");

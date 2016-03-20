@@ -526,6 +526,13 @@ fn lower_expression(
                 .collect();
             SqlCatalogBoundExpression::InValues { expression, values, negated }
         }
+        SqlCatalogBoundExpression::Exists { plan, negated } => {
+            let mut plan = *plan;
+            resolve_subqueries(&mut plan, executor, transaction, dialect)?;
+            let result = execute_plan(executor, transaction, &plan, dialect)?;
+            // `EXISTS` 只关心子查询是否有行，投影内容不参与判断。
+            SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Boolean(!result.rows.is_empty() != negated))
+        }
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             let bound_branches = branches
                 .into_iter()
@@ -1894,6 +1901,9 @@ fn eval_expression(
         SqlCatalogBoundExpression::InSubquery { .. } => {
             return Err(execute_error("IN subquery was not materialized before execution"))
         }
+        SqlCatalogBoundExpression::Exists { .. } => {
+            return Err(execute_error("EXISTS predicate was not materialized before execution"))
+        }
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             eval_case(branches, else_branch, row, field_types, dialect)?
         }
@@ -2503,6 +2513,9 @@ fn eval_having(
         }
         SqlCatalogBoundExpression::InSubquery { .. } => {
             return Err(execute_error("IN subquery was not materialized before execution"))
+        }
+        SqlCatalogBoundExpression::Exists { .. } => {
+            return Err(execute_error("EXISTS predicate was not materialized before execution"))
         }
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             eval_case_having(branches, else_branch, bucket_rows, group_exprs, field_types, dialect)?

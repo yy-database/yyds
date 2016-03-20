@@ -533,6 +533,13 @@ pub enum SqlBoundExpression {
         /// Whether the predicate is spelled `NOT IN`.
         negated: bool,
     },
+    /// `[NOT] EXISTS (<subquery>)`.
+    Exists {
+        /// Bound subquery whose rows are tested for existence.
+        select: Box<SqlBoundSelect>,
+        /// Whether the predicate is spelled `NOT EXISTS`.
+        negated: bool,
+    },
     /// `CASE WHEN cond THEN result ... [ELSE fallback] END`.
     Case {
         /// `(when, then)` branches in source order.
@@ -1156,9 +1163,10 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
         Expression::Subquery { .. } => {
             Err(SqlFrontendError::unsupported("SQL subquery is only supported as the right side of IN"))
         }
-        Expression::Exists { .. } => {
-            Err(SqlFrontendError::unsupported("SQL EXISTS predicates are outside the gateway subset"))
-        }
+        Expression::Exists { query, negated, .. } => Ok(SqlBoundExpression::Exists {
+            select: Box::new(bind_select_statement(query)?),
+            negated: *negated,
+        }),
         Expression::Vector { .. } => {
             Err(SqlFrontendError::unsupported("SQL vector literals are outside the gateway binding subset"))
         }

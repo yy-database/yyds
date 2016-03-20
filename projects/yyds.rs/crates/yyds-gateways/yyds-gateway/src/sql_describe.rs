@@ -174,7 +174,7 @@ fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &B
             | SqlBoundUnaryOperator::IsTruth { .. } => SqlFieldType::Bool,
             SqlBoundUnaryOperator::Plus | SqlBoundUnaryOperator::Minus => infer_expression_type(expression, field_types),
         },
-        InSubquery { .. } | InValues { .. } => SqlFieldType::Bool,
+        InSubquery { .. } | InValues { .. } | Exists { .. } => SqlFieldType::Bool,
         Case { branches, else_branch } => {
             // 取第一个 THEN 分支的类型作为推断结果；更精确的类型合并留给执行期。
             branches

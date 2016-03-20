@@ -269,6 +269,13 @@ pub enum SqlCatalogBoundExpression {
         /// Whether the predicate is spelled `NOT IN`.
         negated: bool,
     },
+    /// `[NOT] EXISTS (<subquery>)` with the subquery already planned.
+    Exists {
+        /// Executable plan for the subquery.
+        plan: Box<crate::sql_planner::SqlExecutionPlan>,
+        /// Whether the predicate is spelled `NOT EXISTS`.
+        negated: bool,
+    },
     /// `IN` predicate whose subquery rows were materialized before evaluation.
     InValues {
         /// Left-hand side expression.
@@ -803,6 +810,12 @@ fn bind_expression(
                 negated,
             })
         }
+        SqlBoundExpression::Exists { select, negated } => {
+            // `EXISTS` 与 `IN` 一样是不相关子查询：子查询自带 FROM 作用域，不继承外层 sources。
+            let bound_select = bind_select(*select, catalog, variables)?;
+            let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
+            Ok(SqlCatalogBoundExpression::Exists { plan: Box::new(plan), negated })
+        }
         SqlBoundExpression::Case { branches, else_branch } => {
             let bound_branches = branches
                 .into_iter()
@@ -1057,6 +1070,8 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
             }
         }
         SqlCatalogBoundExpression::Cast { expr, .. } => collect_column_ids(expr, out),
+        // `EXISTS` 不引用任何外层列，行值键集合不受影响。
+        SqlCatalogBoundExpression::Exists { .. } => {}
         SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
     }
 }
