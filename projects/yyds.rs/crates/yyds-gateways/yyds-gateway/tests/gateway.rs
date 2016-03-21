@@ -2676,6 +2676,99 @@ fn sql_derived_table_reports_unflattenable_shapes() {
 }
 
 #[test]
+fn sql_common_table_expression_flattens_onto_its_base_table() {
+    let (catalog, executor) = join_fixture();
+    let run = |sql: &str| run_sql(&executor, None, &catalog, sql);
+
+    // CTE 是同一张基表的另一个名字，投影与 `WHERE` 都用 CTE 名限定。
+    let named = run("WITH u AS (SELECT * FROM users) SELECT u.name FROM u WHERE u.id = 1");
+    assert_eq!(named.columns, vec!["name".to_string()]);
+    assert_eq!(named.rows, vec![vec![yyds_gateway::SqlValue::String("alice".into())]]);
+
+    // CTE 体的内层过滤并入外层 `WHERE`。
+    let filtered = run("WITH u AS (SELECT * FROM users WHERE id = 2) SELECT name FROM u");
+    assert_eq!(filtered.rows, vec![vec![yyds_gateway::SqlValue::String("bob".into())]]);
+
+    // 同一条 CTE 被引用两次就像自连接，两次出现各有自己的行槽。
+    let twice = run("WITH u AS (SELECT * FROM users) SELECT a.id, b.name FROM u a JOIN u b ON a.id = b.id + 1");
+    assert_eq!(
+        twice.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("alice".into())]]
+    );
+
+    // 带过滤的 CTE 与同一张表的另一次出现共存时，过滤落在 CTE 自己的行槽上。
+    let shared = run(
+        "WITH u AS (SELECT * FROM users WHERE id = 2) SELECT a.name, u.name FROM users a JOIN u ON a.id = u.id - 1",
+    );
+    assert_eq!(
+        shared.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::String("bob".into())]
+        ]
+    );
+
+    // CTE 可以引用更早定义的 CTE。
+    let chained = run("WITH a AS (SELECT * FROM users WHERE id = 1), b AS (SELECT * FROM a) SELECT b.name FROM b");
+    assert_eq!(chained.rows, vec![vec![yyds_gateway::SqlValue::String("alice".into())]]);
+
+    // CTE 名遮蔽同名 catalog 表。
+    let shadows = run("WITH orders AS (SELECT * FROM users) SELECT orders.name FROM orders WHERE orders.id = 2");
+    assert_eq!(shadows.rows, vec![vec![yyds_gateway::SqlValue::String("bob".into())]]);
+}
+
+#[test]
+fn sql_common_table_expression_reports_unflattenable_shapes() {
+    let (catalog, _executor) = join_fixture();
+    let reject = |sql: &str| {
+        yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+            .expect_err(&format!("`{sql}` must stay outside the gateway subset"))
+    };
+
+    for (label, sql, reason) in [
+        ("inner LIMIT", "WITH u AS (SELECT * FROM users LIMIT 1) SELECT * FROM u", "LIMIT/OFFSET"),
+        ("narrow projection", "WITH u AS (SELECT id FROM users) SELECT * FROM u", "every column"),
+        ("inner aggregate", "WITH u AS (SELECT COUNT(*) FROM users) SELECT * FROM u", "every column"),
+        (
+            "inner join",
+            "WITH u AS (SELECT * FROM users JOIN orders ON users.id = orders.user_id) SELECT * FROM u",
+            "joins more than one table",
+        ),
+        (
+            "nested WITH",
+            "WITH u AS (WITH v AS (SELECT * FROM users) SELECT * FROM v) SELECT * FROM u",
+            "its own WITH clause",
+        ),
+    ] {
+        let error = reject(sql);
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{label}: {}", error.message);
+        assert!(error.message.contains("common table expression"), "{label}: {}", error.message);
+        assert!(error.message.contains(reason), "{label}: {}", error.message);
+    }
+
+    // 未被引用的 CTE 也要可表达，不能因为不在 `FROM` 里就静默吞掉错误。
+    let unused = reject("WITH u AS (SELECT * FROM missing) SELECT 1");
+    assert_eq!(unused.kind, yyds_gateway::SqlErrorKind::UnknownTable, "{}", unused.message);
+
+    // 非递归 CTE 只能引用更早的定义，前向引用按未知表拒绝。
+    let forward = reject("WITH a AS (SELECT * FROM b), b AS (SELECT * FROM users) SELECT * FROM a");
+    assert_eq!(forward.kind, yyds_gateway::SqlErrorKind::UnknownTable, "{}", forward.message);
+
+    // 显式列名会重命名 CTE 输出，扁平化后的基表无法表达。
+    let renamed = reject("WITH u (id, name) AS (SELECT * FROM users) SELECT * FROM u");
+    assert_eq!(renamed.kind, yyds_gateway::SqlErrorKind::Unsupported, "{}", renamed.message);
+    assert!(renamed.message.contains("explicit column list"), "{}", renamed.message);
+
+    let duplicate = reject("WITH u AS (SELECT * FROM users), u AS (SELECT * FROM users) SELECT * FROM u");
+    assert_eq!(duplicate.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", duplicate.message);
+    assert!(duplicate.message.contains("more than once"), "{}", duplicate.message);
+
+    // Oak 在解析阶段就拒绝 `WITH RECURSIVE`。
+    let recursive = reject("WITH RECURSIVE u AS (SELECT * FROM users) SELECT * FROM u");
+    assert_eq!(recursive.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", recursive.message);
+    assert!(recursive.message.contains("recursive"), "{}", recursive.message);
+}
+
+#[test]
 fn sql_exists_predicates_evaluate_against_subquery_rows() {
     let (catalog, executor) = join_fixture();
     let ids = |sql: &str| run_sql(&executor, None, &catalog, sql).rows;

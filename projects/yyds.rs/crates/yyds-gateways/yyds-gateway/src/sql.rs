@@ -286,9 +286,20 @@ impl SqlDialect {
     }
 }
 
+/// One non-recursive `WITH` definition retained by the gateway binder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundCte {
+    /// Name the CTE is referenced by in `FROM` / `JOIN`.
+    pub name: String,
+    /// Bound body of the CTE.
+    pub query: Box<SqlBoundSelect>,
+}
+
 /// SQL SELECT request owned by the compatibility gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundSelect {
+    /// Common table expressions declared by this query, in source order.
+    pub with: Vec<SqlBoundCte>,
     /// Optional source row as written by the client.
     pub source: Option<SqlBoundSource>,
     /// JOIN clauses in source order.
@@ -820,11 +831,39 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     }
 }
 
+/// Binds the non-recursive `WITH` prefix into CTE definitions.
+///
+/// Each body goes through the same [`bind_select_statement`] path as every other
+/// query, so a CTE can only carry shapes the gateway already binds. Oak rejects
+/// `WITH RECURSIVE` while parsing, and an explicit column list renames the CTE
+/// output — the flattened gateway source cannot express a rename.
+fn bind_with_clause(clause: Option<&oak_sql::ast::WithClause>) -> Result<Vec<SqlBoundCte>, SqlFrontendError> {
+    let Some(clause) = clause
+    else {
+        return Ok(Vec::new());
+    };
+    if clause.ctes.is_empty() {
+        return Err(bind_error("SQL common table expression list must not be empty"));
+    }
+    let mut ctes: Vec<SqlBoundCte> = Vec::with_capacity(clause.ctes.len());
+    for cte in &clause.ctes {
+        let name = normalize_identifier(cte.name.name.as_ref());
+        if ctes.iter().any(|existing| existing.name == name) {
+            return Err(bind_error(&format!("SQL common table expression `{name}` is defined more than once")));
+        }
+        if !cte.columns.is_empty() {
+            return Err(SqlFrontendError::unsupported(format!(
+                "SQL common table expression `{name}` with an explicit column list is outside the gateway subset"
+            )));
+        }
+        ctes.push(SqlBoundCte { name, query: Box::new(bind_select_statement(&cte.query)?) });
+    }
+    Ok(ctes)
+}
+
 /// Binds one Oak `SELECT` — shared by top-level statements and `IN (SELECT ...)` subqueries.
 fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBoundSelect, SqlFrontendError> {
-    if select.with.is_some() {
-        return Err(SqlFrontendError::unsupported("SQL common table expressions are outside the gateway subset"));
-    }
+    let with = bind_with_clause(select.with.as_ref())?;
     let distinct = match &select.quantifier {
         None | Some(oak_sql::ast::SelectQuantifier::All { .. }) => false,
         Some(oak_sql::ast::SelectQuantifier::Distinct { .. }) => true,
@@ -885,6 +924,7 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SqlBoundSelect {
+        with,
         source: select.from.as_ref().map(bind_table_source).transpose()?,
         joins,
         projections,

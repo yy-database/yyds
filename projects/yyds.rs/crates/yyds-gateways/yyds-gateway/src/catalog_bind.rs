@@ -1,10 +1,10 @@
 //! SQL compatibility binding against a published YYDS VOS catalog.
 
 use crate::sql::{
-    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundDelete, SqlBoundExpression,
-    SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection, SqlBoundProjection,
-    SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement, SqlBoundUnaryOperator,
-    SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
+    bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundCte, SqlBoundDelete,
+    SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection,
+    SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement,
+    SqlBoundUnaryOperator, SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
 };
 use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
@@ -642,10 +642,13 @@ fn bind_set_operation(
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSetOperation, SqlFrontendError> {
+    // `WITH` 写在集合运算前面时作用域覆盖整个运算，左右两侧共享同一份定义。
+    let mut left_select = *set.left;
+    let inherited = resolve_cte_scope(std::mem::take(&mut left_select.with), &[], catalog, variables)?;
     Ok(SqlCatalogBoundSetOperation {
-        left: Box::new(bind_select(*set.left, catalog, variables)?),
+        left: Box::new(bind_select_in(left_select, catalog, variables, &inherited)?),
         operator: set.operator,
-        right: Box::new(bind_select(*set.right, catalog, variables)?),
+        right: Box::new(bind_select_in(*set.right, catalog, variables, &inherited)?),
         order_by: set.order_by,
         limit: set.limit,
         offset: set.offset,
@@ -657,17 +660,61 @@ fn bind_select(
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
+    bind_select_in(select, catalog, variables, &[])
+}
+
+/// Resolves the `WITH` definitions of one select into the scope its `FROM` sees,
+/// keeping the definitions inherited from an enclosing scope.
+///
+/// Definitions apply in source order: each body only sees the definitions written
+/// before it, so a body can neither reference itself nor a later CTE, and a name
+/// defined here shadows an inherited one. Every definition is flattened as soon as
+/// it is resolved, even when nothing references it, so an unexpressible body never
+/// hides behind an unused name.
+fn resolve_cte_scope(
+    own: Vec<SqlBoundCte>,
+    inherited: &[SqlCatalogCte],
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+) -> Result<Vec<SqlCatalogCte>, SqlFrontendError> {
+    let mut ctes: Vec<SqlCatalogCte> = inherited.to_vec();
+    for cte in own {
+        let definition = SqlCatalogCte { name: cte.name.clone(), query: *cte.query, visible: ctes.clone() };
+        let mut probe = std::collections::BTreeMap::new();
+        flatten_body(
+            &definition.query,
+            &definition.name,
+            "common table expression",
+            &definition.visible,
+            catalog,
+            variables,
+            &mut probe,
+        )?;
+        ctes.push(definition);
+    }
+    Ok(ctes)
+}
+
+/// Binds one select whose `FROM` may also reference CTEs from an enclosing scope.
+fn bind_select_in(
+    select: SqlBoundSelect,
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+    inherited: &[SqlCatalogCte],
+) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
+    // CTE 在引用处才被展开成基表，同一条 CTE 被引用两次就得到两个互不覆盖的行槽。
+    let ctes = resolve_cte_scope(select.with, inherited, catalog, variables)?;
     let mut occurrences: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
     // 派生表被扁平化成它自己的基表，内层 `WHERE` 改由外层 `WHERE` 表达。
     let mut derived_predicates: Vec<SqlCatalogBoundExpression> = Vec::new();
     let mut source = None;
     if let Some(bound_source) = select.source.as_ref() {
-        let (table, predicate) = bind_source(bound_source, catalog, variables, &mut occurrences)?;
+        let (table, predicate) = bind_source(bound_source, catalog, variables, &mut occurrences, &ctes)?;
         source = Some(table);
         if let Some(predicate) = predicate {
             // 保留侧的过滤移动到外层 `WHERE` 语义不变；可空侧会因 NULL 扩张丢行。
             if select.joins.iter().any(|join| matches!(join.kind, SqlBoundJoinKind::Right | SqlBoundJoinKind::Full)) {
-                return Err(unsupported_derived("a filtered derived table cannot feed a RIGHT or FULL join"));
+                return Err(unsupported_source("derived table", "a filtered source cannot feed a RIGHT or FULL join"));
             }
             derived_predicates.push(predicate);
         }
@@ -676,10 +723,10 @@ fn bind_select(
     let mut sources: Vec<SqlCatalogBoundTable> = source.iter().cloned().collect();
     let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
     for join in select.joins {
-        let (table, derived_predicate) = bind_source(&join.source, catalog, variables, &mut occurrences)?;
+        let (table, derived_predicate) = bind_source(&join.source, catalog, variables, &mut occurrences, &ctes)?;
         if let Some(predicate) = derived_predicate {
             if !matches!(join.kind, SqlBoundJoinKind::Inner) {
-                return Err(unsupported_derived("a filtered derived table can only feed an INNER join"));
+                return Err(unsupported_source("derived table", "a filtered source can only feed an INNER join"));
             }
             derived_predicates.push(predicate);
         }
@@ -703,14 +750,7 @@ fn bind_select(
     let mut predicate =
         select.predicate.map(|expression| bind_expression(expression, &sources, catalog, variables)).transpose()?;
     for derived in derived_predicates {
-        predicate = match predicate {
-            None => Some(derived),
-            Some(existing) => Some(SqlCatalogBoundExpression::Binary {
-                left: Box::new(existing),
-                operator: SqlBoundBinaryOperator::And,
-                right: Box::new(derived),
-            }),
-        };
+        predicate = merge_predicates(predicate, Some(derived));
     }
     let group_by = select
         .group_by
@@ -840,25 +880,56 @@ fn bind_expression(
     }
 }
 
+/// One `WITH` definition kept while binding, together with the definitions
+/// visible inside its body.
+///
+/// A CTE is never executed on its own: every reference flattens the body onto the
+/// single catalog table it selects from, which is why the same CTE referenced
+/// twice behaves like a self join. `visible` holds only the definitions written
+/// before this one, so a body can neither reference itself nor a later CTE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SqlCatalogCte {
+    /// Name the CTE is referenced by.
+    name: String,
+    /// Bound body of the CTE.
+    query: SqlBoundSelect,
+    /// Definitions visible inside `query`, in source order.
+    visible: Vec<SqlCatalogCte>,
+}
+
 /// Binds one `FROM` / `JOIN` source, assigning the occurrence slot used to build row ids.
 ///
 /// Repeated occurrences of the same catalog table get distinct slots so a self join
-/// can keep both sides of a column in one merged row. A derived table also returns
-/// the predicate its inner query carried, for the caller to merge into the outer
-/// `WHERE`.
+/// can keep both sides of a column in one merged row. A CTE name shadows a catalog
+/// table of the same name. A derived table or a CTE reference also returns the
+/// predicate its body carried, for the caller to merge into the outer `WHERE`.
 fn bind_source(
     source: &SqlBoundSource,
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
     occurrences: &mut std::collections::BTreeMap<u64, u64>,
+    ctes: &[SqlCatalogCte],
 ) -> Result<(SqlCatalogBoundTable, Option<SqlCatalogBoundExpression>), SqlFrontendError> {
     match source {
-        SqlBoundSource::Table { name, alias } => {
-            let mut table = find_table(catalog, name)?;
-            table.alias = alias.clone();
-            Ok((assign_row_slot(table, occurrences), None))
+        SqlBoundSource::Table { name, alias } => match ctes.iter().rev().find(|cte| cte.name == *name) {
+            Some(cte) => flatten_body(
+                &cte.query,
+                alias.as_deref().unwrap_or(name),
+                "common table expression",
+                &cte.visible,
+                catalog,
+                variables,
+                occurrences,
+            ),
+            None => {
+                let mut table = find_table(catalog, name)?;
+                table.alias = alias.clone();
+                Ok((assign_row_slot(table, occurrences), None))
+            }
+        },
+        SqlBoundSource::Derived { query, alias } => {
+            flatten_body(query, alias, "derived table", ctes, catalog, variables, occurrences)
         }
-        SqlBoundSource::Derived { query, alias } => flatten_derived(query, alias, catalog, variables, occurrences),
     }
 }
 
@@ -873,23 +944,30 @@ fn assign_row_slot(
     table
 }
 
-/// Flattens a derived table into the single catalog table it selects from.
+/// Flattens one derived table or CTE body into the single catalog table it
+/// selects from.
 ///
-/// The gateway row source is one catalog table, so a derived table is expressible
-/// only when it is that same table seen through a new name: no join, no grouping,
-/// no ordering, no paging and a projection that exposes every column. The inner
-/// filter is returned to the caller, which ANDs it into the outer `WHERE` — sound
-/// only while the derived columns are never NULL-extended by an outer join, which
-/// the caller checks against the join kinds.
-fn flatten_derived(
+/// The gateway row source is one catalog table, so a body is expressible only
+/// when it is that same table seen through a new name: no join, no grouping, no
+/// ordering, no paging, no nested `WITH` and a projection that exposes every
+/// column. Its source may also be an earlier CTE, which is flattened the same
+/// way. The body's filter is returned to the caller, which ANDs it into the
+/// outer `WHERE` — sound only while the columns are never NULL-extended by an
+/// outer join, which the caller checks against the join kinds.
+fn flatten_body(
     query: &SqlBoundSelect,
     alias: &str,
+    subject: &str,
+    visible: &[SqlCatalogCte],
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
     occurrences: &mut std::collections::BTreeMap<u64, u64>,
 ) -> Result<(SqlCatalogBoundTable, Option<SqlCatalogBoundExpression>), SqlFrontendError> {
     if !query.joins.is_empty() {
-        return Err(unsupported_derived("its inner query joins more than one table"));
+        return Err(unsupported_source(subject, "its inner query joins more than one table"));
+    }
+    if !query.with.is_empty() {
+        return Err(unsupported_source(subject, "its inner query declares its own WITH clause"));
     }
     for (present, clause) in [
         (query.group_by.is_some(), "GROUP BY"),
@@ -899,27 +977,62 @@ fn flatten_derived(
         (query.limit.is_some() || query.offset.is_some(), "LIMIT/OFFSET"),
     ] {
         if present {
-            return Err(unsupported_derived(&format!("its inner query carries {clause}")));
+            return Err(unsupported_source(subject, &format!("its inner query carries {clause}")));
         }
     }
     let Some(source) = query.source.as_ref()
     else {
-        return Err(unsupported_derived("its inner query has no table source"));
+        return Err(unsupported_source(subject, "its inner query has no table source"));
     };
     let SqlBoundSource::Table { name, alias: inner_alias } = source
     else {
-        return Err(unsupported_derived("its inner query selects from another derived table"));
+        return Err(unsupported_source(subject, "its inner query selects from another derived table"));
     };
-    let inner_table = find_table(catalog, name)?;
-    let inner_scope = [SqlCatalogBoundTable { alias: inner_alias.clone(), ..inner_table }];
-    if !projects_every_column(&query.projections, &inner_scope, catalog)? {
-        return Err(unsupported_derived("its inner projection must be `*` or every column of the source table"));
+    // 内层来源既可以是 catalog 表，也可以是更早定义的 CTE；非递归保证这条链必然终止。
+    let (table, inner_predicate) = match visible.iter().rev().find(|cte| cte.name == *name) {
+        Some(cte) => flatten_body(
+            &cte.query,
+            inner_alias.as_deref().unwrap_or(name),
+            "common table expression",
+            &cte.visible,
+            catalog,
+            variables,
+            occurrences,
+        )?,
+        None => {
+            let base = find_table(catalog, name)?;
+            (assign_row_slot(SqlCatalogBoundTable { alias: inner_alias.clone(), ..base }, occurrences), None)
+        }
+    };
+    // 行槽已在展开时确定，过滤条件必须绑定在这一份行值上：这样一条带过滤的 CTE
+    // 与同一张表的另一次出现共存时，过滤不会落到别的行槽上。
+    if !projects_every_column(&query.projections, std::slice::from_ref(&table), catalog)? {
+        return Err(unsupported_source(subject, "its inner projection must be `*` or every column of the source table"));
     }
-    let predicate =
-        query.predicate.clone().map(|expression| bind_expression(expression, &inner_scope, catalog, variables)).transpose()?;
-    let mut table = assign_row_slot(inner_scope[0].clone(), occurrences);
+    let predicate = query
+        .predicate
+        .clone()
+        .map(|expression| bind_expression(expression, std::slice::from_ref(&table), catalog, variables))
+        .transpose()?;
+    let mut table = table;
     table.alias = Some(alias.to_string());
-    Ok((table, predicate))
+    Ok((table, merge_predicates(inner_predicate, predicate)))
+}
+
+/// Joins two row filters with `AND`, keeping whichever side exists.
+fn merge_predicates(
+    left: Option<SqlCatalogBoundExpression>,
+    right: Option<SqlCatalogBoundExpression>,
+) -> Option<SqlCatalogBoundExpression> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(predicate), None) | (None, Some(predicate)) => Some(predicate),
+        (Some(left), Some(right)) => Some(SqlCatalogBoundExpression::Binary {
+            left: Box::new(left),
+            operator: SqlBoundBinaryOperator::And,
+            right: Box::new(right),
+        }),
+    }
 }
 
 /// Whether a derived table's projection exposes exactly every column of its
@@ -961,8 +1074,8 @@ fn projects_every_column(
     Ok(covered.len() == table.fields.len() && table.fields.iter().all(|field| covered.contains(&field.field_id)))
 }
 
-fn unsupported_derived(reason: &str) -> SqlFrontendError {
-    SqlFrontendError::unsupported(format!("SQL derived table cannot be flattened: {reason}"))
+fn unsupported_source(subject: &str, reason: &str) -> SqlFrontendError {
+    SqlFrontendError::unsupported(format!("SQL {subject} cannot be flattened: {reason}"))
 }
 
 fn find_table(catalog: &SqlCatalog, name: &str) -> Result<SqlCatalogBoundTable, SqlFrontendError> {

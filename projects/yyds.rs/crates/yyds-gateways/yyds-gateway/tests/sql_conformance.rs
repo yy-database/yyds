@@ -340,6 +340,67 @@ fn sql_exists_predicates_agree_across_dialects() {
     }
 }
 
+/// 非递归 CTE 在两方言下必须一致：网关把每条 CTE 展开成它的基表，内层过滤并入
+/// 外层 `WHERE`，所以返回值不分叉；无法展开的形状两方言都必须显式拒绝。
+#[test]
+fn sql_common_table_expressions_agree_across_dialects() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        for sql in SEED {
+            fixture.execute(None, sql).expect("seed");
+        }
+
+        let named = fixture
+            .execute(None, "WITH u AS (SELECT * FROM users) SELECT u.id, u.name FROM u WHERE u.id = 2")
+            .unwrap_or_else(|error| panic!("named CTE under {dialect:?}: {error}"));
+        assert_eq!(named.rows, rows(&[&[Lit::Int(2), Lit::Text("bob")]]), "named CTE under {dialect:?}");
+
+        let filtered = fixture
+            .execute(None, "WITH u AS (SELECT * FROM users WHERE age > 20) SELECT u.id FROM u ORDER BY u.id")
+            .unwrap_or_else(|error| panic!("filtered CTE under {dialect:?}: {error}"));
+        assert_eq!(
+            filtered.rows,
+            rows(&[&[Lit::Int(1)], &[Lit::Int(3)]]),
+            "filtered CTE under {dialect:?}"
+        );
+
+        let twice = fixture
+            .execute(
+                None,
+                "WITH u AS (SELECT * FROM users) SELECT a.id, b.name FROM u a JOIN u b ON a.id = b.id + 1 ORDER BY a.id",
+            )
+            .unwrap_or_else(|error| panic!("CTE used twice under {dialect:?}: {error}"));
+        assert_eq!(
+            twice.rows,
+            rows(&[&[Lit::Int(2), Lit::Text("alice")], &[Lit::Int(3), Lit::Text("bob")]]),
+            "CTE used twice under {dialect:?}"
+        );
+
+        // `WITH` 写在集合运算前面时覆盖左右两侧，右侧引用 CTE 不能被当成未知表。
+        let union = fixture
+            .execute(
+                None,
+                "WITH u AS (SELECT * FROM users WHERE age > 20) SELECT id FROM u WHERE id = 1 \
+                 UNION SELECT id FROM u WHERE id = 3 ORDER BY id",
+            )
+            .unwrap_or_else(|error| panic!("CTE over a set operation under {dialect:?}: {error}"));
+        assert_eq!(
+            union.rows,
+            rows(&[&[Lit::Int(1)], &[Lit::Int(3)]]),
+            "CTE over a set operation under {dialect:?}"
+        );
+
+        let rejected = fixture
+            .execute(None, "WITH u AS (SELECT * FROM users LIMIT 1) SELECT * FROM u")
+            .expect_err("an inner LIMIT cannot be flattened");
+        assert!(rejected.contains("common table expression"), "under {dialect:?}: {rejected}");
+
+        let unknown = bind_sql_catalog("WITH u AS (SELECT * FROM users) SELECT * FROM u JOIN missing ON TRUE", &fixture.catalog, SCHEMA_VERSION)
+            .expect_err("unknown joined table");
+        assert_eq!(unknown.kind, SqlErrorKind::UnknownTable, "under {dialect:?}: {}", unknown.message);
+    }
+}
+
 /// `IS` 谓词直接由 Oak 的 `IsNull` / `IsTruth` 节点绑定，网关不再从源码 span 文本
 /// 回读关键字。这里只通过绑定后的表达式求值，验证 NULL 的三值逻辑。
 #[test]
