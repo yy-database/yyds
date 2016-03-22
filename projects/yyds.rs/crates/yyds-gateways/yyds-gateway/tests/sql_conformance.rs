@@ -401,6 +401,56 @@ fn sql_common_table_expressions_agree_across_dialects() {
     }
 }
 
+/// 外层 `WITH` 的作用域覆盖子查询：`IN (SELECT ...)` 与 `EXISTS (...)` 内部引用
+/// 同一个 CTE 时两方言都按同一份扁平化结果执行，未知名字两方言都显式拒绝。
+#[test]
+fn sql_cte_scope_reaches_into_subqueries_across_dialects() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        for sql in SEED {
+            fixture.execute(None, sql).expect("seed");
+        }
+
+        let membership = fixture
+            .execute(
+                None,
+                "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE id IN (SELECT id FROM u WHERE u.name = 'bob')",
+            )
+            .unwrap_or_else(|error| panic!("CTE inside IN under {dialect:?}: {error}"));
+        assert_eq!(membership.rows, rows(&[&[Lit::Int(2)]]), "CTE inside IN under {dialect:?}");
+
+        let existence = fixture
+            .execute(
+                None,
+                "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM u WHERE u.id = 3)",
+            )
+            .unwrap_or_else(|error| panic!("CTE inside EXISTS under {dialect:?}: {error}"));
+        assert_eq!(
+            existence.rows,
+            rows(&[&[Lit::Int(1)], &[Lit::Int(2)], &[Lit::Int(3)]]),
+            "CTE inside EXISTS under {dialect:?}"
+        );
+
+        // CTE 体的过滤在子查询里同样生效：`age > 25` 只剩 1 与 3，所以 id = 2 查不到。
+        let filtered = fixture
+            .execute(
+                None,
+                "WITH u AS (SELECT * FROM users WHERE age > 25) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM u WHERE u.id = 2)",
+            )
+            .unwrap_or_else(|error| panic!("filtered CTE inside EXISTS under {dialect:?}: {error}"));
+        assert!(filtered.rows.is_empty(), "filtered CTE inside EXISTS under {dialect:?}");
+
+        for sql in [
+            "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE id IN (SELECT id FROM missing)",
+            "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
+        ] {
+            let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION)
+                .expect_err("unknown name inside a subquery");
+            assert_eq!(error.kind, SqlErrorKind::UnknownTable, "under {dialect:?} `{sql}`: {}", error.message);
+        }
+    }
+}
+
 /// `IS` 谓词直接由 Oak 的 `IsNull` / `IsTruth` 节点绑定，网关不再从源码 span 文本
 /// 回读关键字。这里只通过绑定后的表达式求值，验证 NULL 的三值逻辑。
 #[test]

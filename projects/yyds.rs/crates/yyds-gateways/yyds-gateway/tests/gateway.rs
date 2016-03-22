@@ -2717,6 +2717,48 @@ fn sql_common_table_expression_flattens_onto_its_base_table() {
 }
 
 #[test]
+fn sql_subqueries_inherit_the_enclosing_cte_scope() {
+    use yyds_gateway::SqlValue;
+
+    let (catalog, executor) = join_fixture();
+    let run = |sql: &str| run_sql(&executor, None, &catalog, sql);
+
+    // `IN (SELECT ...)` 内部可以直接引用外层 `WITH` 定义的 CTE。
+    let membership =
+        run("WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE id IN (SELECT id FROM u WHERE u.name = 'bob')");
+    assert_eq!(membership.rows, vec![vec![SqlValue::Integer(2)]]);
+
+    // CTE 体的内层过滤随扁平化一起并进子查询的 `WHERE`。
+    let filtered =
+        run("WITH u AS (SELECT * FROM users WHERE name = 'alice') SELECT id FROM users WHERE id IN (SELECT id FROM u)");
+    assert_eq!(filtered.rows, vec![vec![SqlValue::Integer(1)]]);
+
+    // `EXISTS (...)` 子查询同样继承外层 CTE。
+    let existence =
+        run("WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM u WHERE u.id = 2) ORDER BY id");
+    assert_eq!(existence.rows, vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]);
+
+    // 子查询在投影位置引用 CTE 也一样，CTE 名在子查询里被真实展开。
+    let projected = run("WITH u AS (SELECT * FROM users) SELECT id, EXISTS (SELECT 1 FROM u WHERE u.id = 9) AS any FROM users ORDER BY id");
+    assert_eq!(
+        projected.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Boolean(false)],
+            vec![SqlValue::Integer(2), SqlValue::Boolean(false)],
+        ]
+    );
+
+    // 作用域只放宽 CTE 名，未知名字仍然按 `UnknownTable` 拒绝。
+    for sql in [
+        "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE id IN (SELECT id FROM missing)",
+        "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
+    ] {
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect_err("unknown name inside the subquery");
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownTable, "{sql}: {}", error.message);
+    }
+}
+
+#[test]
 fn sql_common_table_expression_reports_unflattenable_shapes() {
     let (catalog, _executor) = join_fixture();
     let reject = |sql: &str| {

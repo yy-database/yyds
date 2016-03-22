@@ -553,13 +553,15 @@ fn bind_insert(
                         .map(|assignment| {
                             Ok((
                                 find_field(&assignment.column, &source, catalog)?,
-                                bind_expression(assignment.value, &source, catalog, variables)?,
+                                bind_expression(assignment.value, &source, &[], catalog, variables)?,
                             ))
                         })
                         .collect::<Result<Vec<_>, SqlFrontendError>>()?;
                     SqlCatalogBoundConflictAction::DoUpdate {
                         assignments: bound_assignments,
-                        predicate: predicate.map(|predicate| bind_expression(predicate, &source, catalog, variables)).transpose()?,
+                        predicate: predicate
+                            .map(|predicate| bind_expression(predicate, &source, &[], catalog, variables))
+                            .transpose()?,
                     }
                 }
             },
@@ -570,7 +572,7 @@ fn bind_insert(
         Some(projections) => {
             let mut bound = Vec::new();
             for projection in projections {
-                bound.extend(bind_projection(projection, &source, catalog, variables)?);
+                bound.extend(bind_projection(projection, &source, &[], catalog, variables)?);
             }
             Some(bound)
         }
@@ -600,7 +602,7 @@ fn bind_insert(
             )));
         }
         let bound_row =
-            row.iter().map(|v| bind_expression(v.clone(), &source, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
+            row.iter().map(|v| bind_expression(v.clone(), &source, &[], catalog, variables)).collect::<Result<Vec<_>, _>>()?;
         rows.push(bound_row);
     }
     Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None, conflict, returning })
@@ -618,11 +620,12 @@ fn bind_update(
         .into_iter()
         .map(|SqlBoundAssignment { column, value }| {
             let field = find_field(&column, &source, catalog)?;
-            let bound_value = bind_expression(value, &source, catalog, variables)?;
+            let bound_value = bind_expression(value, &source, &[], catalog, variables)?;
             Ok((field, bound_value))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let predicate = update.predicate.map(|p| bind_expression(p, &source, catalog, variables)).transpose()?;
+    let predicate =
+        update.predicate.map(|p| bind_expression(p, &source, &[], catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundUpdate { table, assignments, predicate })
 }
 
@@ -633,7 +636,7 @@ fn bind_delete(
 ) -> Result<SqlCatalogBoundDelete, SqlFrontendError> {
     let table = find_table(catalog, &delete.table)?;
     let source = [table.clone()];
-    let predicate = delete.predicate.map(|p| bind_expression(p, &source, catalog, variables)).transpose()?;
+    let predicate = delete.predicate.map(|p| bind_expression(p, &source, &[], catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundDelete { table, predicate })
 }
 
@@ -740,30 +743,35 @@ fn bind_select_in(
             ));
         }
         sources.push(table.clone());
-        let on = bind_expression(join.on, &sources, catalog, variables)?;
+        let on = bind_expression(join.on, &sources, &ctes, catalog, variables)?;
         joins.push(SqlCatalogBoundJoin { kind: join.kind, table, on });
     }
     let mut projections: Vec<SqlCatalogBoundProjection> = Vec::new();
     for projection in select.projections {
-        projections.extend(bind_projection(projection, &sources, catalog, variables)?);
+        projections.extend(bind_projection(projection, &sources, &ctes, catalog, variables)?);
     }
     let mut predicate =
-        select.predicate.map(|expression| bind_expression(expression, &sources, catalog, variables)).transpose()?;
+        select.predicate.map(|expression| bind_expression(expression, &sources, &ctes, catalog, variables)).transpose()?;
     for derived in derived_predicates {
         predicate = merge_predicates(predicate, Some(derived));
     }
     let group_by = select
         .group_by
-        .map(|exprs| exprs.into_iter().map(|e| bind_expression(e, &sources, catalog, variables)).collect::<Result<Vec<_>, _>>())
+        .map(|exprs| {
+            exprs
+                .into_iter()
+                .map(|e| bind_expression(e, &sources, &ctes, catalog, variables))
+                .collect::<Result<Vec<_>, _>>()
+        })
         .transpose()?;
-    let having = select.having.map(|e| bind_expression(e, &sources, catalog, variables)).transpose()?;
+    let having = select.having.map(|e| bind_expression(e, &sources, &ctes, catalog, variables)).transpose()?;
     let order_by = match select.order_by {
         Some(items) => {
             let bound = items
                 .into_iter()
                 .map(|item| {
                     Ok(SqlCatalogBoundOrderByItem {
-                        expression: bind_expression(item.expr, &sources, catalog, variables)?,
+                        expression: bind_expression(item.expr, &sources, &ctes, catalog, variables)?,
                         direction: item.direction,
                         nulls: item.nulls,
                     })
@@ -792,6 +800,7 @@ fn bind_select_in(
 fn bind_projection(
     projection: SqlBoundProjection,
     sources: &[SqlCatalogBoundTable],
+    ctes: &[SqlCatalogCte],
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<Vec<SqlCatalogBoundProjection>, SqlFrontendError> {
@@ -803,7 +812,7 @@ fn bind_projection(
             Ok(sources.iter().cloned().map(SqlCatalogBoundProjection::Star).collect())
         }
         SqlBoundProjection::Expression { expression, alias } => Ok(vec![SqlCatalogBoundProjection::Expression {
-            expression: bind_expression(expression, sources, catalog, variables)?,
+            expression: bind_expression(expression, sources, ctes, catalog, variables)?,
             alias,
         }]),
     }
@@ -812,6 +821,7 @@ fn bind_projection(
 fn bind_expression(
     expression: SqlBoundExpression,
     sources: &[SqlCatalogBoundTable],
+    ctes: &[SqlCatalogCte],
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundExpression, SqlFrontendError> {
@@ -827,32 +837,35 @@ fn bind_expression(
         SqlBoundExpression::Literal(literal) => Ok(SqlCatalogBoundExpression::Literal(literal)),
         SqlBoundExpression::Wildcard => Ok(SqlCatalogBoundExpression::Wildcard),
         SqlBoundExpression::Binary { left, operator, right } => Ok(SqlCatalogBoundExpression::Binary {
-            left: Box::new(bind_expression(*left, sources, catalog, variables)?),
+            left: Box::new(bind_expression(*left, sources, ctes, catalog, variables)?),
             operator,
-            right: Box::new(bind_expression(*right, sources, catalog, variables)?),
+            right: Box::new(bind_expression(*right, sources, ctes, catalog, variables)?),
         }),
         SqlBoundExpression::Unary { operator, expression } => Ok(SqlCatalogBoundExpression::Unary {
             operator,
-            expression: Box::new(bind_expression(*expression, sources, catalog, variables)?),
+            expression: Box::new(bind_expression(*expression, sources, ctes, catalog, variables)?),
         }),
         SqlBoundExpression::Function { name, args, distinct } => {
-            let bound_args =
-                args.into_iter().map(|arg| bind_expression(arg, sources, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
+            let bound_args = args
+                .into_iter()
+                .map(|arg| bind_expression(arg, sources, ctes, catalog, variables))
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(SqlCatalogBoundExpression::Function { name, args: bound_args, distinct })
         }
         SqlBoundExpression::InSubquery { expression, select, negated } => {
-            // 子查询自带 FROM 作用域，不继承外层 sources，因此不支持相关子查询。
-            let bound_select = bind_select(*select, catalog, variables)?;
+            // 子查询自带 FROM 作用域，不继承外层 sources，因此不支持相关子查询；
+            // 但外层 `WITH` 定义仍然可见，子查询可以直接引用同一个 CTE。
+            let bound_select = bind_select_in(*select, catalog, variables, ctes)?;
             let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
             Ok(SqlCatalogBoundExpression::InSubquery {
-                expression: Box::new(bind_expression(*expression, sources, catalog, variables)?),
+                expression: Box::new(bind_expression(*expression, sources, ctes, catalog, variables)?),
                 plan: Box::new(plan),
                 negated,
             })
         }
         SqlBoundExpression::Exists { select, negated } => {
-            // `EXISTS` 与 `IN` 一样是不相关子查询：子查询自带 FROM 作用域，不继承外层 sources。
-            let bound_select = bind_select(*select, catalog, variables)?;
+            // `EXISTS` 与 `IN` 一样是不相关子查询，外层 `WITH` 定义同样可见。
+            let bound_select = bind_select_in(*select, catalog, variables, ctes)?;
             let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
             Ok(SqlCatalogBoundExpression::Exists { plan: Box::new(plan), negated })
         }
@@ -860,20 +873,20 @@ fn bind_expression(
             let bound_branches = branches
                 .into_iter()
                 .map(|(when, then)| {
-                    let w = bind_expression(*when, sources, catalog, variables)?;
-                    let t = bind_expression(*then, sources, catalog, variables)?;
+                    let w = bind_expression(*when, sources, ctes, catalog, variables)?;
+                    let t = bind_expression(*then, sources, ctes, catalog, variables)?;
                     Ok((Box::new(w), Box::new(t)))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let bound_else = match else_branch {
-                Some(els) => Some(Box::new(bind_expression(*els, sources, catalog, variables)?)),
+                Some(els) => Some(Box::new(bind_expression(*els, sources, ctes, catalog, variables)?)),
                 None => None,
             };
             Ok(SqlCatalogBoundExpression::Case { branches: bound_branches, else_branch: bound_else })
         }
         SqlBoundExpression::Cast { expr, target } => {
             Ok(SqlCatalogBoundExpression::Cast {
-                expr: Box::new(bind_expression(*expr, sources, catalog, variables)?),
+                expr: Box::new(bind_expression(*expr, sources, ctes, catalog, variables)?),
                 target,
             })
         }
@@ -1012,7 +1025,7 @@ fn flatten_body(
     let predicate = query
         .predicate
         .clone()
-        .map(|expression| bind_expression(expression, std::slice::from_ref(&table), catalog, variables))
+        .map(|expression| bind_expression(expression, std::slice::from_ref(&table), visible, catalog, variables))
         .transpose()?;
     let mut table = table;
     table.alias = Some(alias.to_string());
