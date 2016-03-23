@@ -800,6 +800,22 @@ pub fn upsert_cases() -> Vec<Case> {
             .affected(1)
             .state(DEFAULT_STATE_COLUMNS, rewritten_state)
             .build(),
+        case("on conflict do update reads the stored row and the excluded row")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+                 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, age = users.age + 1",
+            )
+            .affected(1)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("zoe"), Int(31), Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+                    &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
         case("on conflict do update inserts when no row conflicts")
             .only(Driver::Postgres)
             .sql("INSERT INTO users VALUES (4, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET name = 'never'")

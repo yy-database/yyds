@@ -506,7 +506,7 @@ fn plan_on_conflict(
     match conflict.action {
         SqlCatalogBoundConflictAction::DoNothing => Ok(Some(ConflictPolicy::DoNothing)),
         SqlCatalogBoundConflictAction::DoUpdate { assignments, predicate } => {
-            let mut fields = Vec::with_capacity(assignments.len());
+            let mut planned = Vec::with_capacity(assignments.len());
             for (column, expression) in assignments {
                 // 行以主键为 KV key，改写主键等于「删除 + 插入」，网关显式拒绝而不是近似执行。
                 if column.field_id == pk.field_id {
@@ -514,18 +514,57 @@ fn plan_on_conflict(
                         "ON CONFLICT DO UPDATE cannot reassign the table primary key",
                     ));
                 }
-                let lit = literal_from_expression(&expression)?;
                 let field_type = table
                     .fields
                     .iter()
                     .find(|field| field.field_id == column.field_id)
                     .map(|field| field.field_type.clone())
                     .unwrap_or(SqlFieldType::Unknown);
-                check_write_literal(&lit, &field_type, &column.field_name)?;
-                fields.push(WriteField { field_id: column.field_id, value: lit, field_type });
+                check_conflict_value(&expression)?;
+                // 字面量在计划期就能按列类型判定，引用列的形态要等实际值算出来。
+                if let SqlCatalogBoundExpression::Literal(lit) = &expression {
+                    check_write_literal(lit, &field_type, &column.field_name)?;
+                }
+                planned.push(ConflictAssignment {
+                    field_id: column.field_id,
+                    field_name: column.field_name,
+                    field_type,
+                    value: expression,
+                });
             }
-            Ok(Some(ConflictPolicy::DoUpdate { fields, predicate }))
+            Ok(Some(ConflictPolicy::DoUpdate { assignments: planned, predicate }))
         }
+    }
+}
+
+/// Restricts `ON CONFLICT DO UPDATE SET` values to the shapes the executor can
+/// evaluate against a row pair.
+///
+/// A literal, a column reference (existing row `table.column` or proposed row
+/// `EXCLUDED.column`) and `column +/- literal` all evaluate on row values
+/// directly. Everything else — aggregates, functions, `CASE`, subqueries — stays
+/// explicitly unsupported instead of being approximated.
+fn check_conflict_value(expression: &SqlCatalogBoundExpression) -> Result<(), SqlFrontendError> {
+    match expression {
+        SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Column(_) => Ok(()),
+        SqlCatalogBoundExpression::Binary { left, operator, right }
+            if matches!(operator, SqlBoundBinaryOperator::Plus | SqlBoundBinaryOperator::Minus)
+                && matches!(
+                    (left.as_ref(), right.as_ref()),
+                    (
+                        SqlCatalogBoundExpression::Column(_),
+                        SqlCatalogBoundExpression::Literal(_)
+                    ) | (
+                        SqlCatalogBoundExpression::Literal(_),
+                        SqlCatalogBoundExpression::Column(_)
+                    )
+                ) =>
+        {
+            Ok(())
+        }
+        _ => Err(SqlFrontendError::unsupported(
+            "ON CONFLICT DO UPDATE SET supports a literal, a column reference or `column +/- literal` only",
+        )),
     }
 }
 
@@ -998,11 +1037,26 @@ pub enum ConflictPolicy {
     DoNothing,
     /// `DO UPDATE SET ... [WHERE ...]` — 用赋值改写既有行。
     DoUpdate {
-        /// 要写入既有行的字段（此时是 SET 的结果）。
-        fields: Vec<WriteField>,
+        /// 要写入既有行的字段（此时是 `SET` 的结果）。
+        assignments: Vec<ConflictAssignment>,
         /// 只在既有行满足该谓词时才改写。
         predicate: Option<SqlCatalogBoundExpression>,
     },
+}
+
+/// `ON CONFLICT DO UPDATE` 的一条赋值。
+///
+/// 右值在既有行与 `EXCLUDED` 行合并后的作用域里求值，因此可以引用两侧的列。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictAssignment {
+    /// 目标 field_id。
+    pub field_id: u64,
+    /// 目标列名，用于类型错误诊断。
+    pub field_name: String,
+    /// 目标列声明类型，执行层编码校验用。
+    pub field_type: crate::catalog_bind::SqlFieldType,
+    /// 赋值右值。
+    pub value: SqlCatalogBoundExpression,
 }
 
 /// `INSERT ... SELECT` 执行计划：源查询先按读路径执行，再逐行对齐写入。

@@ -16,15 +16,15 @@ use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
-    catalog_bind::{collect_column_ids, SqlCatalogBoundExpression},
+    catalog_bind::{collect_column_ids, ROW_ID_STRIDE, SqlCatalogBoundExpression},
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundSetOperator,
         SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
     },
     sql_planner::{
-        check_write_literal, pk_literal_to_rowid, ConflictPolicy, DeletePlan, DeleteScanPlan, InsertSelectPlan, JoinPlan,
-        JoinSourcePlan, ReadPlan, ReturningProjections, ScalarPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, UpdatePlan,
-        UpdateScanPlan, WriteField, WritePlan,
+        check_write_literal, pk_literal_to_rowid, ConflictAssignment, ConflictPolicy, DeletePlan, DeleteScanPlan,
+        InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ReturningProjections, ScalarPlan, ScanPlan,
+        SetOperationPlan, SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WriteField, WritePlan,
     },
 };
 
@@ -1169,8 +1169,8 @@ fn execute_insert(
     match &plan.conflict {
         None => insert_row_if_absent(executor, transaction, plan, false, dialect),
         Some(ConflictPolicy::DoNothing) => insert_row_if_absent(executor, transaction, plan, true, dialect),
-        Some(ConflictPolicy::DoUpdate { fields, predicate }) => {
-            upsert_row(executor, transaction, plan, fields, predicate.as_ref(), dialect)
+        Some(ConflictPolicy::DoUpdate { assignments, predicate }) => {
+            upsert_row(executor, transaction, plan, assignments, predicate.as_ref(), dialect)
         }
     }
 }
@@ -1213,7 +1213,7 @@ fn upsert_row(
     executor: &dyn KeyValueExecutor,
     transaction: Option<&dyn TransactionHandle>,
     plan: &WritePlan,
-    fields: &[WriteField],
+    assignments: &[ConflictAssignment],
     predicate: Option<&SqlCatalogBoundExpression>,
     dialect: SqlDialect,
 ) -> Result<SqlResult, SqlFrontendError> {
@@ -1237,10 +1237,28 @@ fn upsert_row(
                 return returning_result(&plan.returning, &plan.field_types, Vec::new(), 0, dialect);
             }
         }
-        for field in fields {
-            match sql_value_to_bytes(&field.value) {
-                Some(bytes) => row.insert(field.field_id, bytes),
-                None => row.remove(field.field_id),
+        // 赋值右值同时看到既有行（槽 0）与提议写入的 `EXCLUDED` 行（槽 1，列带上
+        // `ROW_ID_STRIDE` 偏移）。两侧合并后再求值，等价于 PostgreSQL 的「同时赋值」语义。
+        let mut scope = row.clone();
+        let mut scope_types = plan.field_types.clone();
+        for field in &plan.fields {
+            let excluded_row_id = field.field_id + ROW_ID_STRIDE;
+            if let Some(bytes) = sql_value_to_bytes(&field.value) {
+                scope.insert(excluded_row_id, bytes);
+            }
+            scope_types.insert(excluded_row_id, field.field_type.clone());
+        }
+        let mut updates = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            let value = eval_expression(&assignment.value, &scope, &scope_types, dialect)?;
+            let literal = value_to_literal(value);
+            check_write_literal(&literal, &assignment.field_type, &assignment.field_name)?;
+            updates.push((assignment.field_id, sql_value_to_bytes(&literal)));
+        }
+        for (field_id, bytes) in updates {
+            match bytes {
+                Some(bytes) => row.insert(field_id, bytes),
+                None => row.remove(field_id),
             }
         }
         let encoded = encode_row(&row);

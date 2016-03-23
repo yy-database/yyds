@@ -514,6 +514,9 @@ fn bind_insert(
 ) -> Result<SqlCatalogBoundInsert, SqlFrontendError> {
     let table = find_table(catalog, &insert.table)?;
     let source = [table.clone()];
+    // `EXCLUDED` 是 `DO UPDATE` 里提议写入的那一行：同一个 catalog 表占用第二个
+    // 行槽，它的列因此带上 `ROW_ID_STRIDE` 偏移，与既有行区分开。既有行仍是槽 0。
+    let proposed = SqlCatalogBoundTable { alias: Some("EXCLUDED".to_string()), row_slot: 1, ..table.clone() };
     let bound_fields = match insert.columns {
         Some(cols) => cols.iter().map(|name| find_field(name, &source, catalog)).collect::<Result<Vec<_>, _>>()?,
         None => {
@@ -548,17 +551,26 @@ fn bind_insert(
             action: match conflict.action {
                 SqlBoundConflictAction::DoNothing => SqlCatalogBoundConflictAction::DoNothing,
                 SqlBoundConflictAction::DoUpdate { assignments, predicate } => {
+                    // 赋值右值可以引用既有行（槽 0，表名限定）与提议行（`EXCLUDED`）。
+                    let update_scope = [table.clone(), proposed];
                     let bound_assignments = assignments
                         .into_iter()
                         .map(|assignment| {
                             Ok((
                                 find_field(&assignment.column, &source, catalog)?,
-                                bind_expression(assignment.value, &source, &[], catalog, variables)?,
+                                bind_expression(
+                                    canonicalize_excluded(assignment.value),
+                                    &update_scope,
+                                    &[],
+                                    catalog,
+                                    variables,
+                                )?,
                             ))
                         })
                         .collect::<Result<Vec<_>, SqlFrontendError>>()?;
                     SqlCatalogBoundConflictAction::DoUpdate {
                         assignments: bound_assignments,
+                        // `WHERE` 仍只对既有行求值，因此看不到 `EXCLUDED` 的列。
                         predicate: predicate
                             .map(|predicate| bind_expression(predicate, &source, &[], catalog, variables))
                             .transpose()?,
@@ -606,6 +618,48 @@ fn bind_insert(
         rows.push(bound_row);
     }
     Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None, conflict, returning })
+}
+
+/// Normalizes the `EXCLUDED` qualifier of an `ON CONFLICT DO UPDATE` value.
+///
+/// `EXCLUDED` is a keyword rather than a table name, and PostgreSQL folds
+/// unquoted identifiers to lower case, so clients almost always write
+/// `excluded.column`. The gateway matches identifiers case-sensitively, so the
+/// qualifier is folded onto the sentinel spelling here and left untouched
+/// everywhere else.
+fn canonicalize_excluded(expression: SqlBoundExpression) -> SqlBoundExpression {
+    use SqlBoundExpression::*;
+    match expression {
+        Identifier(name) => match name.split_once('.') {
+            Some((qualifier, column)) if qualifier.trim().eq_ignore_ascii_case("excluded") => {
+                Identifier(format!("EXCLUDED.{column}"))
+            }
+            _ => Identifier(name),
+        },
+        Binary { left, operator, right } => Binary {
+            left: Box::new(canonicalize_excluded(*left)),
+            operator,
+            right: Box::new(canonicalize_excluded(*right)),
+        },
+        Unary { operator, expression } => Unary { operator, expression: Box::new(canonicalize_excluded(*expression)) },
+        Function { name, args, distinct } => {
+            Function { name, args: args.into_iter().map(canonicalize_excluded).collect(), distinct }
+        }
+        InSubquery { expression, select, negated } => {
+            InSubquery { expression: Box::new(canonicalize_excluded(*expression)), select, negated }
+        }
+        Exists { select, negated } => Exists { select, negated },
+        Case { branches, else_branch } => Case {
+            branches: branches
+                .into_iter()
+                .map(|(when, then)| (Box::new(canonicalize_excluded(*when)), Box::new(canonicalize_excluded(*then))))
+                .collect(),
+            else_branch: else_branch.map(|els| Box::new(canonicalize_excluded(*els))),
+        },
+        Cast { expr, target } => Cast { expr: Box::new(canonicalize_excluded(*expr)), target },
+        Literal(literal) => Literal(literal),
+        Wildcard => Wildcard,
+    }
 }
 
 fn bind_update(

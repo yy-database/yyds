@@ -1209,6 +1209,105 @@ fn sql_on_conflict_do_update_rejects_invalid_shapes() {
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
 }
 
+#[test]
+fn sql_on_conflict_do_update_reads_the_excluded_and_the_stored_row() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice', 30)");
+
+    // `EXCLUDED` 指向提议写入的那一行。PostgreSQL 会把未加引号的标识符折叠成小写，
+    // 因此两种拼写都接受。
+    let copied = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users VALUES (1, 'bob', 99) ON CONFLICT (id) DO UPDATE SET name = excluded.name, age = EXCLUDED.age",
+    );
+    assert_eq!(copied.affected_rows, 1);
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT name, age FROM users").rows,
+        vec![vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Integer(99)]]
+    );
+
+    // 既有行以表名限定后可以做 `column + literal`。
+    run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users VALUES (1, 'ignored', 100) ON CONFLICT (id) DO UPDATE SET age = users.age + 1",
+    );
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT name, age FROM users").rows,
+        vec![vec![yyds_gateway::SqlValue::String("bob".into()), yyds_gateway::SqlValue::Integer(100)]]
+    );
+}
+
+#[test]
+fn sql_on_conflict_do_update_assigns_columns_simultaneously() {
+    let catalog = catalog("table pairs { @@id: i64, a: i64, b: i64 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO pairs VALUES (1, 10, 20)");
+
+    // 两个右值都读取改写前的既有行，交换列不会因为写入顺序而丢失原值。
+    run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO pairs VALUES (1, 0, 0) ON CONFLICT (id) DO UPDATE SET a = pairs.b, b = pairs.a",
+    );
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT a, b FROM pairs").rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(20), yyds_gateway::SqlValue::Integer(10)]]
+    );
+}
+
+#[test]
+fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+
+    // 只有字面量、列引用与 `列 ± 字面量` 能直接在行对上求值，其余形态显式拒绝。
+    for sql in [
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = users.age * 2",
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = users.age + users.age",
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = -users.age",
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = CASE WHEN users.age > 0 THEN 1 ELSE 2 END",
+    ] {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+            .unwrap_or_else(|error| panic!("bind `{sql}`: {}", error.message));
+        let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("shape is not executable");
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}");
+    }
+
+    // 未限定的列名在既有行与 `EXCLUDED` 之间二义，必须显式限定。
+    let error = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = age + 1",
+        &catalog,
+        7,
+    )
+    .expect_err("unqualified column is ambiguous");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::AmbiguousColumn);
+
+    // `WHERE` 只对既有行求值，`EXCLUDED` 在那里不可见。
+    let error = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = EXCLUDED.age WHERE EXCLUDED.age > 0",
+        &catalog,
+        7,
+    )
+    .expect_err("excluded is not visible in the conflict predicate");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownTableQualifier);
+
+    // MySQL 方言仍然拒绝整条 UPSERT，不退化成 ON DUPLICATE KEY UPDATE。
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
+        .expect_err("MySQL has no ON CONFLICT");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
+}
+
 // --- INSERT ... RETURNING ---
 
 #[test]
