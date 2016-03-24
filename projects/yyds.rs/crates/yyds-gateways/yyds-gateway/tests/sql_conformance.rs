@@ -340,6 +340,46 @@ fn sql_exists_predicates_agree_across_dialects() {
     }
 }
 
+/// 标量子查询的基数语义两端一致：一行取其值，0 行取 `NULL`，多行按执行错误拒绝，
+/// 多列投影在绑定期显式拒绝，两方言都不做近似。
+#[test]
+fn sql_scalar_subquery_agrees_across_dialects() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        for sql in SEED {
+            fixture.execute(None, sql).expect("seed");
+        }
+
+        let single = fixture
+            .execute(None, "SELECT id, (SELECT age FROM users WHERE id = 1) AS peer FROM users WHERE id = 2")
+            .unwrap_or_else(|error| panic!("scalar subquery under {dialect:?}: {error}"));
+        assert_eq!(
+            single.rows,
+            rows(&[&[Lit::Int(2), Lit::Int(30)]]),
+            "scalar subquery with one row under {dialect:?}"
+        );
+
+        let empty = fixture
+            .execute(None, "SELECT (SELECT age FROM users WHERE id = 99) AS none FROM users WHERE id = 1")
+            .unwrap_or_else(|error| panic!("empty scalar subquery under {dialect:?}: {error}"));
+        assert_eq!(empty.rows, rows(&[&[Lit::Null]]), "scalar subquery without rows under {dialect:?}");
+
+        let predicate = fixture
+            .execute(None, "SELECT id FROM users WHERE age = (SELECT age FROM users WHERE id = 3)")
+            .unwrap_or_else(|error| panic!("scalar predicate under {dialect:?}: {error}"));
+        assert_eq!(predicate.rows, rows(&[&[Lit::Int(3)]]), "scalar subquery in predicate under {dialect:?}");
+
+        let error = fixture
+            .execute(None, "SELECT id FROM users WHERE id = (SELECT id FROM users)")
+            .expect_err("several rows must be a cardinality error");
+        assert!(error.contains("more than one row"), "scalar subquery with several rows under {dialect:?}: {error}");
+
+        let wide = bind_sql_catalog("SELECT (SELECT id, age FROM users) FROM users", &fixture.catalog, SCHEMA_VERSION)
+            .expect_err("scalar subquery must project one column");
+        assert_eq!(wide.kind, SqlErrorKind::Unsupported, "under {dialect:?}: {}", wide.message);
+    }
+}
+
 /// 非递归 CTE 在两方言下必须一致：网关把每条 CTE 展开成它的基表，内层过滤并入
 /// 外层 `WHERE`，所以返回值不分叉；无法展开的形状两方言都必须显式拒绝。
 #[test]

@@ -175,6 +175,10 @@ fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &B
             SqlBoundUnaryOperator::Plus | SqlBoundUnaryOperator::Minus => infer_expression_type(expression, field_types),
         },
         InSubquery { .. } | InValues { .. } | Exists { .. } => SqlFieldType::Bool,
+        // 标量子查询的声明类型就是它唯一输出列的类型，绑定期已保证只有一列。
+        ScalarSubquery { plan } => {
+            describe_plan(plan).first().map(|column| column.field_type.clone()).unwrap_or(SqlFieldType::Unknown)
+        }
         Case { branches, else_branch } => {
             // 取第一个 THEN 分支的类型作为推断结果；更精确的类型合并留给执行期。
             branches

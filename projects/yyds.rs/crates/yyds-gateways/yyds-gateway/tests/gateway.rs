@@ -2858,6 +2858,48 @@ fn sql_subqueries_inherit_the_enclosing_cte_scope() {
 }
 
 #[test]
+fn sql_scalar_subquery_yields_one_value_and_pins_its_cardinality() {
+    use yyds_gateway::SqlValue;
+
+    let (catalog, executor) = nullable_users();
+
+    // 一行结果 → 取该行唯一列的值。
+    let single =
+        run_sql(&executor, None, &catalog, "SELECT id, (SELECT age FROM users WHERE id = 3) AS peer FROM users WHERE id = 1");
+    assert_eq!(single.columns, vec!["id".to_string(), "peer".to_string()]);
+    assert_eq!(single.rows, vec![vec![SqlValue::Integer(1), SqlValue::Integer(10)]]);
+
+    // 0 行 → SQL 基数规则：标量子查询取 `NULL`。
+    let empty =
+        run_sql(&executor, None, &catalog, "SELECT (SELECT age FROM users WHERE id = 99) AS none FROM users WHERE id = 1");
+    assert_eq!(empty.rows, vec![vec![SqlValue::Null]]);
+
+    // 聚合形式 `(SELECT MAX(...) ...)` 同样是一条标量子查询，投影类型取自其唯一列。
+    let aggregate = run_sql(&executor, None, &catalog, "SELECT (SELECT COUNT(*) FROM users) AS total FROM users WHERE id = 2");
+    assert_eq!(aggregate.columns, vec!["total".to_string()]);
+    assert_eq!(aggregate.rows, vec![vec![SqlValue::Integer(3)]]);
+
+    // 比较右值复用同一物化路径。
+    let predicate =
+        run_sql(&executor, None, &catalog, "SELECT id FROM users WHERE age = (SELECT age FROM users WHERE id = 3)");
+    assert_eq!(predicate.rows, vec![vec![SqlValue::Integer(3)]]);
+
+    // 多行 → 基数违规，按执行错误上报（不是语法错误）。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = (SELECT id FROM users)", &catalog, 7)
+        .expect("bind scalar subquery");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan scalar subquery");
+    let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("several rows");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution, "{}", error.message);
+    assert!(error.message.contains("more than one row"), "{}", error.message);
+
+    // 投影多列时无法作为单一值，绑定期就显式拒绝。
+    let wide = yyds_gateway::bind_sql_catalog("SELECT (SELECT id, age FROM users) FROM users", &catalog, 7)
+        .expect_err("multi column scalar subquery");
+    assert_eq!(wide.kind, yyds_gateway::SqlErrorKind::Unsupported, "{}", wide.message);
+    assert!(wide.message.contains("exactly one column"), "{}", wide.message);
+}
+
+#[test]
 fn sql_common_table_expression_reports_unflattenable_shapes() {
     let (catalog, _executor) = join_fixture();
     let reject = |sql: &str| {

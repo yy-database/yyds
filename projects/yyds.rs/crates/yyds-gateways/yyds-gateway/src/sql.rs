@@ -544,6 +544,11 @@ pub enum SqlBoundExpression {
         /// Whether the predicate is spelled `NOT IN`.
         negated: bool,
     },
+    /// `(SELECT ...)` used where a single value is expected.
+    ScalarSubquery {
+        /// Bound subquery whose one output column supplies the value.
+        select: Box<SqlBoundSelect>,
+    },
     /// `[NOT] EXISTS (<subquery>)`.
     Exists {
         /// Bound subquery whose rows are tested for existence.
@@ -1199,9 +1204,9 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 target: target.to_string(),
             })
         }
-        // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
-        Expression::Subquery { .. } => {
-            Err(SqlFrontendError::unsupported("SQL subquery is only supported as the right side of IN"))
+        // 单独出现的 `(SELECT ...)` 是标量子查询：值语义由 planner 与执行层固定。
+        Expression::Subquery { query, .. } => {
+            Ok(SqlBoundExpression::ScalarSubquery { select: Box::new(bind_select_statement(query)?) })
         }
         Expression::Exists { query, negated, .. } => Ok(SqlBoundExpression::Exists {
             select: Box::new(bind_select_statement(query)?),

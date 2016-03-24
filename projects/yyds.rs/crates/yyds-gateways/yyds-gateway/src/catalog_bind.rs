@@ -269,6 +269,14 @@ pub enum SqlCatalogBoundExpression {
         /// Whether the predicate is spelled `NOT IN`.
         negated: bool,
     },
+    /// A scalar subquery `(SELECT ...)` with the subquery already planned.
+    ///
+    /// Its value is materialized once per statement, before any row is filtered or
+    /// projected, so only uncorrelated subqueries are expressible.
+    ScalarSubquery {
+        /// Executable plan for the subquery.
+        plan: Box<crate::sql_planner::SqlExecutionPlan>,
+    },
     /// `[NOT] EXISTS (<subquery>)` with the subquery already planned.
     Exists {
         /// Executable plan for the subquery.
@@ -649,6 +657,8 @@ fn canonicalize_excluded(expression: SqlBoundExpression) -> SqlBoundExpression {
             InSubquery { expression: Box::new(canonicalize_excluded(*expression)), select, negated }
         }
         Exists { select, negated } => Exists { select, negated },
+        // 标量子查询不引用外层列，`EXCLUDED` 折叠无内容可改。
+        ScalarSubquery { select } => ScalarSubquery { select },
         Case { branches, else_branch } => Case {
             branches: branches
                 .into_iter()
@@ -916,6 +926,16 @@ fn bind_expression(
                 plan: Box::new(plan),
                 negated,
             })
+        }
+        SqlBoundExpression::ScalarSubquery { select } => {
+            // 标量子查询与 `EXISTS` 一样不相关：外层 `WITH` 可见，外层列不可见。
+            // 它的值必须是单一列，因此在绑定期就拒绝多列投影，而不是在执行期近似取首列。
+            let bound_select = bind_select_in(*select, catalog, variables, ctes)?;
+            let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
+            if crate::sql_describe::describe_plan(&plan).len() != 1 {
+                return Err(SqlFrontendError::unsupported("SQL scalar subquery must select exactly one column"));
+            }
+            Ok(SqlCatalogBoundExpression::ScalarSubquery { plan: Box::new(plan) })
         }
         SqlBoundExpression::Exists { select, negated } => {
             // `EXISTS` 与 `IN` 一样是不相关子查询，外层 `WITH` 定义同样可见。
@@ -1252,6 +1272,8 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
         SqlCatalogBoundExpression::Cast { expr, .. } => collect_column_ids(expr, out),
         // `EXISTS` 不引用任何外层列，行值键集合不受影响。
         SqlCatalogBoundExpression::Exists { .. } => {}
+        // 标量子查询同样只依赖自己的结果，不引用任何外层列。
+        SqlCatalogBoundExpression::ScalarSubquery { .. } => {}
         SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
     }
 }

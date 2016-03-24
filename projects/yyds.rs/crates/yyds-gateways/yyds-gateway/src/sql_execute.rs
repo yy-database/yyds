@@ -526,6 +526,26 @@ fn lower_expression(
                 .collect();
             SqlCatalogBoundExpression::InValues { expression, values, negated }
         }
+        SqlCatalogBoundExpression::ScalarSubquery { plan } => {
+            let mut plan = *plan;
+            resolve_subqueries(&mut plan, executor, transaction, dialect)?;
+            let result = execute_plan(executor, transaction, &plan, dialect)?;
+            // 标量子查询的基数语义固定在这一层：0 行取值 `NULL`，多行是基数违规，
+            // 按执行错误上报而不是静默取首行。列数在绑定期已保证为 1。
+            match result.rows.len() {
+                0 => SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Null),
+                1 => SqlCatalogBoundExpression::Literal(
+                    result
+                        .rows
+                        .into_iter()
+                        .next()
+                        .and_then(|row| row.into_iter().next())
+                        .map(value_to_literal)
+                        .unwrap_or(SqlBoundLiteral::Null),
+                ),
+                _ => return Err(execute_error("scalar subquery returned more than one row")),
+            }
+        }
         SqlCatalogBoundExpression::Exists { plan, negated } => {
             let mut plan = *plan;
             resolve_subqueries(&mut plan, executor, transaction, dialect)?;
@@ -1922,6 +1942,9 @@ fn eval_expression(
         SqlCatalogBoundExpression::Exists { .. } => {
             return Err(execute_error("EXISTS predicate was not materialized before execution"))
         }
+        SqlCatalogBoundExpression::ScalarSubquery { .. } => {
+            return Err(execute_error("scalar subquery was not evaluated before execution"))
+        }
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             eval_case(branches, else_branch, row, field_types, dialect)?
         }
@@ -2534,6 +2557,9 @@ fn eval_having(
         }
         SqlCatalogBoundExpression::Exists { .. } => {
             return Err(execute_error("EXISTS predicate was not materialized before execution"))
+        }
+        SqlCatalogBoundExpression::ScalarSubquery { .. } => {
+            return Err(execute_error("scalar subquery was not evaluated before execution"))
         }
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             eval_case_having(branches, else_branch, bucket_rows, group_exprs, field_types, dialect)?
