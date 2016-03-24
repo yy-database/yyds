@@ -1929,7 +1929,7 @@ fn eval_expression(
             for arg in args {
                 values.push(eval_expression(arg, row, field_types, dialect)?);
             }
-            eval_scalar_function(scalar, &values)?
+            eval_scalar_function(scalar, &values, dialect)?
         }
         SqlCatalogBoundExpression::InValues { expression, values, negated } => {
             let target = eval_expression(expression, row, field_types, dialect)?;
@@ -2090,7 +2090,14 @@ fn eval_in_values(target: SqlValue, values: &[SqlBoundLiteral], negated: bool, d
 }
 
 /// 对一行求值标量内建函数。参数已按从左到右求值完毕。
-fn eval_scalar_function(function: SqlScalarFunction, args: &[SqlValue]) -> Result<SqlValue, SqlFrontendError> {
+///
+/// `dialect` 参与的函数只有这些真正分叉的语义：`LENGTH` 的字节/字符计数、
+/// `CONCAT` 的 NULL 传播、`SUBSTRING` 的越界裁剪与 `TRIM` 的显式字符集。
+fn eval_scalar_function(
+    function: SqlScalarFunction,
+    args: &[SqlValue],
+    dialect: SqlDialect,
+) -> Result<SqlValue, SqlFrontendError> {
     use SqlValue::{Integer, Null, Number, String as Text};
     Ok(match function {
         SqlScalarFunction::Version => Text(crate::version_label()),
@@ -2105,10 +2112,83 @@ fn eval_scalar_function(function: SqlScalarFunction, args: &[SqlValue]) -> Resul
             Some(text) => Text(text.to_uppercase()),
             None => Null,
         },
+        // MySQL 的 `LENGTH` 是 UTF-8 字节数，PostgreSQL 的 `length` 是字符数。
         SqlScalarFunction::Length => match scalar_text(args, 0) {
+            Some(text) => Integer(match dialect {
+                SqlDialect::Mysql => i64::try_from(text.len()).unwrap_or(i64::MAX),
+                SqlDialect::Postgres => i64::try_from(text.chars().count()).unwrap_or(i64::MAX),
+            }),
+            None => Null,
+        },
+        SqlScalarFunction::CharLength => match scalar_text(args, 0) {
             Some(text) => Integer(i64::try_from(text.chars().count()).unwrap_or(i64::MAX)),
             None => Null,
         },
+        SqlScalarFunction::Substring => {
+            let (text, start) = match (scalar_text(args, 0), scalar_integer(args, 1)) {
+                (Some(text), Some(start)) => (text, start),
+                _ => return Ok(Null),
+            };
+            let length = match args.get(2) {
+                None => None,
+                Some(Null) => return Ok(Null),
+                Some(_) => match scalar_integer(args, 2) {
+                    Some(value) => Some(value),
+                    None => return Ok(Null),
+                },
+            };
+            substring_value(&text, start, length, dialect)?
+        }
+        SqlScalarFunction::Trim | SqlScalarFunction::Ltrim | SqlScalarFunction::Rtrim => {
+            // 显式 trim 字符集是 PostgreSQL 的 `TRIM(x, chars)` 形式。MySQL 只有
+            // `TRIM([BOTH|LEADING|TRAILING] chars FROM x)`，两参数调用在 MySQL 是语法错误。
+            if dialect == SqlDialect::Mysql && args.len() > 1 {
+                return Err(SqlFrontendError::syntax(format!(
+                    "{}() with an explicit trim character set is PostgreSQL syntax",
+                    function.name()
+                )));
+            }
+            let text = match scalar_text(args, 0) {
+                Some(text) => text,
+                None => return Ok(Null),
+            };
+            let characters = match args.get(1) {
+                None => None,
+                Some(Null) => return Ok(Null),
+                Some(_) => scalar_text(args, 1).map(|set| set.chars().collect::<Vec<_>>()),
+            };
+            // 默认只删除半角空格，两方言一致（MySQL 的 `TRIM(str)` 与 PostgreSQL 的 `trim(str)`）。
+            let is_trimmed = |character: char| match characters.as_ref() {
+                Some(set) => set.contains(&character),
+                None => character == ' ',
+            };
+            Text(match function {
+                SqlScalarFunction::Ltrim => text.trim_start_matches(is_trimmed).to_string(),
+                SqlScalarFunction::Rtrim => text.trim_end_matches(is_trimmed).to_string(),
+                _ => text.trim_matches(is_trimmed).to_string(),
+            })
+        }
+        SqlScalarFunction::Replace => {
+            let (text, from, to) = match (scalar_text(args, 0), scalar_text(args, 1), scalar_text(args, 2)) {
+                (Some(text), Some(from), Some(to)) => (text, from, to),
+                _ => return Ok(Null),
+            };
+            // 两方言都把空搜索串当作“无需替换”，而不是在每个字符之间插入替换串。
+            Text(if from.is_empty() { text } else { text.replace(&from, &to) })
+        }
+        SqlScalarFunction::Concat => {
+            let mut joined = String::new();
+            for index in 0..args.len() {
+                match scalar_text(args, index) {
+                    Some(text) => joined.push_str(&text),
+                    // MySQL：任一参数为 NULL，结果是 NULL。
+                    None if dialect == SqlDialect::Mysql => return Ok(Null),
+                    // PostgreSQL 的 `concat` 跳过 NULL 参数，把它当作空串。
+                    None => {}
+                }
+            }
+            Text(joined)
+        }
         SqlScalarFunction::Coalesce => args.iter().find(|value| **value != Null).cloned().unwrap_or(Null),
         SqlScalarFunction::Abs => match args.first() {
             Some(Integer(value)) => Integer(value.checked_abs().ok_or_else(|| execute_error("ABS integer overflow"))?),
@@ -2144,6 +2224,50 @@ fn eval_scalar_function(function: SqlScalarFunction, args: &[SqlValue]) -> Resul
     })
 }
 
+/// `SUBSTRING(x, start[, length])`，下标从 1 开始，字符（不是字节）计数。
+///
+/// 两方言共享 1-based 下标与“任一侧 NULL 即 NULL”，差异在于越界与负值：
+///
+/// - MySQL：`start = 0` 与负长度都返回空串，负起点从字符串结尾倒数后裁剪。
+/// - PostgreSQL：`start < 1` 从第 1 个字符开始并把范围裁剪到 `start + length - 1`，
+///   负长度报 `22011`，超出结尾返回空串。
+fn substring_value(text: &str, start: i64, length: Option<i64>, dialect: SqlDialect) -> Result<SqlValue, SqlFrontendError> {
+    let characters = text.chars().collect::<Vec<_>>();
+    let total = i64::try_from(characters.len()).unwrap_or(i64::MAX);
+    let (first, end) = match dialect {
+        SqlDialect::Mysql => {
+            if start == 0 || length.is_some_and(|length| length < 0) {
+                return Ok(SqlValue::String(String::new()));
+            }
+            let offset = if start > 0 { start - 1 } else { total + start };
+            let mut span = length.unwrap_or(total - offset);
+            let mut begin = offset;
+            if begin < 0 {
+                span += begin;
+                begin = 0;
+            }
+            (begin, begin + span)
+        }
+        SqlDialect::Postgres => {
+            if length.is_some_and(|length| length < 0) {
+                return Err(SqlFrontendError::new(
+                    SqlErrorKind::InvalidSubstringLength,
+                    "negative substring length not allowed",
+                ));
+            }
+            let begin = (start - 1).max(0);
+            let end = match length {
+                Some(length) => (start + length - 1).max(0),
+                None => total,
+            };
+            (begin, end)
+        }
+    };
+    let first = first.clamp(0, total) as usize;
+    let end = end.clamp(0, total) as usize;
+    Ok(SqlValue::String(if end <= first { String::new() } else { characters[first..end].iter().collect() }))
+}
+
 /// 把第 `index` 个参数取成字符串；NULL 或缺失返回 `None`。
 fn scalar_text(args: &[SqlValue], index: usize) -> Option<String> {
     match args.get(index) {
@@ -2152,6 +2276,17 @@ fn scalar_text(args: &[SqlValue], index: usize) -> Option<String> {
         Some(SqlValue::Number(value)) => Some(format_number(*value)),
         Some(SqlValue::Boolean(value)) => Some(if *value { "1" } else { "0" }.to_string()),
         Some(SqlValue::Null) | None => None,
+    }
+}
+
+/// 把第 `index` 个参数取成整数；NULL 或无法解释成整数的文本返回 `None`。
+fn scalar_integer(args: &[SqlValue], index: usize) -> Option<i64> {
+    match args.get(index)? {
+        SqlValue::Integer(value) => Some(*value),
+        SqlValue::Number(value) => Some(*value as i64),
+        SqlValue::String(text) => text.trim().parse::<i64>().ok(),
+        SqlValue::Boolean(value) => Some(i64::from(*value)),
+        SqlValue::Null => None,
     }
 }
 
@@ -2533,7 +2668,7 @@ fn eval_having(
                 for arg in args {
                     values.push(eval_having(arg, bucket_rows, group_exprs, field_types, dialect)?);
                 }
-                eval_scalar_function(function, &values)?
+                eval_scalar_function(function, &values, dialect)?
             }
             else {
                 return Err(execute_error(&format!("unknown function in grouped expression: {name}")));

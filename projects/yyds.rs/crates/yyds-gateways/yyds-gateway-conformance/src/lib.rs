@@ -542,6 +542,49 @@ pub fn type_cases() -> Vec<Case> {
     ]
 }
 
+/// Scalar string functions whose result is identical under both dialects: 1-based
+/// `SUBSTRING` indexes, character counting, and NULL propagation through
+/// `SUBSTRING` / `TRIM` / `REPLACE`.
+///
+/// Dialect-divergent readings stay out of this shared table on purpose: `LENGTH`
+/// counts bytes on MySQL but characters on PostgreSQL, `CONCAT` propagates NULL on
+/// MySQL but skips it on PostgreSQL, `SUBSTRING` clips out-of-range starts
+/// differently, and only PostgreSQL accepts `TRIM(x, chars)`. Those are asserted
+/// per dialect in the gateway suite instead of being merged into one expectation.
+pub fn string_function_cases() -> Vec<Case> {
+    use Lit::{Int, Null, Text};
+
+    vec![
+        case("substring is one based")
+            .sql("SELECT SUBSTRING(name, 2, 3) FROM users WHERE id = 1")
+            .rows(&[&[Text("lic")]])
+            .build(),
+        case("substring without a length runs to the end").sql("SELECT SUBSTR('abcdef', 4)").rows(&[&[Text("def")]]).build(),
+        case("substring past the end is empty").sql("SELECT SUBSTRING('abcdef', 99)").rows(&[&[Text("")]]).build(),
+        case("substring of null is null").sql("SELECT SUBSTRING(NULL, 2)").rows(&[&[Null]]).build(),
+        case("char length counts characters")
+            .sql("SELECT CHAR_LENGTH('abc'), CHARACTER_LENGTH('abc')")
+            .rows(&[&[Int(3), Int(3)]])
+            .build(),
+        case("trim removes surrounding spaces").sql("SELECT TRIM('  pad  ')").rows(&[&[Text("pad")]]).build(),
+        case("ltrim and rtrim split the sides")
+            .sql("SELECT LTRIM('  pad'), RTRIM('pad  ')")
+            .rows(&[&[Text("pad"), Text("pad")]])
+            .build(),
+        case("trim of null is null").sql("SELECT TRIM(NULL)").rows(&[&[Null]]).build(),
+        case("replace rewrites every occurrence")
+            .sql("SELECT REPLACE('banana', 'na', 'NA')")
+            .rows(&[&[Text("baNANA")]])
+            .build(),
+        case("replace of null is null").sql("SELECT REPLACE('banana', NULL, 'x')").rows(&[&[Null]]).build(),
+        case("concat joins every argument").sql("SELECT CONCAT('a', 'b', 1)").rows(&[&[Text("ab1")]]).build(),
+        case("string functions read column values")
+            .sql("SELECT LOWER(name), SUBSTRING(name, 1, 3), CONCAT(name, '-', age) FROM users WHERE id = 2")
+            .rows(&[&[Text("bob"), Text("bob"), Text("bob-20")]])
+            .build(),
+    ]
+}
+
 /// Fixture with tied sort keys for multi-column `ORDER BY` coverage.
 pub const ORDER_SEED: &[&str] = &[
     "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
@@ -888,6 +931,7 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
 pub fn all_cases() -> Vec<Case> {
     let mut cases = crud_cases();
     cases.extend(type_cases());
+    cases.extend(string_function_cases());
     cases.extend(distinct_cases());
     cases.extend(group_cases());
     cases.extend(order_cases());

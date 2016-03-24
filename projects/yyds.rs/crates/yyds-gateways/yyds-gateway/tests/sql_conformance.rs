@@ -14,8 +14,8 @@ use yyds_gateway::{
 };
 use yyds_gateway_conformance::{
     crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, returning_cases, rows, set_operation_cases,
-    type_cases, upsert_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED,
-    USERS_SCHEMA,
+    string_function_cases, type_cases, upsert_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION,
+    SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -172,6 +172,96 @@ fn sql_conformance_null_ordering() {
 #[test]
 fn sql_conformance_set_operations() {
     run_cases(&set_operation_cases());
+}
+
+#[test]
+fn sql_conformance_string_functions() {
+    run_cases(&string_function_cases());
+}
+
+/// 字符串函数在两方言上共享的部分：1-based 下标、字符计数与 NULL 传播。
+#[test]
+fn sql_string_functions_agree_across_dialects() {
+    use Lit::{Int, Null, Text};
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        let vals = |sql: &str| {
+            fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under {dialect:?}: {error}")).rows
+        };
+        assert_eq!(vals("SELECT SUBSTRING('abcdef', 2, 3)"), rows(&[&[Text("bcd")]]), "under {dialect:?}");
+        assert_eq!(vals("SELECT SUBSTR('abcdef', 4)"), rows(&[&[Text("def")]]), "under {dialect:?}");
+        assert_eq!(vals("SELECT SUBSTRING('abcdef', 7)"), rows(&[&[Text("")]]), "under {dialect:?}");
+        assert_eq!(vals("SELECT SUBSTRING('abcdef', 3, 0)"), rows(&[&[Text("")]]), "under {dialect:?}");
+        assert_eq!(vals("SELECT SUBSTRING(NULL, 2, 3)"), rows(&[&[Null]]), "under {dialect:?}");
+        assert_eq!(vals("SELECT SUBSTRING('abcdef', NULL)"), rows(&[&[Null]]), "under {dialect:?}");
+        assert_eq!(vals("SELECT CHAR_LENGTH('abc'), CHARACTER_LENGTH('abc'), LEN('abc')"), rows(&[&[Int(3), Int(3), Int(3)]]));
+        assert_eq!(vals("SELECT TRIM('  pad  ')"), rows(&[&[Text("pad")]]), "under {dialect:?}");
+        assert_eq!(vals("SELECT LTRIM('  pad'), RTRIM('pad  ')"), rows(&[&[Text("pad"), Text("pad")]]));
+        assert_eq!(vals("SELECT TRIM(NULL), LTRIM(NULL), RTRIM(NULL)"), rows(&[&[Null, Null, Null]]));
+        assert_eq!(vals("SELECT REPLACE('banana', 'na', 'NA')"), rows(&[&[Text("baNANA")]]));
+        assert_eq!(vals("SELECT REPLACE('abc', NULL, 'x')"), rows(&[&[Null]]));
+        assert_eq!(vals("SELECT CONCAT('a', 'b', 1)"), rows(&[&[Text("ab1")]]), "under {dialect:?}");
+    }
+}
+
+/// `LENGTH` 的字节/字符、`CONCAT` 的 NULL 传播、`SUBSTRING` 的越界裁剪与两参数
+/// `TRIM` 都按方言分叉，两方言各走自己的断言，不能合并成一个期望值。
+#[test]
+fn sql_string_functions_split_by_dialect() {
+    use Lit::{Int, Null, Text};
+
+    let mysql = Fixture::with_dialect(SqlDialect::Mysql);
+    let mysql_vals =
+        |sql: &str| mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows;
+    let pg = Fixture::with_dialect(SqlDialect::Postgres);
+    let pg_vals = |sql: &str| pg.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under Postgres: {error}")).rows;
+
+    // MySQL 的 `LENGTH` 是 UTF-8 字节数，PostgreSQL 的 `length` 是字符数。
+    assert_eq!(mysql_vals("SELECT LENGTH('héllo'), CHAR_LENGTH('héllo')"), rows(&[&[Int(6), Int(5)]]));
+    assert_eq!(pg_vals("SELECT LENGTH('héllo'), CHAR_LENGTH('héllo')"), rows(&[&[Int(5), Int(5)]]));
+
+    // MySQL 的 `CONCAT` 传播 NULL，PostgreSQL 的 `concat` 跳过 NULL 参数。
+    assert_eq!(mysql_vals("SELECT CONCAT('a', NULL, 'b')"), rows(&[&[Null]]));
+    assert_eq!(pg_vals("SELECT CONCAT('a', NULL, 'b')"), rows(&[&[Text("ab")]]));
+
+    // 起点 0：MySQL 返回空串，PostgreSQL 从第 1 个字符开始。
+    assert_eq!(mysql_vals("SELECT SUBSTRING('abcdef', 0)"), rows(&[&[Text("")]]));
+    assert_eq!(pg_vals("SELECT SUBSTRING('abcdef', 0)"), rows(&[&[Text("abcdef")]]));
+    assert_eq!(mysql_vals("SELECT SUBSTRING('abcdef', 0, 3)"), rows(&[&[Text("")]]));
+    assert_eq!(pg_vals("SELECT SUBSTRING('abcdef', 0, 3)"), rows(&[&[Text("ab")]]));
+
+    // 负起点：MySQL 从结尾倒数，PostgreSQL 从第 1 个字符开始。
+    assert_eq!(mysql_vals("SELECT SUBSTRING('abcdef', -2)"), rows(&[&[Text("ef")]]));
+    assert_eq!(pg_vals("SELECT SUBSTRING('abcdef', -2)"), rows(&[&[Text("abcdef")]]));
+
+    // 负长度：MySQL 返回空串，PostgreSQL 报 `22011`。
+    assert_eq!(mysql_vals("SELECT SUBSTRING('abcdef', 2, -1)"), rows(&[&[Text("")]]));
+    let rejected = pg.execute(None, "SELECT SUBSTRING('abcdef', 2, -1)").expect_err("negative substring length");
+    assert!(rejected.contains("negative substring length"), "unexpected reason: {rejected}");
+
+    // 显式 trim 字符集是 PostgreSQL 形式，MySQL 只能写成 `TRIM(chars FROM str)`。
+    assert_eq!(
+        pg_vals("SELECT TRIM('xxaxx', 'x'), LTRIM('xxa', 'x'), RTRIM('axx', 'x')"),
+        rows(&[&[Text("a"), Text("a"), Text("a")]])
+    );
+    let mysql_trim = mysql.execute(None, "SELECT TRIM('xxaxx', 'x')").expect_err("two-argument trim under MySQL");
+    assert!(mysql_trim.contains("PostgreSQL syntax"), "unexpected reason: {mysql_trim}");
+}
+
+/// 标量函数的参数个数在绑定期就拒绝，未知名字仍然报 `UnknownFunction`。
+#[test]
+fn sql_string_function_arity_is_rejected_while_binding() {
+    let fixture = Fixture::new();
+    for sql in [
+        "SELECT SUBSTRING('abc')",
+        "SELECT SUBSTR('abc', 1, 2, 3)",
+        "SELECT REPLACE('a', 'b')",
+        "SELECT CONCAT()",
+        "SELECT TRIM('a', 'b', 'c')",
+    ] {
+        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err(sql);
+        assert_eq!(error.kind, SqlErrorKind::UnknownFunction, "`{sql}`: {}", error.message);
+    }
 }
 
 /// `ON CONFLICT DO NOTHING` keeps the stored row and reports zero affected rows,

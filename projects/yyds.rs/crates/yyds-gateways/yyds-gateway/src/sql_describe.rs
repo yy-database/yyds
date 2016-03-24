@@ -145,7 +145,8 @@ fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &B
         },
         Wildcard => SqlFieldType::Unknown,
         Function { name, args, distinct } => match name.as_str() {
-            "count" | "length" => SqlFieldType::Int64,
+            // `LENGTH` 与字符计数的拼写都返回整数；其余字符串函数退回 `String`。
+            "count" | "length" | "char_length" | "character_length" | "len" => SqlFieldType::Int64,
             "avg" => SqlFieldType::Float64,
             "sum" | "max" | "min" | "abs" | "round" | "coalesce" => {
                 args.first().map(|arg| infer_expression_type(arg, field_types)).unwrap_or(SqlFieldType::Unknown)

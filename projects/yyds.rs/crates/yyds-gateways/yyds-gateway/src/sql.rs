@@ -46,6 +46,9 @@ pub enum SqlErrorKind {
     Execution,
     /// Division or modulo by zero — PostgreSQL raises an error, MySQL returns NULL.
     DivisionByZero,
+    /// `SUBSTRING` was given a negative length. PostgreSQL rejects it with SQLSTATE
+    /// `22011`, while MySQL returns an empty string, so this category is PostgreSQL-only.
+    InvalidSubstringLength,
 }
 
 /// Structured failure from the Oak SQL frontend or gateway binder.
@@ -622,8 +625,22 @@ pub enum SqlScalarFunction {
     Lower,
     /// `UPPER(x)` / `UCASE(x)`.
     Upper,
-    /// `LENGTH(x)` / `CHAR_LENGTH(x)`.
+    /// `LENGTH(x)` — PostgreSQL counts characters, MySQL counts UTF-8 bytes.
     Length,
+    /// `CHAR_LENGTH(x)` / `CHARACTER_LENGTH(x)` / `LEN(x)` — character count in both dialects.
+    CharLength,
+    /// `SUBSTRING(x, start[, length])` / `SUBSTR(x, start[, length])` / `MID(x, start[, length])`.
+    Substring,
+    /// `TRIM(x[, chars])` / `BTRIM(x[, chars])`.
+    Trim,
+    /// `LTRIM(x[, chars])`.
+    Ltrim,
+    /// `RTRIM(x[, chars])`.
+    Rtrim,
+    /// `REPLACE(x, from, to)`.
+    Replace,
+    /// `CONCAT(a, b, ...)` — MySQL propagates NULL, PostgreSQL skips NULL arguments.
+    Concat,
     /// `COALESCE(a, b, ...)` / `IFNULL(a, b)`.
     Coalesce,
     /// `ABS(x)`.
@@ -641,11 +658,41 @@ impl SqlScalarFunction {
             "NOW" | "CURRENT_TIMESTAMP" => Some(Self::Now),
             "LOWER" | "LCASE" => Some(Self::Lower),
             "UPPER" | "UCASE" => Some(Self::Upper),
-            "LENGTH" | "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LEN" => Some(Self::Length),
+            "LENGTH" => Some(Self::Length),
+            "CHAR_LENGTH" | "CHARACTER_LENGTH" | "LEN" => Some(Self::CharLength),
+            "SUBSTRING" | "SUBSTR" | "MID" => Some(Self::Substring),
+            "TRIM" | "BTRIM" => Some(Self::Trim),
+            "LTRIM" => Some(Self::Ltrim),
+            "RTRIM" => Some(Self::Rtrim),
+            "REPLACE" => Some(Self::Replace),
+            "CONCAT" => Some(Self::Concat),
             "COALESCE" | "IFNULL" => Some(Self::Coalesce),
             "ABS" => Some(Self::Abs),
             "ROUND" => Some(Self::Round),
             _ => None,
+        }
+    }
+
+    /// Canonical spelling used by diagnostics for this function identity.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Version => "VERSION",
+            Self::Database => "DATABASE",
+            Self::CurrentSchema => "CURRENT_SCHEMA",
+            Self::Now => "NOW",
+            Self::Lower => "LOWER",
+            Self::Upper => "UPPER",
+            Self::Length => "LENGTH",
+            Self::CharLength => "CHAR_LENGTH",
+            Self::Substring => "SUBSTRING",
+            Self::Trim => "TRIM",
+            Self::Ltrim => "LTRIM",
+            Self::Rtrim => "RTRIM",
+            Self::Replace => "REPLACE",
+            Self::Concat => "CONCAT",
+            Self::Coalesce => "COALESCE",
+            Self::Abs => "ABS",
+            Self::Round => "ROUND",
         }
     }
 
@@ -654,9 +701,12 @@ impl SqlScalarFunction {
     pub fn arity(&self) -> (usize, Option<usize>) {
         match self {
             Self::Version | Self::Database | Self::CurrentSchema | Self::Now => (0, Some(0)),
-            Self::Lower | Self::Upper | Self::Length | Self::Abs => (1, Some(1)),
+            Self::Lower | Self::Upper | Self::Length | Self::CharLength | Self::Abs => (1, Some(1)),
             Self::Round => (1, Some(2)),
-            Self::Coalesce => (1, None),
+            Self::Substring => (2, Some(3)),
+            Self::Trim | Self::Ltrim | Self::Rtrim => (1, Some(2)),
+            Self::Replace => (3, Some(3)),
+            Self::Concat | Self::Coalesce => (1, None),
         }
     }
 }
@@ -1156,7 +1206,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 SqlFrontendError::new(
                     SqlErrorKind::UnknownFunction,
                     format!(
-                        "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/COALESCE/ABS/ROUND)"
+                        "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/CHAR_LENGTH/SUBSTRING/TRIM/LTRIM/RTRIM/REPLACE/CONCAT/COALESCE/ABS/ROUND)"
                     ),
                 )
             })?;
