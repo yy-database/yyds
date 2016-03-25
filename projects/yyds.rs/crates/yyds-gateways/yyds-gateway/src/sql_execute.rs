@@ -2104,6 +2104,23 @@ fn eval_scalar_function(
         // 未选择数据库 / schema 时，MySQL 与 PostgreSQL 都返回 NULL。
         SqlScalarFunction::Database | SqlScalarFunction::CurrentSchema => Null,
         SqlScalarFunction::Now => Text(current_timestamp()),
+        SqlScalarFunction::CurrentDate => Text(current_date()),
+        SqlScalarFunction::CurrentTime => Text(current_time()),
+        SqlScalarFunction::Curdate | SqlScalarFunction::Curtime => {
+            // `CURDATE()` / `CURTIME()` 是 MySQL 拼写，PostgreSQL 只认
+            // `CURRENT_DATE` / `CURRENT_TIME`，报 `42883` 而不是语法错误。
+            if dialect == SqlDialect::Postgres {
+                return Err(SqlFrontendError::new(
+                    SqlErrorKind::UnknownFunction,
+                    format!(
+                        "{}() is a MySQL spelling, PostgreSQL spells it CURRENT_{}",
+                        function.name(),
+                        if function == SqlScalarFunction::Curdate { "DATE" } else { "TIME" }
+                    ),
+                ));
+            }
+            Text(if function == SqlScalarFunction::Curdate { current_date() } else { current_time() })
+        }
         SqlScalarFunction::Lower => match scalar_text(args, 0) {
             Some(text) => Text(text.to_lowercase()),
             None => Null,
@@ -2290,14 +2307,35 @@ fn scalar_integer(args: &[SqlValue], index: usize) -> Option<i64> {
     }
 }
 
-/// Session timestamp in SQL `YYYY-MM-DD HH:MM:SS` form, derived from the host clock.
+/// 会话时间戳 `YYYY-MM-DD HH:MM:SS`，UTC。
 fn current_timestamp() -> String {
-    let seconds =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs() as i64).unwrap_or(0);
-    let days = seconds.div_euclid(86_400);
+    let seconds = current_utc_seconds();
+    format!("{} {}", date_of(seconds), time_of(seconds))
+}
+
+/// 会话日期 `YYYY-MM-DD`，UTC。
+fn current_date() -> String {
+    date_of(current_utc_seconds())
+}
+
+/// 会话时间 `HH:MM:SS`，UTC。
+fn current_time() -> String {
+    time_of(current_utc_seconds())
+}
+
+/// 当前 UTC 秒数；时钟早于 Unix epoch 时按 0 处理。
+fn current_utc_seconds() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs() as i64).unwrap_or(0)
+}
+
+fn date_of(seconds: i64) -> String {
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn time_of(seconds: i64) -> String {
     let remainder = seconds.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}", remainder / 3600, (remainder % 3600) / 60, remainder % 60)
+    format!("{:02}:{:02}:{:02}", remainder / 3600, (remainder % 3600) / 60, remainder % 60)
 }
 
 /// Gregorian date from days since 1970-01-01 (Howard Hinnant's civil_from_days).

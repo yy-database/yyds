@@ -264,6 +264,126 @@ fn sql_string_function_arity_is_rejected_while_binding() {
     }
 }
 
+/// 断言值为 `YYYY-MM-DD HH:MM:SS` 形状。
+fn assert_timestamp_shape(value: &str) {
+    assert_eq!(value.len(), 19, "{value}");
+    assert_digits_with_separators(value, &[(4, '-'), (7, '-'), (10, ' '), (13, ':'), (16, ':')]);
+}
+
+/// 断言值为 `YYYY-MM-DD` 形状。
+fn assert_date_shape(value: &str) {
+    assert_eq!(value.len(), 10, "{value}");
+    assert_digits_with_separators(value, &[(4, '-'), (7, '-')]);
+}
+
+/// 断言值为 `HH:MM:SS` 形状。
+fn assert_time_shape(value: &str) {
+    assert_eq!(value.len(), 8, "{value}");
+    assert_digits_with_separators(value, &[(2, ':'), (5, ':')]);
+}
+
+fn assert_digits_with_separators(value: &str, separators: &[(usize, char)]) {
+    for (index, character) in value.char_indices() {
+        match separators.iter().find(|(separator, _)| *separator == index) {
+            Some((_, expected)) => assert_eq!(character, *expected, "{value}"),
+            None => assert!(character.is_ascii_digit(), "{value}"),
+        }
+    }
+}
+
+/// 取第一行第 `index` 列的文本值。
+fn text_at(result: &SqlResult, index: usize) -> String {
+    match &result.rows[0][index] {
+        SqlValue::String(text) => text.clone(),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+/// `NOW` / `CURRENT_DATE` / `CURRENT_TIME` 都从主机时钟取 UTC，并统一渲染成 TEXT：
+/// 时间戳 19 字符 `YYYY-MM-DD HH:MM:SS`，日期 10 字符，时间 8 字符。YYDS 没有原生
+/// 日期类型，网关也不会发出 DATE / TIMESTAMP 的 wire 类型。
+#[test]
+fn sql_date_functions_render_utc_text_in_both_dialects() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        let values =
+            |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under {dialect:?}: {error}"));
+
+        assert_timestamp_shape(&text_at(&values("SELECT NOW()"), 0));
+        assert_timestamp_shape(&text_at(&values("SELECT CURRENT_TIMESTAMP()"), 0));
+        assert_date_shape(&text_at(&values("SELECT CURRENT_DATE()"), 0));
+        assert_time_shape(&text_at(&values("SELECT CURRENT_TIME()"), 0));
+        // 同一语句里两个函数各自取值，形状必须一致。
+        let pair = values("SELECT CURRENT_DATE(), CURRENT_TIME()");
+        assert_date_shape(&text_at(&pair, 0));
+        assert_time_shape(&text_at(&pair, 1));
+    }
+}
+
+/// SQL 标准把 `CURRENT_DATE` / `CURRENT_TIME` / `CURRENT_TIMESTAMP` 写成无括号关键字。
+/// Oak 的树里没有对应节点，因此绑定器在列解析失败后回退成无参内建函数，同名列优先。
+#[test]
+fn sql_bare_date_keywords_bind_as_niladic_functions() {
+    use Lit::{Int, Text};
+    let fixture = Fixture::new();
+    let values = |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}`: {error}"));
+
+    assert_date_shape(&text_at(&values("SELECT CURRENT_DATE"), 0));
+    assert_time_shape(&text_at(&values("SELECT CURRENT_TIME"), 0));
+    assert_timestamp_shape(&text_at(&values("SELECT CURRENT_TIMESTAMP"), 0));
+
+    for sql in SEED {
+        fixture.execute(None, sql).expect("seed");
+    }
+    // 带 FROM 时同样回退：`users` 没有同名列也不会失败。
+    assert_date_shape(&text_at(&values("SELECT CURRENT_DATE FROM users WHERE id = 1"), 0));
+    // 回退后的值仍是普通表达式，可以作为其它函数的参数。
+    assert_eq!(values("SELECT CHAR_LENGTH(CURRENT_DATE) FROM users WHERE id = 1").rows, rows(&[&[Int(10)]]));
+    assert_eq!(values("SELECT SUBSTRING(CURRENT_TIMESTAMP, 5, 1) FROM users WHERE id = 1").rows, rows(&[&[Text("-")]]));
+
+    // 回退只覆盖标准关键字：`NOW` 在两方言里都必须带括号。
+    let error = fixture.execute(None, "SELECT NOW FROM users WHERE id = 1").expect_err("bare NOW");
+    assert!(error.contains("unknown SQL column"), "unexpected reason: {error}");
+}
+
+/// `CURDATE()` / `CURTIME()` 是 MySQL 拼写。PostgreSQL 没有这两个函数，报 `42883`
+/// 而不是把它们当成语法错误或静默接受。
+#[test]
+fn sql_curdate_and_curtime_are_mysql_spellings() {
+    let mysql = Fixture::with_dialect(SqlDialect::Mysql);
+    let values = |sql: &str| mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}"));
+    assert_date_shape(&text_at(&values("SELECT CURDATE()"), 0));
+    assert_time_shape(&text_at(&values("SELECT CURTIME()"), 0));
+
+    let pg = Fixture::with_dialect(SqlDialect::Postgres);
+    for sql in ["SELECT CURDATE()", "SELECT CURTIME()"] {
+        let bound = bind_sql_catalog(sql, &pg.catalog, SCHEMA_VERSION).expect("binds under PostgreSQL");
+        let plan = plan_statement_for_dialect(bound, &pg.catalog, SqlDialect::Postgres).expect("plans");
+        let error = execute_plan(pg.executor.as_ref(), None, &plan, SqlDialect::Postgres)
+            .expect_err("PostgreSQL rejects MySQL spelling");
+        assert_eq!(error.kind, SqlErrorKind::UnknownFunction, "`{sql}`: {}", error.message);
+        assert!(error.message.contains("MySQL spelling"), "`{sql}`: {}", error.message);
+    }
+}
+
+/// 日期函数的参数个数在绑定期拒绝，`EXTRACT` 仍不在网关子集内。
+#[test]
+fn sql_date_function_gaps_are_reported_explicitly() {
+    let fixture = Fixture::new();
+    for sql in ["SELECT CURRENT_DATE(1)", "SELECT CURRENT_TIME('x')", "SELECT NOW(1)", "SELECT CURDATE(1)"] {
+        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err(sql);
+        assert_eq!(error.kind, SqlErrorKind::UnknownFunction, "`{sql}`: {}", error.message);
+    }
+
+    // Oak 把 `EXTRACT(field FROM value)` 解析成普通函数调用，网关在函数白名单上拒绝，
+    // 因为 YYDS 没有日期类型可供抽取，编造一个语义会比报未支持更糟。
+    for sql in ["SELECT EXTRACT(YEAR FROM age) FROM users", "SELECT EXTRACT(age) FROM users"] {
+        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err("EXTRACT must not bind");
+        assert_eq!(error.kind, SqlErrorKind::UnknownFunction, "`{sql}`: {}", error.message);
+        assert!(error.message.contains("EXTRACT"), "`{sql}`: {}", error.message);
+    }
+}
+
 /// `ON CONFLICT DO NOTHING` keeps the stored row and reports zero affected rows,
 /// while `DO UPDATE` rewrites it and reports one. `INSERT ... RETURNING` projects
 /// the rows the statement actually wrote.

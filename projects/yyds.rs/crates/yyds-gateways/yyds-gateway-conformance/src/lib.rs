@@ -925,6 +925,10 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("set operation column count", "SELECT id FROM users UNION SELECT id, name FROM users"),
     ("set operation column type", "SELECT id FROM users UNION SELECT name FROM users"),
     ("FOR UPDATE", "SELECT id FROM users FOR UPDATE"),
+    // 日期函数没有参数形式，`EXTRACT` 也还没有带依据的语义，三者都按未知函数拒绝。
+    ("niladic date function arity", "SELECT CURRENT_DATE(1)"),
+    ("niladic timestamp function arity", "SELECT NOW(1)"),
+    ("unsupported EXTRACT", "SELECT EXTRACT(age) FROM users"),
 ];
 
 /// Every case that both the in-process suite and the real-client suites run.

@@ -4,7 +4,7 @@ use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundCte, SqlBoundDelete,
     SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection,
     SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement,
-    SqlBoundUnaryOperator, SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
+    SqlBoundUnaryOperator, SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
 };
 use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
@@ -895,7 +895,24 @@ fn bind_expression(
             if name.starts_with("@@") {
                 return variables(&name).map(SqlCatalogBoundExpression::Literal);
             }
-            let field = find_field(&name, sources, catalog)?;
+            let field = match find_field(&name, sources, catalog) {
+                Ok(field) => field,
+                // SQL 标准把 `CURRENT_DATE` / `CURRENT_TIME` / `CURRENT_TIMESTAMP` 写成
+                // 无括号关键字，Oak 的树里没有对应节点。列解析失败后回退为无参内建函数，
+                // 同名列优先，作用域与普通列引用一致。
+                Err(error) => {
+                    let keyword =
+                        if error.kind == SqlErrorKind::UnknownColumn { SqlScalarFunction::from_keyword(&name) } else { None };
+                    return match keyword {
+                        Some(function) => Ok(SqlCatalogBoundExpression::Function {
+                            name: function.name().to_ascii_lowercase(),
+                            args: Vec::new(),
+                            distinct: false,
+                        }),
+                        None => Err(error),
+                    };
+                }
+            };
             Ok(SqlCatalogBoundExpression::Column(field))
         }
         SqlBoundExpression::Literal(literal) => Ok(SqlCatalogBoundExpression::Literal(literal)),

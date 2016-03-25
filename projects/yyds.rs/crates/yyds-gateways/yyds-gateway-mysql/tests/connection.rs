@@ -935,6 +935,10 @@ fn error_numbers_reflect_structured_gateway_errors() {
         ("SELECT nope_fn(name) FROM users", 1305, "42000"),
         // MySQL 只有 `TRIM(chars FROM str)`，两参数函数形式是 PostgreSQL 语法。
         ("SELECT TRIM('xxaxx', 'x')", 1064, "42000"),
+        // `EXTRACT` 没有依据的语义，按未知函数拒绝（`1305`），不编造抽取行为。
+        ("SELECT EXTRACT(age) FROM users", 1305, "42000"),
+        // 日期函数不接受参数。
+        ("SELECT CURDATE(1)", 1305, "42000"),
         // 外连接已受支持：未限定列名报歧义，而不是「不支持」。
         ("SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", 1052, "23000"),
         ("SELECT id FROM users RIGHT JOIN orders ON users.id = orders.user_id", 1052, "23000"),
@@ -947,6 +951,26 @@ fn error_numbers_reflect_structured_gateway_errors() {
         let (code, state) = expect_error(&mut client, sql);
         assert_eq!((code, state.as_str()), (*expected_code, *expected_state), "unexpected error for `{sql}`");
     }
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// `CURDATE()` / `CURTIME()` 是 MySQL 拼写，与 `NOW()` 一样返回 UTC 文本。
+#[test]
+fn mysql_date_spellings_render_utc_text_rows() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    let date = expect_single_value(&mut client, "SELECT CURDATE()");
+    assert_eq!(date.len(), 10, "`CURDATE()` renders `YYYY-MM-DD`, got {:?}", String::from_utf8_lossy(&date));
+    let time = expect_single_value(&mut client, "SELECT CURTIME()");
+    assert_eq!(time.len(), 8, "`CURTIME()` renders `HH:MM:SS`, got {:?}", String::from_utf8_lossy(&time));
+    let stamp = expect_single_value(&mut client, "SELECT NOW()");
+    assert_eq!(stamp.len(), 19, "`NOW()` renders `YYYY-MM-DD HH:MM:SS`, got {:?}", String::from_utf8_lossy(&stamp));
 
     drop(client);
     server.join().unwrap();

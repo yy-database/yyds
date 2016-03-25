@@ -165,6 +165,10 @@ fn sqlstate_reflects_structured_gateway_errors() {
     assert_sqlstate(&mut client, "SELECT nope_fn(name) FROM users", b"42883");
     // 负长度在 PostgreSQL 是 `22011`；MySQL 对同一表达式返回空串。
     assert_sqlstate(&mut client, "SELECT SUBSTRING('abcdef', 2, -1)", b"22011");
+    // `CURDATE()` / `CURTIME()` 与 `EXTRACT` 是 MySQL 拼写或未实现的语义，按未知函数报 `42883`。
+    assert_sqlstate(&mut client, "SELECT CURDATE()", b"42883");
+    assert_sqlstate(&mut client, "SELECT CURTIME()", b"42883");
+    assert_sqlstate(&mut client, "SELECT EXTRACT(id) FROM users", b"42883");
     // 外连接已受支持：未限定列名报歧义，而不是「不支持」。
     assert_sqlstate(&mut client, "SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", b"42702");
     assert_sqlstate(&mut client, "SELECT id FROM users RIGHT JOIN orders ON users.id = orders.user_id", b"42702");

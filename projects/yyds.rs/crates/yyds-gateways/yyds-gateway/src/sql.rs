@@ -619,8 +619,17 @@ pub enum SqlScalarFunction {
     Database,
     /// `CURRENT_SCHEMA()` / `SCHEMA()` — current schema name.
     CurrentSchema,
-    /// `NOW()` / `CURRENT_TIMESTAMP()` — session timestamp.
+    /// `NOW()` / `CURRENT_TIMESTAMP()` / bare `CURRENT_TIMESTAMP` — UTC session
+    /// timestamp rendered as TEXT `YYYY-MM-DD HH:MM:SS`.
     Now,
+    /// `CURRENT_DATE()` / bare `CURRENT_DATE` — UTC date rendered as TEXT `YYYY-MM-DD`.
+    CurrentDate,
+    /// `CURRENT_TIME()` / bare `CURRENT_TIME` — UTC time rendered as TEXT `HH:MM:SS`.
+    CurrentTime,
+    /// `CURDATE()` — MySQL spelling of [`Self::CurrentDate`], rejected by PostgreSQL.
+    Curdate,
+    /// `CURTIME()` — MySQL spelling of [`Self::CurrentTime`], rejected by PostgreSQL.
+    Curtime,
     /// `LOWER(x)` / `LCASE(x)`.
     Lower,
     /// `UPPER(x)` / `UCASE(x)`.
@@ -656,6 +665,10 @@ impl SqlScalarFunction {
             "DATABASE" | "CURRENT_DATABASE" => Some(Self::Database),
             "CURRENT_SCHEMA" | "SCHEMA" => Some(Self::CurrentSchema),
             "NOW" | "CURRENT_TIMESTAMP" => Some(Self::Now),
+            "CURRENT_DATE" => Some(Self::CurrentDate),
+            "CURRENT_TIME" => Some(Self::CurrentTime),
+            "CURDATE" => Some(Self::Curdate),
+            "CURTIME" => Some(Self::Curtime),
             "LOWER" | "LCASE" => Some(Self::Lower),
             "UPPER" | "UCASE" => Some(Self::Upper),
             "LENGTH" => Some(Self::Length),
@@ -673,6 +686,20 @@ impl SqlScalarFunction {
         }
     }
 
+    /// Niladic spellings the SQL standard writes without parentheses.
+    ///
+    /// Oak's SQL tree has no node for these keywords, so the catalog binder falls
+    /// back to them only after an unqualified identifier fails to resolve to a
+    /// column. `NOW` is deliberately absent: both dialects require `NOW()`.
+    pub fn from_keyword(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "CURRENT_DATE" => Some(Self::CurrentDate),
+            "CURRENT_TIME" => Some(Self::CurrentTime),
+            "CURRENT_TIMESTAMP" => Some(Self::Now),
+            _ => None,
+        }
+    }
+
     /// Canonical spelling used by diagnostics for this function identity.
     pub fn name(&self) -> &'static str {
         match self {
@@ -680,6 +707,10 @@ impl SqlScalarFunction {
             Self::Database => "DATABASE",
             Self::CurrentSchema => "CURRENT_SCHEMA",
             Self::Now => "NOW",
+            Self::CurrentDate => "CURRENT_DATE",
+            Self::CurrentTime => "CURRENT_TIME",
+            Self::Curdate => "CURDATE",
+            Self::Curtime => "CURTIME",
             Self::Lower => "LOWER",
             Self::Upper => "UPPER",
             Self::Length => "LENGTH",
@@ -700,7 +731,14 @@ impl SqlScalarFunction {
     /// means variadic.
     pub fn arity(&self) -> (usize, Option<usize>) {
         match self {
-            Self::Version | Self::Database | Self::CurrentSchema | Self::Now => (0, Some(0)),
+            Self::Version
+            | Self::Database
+            | Self::CurrentSchema
+            | Self::Now
+            | Self::CurrentDate
+            | Self::CurrentTime
+            | Self::Curdate
+            | Self::Curtime => (0, Some(0)),
             Self::Lower | Self::Upper | Self::Length | Self::CharLength | Self::Abs => (1, Some(1)),
             Self::Round => (1, Some(2)),
             Self::Substring => (2, Some(3)),
@@ -1206,7 +1244,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 SqlFrontendError::new(
                     SqlErrorKind::UnknownFunction,
                     format!(
-                        "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/CHAR_LENGTH/SUBSTRING/TRIM/LTRIM/RTRIM/REPLACE/CONCAT/COALESCE/ABS/ROUND)"
+                        "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/CURRENT_DATE/CURRENT_TIME/CURDATE/CURTIME/LOWER/UPPER/LENGTH/CHAR_LENGTH/SUBSTRING/TRIM/LTRIM/RTRIM/REPLACE/CONCAT/COALESCE/ABS/ROUND)"
                     ),
                 )
             })?;
