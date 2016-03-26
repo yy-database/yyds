@@ -2208,7 +2208,7 @@ fn eval_scalar_function(
         }
         SqlScalarFunction::Coalesce => args.iter().find(|value| **value != Null).cloned().unwrap_or(Null),
         SqlScalarFunction::Abs => match args.first() {
-            Some(Integer(value)) => Integer(value.checked_abs().ok_or_else(|| execute_error("ABS integer overflow"))?),
+            Some(Integer(value)) => Integer(value.checked_abs().ok_or_else(|| numeric_overflow_error("ABS"))?),
             Some(Number(value)) => Number(value.abs()),
             Some(Null) | None => Null,
             Some(_) => Number(0.0),
@@ -2370,9 +2370,7 @@ fn eval_unary(op: SqlBoundUnaryOperator, operand: SqlValue) -> Result<SqlValue, 
             _ => SqlValue::Null,
         },
         SqlBoundUnaryOperator::Minus => match operand {
-            SqlValue::Integer(n) => {
-                SqlValue::Integer(n.checked_neg().ok_or_else(|| execute_error("integer overflow in unary minus"))?)
-            }
+            SqlValue::Integer(n) => SqlValue::Integer(n.checked_neg().ok_or_else(|| numeric_overflow_error("unary minus"))?),
             SqlValue::Number(n) => SqlValue::Number(-n),
             _ => SqlValue::Null,
         },
@@ -2490,7 +2488,7 @@ fn compare_integer_float(integer: i64, float: f64) -> Option<std::cmp::Ordering>
 /// 整数之间的四则与比较：加、减、乘、模保持精确整数，只在溢出时显式报错。
 fn integer_binary(op: SqlBoundBinaryOperator, a: i64, b: i64, dialect: SqlDialect) -> Result<SqlValue, SqlFrontendError> {
     use SqlValue::{Boolean, Integer, Number};
-    let overflow = || execute_error("integer overflow");
+    let overflow = || numeric_overflow_error("integer arithmetic");
     let divide_by_zero = || match dialect {
         SqlDialect::Postgres => Err(division_by_zero_error()),
         SqlDialect::Mysql => Ok(SqlValue::Null),
@@ -2750,6 +2748,11 @@ fn execute_error(message: &str) -> SqlFrontendError {
 
 fn division_by_zero_error() -> SqlFrontendError {
     SqlFrontendError::new(SqlErrorKind::DivisionByZero, "division by zero")
+}
+
+/// 精确整数运算越界。两方言都要报 SQLSTATE `22003`，因此不降级成通用执行错误。
+fn numeric_overflow_error(stage: &str) -> SqlFrontendError {
+    SqlFrontendError::new(SqlErrorKind::NumericOverflow, format!("{stage} overflowed the integer range"))
 }
 
 /// Storage failures that other transactions can resolve by retrying are

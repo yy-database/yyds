@@ -169,6 +169,9 @@ fn sqlstate_reflects_structured_gateway_errors() {
     assert_sqlstate(&mut client, "SELECT CURDATE()", b"42883");
     assert_sqlstate(&mut client, "SELECT CURTIME()", b"42883");
     assert_sqlstate(&mut client, "SELECT EXTRACT(id) FROM users", b"42883");
+    // 精确整数越界报 `22003`，与除零 `22012` 分开。
+    assert_sqlstate(&mut client, "SELECT 9223372036854775807 + 1", b"22003");
+    assert_sqlstate(&mut client, "SELECT 9223372036854775807 * 2", b"22003");
     // 外连接已受支持：未限定列名报歧义，而不是「不支持」。
     assert_sqlstate(&mut client, "SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", b"42702");
     assert_sqlstate(&mut client, "SELECT id FROM users RIGHT JOIN orders ON users.id = orders.user_id", b"42702");

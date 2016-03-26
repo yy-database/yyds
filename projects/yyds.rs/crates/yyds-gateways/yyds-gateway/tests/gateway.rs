@@ -452,8 +452,9 @@ fn sql_int64_round_trip_preserves_precision_beyond_f64() {
     let bound = yyds_gateway::bind_sql_catalog(&format!("SELECT age + 2 FROM users WHERE id = {id}"), &catalog, 7)
         .expect("overflow select bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("overflow select plan");
-    let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("integer overflow must fail");
-    assert!(error.message.contains("integer overflow"), "{}", error.message);
+    let error =
+        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("integer overflow must fail");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::NumericOverflow, "{}", error.message);
 }
 
 #[test]

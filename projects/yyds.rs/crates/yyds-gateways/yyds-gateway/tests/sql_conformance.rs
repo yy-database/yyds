@@ -13,9 +13,9 @@ use yyds_gateway::{
     SqlErrorKind, SqlParameterStyle, SqlResult, SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, group_cases, null_order_cases, order_cases, returning_cases, rows, set_operation_cases,
-    string_function_cases, type_cases, upsert_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION,
-    SEED, USERS_SCHEMA,
+    crud_cases, distinct_cases, group_cases, null_order_cases, numeric_cases, order_cases, returning_cases, rows,
+    set_operation_cases, string_function_cases, type_cases, upsert_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS,
+    REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -177,6 +177,36 @@ fn sql_conformance_set_operations() {
 #[test]
 fn sql_conformance_string_functions() {
     run_cases(&string_function_cases());
+}
+
+#[test]
+fn sql_conformance_numeric_semantics() {
+    run_cases(&numeric_cases());
+}
+
+/// 精确整数运算越界时两方言都必须报 SQLSTATE `22003`：PostgreSQL 没有厂商错误号，
+/// MySQL 用 `1690`。这里断言结构化分类，具体 wire 码由适配器套件覆盖。
+#[test]
+fn sql_integer_overflow_reports_numeric_out_of_range() {
+    let overflow_sql = [
+        "SELECT 9223372036854775807 + 1",
+        "SELECT -9223372036854775807 - 2",
+        "SELECT 9223372036854775807 * 2",
+        "SELECT -(-9223372036854775808)",
+        "SELECT ABS(-9223372036854775808)",
+    ];
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        let fixture = Fixture::with_dialect(dialect);
+        for sql in overflow_sql {
+            let bound = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION)
+                .unwrap_or_else(|error| panic!("`{sql}` must bind: {}", error.message));
+            let plan = plan_statement_for_dialect(bound, &fixture.catalog, dialect)
+                .unwrap_or_else(|error| panic!("`{sql}` must plan: {}", error.message));
+            let error = execute_plan(fixture.executor.as_ref(), None, &plan, dialect).expect_err(sql);
+            assert_eq!(error.kind, SqlErrorKind::NumericOverflow, "`{sql}` under {dialect:?}: {}", error.message);
+            assert!(error.message.contains("overflow"), "`{sql}` under {dialect:?}: {}", error.message);
+        }
+    }
 }
 
 /// 字符串函数在两方言上共享的部分：1-based 下标、字符计数与 NULL 传播。

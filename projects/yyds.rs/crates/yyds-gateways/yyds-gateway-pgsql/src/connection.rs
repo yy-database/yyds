@@ -546,6 +546,7 @@ fn pg_sqlstate(kind: SqlErrorKind) -> &'static str {
         Conflict => "40001",
         Execution => "XX000",
         DivisionByZero => "22012",
+        NumericOverflow => "22003",
         InvalidSubstringLength => "22011",
     }
 }

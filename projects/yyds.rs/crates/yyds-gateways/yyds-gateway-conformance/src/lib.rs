@@ -936,6 +936,7 @@ pub fn all_cases() -> Vec<Case> {
     let mut cases = crud_cases();
     cases.extend(type_cases());
     cases.extend(string_function_cases());
+    cases.extend(numeric_cases());
     cases.extend(distinct_cases());
     cases.extend(group_cases());
     cases.extend(order_cases());
@@ -944,6 +945,37 @@ pub fn all_cases() -> Vec<Case> {
     cases.extend(upsert_cases());
     cases.extend(returning_cases());
     cases
+}
+
+/// Exact numeric semantics. `i64` arithmetic stays exact and only promotes when
+/// a `f64` operand is present, which both dialects agree on. Integer division and
+/// modulo-by-zero differ per dialect, so those cases name a single driver instead
+/// of sharing one expectation.
+pub fn numeric_cases() -> Vec<Case> {
+    use Lit::{Bool, Float, Int, Null};
+
+    vec![
+        case("mixed int and float addition").sql("SELECT 1 + 1.5").rows(&[&[Float(2.5)]]).build(),
+        case("mixed float and int subtraction").sql("SELECT 3.0 - 1").rows(&[&[Float(2.0)]]).build(),
+        case("mixed int and float multiplication").sql("SELECT 2 * 1.5").rows(&[&[Float(3.0)]]).build(),
+        case("int equality against float").sql("SELECT 1 = 1.0").rows(&[&[Bool(true)]]).build(),
+        case("int and float compare beyond f64 precision")
+            .sql("SELECT 9007199254740993 > 9007199254740992.0")
+            .rows(&[&[Bool(true)]])
+            .build(),
+        case("modulo keeps the dividend sign").sql("SELECT -7 % 2").rows(&[&[Int(-1)]]).build(),
+        case("modulo accepts a negative divisor").sql("SELECT 7 % -2").rows(&[&[Int(1)]]).build(),
+        // PostgreSQL 的整数除法向零截断，MySQL 把 INT / INT 提升成浮点。
+        case("integer division truncates toward zero")
+            .sql("SELECT -7 / 2")
+            .rows(&[&[Int(-3)]])
+            .only(Driver::Postgres)
+            .build(),
+        case("integer division promotes to float").sql("SELECT -7 / 2").rows(&[&[Float(-3.5)]]).only(Driver::Mysql).build(),
+        // MySQL 的 `/ 0` 返回 NULL，PostgreSQL 直接报错（错误码由适配器套件断言）。
+        case("division by zero yields null").sql("SELECT 1 / 0").rows(&[&[Null]]).only(Driver::Mysql).build(),
+        case("modulo by zero yields null").sql("SELECT 7 % 0").rows(&[&[Null]]).only(Driver::Mysql).build(),
+    ]
 }
 
 /// Real-client driver.

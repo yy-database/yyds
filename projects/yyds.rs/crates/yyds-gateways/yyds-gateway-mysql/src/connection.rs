@@ -716,6 +716,8 @@ fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
         Conflict => (1213, "40001"),
         Execution => (1105, "HY000"),
         DivisionByZero => (1365, "22012"),
+        // MySQL 用 `1690` 报 BIGINT 越界，SQLSTATE 与 PostgreSQL 一致是 `22003`。
+        NumericOverflow => (1690, "22003"),
         // PostgreSQL-only 分类：MySQL 对负长度返回空串，因此不会走到这里。
         InvalidSubstringLength => (1105, "HY000"),
     }

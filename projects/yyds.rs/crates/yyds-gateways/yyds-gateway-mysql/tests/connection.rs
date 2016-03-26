@@ -939,6 +939,8 @@ fn error_numbers_reflect_structured_gateway_errors() {
         ("SELECT EXTRACT(age) FROM users", 1305, "42000"),
         // 日期函数不接受参数。
         ("SELECT CURDATE(1)", 1305, "42000"),
+        // 精确整数越界是 MySQL 的 `1690`，SQLSTATE 与 PostgreSQL 同为 `22003`。
+        ("SELECT 9223372036854775807 + 1", 1690, "22003"),
         // 外连接已受支持：未限定列名报歧义，而不是「不支持」。
         ("SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", 1052, "23000"),
         ("SELECT id FROM users RIGHT JOIN orders ON users.id = orders.user_id", 1052, "23000"),

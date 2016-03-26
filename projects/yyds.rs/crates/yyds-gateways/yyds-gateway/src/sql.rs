@@ -49,6 +49,9 @@ pub enum SqlErrorKind {
     /// `SUBSTRING` was given a negative length. PostgreSQL rejects it with SQLSTATE
     /// `22011`, while MySQL returns an empty string, so this category is PostgreSQL-only.
     InvalidSubstringLength,
+    /// Exact integer arithmetic left the `i64` range. Both dialects report SQLSTATE
+    /// `22003`, but MySQL names it with its own error number `1690`.
+    NumericOverflow,
 }
 
 /// Structured failure from the Oak SQL frontend or gateway binder.
