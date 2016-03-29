@@ -1221,12 +1221,21 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 Ok(in_expr)
             }
         }
-        Expression::FunctionCall { name, args, distinct, .. } => {
+        Expression::FunctionCall { name, args, distinct, window, .. } => {
             // Canonical lower-case name: description inference matches the
             // documented spelling, while execution stays case-insensitive.
             // Diagnostics keep the spelling the query used.
             let display = normalize_identifier(name.name.as_ref());
             let fname = display.to_ascii_lowercase();
+
+            // Oak now parses `OVER (...)`; the gateway has no window evaluation
+            // yet, so a windowed call is rejected instead of silently running as
+            // a plain aggregate over the whole table.
+            if window.is_some() {
+                return Err(SqlFrontendError::unsupported(format!(
+                    "SQL window functions are not supported yet: {display}(...) OVER (...)"
+                )));
+            }
 
             let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
