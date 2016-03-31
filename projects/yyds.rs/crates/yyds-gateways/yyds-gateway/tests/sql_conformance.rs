@@ -14,8 +14,8 @@ use yyds_gateway::{
 };
 use yyds_gateway_conformance::{
     crud_cases, distinct_cases, group_cases, null_order_cases, numeric_cases, order_cases, returning_cases, rows,
-    set_operation_cases, string_function_cases, type_cases, upsert_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS,
-    REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    set_operation_cases, string_function_cases, type_cases, upsert_cases, window_cases, Case, Driver, Lit,
+    DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -157,6 +157,13 @@ fn sql_conformance_distinct() {
 #[test]
 fn sql_conformance_group_by_and_having() {
     run_cases(&group_cases());
+}
+
+/// 窗口函数：分区 + 排序的排名、默认 frame 的累计/整分区聚合、显式 `ROWS` frame
+/// 与方言 `NULL` 位置。排名函数和聚合窗口都在执行层真实计算，不返回近似值。
+#[test]
+fn sql_conformance_windows() {
+    run_cases(&window_cases());
 }
 
 #[test]

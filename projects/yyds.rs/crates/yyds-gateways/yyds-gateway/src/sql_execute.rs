@@ -16,10 +16,11 @@ use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
-    catalog_bind::{collect_column_ids, ROW_ID_STRIDE, SqlCatalogBoundExpression},
+    catalog_bind::{collect_column_ids, ROW_ID_STRIDE, SqlCatalogBoundExpression, SqlCatalogBoundWindowSpec},
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundSetOperator,
-        SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
+        SqlBoundUnaryOperator, SqlBoundWindowFrameBound, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
+        SqlScalarFunction, SqlWindowFunction,
     },
     sql_planner::{
         check_write_literal, pk_literal_to_rowid, ConflictAssignment, ConflictPolicy, DeletePlan, DeleteScanPlan,
@@ -492,10 +493,11 @@ fn lower_expression(
         SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
             expression
         }
-        SqlCatalogBoundExpression::Function { name, args, distinct } => SqlCatalogBoundExpression::Function {
+        SqlCatalogBoundExpression::Function { name, args, distinct, window } => SqlCatalogBoundExpression::Function {
             name,
             args: args.into_iter().map(|arg| lower_expression(arg, executor, transaction, dialect)).collect::<Result<Vec<_>, _>>()?,
             distinct,
+            window,
         },
         SqlCatalogBoundExpression::Binary { left, operator, right } => SqlCatalogBoundExpression::Binary {
             left: Box::new(lower_expression(*left, executor, transaction, dialect)?),
@@ -914,6 +916,56 @@ fn execute_scan(
     // 避免先收集全量 rows 再排序。容量 = offset + limit（limit=0 视为无限，fallback 到 Vec）。
     let use_top_n = plan.order_by.is_some() && (plan.limit_after_sort > 0 || plan.offset_after_sort > 0);
 
+    if plan.has_window {
+        // —— 窗口路径：先解码 + 过滤得到输入行集合，再按分区求值，最后套用
+        // DISTINCT / ORDER BY / LIMIT ——
+        let mut rows: Vec<RowFieldValues> = Vec::new();
+        for (_rowid, value_bytes) in scanned {
+            let row = decode_row_fields(&value_bytes, &needed_ids)?;
+            if let Some(ref predicate) = plan.remaining_predicate {
+                let v = eval_expression(predicate, &row, &plan.field_types, dialect)?;
+                if !truthy(&v) {
+                    continue;
+                }
+            }
+            rows.push(row);
+        }
+
+        // 每个窗口投影整列求值一次；其余表达式仍按行求值。
+        let mut window_columns: Vec<Option<Vec<SqlValue>>> = Vec::with_capacity(plan.projection_expressions.len());
+        for (expr, _) in &plan.projection_expressions {
+            window_columns.push(match expr {
+                SqlCatalogBoundExpression::Function { window: Some(_), .. } => {
+                    Some(eval_window_projection(expr, &rows, &plan.field_types, plan.nulls_first, dialect)?)
+                }
+                _ => None,
+            });
+        }
+
+        let mut staged: Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)> = Vec::with_capacity(rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            let sort_keys: Vec<Option<SqlValue>> = match &plan.order_by {
+                Some(items) => items
+                    .iter()
+                    .map(|item| Ok(Some(eval_expression(&item.expression, row, &plan.field_types, dialect)?)))
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => Vec::new(),
+            };
+            let mut row_values: Vec<SqlValue> = Vec::new();
+            for (field_id, _) in &plan.projection_fields {
+                row_values.push(row.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
+            }
+            for (position, (expr, _)) in plan.projection_expressions.iter().enumerate() {
+                match &window_columns[position] {
+                    Some(values) => row_values.push(values[index].clone()),
+                    None => row_values.push(eval_expression(expr, row, &plan.field_types, dialect)?),
+                }
+            }
+            staged.push((sort_keys, row_values));
+        }
+        return Ok(finish_scan_staged(plan, columns, staged));
+    }
+
     if plan.has_aggregate && plan.group_by.is_none() {
         // —— 全局聚合路径（无 GROUP BY）：需要访问所有 post-filter rows，无 heap 收益 ——
         let mut all_rows: Vec<RowFieldValues> = Vec::new();
@@ -1111,6 +1163,18 @@ fn execute_scan(
         }
         staged.push((sort_keys, row_values));
     }
+    Ok(finish_scan_staged(plan, columns, staged))
+}
+
+/// 对已求值的投影行套用 `DISTINCT`、`ORDER BY` 与 `OFFSET` / `LIMIT`。
+///
+/// 常规扫描路径与窗口路径共用这一段，保证两条路径的 DISTINCT、NULL 排序和分页
+/// 语义只实现一次。
+fn finish_scan_staged(
+    plan: &ScanPlan,
+    columns: Vec<String>,
+    mut staged: Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)>,
+) -> SqlResult {
     if plan.distinct {
         retain_distinct_projected_rows(&mut staged);
     }
@@ -1141,7 +1205,7 @@ fn execute_scan(
     let rows: Vec<Vec<SqlValue>> =
         staged.into_iter().skip(offset).take(if limit == 0 { usize::MAX } else { limit }).map(|(_, r)| r).collect();
 
-    Ok(SqlResult { columns, rows, affected_rows: 0 })
+    SqlResult { columns, rows, affected_rows: 0 }
 }
 
 /// 执行层内部：Top-N heap 用的可排序行。
@@ -1759,6 +1823,153 @@ fn sql_or(left: &SqlValue, right: &SqlValue) -> SqlValue {
     }
 }
 
+/// 求值一个窗口函数投影：按 `PARTITION BY` 分桶，桶内按窗口 `ORDER BY` 排序，
+/// 再为每一行算出排名值或聚合窗口值。返回值按输入行下标对齐。
+fn eval_window_projection(
+    expr: &SqlCatalogBoundExpression,
+    rows: &[RowFieldValues],
+    field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    nulls_first: bool,
+    dialect: SqlDialect,
+) -> Result<Vec<SqlValue>, SqlFrontendError> {
+    let (name, spec) = match expr {
+        SqlCatalogBoundExpression::Function { name, window: Some(spec), .. } => (name, spec),
+        _ => return Err(execute_error(&format!("window evaluation requires a window function call: {expr:?}"))),
+    };
+    let ranking = SqlWindowFunction::from_name(name);
+    let aggregate = SqlAggregateFunction::from_name(name);
+    if ranking.is_none() && aggregate.is_none() {
+        return Err(execute_error(&format!("unknown window function: {name}")));
+    }
+
+    // 分区 key 复用 GROUP BY 的稳定序列化：两个 NULL 落在同一分区，而 `1` 与 `'1'`
+    // 不会混在一起。
+    let mut partitions: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let key_values = spec
+            .partition_by
+            .iter()
+            .map(|partition| eval_expression(partition, row, field_types, dialect))
+            .collect::<Result<Vec<_>, _>>()?;
+        partitions.entry(serialize_group_key(&key_values)).or_default().push(index);
+    }
+
+    let mut values = vec![SqlValue::Null; rows.len()];
+    for indices in partitions.into_values() {
+        // 窗口 ORDER BY 的排序键：NULL 位置沿用方言默认，与普通 ORDER BY 同一套规则。
+        let mut keyed: Vec<(Vec<Option<SqlValue>>, usize)> = Vec::with_capacity(indices.len());
+        for index in indices {
+            let keys = spec
+                .order_by
+                .iter()
+                .map(|item| Ok(Some(eval_expression(&item.expression, &rows[index], field_types, dialect)?)))
+                .collect::<Result<Vec<_>, SqlFrontendError>>()?;
+            keyed.push((keys, index));
+        }
+        let orderings = spec
+            .order_by
+            .iter()
+            .map(|item| (item.direction.clone(), order_nulls_first(&item.direction, item.nulls, nulls_first)))
+            .collect::<Vec<_>>();
+        keyed.sort_by(|a, b| {
+            for (position, (direction, nulls_first)) in orderings.iter().enumerate() {
+                let ordering = compare_values_with_nulls(a.0[position].as_ref(), b.0[position].as_ref(), *nulls_first);
+                if ordering != std::cmp::Ordering::Equal {
+                    return match direction {
+                        SqlBoundOrderDirection::Asc => ordering,
+                        SqlBoundOrderDirection::Desc => ordering.reverse(),
+                    };
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+
+        // peer 组：排序键完全相同的行共享排名，也决定默认 frame 的上界。
+        let mut peer_start = vec![0usize; keyed.len()];
+        let mut peer_end = vec![0usize; keyed.len()];
+        let mut dense_rank = vec![0i64; keyed.len()];
+        let mut start = 0usize;
+        let mut group = 0i64;
+        while start < keyed.len() {
+            let mut end = start + 1;
+            while end < keyed.len() && peer_keys_equal(&keyed[start].0, &keyed[end].0) {
+                end += 1;
+            }
+            group += 1;
+            for position in start..end {
+                peer_start[position] = start;
+                peer_end[position] = end;
+                dense_rank[position] = group;
+            }
+            start = end;
+        }
+
+        let ordered_rows: Vec<RowFieldValues> = keyed.iter().map(|(_, index)| rows[*index].clone()).collect();
+        for (position, (_, index)) in keyed.iter().enumerate() {
+            let value = match ranking {
+                Some(SqlWindowFunction::RowNumber) => {
+                    SqlValue::Integer(i64::try_from(position + 1).unwrap_or(i64::MAX))
+                }
+                Some(SqlWindowFunction::Rank) => {
+                    SqlValue::Integer(i64::try_from(peer_start[position] + 1).unwrap_or(i64::MAX))
+                }
+                Some(SqlWindowFunction::DenseRank) => SqlValue::Integer(dense_rank[position]),
+                _ => {
+                    let (frame_start, frame_end) = window_frame_bounds(spec, position, peer_end[position], ordered_rows.len());
+                    let frame = if frame_start < frame_end { &ordered_rows[frame_start..frame_end] } else { &ordered_rows[0..0] };
+                    eval_aggregate(expr, frame, field_types, dialect)?
+                }
+            };
+            values[*index] = value;
+        }
+    }
+    Ok(values)
+}
+
+/// 计算当前行上的窗口 frame 在排序后分区内的 `[start, end)` 区间。
+///
+/// 没有显式 frame 时按 SQL 默认：有 `ORDER BY` 的聚合窗口累计到当前行的 peer 组末尾
+/// （`RANGE UNBOUNDED PRECEDING TO CURRENT ROW`），没有 `ORDER BY` 时覆盖整个分区。
+fn window_frame_bounds(
+    spec: &SqlCatalogBoundWindowSpec,
+    position: usize,
+    peer_end: usize,
+    len: usize,
+) -> (usize, usize) {
+    let Some(frame) = spec.frame.as_ref()
+    else {
+        return if spec.order_by.is_empty() { (0, len) } else { (0, peer_end) };
+    };
+    let limit = i64::try_from(len).unwrap_or(i64::MAX);
+    let start = frame_bound_position(frame.start, position).clamp(0, limit) as usize;
+    let end_exclusive = match frame.end {
+        Some(bound) => frame_bound_position(bound, position).clamp(-1, limit).saturating_add(1),
+        None => frame_bound_position(SqlBoundWindowFrameBound::CurrentRow, position).saturating_add(1),
+    };
+    (start, end_exclusive.clamp(0, limit) as usize)
+}
+
+/// 把一个 frame bound 换算成当前行上的绝对行位置。
+fn frame_bound_position(bound: SqlBoundWindowFrameBound, position: usize) -> i64 {
+    let row = i64::try_from(position).unwrap_or(i64::MAX);
+    match bound {
+        SqlBoundWindowFrameBound::UnboundedPreceding => 0,
+        SqlBoundWindowFrameBound::UnboundedFollowing => i64::MAX,
+        SqlBoundWindowFrameBound::CurrentRow => row,
+        SqlBoundWindowFrameBound::Preceding(offset) => row - i64::try_from(offset).unwrap_or(i64::MAX),
+        SqlBoundWindowFrameBound::Following(offset) => row.saturating_add(i64::try_from(offset).unwrap_or(i64::MAX)),
+    }
+}
+
+/// 两个窗口排序键是否属于同一个 peer 组。
+fn peer_keys_equal(left: &[Option<SqlValue>], right: &[Option<SqlValue>]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right.iter())
+            .all(|(left, right)| compare_values_with_nulls(left.as_ref(), right.as_ref(), false) == std::cmp::Ordering::Equal)
+}
+
 /// 对一个聚合函数在所有收集到的行上求值，返回单个 SqlValue。
 fn eval_aggregate(
     expr: &SqlCatalogBoundExpression,
@@ -1767,7 +1978,7 @@ fn eval_aggregate(
     dialect: SqlDialect,
 ) -> Result<SqlValue, SqlFrontendError> {
     let (name, args, distinct) = match expr {
-        SqlCatalogBoundExpression::Function { name, args, distinct } => (name.clone(), args.clone(), *distinct),
+        SqlCatalogBoundExpression::Function { name, args, distinct, .. } => (name.clone(), args.clone(), *distinct),
         _ => return Err(execute_error(&format!("eval_aggregate: non-Function expression encountered: {expr:?}"))),
     };
 
@@ -1922,7 +2133,11 @@ fn eval_expression(
             let r = eval_expression(right, row, field_types, dialect)?;
             eval_binary(*operator, &l, &r, dialect)?
         }
-        SqlCatalogBoundExpression::Function { name, args, distinct } => {
+        // 窗口函数需要整列上下文，必须由窗口路径批量求值。
+        SqlCatalogBoundExpression::Function { window: Some(_), .. } => {
+            return Err(execute_error("window function was not evaluated by the window pass"))
+        }
+        SqlCatalogBoundExpression::Function { name, args, .. } => {
             let scalar = SqlScalarFunction::from_name(name)
                 .ok_or_else(|| execute_error(&format!("aggregate function {name} cannot be evaluated on a single row")))?;
             let mut values = Vec::with_capacity(args.len());
@@ -2695,7 +2910,7 @@ fn eval_having(
         SqlCatalogBoundExpression::Wildcard => {
             return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
         }
-        SqlCatalogBoundExpression::Function { name, args, distinct } => {
+        SqlCatalogBoundExpression::Function { name, args, .. } => {
             if SqlAggregateFunction::from_name(name).is_some() {
                 eval_aggregate(expr, bucket_rows, field_types, dialect)?
             }

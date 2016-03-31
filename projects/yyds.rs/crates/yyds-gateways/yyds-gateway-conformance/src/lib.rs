@@ -776,6 +776,128 @@ pub fn group_cases() -> Vec<Case> {
     ]
 }
 
+/// Window functions: ranking over a partition and order, aggregate windows over
+/// the default frame, explicit `ROWS` frames, and dialect-dependent `NULL`
+/// placement of the window `ORDER BY`.
+///
+/// The default frame is the SQL one: an ordered aggregate window accumulates
+/// through the peer group of the current row, an unordered one covers the whole
+/// partition. `ROWS` frames count physical rows instead, so the two must not be
+/// confused.
+pub fn window_cases() -> Vec<Case> {
+    use Lit::{Float, Int, Null};
+
+    vec![
+        case("window row number over partition and order")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, ROW_NUMBER() OVER (PARTITION BY active ORDER BY age) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(1)], &[Int(2), Int(1)], &[Int(3), Int(2)], &[Int(4), Int(2)]])
+            .build(),
+        case("window rank and dense rank with ties")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, RANK() OVER (ORDER BY age), DENSE_RANK() OVER (ORDER BY age) FROM users ORDER BY id")
+            .rows(&[
+                &[Int(1), Int(2), Int(2)],
+                &[Int(2), Int(1), Int(1)],
+                &[Int(3), Int(4), Int(3)],
+                &[Int(4), Int(2), Int(2)],
+            ])
+            .build(),
+        case("window order descending with ties")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, ROW_NUMBER() OVER (ORDER BY age DESC, id DESC) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(3)], &[Int(2), Int(4)], &[Int(3), Int(1)], &[Int(4), Int(2)]])
+            .build(),
+        case("window order follows dialect null placement")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id, ROW_NUMBER() OVER (ORDER BY tag) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(2)], &[Int(2), Int(3)], &[Int(3), Int(1)], &[Int(4), Int(4)]])
+            .rows_for(Driver::Mysql, &[&[Int(1), Int(4)], &[Int(2), Int(1)], &[Int(3), Int(3)], &[Int(4), Int(2)]])
+            .build(),
+        case("window over empty table")
+            .setup(&[])
+            .state(DEFAULT_STATE_COLUMNS, &[])
+            .sql("SELECT id, COUNT(*) OVER (PARTITION BY active) FROM users ORDER BY id")
+            .rows(&[])
+            .build(),
+        case("window partition of only nulls")
+            .setup(NULL_GROUP_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_group_state())
+            .sql("SELECT id, COUNT(*) OVER (PARTITION BY tag), RANK() OVER (ORDER BY tag) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(2), Int(1)], &[Int(2), Int(2), Int(1)]])
+            .build(),
+        case("window cumulative sum of default frame")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(score) OVER (PARTITION BY active ORDER BY age) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Float(1.5)], &[Int(2), Float(2.5)], &[Int(3), Float(4.75)], &[Int(4), Float(3.0)]])
+            .build(),
+        case("window whole partition count and max")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, COUNT(*) OVER (PARTITION BY active), MAX(age) OVER (PARTITION BY active) FROM users ORDER BY id")
+            .rows(&[
+                &[Int(1), Int(2), Int(40)],
+                &[Int(2), Int(2), Int(30)],
+                &[Int(3), Int(2), Int(40)],
+                &[Int(4), Int(2), Int(30)],
+            ])
+            .build(),
+        case("window whole partition sum and average")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (PARTITION BY active), AVG(age) OVER (PARTITION BY active) FROM users ORDER BY id")
+            .rows(&[
+                &[Int(1), Int(70), Float(35.0)],
+                &[Int(2), Int(50), Float(25.0)],
+                &[Int(3), Int(70), Float(35.0)],
+                &[Int(4), Int(50), Float(25.0)],
+            ])
+            .build(),
+        case("window default frame shares peer rows")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (ORDER BY age) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(80)], &[Int(2), Int(20)], &[Int(3), Int(120)], &[Int(4), Int(80)]])
+            .build(),
+        case("window rows frame unbounded preceding")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql(
+                "SELECT id, SUM(age) OVER (ORDER BY age ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users ORDER BY id",
+            )
+            .rows(&[&[Int(1), Int(50)], &[Int(2), Int(20)], &[Int(3), Int(120)], &[Int(4), Int(80)]])
+            .build(),
+        case("window rows frame one preceding")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (ORDER BY age ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(50)], &[Int(2), Int(20)], &[Int(3), Int(70)], &[Int(4), Int(60)]])
+            .build(),
+        case("window rows frame to unbounded following")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql(
+                "SELECT id, SUM(age) OVER (ORDER BY age ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM users ORDER BY id",
+            )
+            .rows(&[&[Int(1), Int(100)], &[Int(2), Int(120)], &[Int(3), Int(40)], &[Int(4), Int(70)]])
+            .build(),
+        case("window rows frame past the partition end")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql(
+                "SELECT id, COUNT(*) OVER (ORDER BY age ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING), \
+                 SUM(age) OVER (ORDER BY age ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING) FROM users ORDER BY id",
+            )
+            .rows(&[&[Int(1), Int(1), Int(40)], &[Int(2), Int(2), Int(70)], &[Int(3), Int(0), Null], &[Int(4), Int(0), Null]])
+            .build(),
+    ]
+}
+
 /// Set-operation behavior: `UNION` de-duplicates, `UNION ALL` keeps duplicates,
 /// `INTERSECT` keeps common rows and `EXCEPT` keeps the left-only rows.
 ///
@@ -929,6 +1051,22 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("niladic date function arity", "SELECT CURRENT_DATE(1)"),
     ("niladic timestamp function arity", "SELECT NOW(1)"),
     ("unsupported EXTRACT", "SELECT EXTRACT(age) FROM users"),
+    // 窗口函数只实现有依据的子集：其余形式显式拒绝，不做近似求值。
+    ("window RANGE frame", "SELECT id, SUM(age) OVER (ORDER BY age RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users"),
+    ("window GROUPS frame", "SELECT id, SUM(age) OVER (ORDER BY age GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users"),
+    (
+        "window frame EXCLUDE",
+        "SELECT id, SUM(age) OVER (ORDER BY age ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM users",
+    ),
+    ("window frame starting at a following row", "SELECT id, SUM(age) OVER (ORDER BY age ROWS 1 FOLLOWING) FROM users"),
+    ("window function in WHERE", "SELECT id FROM users WHERE ROW_NUMBER() OVER (ORDER BY age) = 1"),
+    ("window function in ORDER BY", "SELECT id FROM users ORDER BY ROW_NUMBER() OVER (ORDER BY age)"),
+    ("window function with GROUP BY", "SELECT age, ROW_NUMBER() OVER (ORDER BY age) FROM users GROUP BY age"),
+    ("window function inside a larger expression", "SELECT id, ROW_NUMBER() OVER (ORDER BY age) + 1 FROM users"),
+    ("window function inside an aggregate argument", "SELECT SUM(ROW_NUMBER() OVER (ORDER BY age)) FROM users"),
+    ("unimplemented window function", "SELECT id, NTILE(2) OVER (ORDER BY age) FROM users"),
+    ("unimplemented offset window function", "SELECT id, LAG(age) OVER (ORDER BY age) FROM users"),
+    ("named window", "SELECT id, ROW_NUMBER() OVER w FROM users WINDOW w AS (ORDER BY age)"),
 ];
 
 /// Every case that both the in-process suite and the real-client suites run.
@@ -939,6 +1077,7 @@ pub fn all_cases() -> Vec<Case> {
     cases.extend(numeric_cases());
     cases.extend(distinct_cases());
     cases.extend(group_cases());
+    cases.extend(window_cases());
     cases.extend(order_cases());
     cases.extend(null_order_cases());
     cases.extend(set_operation_cases());

@@ -393,6 +393,45 @@ pub enum SqlNullsOrder {
     Last,
 }
 
+/// One `OVER (...)` clause attached to a window function call.
+///
+/// `RANGE` frames are rejected while binding, so this type never carries a
+/// frame unit: an explicit frame here is always a `ROWS` frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundWindowSpec {
+    /// `PARTITION BY` expressions, in source order.
+    pub partition_by: Vec<SqlBoundExpression>,
+    /// Window `ORDER BY` items, in source order.
+    pub order_by: Vec<SqlBoundOrderByItem>,
+    /// Explicit `ROWS ...` frame, when one was written.
+    pub frame: Option<SqlBoundWindowFrame>,
+}
+
+/// Explicit window frame bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlBoundWindowFrame {
+    /// The bound the frame starts at.
+    pub start: SqlBoundWindowFrameBound,
+    /// The bound the frame ends at. The single-bound spelling is normalized to
+    /// `CURRENT ROW` here, so execution always sees both bounds.
+    pub end: Option<SqlBoundWindowFrameBound>,
+}
+
+/// One bound of an explicit `ROWS` frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlBoundWindowFrameBound {
+    /// `UNBOUNDED PRECEDING`.
+    UnboundedPreceding,
+    /// `n PRECEDING`.
+    Preceding(u64),
+    /// `CURRENT ROW`.
+    CurrentRow,
+    /// `n FOLLOWING`.
+    Following(u64),
+    /// `UNBOUNDED FOLLOWING`.
+    UnboundedFollowing,
+}
+
 /// SQL INSERT request owned by the compatibility gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundInsert {
@@ -540,6 +579,8 @@ pub enum SqlBoundExpression {
         args: Vec<SqlBoundExpression>,
         /// Whether the aggregate uses `DISTINCT` quantifier. Only meaningful on COUNT/SUM/AVG.
         distinct: bool,
+        /// `OVER (...)` clause when the call is a window function.
+        window: Option<SqlBoundWindowSpec>,
     },
     /// `expr IN (<subquery>)` / `expr NOT IN (<subquery>)`.
     InSubquery {
@@ -606,6 +647,38 @@ impl SqlAggregateFunction {
             Self::AVG => "AVG",
             Self::MAX => "MAX",
             Self::MIN => "MIN",
+        }
+    }
+}
+
+/// SQL window-only function identity recognized by the gateway.
+///
+/// These are ranking functions: they take no argument and always require an
+/// `OVER (...)` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlWindowFunction {
+    /// `ROW_NUMBER()` — 1-based position inside the window ordering.
+    RowNumber,
+    /// `RANK()` — position of the first peer row, so ties share a rank and gaps remain.
+    Rank,
+    /// `DENSE_RANK()` — peer group ordinal without gaps.
+    DenseRank,
+}
+
+impl SqlWindowFunction {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_uppercase().as_str() {
+            "ROW_NUMBER" => Some(Self::RowNumber),
+            "RANK" => Some(Self::Rank),
+            "DENSE_RANK" => Some(Self::DenseRank),
+            _ => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::RowNumber => "ROW_NUMBER",
+            Self::Rank => "RANK",
+            Self::DenseRank => "DENSE_RANK",
         }
     }
 }
@@ -1095,6 +1168,74 @@ fn bind_order_by_clause(
     })
 }
 
+/// Binds an Oak `OVER (...)` clause into a gateway window spec.
+///
+/// Oak only parses `PARTITION BY <column>` and `ORDER BY <column>` inside a
+/// window, so every partitioning / ordering term is a plain identifier.
+fn bind_window_spec(spec: &oak_sql::ast::WindowSpec) -> Result<SqlBoundWindowSpec, SqlFrontendError> {
+    let partition_by = spec
+        .partition_by
+        .iter()
+        .map(|column| SqlBoundExpression::Identifier(normalize_identifier(column.name.as_ref())))
+        .collect();
+    let order_by = spec
+        .order_by
+        .iter()
+        .map(|item| SqlBoundOrderByItem {
+            expr: SqlBoundExpression::Identifier(normalize_identifier(item.column.name.as_ref())),
+            direction: match item.direction {
+                oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
+                oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
+            },
+            nulls: item.nulls.map(|nulls| match nulls {
+                oak_sql::ast::NullsOrder::First => SqlNullsOrder::First,
+                oak_sql::ast::NullsOrder::Last => SqlNullsOrder::Last,
+            }),
+        })
+        .collect();
+    let frame = spec.frame.as_ref().map(bind_window_frame).transpose()?;
+    Ok(SqlBoundWindowSpec { partition_by, order_by, frame })
+}
+
+/// Binds an explicit window frame. Only `ROWS` frames are in the gateway
+/// subset: `RANGE` compares values instead of row positions and would need a
+/// separate lowering, so it is rejected rather than approximated as `ROWS`.
+fn bind_window_frame(frame: &oak_sql::ast::WindowFrame) -> Result<SqlBoundWindowFrame, SqlFrontendError> {
+    if let oak_sql::ast::WindowFrameUnit::Range = frame.unit {
+        return Err(SqlFrontendError::unsupported(
+            "SQL window `RANGE` frames are not supported by the gateway, write the frame with `ROWS`",
+        ));
+    }
+    let start = bind_window_frame_bound(frame.start);
+    let end = match frame.end {
+        Some(end) => Some(bind_window_frame_bound(end)),
+        // 单 bound 的 `ROWS <start>` 就是 `BETWEEN <start> AND CURRENT ROW`。起点在
+        // 当前行之后时该区间恒为空，标准 SQL 要求显式写出 end。
+        None => {
+            if matches!(
+                start,
+                SqlBoundWindowFrameBound::Following(_) | SqlBoundWindowFrameBound::UnboundedFollowing
+            ) {
+                return Err(bind_error(
+                    "SQL window frame starting at a following row requires `BETWEEN ... AND ...`",
+                ));
+            }
+            Some(SqlBoundWindowFrameBound::CurrentRow)
+        }
+    };
+    Ok(SqlBoundWindowFrame { start, end })
+}
+
+fn bind_window_frame_bound(bound: oak_sql::ast::WindowFrameBound) -> SqlBoundWindowFrameBound {
+    match bound {
+        oak_sql::ast::WindowFrameBound::UnboundedPreceding => SqlBoundWindowFrameBound::UnboundedPreceding,
+        oak_sql::ast::WindowFrameBound::Preceding(value) => SqlBoundWindowFrameBound::Preceding(value),
+        oak_sql::ast::WindowFrameBound::CurrentRow => SqlBoundWindowFrameBound::CurrentRow,
+        oak_sql::ast::WindowFrameBound::Following(value) => SqlBoundWindowFrameBound::Following(value),
+        oak_sql::ast::WindowFrameBound::UnboundedFollowing => SqlBoundWindowFrameBound::UnboundedFollowing,
+    }
+}
+
 /// Binds an Oak `FROM` / `JOIN` source into a catalog table reference or a
 /// derived table. A derived table is a full nested `SELECT`, so it is bound
 /// through the same [`bind_select_statement`] path as every other query.
@@ -1228,16 +1369,32 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             let display = normalize_identifier(name.name.as_ref());
             let fname = display.to_ascii_lowercase();
 
-            // Oak now parses `OVER (...)`; the gateway has no window evaluation
-            // yet, so a windowed call is rejected instead of silently running as
-            // a plain aggregate over the whole table.
-            if window.is_some() {
-                return Err(SqlFrontendError::unsupported(format!(
-                    "SQL window functions are not supported yet: {display}(...) OVER (...)"
-                )));
+            let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
+            let bound_window = window.as_ref().map(bind_window_spec).transpose()?;
+
+            // 排名函数只存在于窗口上下文，且不接受参数与 DISTINCT。
+            if SqlWindowFunction::from_name(&fname).is_some() {
+                if bound_window.is_none() {
+                    return Err(SqlFrontendError::unsupported(format!(
+                        "{display}() is a window function and requires an OVER (...) clause"
+                    )));
+                }
+                if !bound_args.is_empty() {
+                    return Err(SqlFrontendError::unsupported(format!("{display}() takes no arguments")));
+                }
+                if *distinct {
+                    return Err(SqlFrontendError::unsupported(format!(
+                        "{display}() does not accept the DISTINCT quantifier"
+                    )));
+                }
+                return Ok(SqlBoundExpression::Function {
+                    name: fname,
+                    args: Vec::new(),
+                    distinct: false,
+                    window: bound_window,
+                });
             }
 
-            let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
             if SqlAggregateFunction::from_name(&fname).is_some() {
                 if bound_args.is_empty() {
@@ -1250,16 +1407,41 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                         "only COUNT supports the DISTINCT quantifier",
                     ));
                 }
-                return Ok(SqlBoundExpression::Function { name: fname, args: bound_args, distinct: *distinct });
+                if *distinct && bound_window.is_some() {
+                    return Err(SqlFrontendError::unsupported(
+                        "DISTINCT is not supported in window aggregates",
+                    ));
+                }
+                return Ok(SqlBoundExpression::Function {
+                    name: fname,
+                    args: bound_args,
+                    distinct: *distinct,
+                    window: bound_window,
+                });
             }
-            let scalar = SqlScalarFunction::from_name(&fname).ok_or_else(|| {
-                SqlFrontendError::new(
-                    SqlErrorKind::UnknownFunction,
-                    format!(
-                        "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/CURRENT_DATE/CURRENT_TIME/CURDATE/CURTIME/LOWER/UPPER/LENGTH/CHAR_LENGTH/SUBSTRING/TRIM/LTRIM/RTRIM/REPLACE/CONCAT/COALESCE/ABS/ROUND)"
-                    ),
-                )
-            })?;
+            let Some(scalar) = SqlScalarFunction::from_name(&fname)
+            else {
+                // `OVER (...)` 只挂在已知的窗口/聚合函数上；其余名字既不是标量函数
+                // 也没有窗口语义（`NTILE` / `LAG` / `LEAD` / `FIRST_VALUE` / ...）。
+                return Err(if bound_window.is_some() {
+                    SqlFrontendError::unsupported(format!(
+                        "SQL window function is not supported by the gateway: {display}"
+                    ))
+                }
+                else {
+                    SqlFrontendError::new(
+                        SqlErrorKind::UnknownFunction,
+                        format!(
+                            "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/CURRENT_DATE/CURRENT_TIME/CURDATE/CURTIME/LOWER/UPPER/LENGTH/CHAR_LENGTH/SUBSTRING/TRIM/LTRIM/RTRIM/REPLACE/CONCAT/COALESCE/ABS/ROUND)"
+                        ),
+                    )
+                });
+            };
+            if bound_window.is_some() {
+                return Err(SqlFrontendError::unsupported(format!(
+                    "SQL scalar function {display}() cannot take an OVER (...) clause"
+                )));
+            }
             let (minimum, maximum) = scalar.arity();
             let supplied = bound_args.len();
             if supplied < minimum || maximum.is_some_and(|max| supplied > max) {
@@ -1276,7 +1458,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                     ),
                 ));
             }
-            Ok(SqlBoundExpression::Function { name: fname, args: bound_args, distinct: false })
+            Ok(SqlBoundExpression::Function { name: fname, args: bound_args, distinct: false, window: None })
         }
         Expression::InSubquery { expr, query, negated, .. } => Ok(SqlBoundExpression::InSubquery {
             expression: Box::new(bind_expression(expr)?),

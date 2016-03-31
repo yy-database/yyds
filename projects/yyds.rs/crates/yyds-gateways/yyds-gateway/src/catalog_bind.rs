@@ -4,7 +4,8 @@ use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundCte, SqlBoundDelete,
     SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection,
     SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement,
-    SqlBoundUnaryOperator, SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
+    SqlBoundUnaryOperator, SqlBoundUpdate, SqlBoundWindowFrame, SqlBoundWindowSpec, SqlErrorKind, SqlFrontendError,
+    SqlNullsOrder, SqlScalarFunction,
 };
 use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
@@ -235,7 +236,7 @@ pub enum SqlCatalogBoundExpression {
     Literal(SqlBoundLiteral),
     /// A bare `*` argument; only `COUNT(*)` gives it meaning.
     Wildcard,
-    /// A SQL function call (currently only aggregate functions).
+    /// A SQL function call (aggregate, scalar or window function).
     Function {
         /// Canonical lower-case function name.
         name: String,
@@ -243,6 +244,8 @@ pub enum SqlCatalogBoundExpression {
         args: Vec<SqlCatalogBoundExpression>,
         /// Whether the aggregate uses `DISTINCT` quantifier.
         distinct: bool,
+        /// `OVER (...)` clause when the call is a window function.
+        window: Option<SqlCatalogBoundWindowSpec>,
     },
     /// A binary SQL expression.
     Binary {
@@ -357,6 +360,17 @@ pub struct SqlCatalogBoundOrderByItem {
     pub direction: SqlBoundOrderDirection,
     /// Explicit `NULLS FIRST` / `NULLS LAST`, when written.
     pub nulls: Option<SqlNullsOrder>,
+}
+
+/// One `OVER (...)` clause after SQL names are bound to YYDS catalog identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundWindowSpec {
+    /// `PARTITION BY` expressions, in source order.
+    pub partition_by: Vec<SqlCatalogBoundExpression>,
+    /// Window `ORDER BY` items, in source order.
+    pub order_by: Vec<SqlCatalogBoundOrderByItem>,
+    /// Explicit `ROWS ...` frame, when one was written.
+    pub frame: Option<SqlBoundWindowFrame>,
 }
 
 /// One JOIN clause after SQL names are bound to YYDS catalog identity.
@@ -650,9 +664,12 @@ fn canonicalize_excluded(expression: SqlBoundExpression) -> SqlBoundExpression {
             right: Box::new(canonicalize_excluded(*right)),
         },
         Unary { operator, expression } => Unary { operator, expression: Box::new(canonicalize_excluded(*expression)) },
-        Function { name, args, distinct } => {
-            Function { name, args: args.into_iter().map(canonicalize_excluded).collect(), distinct }
-        }
+        Function { name, args, distinct, window } => Function {
+            name,
+            args: args.into_iter().map(canonicalize_excluded).collect(),
+            distinct,
+            window,
+        },
         InSubquery { expression, select, negated } => {
             InSubquery { expression: Box::new(canonicalize_excluded(*expression)), select, negated }
         }
@@ -908,6 +925,7 @@ fn bind_expression(
                             name: function.name().to_ascii_lowercase(),
                             args: Vec::new(),
                             distinct: false,
+                            window: None,
                         }),
                         None => Err(error),
                     };
@@ -926,12 +944,15 @@ fn bind_expression(
             operator,
             expression: Box::new(bind_expression(*expression, sources, ctes, catalog, variables)?),
         }),
-        SqlBoundExpression::Function { name, args, distinct } => {
+        SqlBoundExpression::Function { name, args, distinct, window } => {
             let bound_args = args
                 .into_iter()
                 .map(|arg| bind_expression(arg, sources, ctes, catalog, variables))
                 .collect::<Result<Vec<_>, _>>()?;
-            Ok(SqlCatalogBoundExpression::Function { name, args: bound_args, distinct })
+            let window = window
+                .map(|spec| bind_window_spec(spec, sources, ctes, catalog, variables))
+                .transpose()?;
+            Ok(SqlCatalogBoundExpression::Function { name, args: bound_args, distinct, window })
         }
         SqlBoundExpression::InSubquery { expression, select, negated } => {
             // 子查询自带 FROM 作用域，不继承外层 sources，因此不支持相关子查询；
@@ -982,6 +1003,31 @@ fn bind_expression(
             })
         }
     }
+}
+
+/// Catalog-binds one window spec, keeping partition / ordering terms resolvable
+/// against the same table scope as the call itself.
+fn bind_window_spec(
+    spec: SqlBoundWindowSpec,
+    sources: &[SqlCatalogBoundTable],
+    ctes: &[SqlCatalogCte],
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+) -> Result<SqlCatalogBoundWindowSpec, SqlFrontendError> {
+    let partition_by = spec
+        .partition_by
+        .into_iter()
+        .map(|expr| bind_expression(expr, sources, ctes, catalog, variables))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut order_by = Vec::with_capacity(spec.order_by.len());
+    for item in spec.order_by {
+        order_by.push(SqlCatalogBoundOrderByItem {
+            expression: bind_expression(item.expr, sources, ctes, catalog, variables)?,
+            direction: item.direction,
+            nulls: item.nulls,
+        });
+    }
+    Ok(SqlCatalogBoundWindowSpec { partition_by, order_by, frame: spec.frame })
 }
 
 /// One `WITH` definition kept while binding, together with the definitions
@@ -1264,9 +1310,17 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
                 out.push(col.row_id);
             }
         }
-        SqlCatalogBoundExpression::Function { args, .. } => {
+        SqlCatalogBoundExpression::Function { args, window, .. } => {
             for arg in args {
                 collect_column_ids(arg, out);
+            }
+            if let Some(window) = window {
+                for expr in &window.partition_by {
+                    collect_column_ids(expr, out);
+                }
+                for item in &window.order_by {
+                    collect_column_ids(&item.expression, out);
+                }
             }
         }
         SqlCatalogBoundExpression::Binary { left, right, .. } => {

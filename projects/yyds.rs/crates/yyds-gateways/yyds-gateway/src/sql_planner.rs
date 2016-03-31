@@ -78,6 +78,7 @@ pub fn plan_select_for_dialect(
     let mut projection_expressions: Vec<(SqlCatalogBoundExpression, String)> = Vec::new();
     let mut has_aggregate = false;
     let mut has_non_aggregate = false;
+    let mut has_window = false;
     for projection in &select.projections {
         match projection {
             SqlCatalogBoundProjection::Star(star_table) => {
@@ -87,23 +88,46 @@ pub fn plan_select_for_dialect(
                     projection_fields.push((source.row_id(field.field_id), field.name.clone()));
                 }
             }
-            SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
-                SqlCatalogBoundExpression::Column(col) => {
-                    has_non_aggregate = true;
-                    projection_fields.push((col.row_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
+            SqlCatalogBoundProjection::Expression { expression, alias } => {
+                if expression_has_window(expression) && !is_window_call(expression) {
+                    return Err(planner_error(
+                        "SQL window function must be the entire projection expression, not part of a larger one",
+                    ));
                 }
-                SqlCatalogBoundExpression::Function { .. } => {
-                    has_aggregate = true;
-                    projection_expressions
-                        .push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
+                match expression {
+                    SqlCatalogBoundExpression::Column(col) => {
+                        has_non_aggregate = true;
+                        projection_fields.push((col.row_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
+                    }
+                    SqlCatalogBoundExpression::Function { window: Some(_), .. } => {
+                        has_window = true;
+                        projection_expressions
+                            .push((expression.clone(), alias.clone().unwrap_or_else(|| scalar_projection_label(expression))));
+                    }
+                    SqlCatalogBoundExpression::Function { .. } => {
+                        has_aggregate = true;
+                        projection_expressions.push((
+                            expression.clone(),
+                            alias.clone().unwrap_or_else(|| expression_default_label(expression)),
+                        ));
+                    }
+                    other => {
+                        has_non_aggregate = true;
+                        projection_expressions
+                            .push((other.clone(), alias.clone().unwrap_or_else(|| expression_default_label(other))));
+                    }
                 }
-                other => {
-                    has_non_aggregate = true;
-                    projection_expressions
-                        .push((other.clone(), alias.clone().unwrap_or_else(|| expression_default_label(other))));
-                }
-            },
+            }
         }
+    }
+
+    // 窗口函数只能出现在投影里，也不能与 GROUP BY / 聚合投影混用。
+    validate_window_placement(&select)?;
+    if has_window && has_aggregate {
+        return Err(planner_error("cannot mix window and aggregate projections in the same SELECT"));
+    }
+    if has_window && select.group_by.is_some() {
+        return Err(planner_error("SQL window functions cannot be combined with GROUP BY"));
     }
 
     // 混合聚合 + 非聚合（无 GROUP BY）→ 拒绝；有 GROUP BY 时由分组校验约束非聚合列。
@@ -127,17 +151,20 @@ pub fn plan_select_for_dialect(
         table.fields.iter().map(|f| (source.row_id(f.field_id), f.field_type.clone())).collect();
 
     if let Some(lit) = pk_equality {
-        let rowid = pk_literal_to_rowid(&lit)?;
-        return Ok(SqlExecutionPlan::Read(ReadPlan {
-            namespace,
-            rowid,
-            projection_fields,
-            projection_expressions,
-            remaining_predicate,
-            // `LIMIT 0` 按 SQL 语义返回空结果集，单点读同样不能绕过。
-            suppress_rows: select.limit == Some(0),
-            field_types: field_types.clone(),
-        }));
+        // 窗口函数需要看到分区里的其余行，单点读无法求值，必须退回扫描。
+        if !has_window {
+            let rowid = pk_literal_to_rowid(&lit)?;
+            return Ok(SqlExecutionPlan::Read(ReadPlan {
+                namespace,
+                rowid,
+                projection_fields,
+                projection_expressions,
+                remaining_predicate,
+                // `LIMIT 0` 按 SQL 语义返回空结果集，单点读同样不能绕过。
+                suppress_rows: select.limit == Some(0),
+                field_types: field_types.clone(),
+            }));
+        }
     }
 
     // Scan 路径：prefix / after / before 都是 bytes。
@@ -147,7 +174,7 @@ pub fn plan_select_for_dialect(
     let has_order_by = select.order_by.is_some();
     let has_group_by = select.group_by.is_some();
     let has_predicate = remaining_predicate.is_some();
-    let needs_post_filter_limit = has_order_by || has_group_by || has_aggregate || has_predicate;
+    let needs_post_filter_limit = has_order_by || has_group_by || has_aggregate || has_predicate || has_window;
     let kv_limit = if needs_post_filter_limit { 0 } else { select.limit.unwrap_or(0) };
     let limit_after_sort = if needs_post_filter_limit { select.limit.unwrap_or(0) } else { 0 };
     let offset_after_sort = if needs_post_filter_limit { select.offset.unwrap_or(0) } else { 0 };
@@ -169,6 +196,7 @@ pub fn plan_select_for_dialect(
         nulls_first: dialect.nulls_sort_first(),
         suppress_rows: select.limit == Some(0),
         has_aggregate,
+        has_window,
         distinct: select.distinct,
         field_types,
     }))
@@ -273,6 +301,15 @@ fn plan_join_select(
     let base = source.ok_or_else(|| planner_error("SQL JOIN requires a FROM table"))?;
     if group_by.is_some() || having.is_some() {
         return Err(planner_error("SQL JOIN with GROUP BY / HAVING is not in the gateway subset yet"));
+    }
+    // 窗口函数需要在单表行集合上分区排序，JOIN 合并后没有对应的 lowering。
+    let has_window = projections.iter().any(|projection| match projection {
+        SqlCatalogBoundProjection::Expression { expression, .. } => expression_has_window(expression),
+        SqlCatalogBoundProjection::Star(_) => false,
+    }) || predicate.as_ref().is_some_and(expression_has_window)
+        || order_by.as_ref().is_some_and(|items| items.iter().any(|item| expression_has_window(&item.expression)));
+    if has_window {
+        return Err(planner_error("SQL window functions are not supported in JOIN queries"));
     }
 
     // 1. 投影展开：Star 按来源顺序展开整表，Column 直接映射，其余表达式保留。
@@ -401,6 +438,9 @@ fn plan_source_less_select(select: SqlCatalogBoundSelect) -> Result<SqlExecution
                 return Err(planner_error("SQL star projection requires a catalog table source"));
             }
             SqlCatalogBoundProjection::Expression { expression, alias } => {
+                if expression_has_window(&expression) {
+                    return Err(planner_error("SQL window functions require a FROM source"));
+                }
                 let label = alias.unwrap_or_else(|| scalar_projection_label(&expression));
                 projections.push((expression, label));
             }
@@ -606,6 +646,9 @@ fn plan_returning(
                     planned.push((SqlCatalogBoundExpression::Column(column), label));
                 }
                 other => {
+                    if expression_has_window(&other) {
+                        return Err(planner_error("SQL window functions are not allowed in RETURNING"));
+                    }
                     let label = alias.unwrap_or_else(|| expression_default_label(&other));
                     planned.push((other, label));
                 }
@@ -918,6 +961,9 @@ pub struct ScanPlan {
     /// True when any projection expression is an aggregate function
     /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce aggregated result rows.
     pub has_aggregate: bool,
+    /// True when any projection expression is a window function call. execute_scan
+    /// evaluates it per partition before applying DISTINCT / ORDER BY / LIMIT.
+    pub has_window: bool,
     /// `SELECT DISTINCT`：execute 层在排序/分页之前按投影值去重。
     pub distinct: bool,
     /// `LIMIT 0`：结果集必须为空，包括聚合结果。
@@ -1392,11 +1438,12 @@ fn expression_default_label(expr: &SqlCatalogBoundExpression) -> String {
     format!("{expr:?}")
 }
 
-/// 表达式里是否出现聚合函数（含嵌套在运算里）。
+/// 表达式里是否出现聚合函数（含嵌套在运算里）。窗口调用不算聚合：
+/// 它按分区逐行输出，不压缩行数。
 fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
     match expr {
-        SqlCatalogBoundExpression::Function { name, args, distinct } => {
-            SqlAggregateFunction::from_name(name).is_some() || args.iter().any(expression_has_aggregate)
+        SqlCatalogBoundExpression::Function { name, args, window, .. } => {
+            window.is_none() && (SqlAggregateFunction::from_name(name).is_some() || args.iter().any(expression_has_aggregate))
         }
         SqlCatalogBoundExpression::Binary { left, right, .. } => {
             expression_has_aggregate(left) || expression_has_aggregate(right)
@@ -1416,6 +1463,55 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
             false
         }
     }
+}
+
+/// 表达式本身是否是一个窗口函数调用（`ROW_NUMBER()` / `SUM(...) OVER (...)`）。
+fn is_window_call(expr: &SqlCatalogBoundExpression) -> bool {
+    matches!(expr, SqlCatalogBoundExpression::Function { window: Some(_), .. })
+}
+
+/// 表达式里是否出现窗口函数调用（含嵌套在运算或实参里的情况）。
+fn expression_has_window(expr: &SqlCatalogBoundExpression) -> bool {
+    match expr {
+        SqlCatalogBoundExpression::Function { args, window, .. } => {
+            window.is_some() || args.iter().any(expression_has_window)
+        }
+        SqlCatalogBoundExpression::Binary { left, right, .. } => {
+            expression_has_window(left) || expression_has_window(right)
+        }
+        SqlCatalogBoundExpression::Unary { expression, .. } => expression_has_window(expression),
+        SqlCatalogBoundExpression::InSubquery { expression, .. } | SqlCatalogBoundExpression::InValues { expression, .. } => {
+            expression_has_window(expression)
+        }
+        SqlCatalogBoundExpression::Case { branches, else_branch } => {
+            branches.iter().any(|(w, t)| expression_has_window(w) || expression_has_window(t))
+                || else_branch.as_ref().is_some_and(|e| expression_has_window(e))
+        }
+        SqlCatalogBoundExpression::Cast { expr, .. } => expression_has_window(expr),
+        SqlCatalogBoundExpression::Column(_)
+        | SqlCatalogBoundExpression::Literal(_)
+        | SqlCatalogBoundExpression::Wildcard
+        | SqlCatalogBoundExpression::Exists { .. }
+        | SqlCatalogBoundExpression::ScalarSubquery { .. } => false,
+    }
+}
+
+/// 窗口函数只允许出现在投影列表里：WHERE / GROUP BY / HAVING / ORDER BY 拿到窗口
+/// 调用时显式拒绝，而不是在执行期按错误的行集合求值。
+fn validate_window_placement(select: &SqlCatalogBoundSelect) -> Result<(), SqlFrontendError> {
+    if select.predicate.as_ref().is_some_and(expression_has_window) {
+        return Err(planner_error("SQL window functions are not allowed in WHERE"));
+    }
+    if select.group_by.as_ref().is_some_and(|items| items.iter().any(expression_has_window)) {
+        return Err(planner_error("SQL window functions are not allowed in GROUP BY"));
+    }
+    if select.having.as_ref().is_some_and(expression_has_window) {
+        return Err(planner_error("SQL window functions are not allowed in HAVING"));
+    }
+    if select.order_by.as_ref().is_some_and(|items| items.iter().any(|item| expression_has_window(&item.expression))) {
+        return Err(planner_error("SQL window functions are not allowed in ORDER BY"));
+    }
+    Ok(())
 }
 
 /// 分组查询只允许投影分组列/分组表达式或聚合函数，避免返回任意组内行。
@@ -1487,7 +1583,7 @@ fn grouped_expression_allowed(
         SqlCatalogBoundExpression::Literal(_) => true,
         SqlCatalogBoundExpression::Wildcard => false,
         SqlCatalogBoundExpression::Function { name, .. } if SqlAggregateFunction::from_name(name).is_some() => true,
-        SqlCatalogBoundExpression::Function { name, args, distinct } => {
+        SqlCatalogBoundExpression::Function { name, args, .. } => {
             SqlScalarFunction::from_name(name).is_some()
                 && args.iter().all(|arg| grouped_expression_allowed(arg, group_expressions, group_columns))
         }
