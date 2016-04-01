@@ -522,6 +522,57 @@ fn describe_statement_reports_catalog_types_and_binary_rows_round_trip() {
     server.join().unwrap();
 }
 
+/// 窗口函数的排名列经 `Describe` 下发的是声明的 `int8`（OID 20，8 字节），
+/// 不按结果行推断，也不退化成 `text`。
+#[test]
+fn window_rank_columns_are_described_as_int8() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "INSERT INTO users VALUES (1, 'alice'), (2, 'bob'), (3, 'carol')");
+    let inserted = receive_until_ready(&mut client);
+    assert_eq!(inserted[0], (b'C', b"INSERT 0 3\0".to_vec()));
+
+    let mut parse = cstring("w1");
+    parse.extend_from_slice(&cstring(
+        "SELECT id, ROW_NUMBER() OVER (ORDER BY id), RANK() OVER (ORDER BY id), \
+         DENSE_RANK() OVER (ORDER BY id) FROM users",
+    ));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'D', &describe_of(&cstring("w1")));
+    send_message(&mut client, b'S', &[]);
+    let described = receive_until_ready(&mut client);
+    assert_eq!(described[0].0, b'1');
+    assert_eq!(described[1].0, b't');
+    assert_eq!(described[2].0, b'T');
+    assert_eq!(
+        parse_row_description(&described[2].1),
+        vec![
+            ("id".to_string(), 20, 8, 0),
+            ("ROW_NUMBER".to_string(), 20, 8, 0),
+            ("RANK".to_string(), 20, 8, 0),
+            ("DENSE_RANK".to_string(), 20, 8, 0),
+        ]
+    );
+
+    // 实际结果也是 64 位整数：文本格式下每列就是排名文本，行序由 `ORDER BY id` 决定。
+    send_query(&mut client, "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM users ORDER BY id");
+    let rows = receive_until_ready(&mut client);
+    assert_eq!(rows[0].0, b'T');
+    assert_eq!(
+        parse_row_description(&rows[0].1),
+        vec![("id".to_string(), 20, 8, 0), ("ROW_NUMBER".to_string(), 20, 8, 0)]
+    );
+    let data: Vec<Vec<Option<Vec<u8>>>> =
+        rows.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(data.len(), 3);
+    assert_eq!(data[0], vec![Some(b"1".to_vec()), Some(b"1".to_vec())]);
+    assert_eq!(data[2], vec![Some(b"3".to_vec()), Some(b"3".to_vec())]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 fn describe_of(statement: &[u8]) -> Vec<u8> {
     let mut describe = vec![b'S'];
     describe.extend_from_slice(statement);

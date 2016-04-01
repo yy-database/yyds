@@ -958,6 +958,47 @@ fn error_numbers_reflect_structured_gateway_errors() {
     server.join().unwrap();
 }
 
+/// 窗口函数的排名列在 MySQL 协议上必须声明为 `LONGLONG`（`0x08`），与普通整数列
+/// 一致。列类型取自计划的声明类型，不按返回值的文本形状推断成 `VAR_STRING`。
+#[test]
+fn window_rank_columns_are_declared_as_longlong() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    let sql = "SELECT id, ROW_NUMBER() OVER (ORDER BY id), RANK() OVER (ORDER BY id) FROM users";
+    client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
+
+    let (_, count_packet) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&count_packet).0, 3);
+
+    for name in ["id", "ROW_NUMBER", "RANK"] {
+        let (_, definition) = read_packet_full(&mut client);
+        assert_eq!(extract_column_name(&definition), name);
+        assert_eq!(column_type_byte(&definition), 0x08, "`{name}` must be declared as `LONGLONG`");
+    }
+
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    let (_, row) = read_packet_full(&mut client);
+    let (id, consumed) = read_lenenc_str(&row);
+    assert_eq!(id, b"42");
+    let (number, consumed_number) = read_lenenc_str(&row[consumed..]);
+    assert_eq!(number, b"1");
+    let (rank, consumed_rank) = read_lenenc_str(&row[consumed + consumed_number..]);
+    assert_eq!(rank, b"1");
+    assert_eq!(consumed + consumed_number + consumed_rank, row.len());
+
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// `CURDATE()` / `CURTIME()` 是 MySQL 拼写，与 `NOW()` 一样返回 UTC 文本。
 #[test]
 fn mysql_date_spellings_render_utc_text_rows() {
