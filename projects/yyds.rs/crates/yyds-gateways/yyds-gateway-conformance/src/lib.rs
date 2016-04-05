@@ -1058,6 +1058,39 @@ pub fn upsert_cases() -> Vec<Case> {
                 ],
             )
             .build(),
+        case("on conflict do update multiplies the stored column by the excluded column")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+                 ON CONFLICT (id) DO UPDATE SET score = users.score * EXCLUDED.score",
+            )
+            .affected(1)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(30), Float(2.25), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+                    &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
+        // PostgreSQL 的整数除法向零截断，与 SELECT 路径保持同一规则。
+        case("on conflict do update divides with PostgreSQL integer truncation")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+                 ON CONFLICT (id) DO UPDATE SET age = users.age / 7",
+            )
+            .affected(1)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(4), Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+                    &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
         case("on conflict do update inserts when no row conflicts")
             .only(Driver::Postgres)
             .sql("INSERT INTO users VALUES (4, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET name = 'never'")

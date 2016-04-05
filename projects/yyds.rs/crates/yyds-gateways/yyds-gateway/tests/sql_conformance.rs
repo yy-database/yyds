@@ -14,8 +14,8 @@ use yyds_gateway::{
 };
 use yyds_gateway_conformance::{
     crud_cases, distinct_cases, group_cases, nested_call_cases, null_order_cases, numeric_cases, order_cases,
-    returning_cases, rows, set_operation_cases, string_function_cases, type_cases, upsert_cases, window_cases, Case,
-    Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    returning_cases, rows, seed_state, set_operation_cases, string_function_cases, type_cases, upsert_cases, window_cases,
+    Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -221,6 +221,57 @@ fn sql_integer_overflow_reports_numeric_out_of_range() {
             assert!(error.message.contains("overflow"), "`{sql}` under {dialect:?}: {}", error.message);
         }
     }
+}
+
+/// `DO UPDATE SET` 的数值表达式继承方言规则：PostgreSQL 的除零报 `DivisionByZero`、
+/// 精确整数溢出报 `NumericOverflow`，失败的赋值不落库。MySQL 没有 `ON CONFLICT`，
+/// 同一语句按语法错误拒绝，除零与溢出的方言分叉由共享的表达式用例覆盖。
+#[test]
+fn sql_upsert_arithmetic_keeps_dialect_numeric_rules() {
+    // 结构化错误需要未经 `String` 降级的前端结果，因此这里直接走 bind/plan/execute。
+    let raw = |fixture: &Fixture, sql: &str, dialect: SqlDialect| {
+        let bound = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION)?;
+        let plan = plan_statement_for_dialect(bound, &fixture.catalog, dialect)?;
+        execute_plan(fixture.executor.as_ref(), None, &plan, dialect)
+    };
+
+    let pg = Fixture::with_dialect(SqlDialect::Postgres);
+    for sql in SEED {
+        pg.execute(None, sql).expect("seed");
+    }
+
+    let division = raw(
+        &pg,
+        "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET age = users.age / 0",
+        SqlDialect::Postgres,
+    )
+    .expect_err("PostgreSQL raises on division by zero");
+    assert_eq!(division.kind, SqlErrorKind::DivisionByZero, "{}", division.message);
+
+    let overflow = raw(
+        &pg,
+        "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+         ON CONFLICT (id) DO UPDATE SET age = users.age * 9223372036854775807",
+        SqlDialect::Postgres,
+    )
+    .expect_err("exact integer multiplication overflows");
+    assert_eq!(overflow.kind, SqlErrorKind::NumericOverflow, "{}", overflow.message);
+
+    // 赋值求值失败时既有行保持原值，不会写回半个结果。
+    assert_eq!(pg.snapshot(DEFAULT_STATE_COLUMNS), rows(seed_state()));
+
+    let mysql = Fixture::with_dialect(SqlDialect::Mysql);
+    for sql in SEED {
+        mysql.execute(None, sql).expect("seed");
+    }
+    let rejected = raw(
+        &mysql,
+        "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET age = users.age / 0",
+        SqlDialect::Mysql,
+    )
+    .expect_err("MySQL has no ON CONFLICT clause");
+    assert_eq!(rejected.kind, SqlErrorKind::Syntax, "{}", rejected.message);
+    assert_eq!(mysql.snapshot(DEFAULT_STATE_COLUMNS), rows(seed_state()));
 }
 
 /// 字符串函数在两方言上共享的部分：1-based 下标、字符计数与 NULL 传播。

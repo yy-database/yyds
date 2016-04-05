@@ -1286,6 +1286,31 @@ fn sql_on_conflict_do_update_accepts_numeric_arithmetic_over_columns() {
         run_sql(&executor, None, &catalog, "SELECT age FROM users").rows,
         vec![vec![yyds_gateway::SqlValue::Integer(30)]]
     );
+
+    let multiplied = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users VALUES (1, 'ignored', 99) ON CONFLICT (id) DO UPDATE SET age = users.age * 3",
+    );
+    assert_eq!(multiplied.affected_rows, 1);
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT age FROM users").rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(90)]]
+    );
+
+    // PostgreSQL 的整数除法向零截断，与 `SELECT` 路径共用同一份规则。
+    let divided = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users VALUES (1, 'ignored', 99) ON CONFLICT (id) DO UPDATE SET age = users.age / 7",
+    );
+    assert_eq!(divided.affected_rows, 1);
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT age FROM users").rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(12)]]
+    );
 }
 
 #[test]
@@ -1311,9 +1336,9 @@ fn sql_on_conflict_do_update_assigns_columns_simultaneously() {
 fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
 
-    // 只有字面量、列引用与 `+` / `-` 组成的数值表达式能直接在行对上求值，其余形态显式拒绝。
+    // 只有字面量、列引用与 `+` / `-` / `*` / `/` 组成的数值表达式能直接在行对上求值，
+    // 其余形态显式拒绝。
     for sql in [
-        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = users.age * 2",
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = users.age % 2",
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = CASE WHEN users.age > 0 THEN 1 ELSE 2 END",
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = (SELECT MAX(age) FROM users)",

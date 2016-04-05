@@ -583,11 +583,12 @@ fn plan_on_conflict(
 ///
 /// A literal and a column reference (existing row `table.column` or proposed row
 /// `EXCLUDED.column`) evaluate on row values directly, and so does arithmetic
-/// composed from them: unary minus and `+` / `-` over those operands. The value
-/// therefore runs through the ordinary numeric expression path, which keeps each
-/// dialect's division-by-zero and integer-overflow rules. Everything else —
-/// aggregates, functions, `CASE`, subqueries, window calls — stays explicitly
-/// unsupported instead of being approximated.
+/// composed from them: unary minus and `+`, `-`, `*`, `/` over those operands.
+/// The value therefore runs through the ordinary numeric expression path, which
+/// keeps each dialect's division semantics, division-by-zero handling and
+/// integer-overflow rules. Everything else — aggregates, functions, `CASE`,
+/// subqueries, window calls — stays explicitly unsupported instead of being
+/// approximated.
 fn check_conflict_value(expression: &SqlCatalogBoundExpression) -> Result<(), SqlFrontendError> {
     match expression {
         SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Column(_) => Ok(()),
@@ -595,13 +596,19 @@ fn check_conflict_value(expression: &SqlCatalogBoundExpression) -> Result<(), Sq
             check_conflict_value(expression)
         }
         SqlCatalogBoundExpression::Binary { left, operator, right }
-            if matches!(operator, SqlBoundBinaryOperator::Plus | SqlBoundBinaryOperator::Minus) =>
+            if matches!(
+                operator,
+                SqlBoundBinaryOperator::Plus
+                    | SqlBoundBinaryOperator::Minus
+                    | SqlBoundBinaryOperator::Multiply
+                    | SqlBoundBinaryOperator::Divide
+            ) =>
         {
             check_conflict_value(left)?;
             check_conflict_value(right)
         }
         _ => Err(SqlFrontendError::unsupported(
-            "ON CONFLICT DO UPDATE SET supports a literal, a column reference or `+` / `-` over them only",
+            "ON CONFLICT DO UPDATE SET supports a literal, a column reference or `+` / `-` / `*` / `/` over them only",
         )),
     }
 }
