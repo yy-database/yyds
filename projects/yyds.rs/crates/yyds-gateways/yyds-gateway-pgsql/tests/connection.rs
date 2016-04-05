@@ -573,6 +573,46 @@ fn window_rank_columns_are_described_as_int8() {
     server.join().unwrap();
 }
 
+/// 嵌套调用不改变 `Describe` 的类型：聚合实参里的标量调用让外层聚合照旧下发
+/// `int8`，`COALESCE(LOWER(name), UPPER(name))` 照旧下发 `text`。
+#[test]
+fn nested_call_columns_keep_declared_types() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')");
+    let inserted = receive_until_ready(&mut client);
+    assert_eq!(inserted[0], (b'C', b"INSERT 0 2\0".to_vec()));
+
+    let mut parse = cstring("n1");
+    parse
+        .extend_from_slice(&cstring("SELECT SUM(LENGTH(name)) AS total_len, SUM(CHAR_LENGTH(name)) AS total_chars FROM users"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'D', &describe_of(&cstring("n1")));
+    send_message(&mut client, b'S', &[]);
+    let described = receive_until_ready(&mut client);
+    assert_eq!(
+        parse_row_description(&described[2].1),
+        vec![("total_len".to_string(), 20, 8, 0), ("total_chars".to_string(), 20, 8, 0)]
+    );
+
+    send_query(&mut client, "SELECT SUM(LENGTH(name)), SUM(CHAR_LENGTH(name)) FROM users");
+    let rows = receive_until_ready(&mut client);
+    let data: Vec<Vec<Option<Vec<u8>>>> =
+        rows.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(data, vec![vec![Some(b"8".to_vec()), Some(b"8".to_vec())]]);
+
+    send_query(&mut client, "SELECT COALESCE(LOWER(name), UPPER(name)) AS name_label FROM users ORDER BY id");
+    let rows = receive_until_ready(&mut client);
+    assert_eq!(parse_row_description(&rows[0].1), vec![("name_label".to_string(), 25, -1, 0)]);
+    let data: Vec<Vec<Option<Vec<u8>>>> =
+        rows.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(data, vec![vec![Some(b"alice".to_vec())], vec![Some(b"bob".to_vec())]]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 fn describe_of(statement: &[u8]) -> Vec<u8> {
     let mut describe = vec![b'S'];
     describe.extend_from_slice(statement);

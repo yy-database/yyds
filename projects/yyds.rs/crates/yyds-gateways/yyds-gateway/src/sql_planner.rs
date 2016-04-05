@@ -104,12 +104,13 @@ pub fn plan_select_for_dialect(
                         projection_expressions
                             .push((expression.clone(), alias.clone().unwrap_or_else(|| scalar_projection_label(expression))));
                     }
-                    SqlCatalogBoundExpression::Function { .. } => {
+                    // 只有真正含聚合的调用走聚合路径；纯标量调用（含嵌套标量实参）
+                    // 仍按行求值，否则 `SELECT COALESCE(LOWER(tag), name)` 会被当成
+                    // 聚合投影并在执行期报未知聚合函数。
+                    SqlCatalogBoundExpression::Function { .. } if expression_has_aggregate(expression) => {
                         has_aggregate = true;
-                        projection_expressions.push((
-                            expression.clone(),
-                            alias.clone().unwrap_or_else(|| expression_default_label(expression)),
-                        ));
+                        projection_expressions
+                            .push((expression.clone(), alias.clone().unwrap_or_else(|| expression_default_label(expression))));
                     }
                     other => {
                         has_non_aggregate = true;

@@ -13,9 +13,9 @@ use yyds_gateway::{
     SqlErrorKind, SqlParameterStyle, SqlResult, SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, group_cases, null_order_cases, numeric_cases, order_cases, returning_cases, rows,
-    set_operation_cases, string_function_cases, type_cases, upsert_cases, window_cases, Case, Driver, Lit,
-    DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    crud_cases, distinct_cases, group_cases, nested_call_cases, null_order_cases, numeric_cases, order_cases,
+    returning_cases, rows, set_operation_cases, string_function_cases, type_cases, upsert_cases, window_cases, Case,
+    Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -184,6 +184,13 @@ fn sql_conformance_set_operations() {
 #[test]
 fn sql_conformance_string_functions() {
     run_cases(&string_function_cases());
+}
+
+/// 标量函数实参可以是另一个标量调用：投影、谓词、三层嵌套与窗口聚合实参
+/// 都按真实自变量绑定，外层函数拿到内层结果而不是零参数。
+#[test]
+fn sql_conformance_nested_calls() {
+    run_cases(&nested_call_cases());
 }
 
 #[test]

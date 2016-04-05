@@ -1402,6 +1402,11 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                         "aggregate functions require an argument",
                     ));
                 }
+                if let Some(nested) = bound_args.iter().find_map(find_aggregate_call) {
+                    return Err(SqlFrontendError::unsupported(format!(
+                        "aggregate function {display}() cannot take the aggregate {nested}() as its argument"
+                    )));
+                }
                 if *distinct && fname != "count" {
                     return Err(SqlFrontendError::unsupported(
                         "only COUNT supports the DISTINCT quantifier",
@@ -1498,6 +1503,33 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             Err(SqlFrontendError::unsupported("SQL vector literals are outside the gateway binding subset"))
         }
         Expression::Error { message, .. } => Err(bind_error(message)),
+    }
+}
+
+/// 实参里是否还有聚合调用。SQL 没有第二次分组，聚合套聚合在单行上没有可求值的
+/// 语义；空表时执行层还会静默返回 NULL，因此必须在绑定期拒绝而不是留到执行期。
+fn find_aggregate_call(expression: &SqlBoundExpression) -> Option<&str> {
+    match expression {
+        SqlBoundExpression::Function { name, args, .. } => {
+            if SqlAggregateFunction::from_name(name).is_some() {
+                return Some(name.as_str());
+            }
+            args.iter().find_map(find_aggregate_call)
+        }
+        SqlBoundExpression::Binary { left, right, .. } => find_aggregate_call(left).or_else(|| find_aggregate_call(right)),
+        SqlBoundExpression::Unary { expression, .. } => find_aggregate_call(expression),
+        SqlBoundExpression::Case { branches, else_branch } => branches
+            .iter()
+            .find_map(|(when, then)| find_aggregate_call(when).or_else(|| find_aggregate_call(then)))
+            .or_else(|| else_branch.as_ref().and_then(|expression| find_aggregate_call(expression))),
+        SqlBoundExpression::Cast { expr: expression, .. } => find_aggregate_call(expression),
+        // 子查询自成一个作用域，它的聚合属于内层 SELECT。
+        SqlBoundExpression::Identifier(_)
+        | SqlBoundExpression::Literal(_)
+        | SqlBoundExpression::Wildcard
+        | SqlBoundExpression::InSubquery { .. }
+        | SqlBoundExpression::ScalarSubquery { .. }
+        | SqlBoundExpression::Exists { .. } => None,
     }
 }
 

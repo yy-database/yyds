@@ -585,6 +585,37 @@ pub fn string_function_cases() -> Vec<Case> {
     ]
 }
 
+/// Scalar calls nested inside another call: a projection argument, a predicate
+/// and a window aggregate argument. Each nested call is bound as a real
+/// `FunctionCall` argument, so the inner result feeds the outer function instead
+/// of the outer call silently seeing zero arguments.
+pub fn nested_call_cases() -> Vec<Case> {
+    use Lit::{Int, Text};
+
+    vec![
+        case("aggregate over a scalar call").sql("SELECT SUM(LENGTH(name)) FROM users").rows(&[&[Int(13)]]).build(),
+        case("char length of now").sql("SELECT CHAR_LENGTH(NOW())").rows(&[&[Int(19)]]).build(),
+        case("coalesce picks the first non-null call")
+            .sql("SELECT COALESCE(LOWER(tag), UPPER(name)) FROM users ORDER BY id")
+            .rows(&[&[Text("x")], &[Text("BOB")], &[Text("")]])
+            .build(),
+        case("three nested calls")
+            .sql("SELECT UPPER(SUBSTRING(LOWER(name), 2, 3)) FROM users WHERE id = 1")
+            .rows(&[&[Text("LIC")]])
+            .build(),
+        case("nested calls inside a predicate")
+            .sql("SELECT id FROM users WHERE LENGTH(UPPER(name)) = 5 ORDER BY id")
+            .rows(&[&[Int(1)], &[Int(3)]])
+            .build(),
+        case("nested call inside a window aggregate")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(ABS(age)) OVER (ORDER BY age) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(80)], &[Int(2), Int(20)], &[Int(3), Int(120)], &[Int(4), Int(80)]])
+            .build(),
+    ]
+}
+
 /// Fixture with tied sort keys for multi-column `ORDER BY` coverage.
 pub const ORDER_SEED: &[&str] = &[
     "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
@@ -1051,6 +1082,9 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("niladic date function arity", "SELECT CURRENT_DATE(1)"),
     ("niladic timestamp function arity", "SELECT NOW(1)"),
     ("unsupported EXTRACT", "SELECT EXTRACT(age) FROM users"),
+    // 嵌套调用只放开「标量函数实参」，聚合套聚合、未知函数仍在绑定期拒绝。
+    ("aggregate inside an aggregate", "SELECT SUM(AVG(age)) FROM users"),
+    ("unsupported function inside an aggregate", "SELECT SUM(EXTRACT(age)) FROM users"),
     // 窗口函数只实现有依据的子集：其余形式显式拒绝，不做近似求值。
     ("window RANGE frame", "SELECT id, SUM(age) OVER (ORDER BY age RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users"),
     ("window GROUPS frame", "SELECT id, SUM(age) OVER (ORDER BY age GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users"),
@@ -1074,6 +1108,7 @@ pub fn all_cases() -> Vec<Case> {
     let mut cases = crud_cases();
     cases.extend(type_cases());
     cases.extend(string_function_cases());
+    cases.extend(nested_call_cases());
     cases.extend(numeric_cases());
     cases.extend(distinct_cases());
     cases.extend(group_cases());

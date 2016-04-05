@@ -999,6 +999,57 @@ fn window_rank_columns_are_declared_as_longlong() {
     server.join().unwrap();
 }
 
+/// 嵌套调用不改变列的声明类型：聚合实参里的标量调用让外层聚合照旧声明
+/// `LONGLONG`，`COALESCE(LOWER(name), UPPER(name))` 照旧声明 `VAR_STRING`。
+#[test]
+fn nested_call_columns_keep_declared_types() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    let sql = "SELECT SUM(LENGTH(name)) AS total_len, SUM(CHAR_LENGTH(name)) AS total_chars FROM users";
+    client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
+
+    let (_, count_packet) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&count_packet).0, 2);
+    for name in ["total_len", "total_chars"] {
+        let (_, definition) = read_packet_full(&mut client);
+        assert_eq!(extract_column_name(&definition), name);
+        assert_eq!(column_type_byte(&definition), 0x08, "`{name}` must be declared as `LONGLONG`");
+    }
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    let (_, row) = read_packet_full(&mut client);
+    let (first, consumed) = read_lenenc_str(&row);
+    let (second, consumed_second) = read_lenenc_str(&row[consumed..]);
+    assert_eq!((first, second), (b"5".as_slice(), b"5".as_slice()));
+    assert_eq!(consumed + consumed_second, row.len());
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    let sql = "SELECT COALESCE(LOWER(name), UPPER(name)) AS name_label FROM users";
+    client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
+
+    let (_, count_packet) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&count_packet).0, 1);
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "name_label");
+    assert_eq!(column_type_byte(&definition), 0xFD, "`COALESCE` must be declared as `VAR_STRING`");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc_str(&row), (b"alice".as_slice(), row.len()));
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// `CURDATE()` / `CURTIME()` 是 MySQL 拼写，与 `NOW()` 一样返回 UTC 文本。
 #[test]
 fn mysql_date_spellings_render_utc_text_rows() {
