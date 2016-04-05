@@ -1012,6 +1012,52 @@ pub fn upsert_cases() -> Vec<Case> {
                 ],
             )
             .build(),
+        // 赋值右值走普通数值表达式路径，因此既能引用两侧的列，也能对它们取负或做加减。
+        case("on conflict do update negates a stored column")
+            .only(Driver::Postgres)
+            .sql("INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET age = -users.age")
+            .affected(1)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(-30), Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+                    &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
+        case("on conflict do update adds the stored column to the excluded column")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+                 ON CONFLICT (id) DO UPDATE SET age = users.age + EXCLUDED.age",
+            )
+            .affected(1)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(129), Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+                    &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
+        case("on conflict do update subtracts the stored column from the excluded column")
+            .only(Driver::Postgres)
+            .sql(
+                "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+                 ON CONFLICT (id) DO UPDATE SET age = EXCLUDED.age - users.age",
+            )
+            .affected(1)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(69), Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Float(2.5), Bool(false), Lit::Null],
+                    &[Int(3), Text("carol"), Int(40), Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
         case("on conflict do update inserts when no row conflicts")
             .only(Driver::Postgres)
             .sql("INSERT INTO users VALUES (4, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET name = 'never'")
@@ -1101,6 +1147,21 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("unimplemented window function", "SELECT id, NTILE(2) OVER (ORDER BY age) FROM users"),
     ("unimplemented offset window function", "SELECT id, LAG(age) OVER (ORDER BY age) FROM users"),
     ("named window", "SELECT id, ROW_NUMBER() OVER w FROM users WINDOW w AS (ORDER BY age)"),
+    // `DO UPDATE SET` 只放开数值表达式；`CASE`、函数调用与子查询继续显式拒绝，不做近似执行。
+    (
+        "upsert CASE assignment",
+        "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+         ON CONFLICT (id) DO UPDATE SET age = CASE WHEN users.age > 0 THEN 1 ELSE 2 END",
+    ),
+    (
+        "upsert function assignment",
+        "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') ON CONFLICT (id) DO UPDATE SET age = ABS(users.age)",
+    ),
+    (
+        "upsert subquery assignment",
+        "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
+         ON CONFLICT (id) DO UPDATE SET age = (SELECT MAX(age) FROM users)",
+    ),
 ];
 
 /// Every case that both the in-process suite and the real-client suites run.

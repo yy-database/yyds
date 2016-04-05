@@ -1243,6 +1243,51 @@ fn sql_on_conflict_do_update_reads_the_excluded_and_the_stored_row() {
     );
 }
 
+/// `DO UPDATE SET` 的右值走普通数值表达式路径：一元负号与列之间的 `+` / `-` 都直接
+/// 对既有行与 `EXCLUDED` 求值，再按目标列类型校验后落库。
+#[test]
+fn sql_on_conflict_do_update_accepts_numeric_arithmetic_over_columns() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
+    let executor = empty_executor();
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice', 30)");
+
+    let negated = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users VALUES (1, 'ignored', 99) ON CONFLICT (id) DO UPDATE SET age = -users.age",
+    );
+    assert_eq!(negated.affected_rows, 1);
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT age FROM users").rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(-30)]]
+    );
+
+    let summed = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users VALUES (1, 'ignored', 99) ON CONFLICT (id) DO UPDATE SET age = users.age + EXCLUDED.age",
+    );
+    assert_eq!(summed.affected_rows, 1);
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT age FROM users").rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(69)]]
+    );
+
+    let subtracted = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users VALUES (1, 'ignored', 99) ON CONFLICT (id) DO UPDATE SET age = EXCLUDED.age - users.age",
+    );
+    assert_eq!(subtracted.affected_rows, 1);
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT age FROM users").rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(30)]]
+    );
+}
+
 #[test]
 fn sql_on_conflict_do_update_assigns_columns_simultaneously() {
     let catalog = catalog("table pairs { @@id: i64, a: i64, b: i64 }\n");
@@ -1266,18 +1311,27 @@ fn sql_on_conflict_do_update_assigns_columns_simultaneously() {
 fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
 
-    // 只有字面量、列引用与 `列 ± 字面量` 能直接在行对上求值，其余形态显式拒绝。
+    // 只有字面量、列引用与 `+` / `-` 组成的数值表达式能直接在行对上求值，其余形态显式拒绝。
     for sql in [
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = users.age * 2",
-        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = users.age + users.age",
-        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = -users.age",
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = users.age % 2",
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = CASE WHEN users.age > 0 THEN 1 ELSE 2 END",
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = (SELECT MAX(age) FROM users)",
     ] {
         let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
             .unwrap_or_else(|error| panic!("bind `{sql}`: {}", error.message));
         let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("shape is not executable");
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}");
     }
+
+    // 函数调用连上游 `SET` 赋值语法都不接受，在绑定阶段就报错，同样不会被近似执行。
+    let function_error = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = ABS(users.age)",
+        &catalog,
+        7,
+    )
+    .expect_err("a function call is not a supported assignment value");
+    assert!(!function_error.message.is_empty(), "function assignment must report a reason");
 
     // 未限定的列名在既有行与 `EXCLUDED` 之间二义，必须显式限定。
     let error = yyds_gateway::bind_sql_catalog(
