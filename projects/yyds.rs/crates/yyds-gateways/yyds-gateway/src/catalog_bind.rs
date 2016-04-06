@@ -227,11 +227,26 @@ pub struct SqlCatalogBoundColumn {
     pub field_name: String,
 }
 
+/// A column of the directly enclosing query read by a correlated subquery.
+///
+/// A correlated subquery is re-executed once per outer row, so the value cannot
+/// come from the subquery's own row. The declared type travels with the column
+/// because execution decodes the outer row without consulting the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogOuterColumn {
+    /// Column identity and the row-value key inside the enclosing query's row.
+    pub column: SqlCatalogBoundColumn,
+    /// Declared type of the column, taken from the catalog at bind time.
+    pub field_type: SqlFieldType,
+}
+
 /// SQL expression after catalog binding and before distributed planning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlCatalogBoundExpression {
     /// A catalog-resolved column reference.
     Column(SqlCatalogBoundColumn),
+    /// A column of the directly enclosing query, supplied per outer row.
+    OuterColumn(SqlCatalogOuterColumn),
     /// A SQL literal retaining gateway semantics.
     Literal(SqlBoundLiteral),
     /// A bare `*` argument; only `COUNT(*)` gives it meaning.
@@ -274,8 +289,8 @@ pub enum SqlCatalogBoundExpression {
     },
     /// A scalar subquery `(SELECT ...)` with the subquery already planned.
     ///
-    /// Its value is materialized once per statement, before any row is filtered or
-    /// projected, so only uncorrelated subqueries are expressible.
+    /// The plan is executed once per enclosing row when it reads an enclosing column,
+    /// and once per statement otherwise.
     ScalarSubquery {
         /// Executable plan for the subquery.
         plan: Box<crate::sql_planner::SqlExecutionPlan>,
@@ -480,6 +495,68 @@ pub enum SqlCatalogBoundStatement {
     SetOperation(SqlCatalogBoundSetOperation),
 }
 
+/// Why a column reference may not reach the directly enclosing query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlCorrelatedBlock {
+    /// The subquery sits in a write statement, where no enclosing row is in scope yet.
+    WriteStatement,
+    /// The subquery is nested inside another subquery; only one correlation level exists.
+    Nested,
+    /// The reference sits in a `FROM` clause, which is flattened onto the enclosing row.
+    FromClause,
+}
+
+impl SqlCorrelatedBlock {
+    /// Client-facing reason a correlated reference is rejected in this position.
+    fn message(self) -> &'static str {
+        match self {
+            Self::WriteStatement => "SQL correlated subquery is not supported in a write statement",
+            Self::Nested => "SQL correlated subquery supports a single nesting level only",
+            Self::FromClause => "SQL correlated column cannot appear in a subquery FROM clause",
+        }
+    }
+}
+
+/// Which tables an expression may correlate against, and whether that is allowed.
+///
+/// A correlated subquery is re-executed once per enclosing row, so the enclosing
+/// tables stay visible inside it. `blocked` records positions where correlation is
+/// refused instead of silently reading a value from the wrong row.
+#[derive(Debug, Clone, Default)]
+struct SqlCorrelationScope {
+    /// Tables of the directly enclosing query, addressable by a correlated subquery.
+    outer: Vec<SqlCatalogBoundTable>,
+    /// Reason enclosing columns are rejected here, when one applies.
+    blocked: Option<SqlCorrelatedBlock>,
+}
+
+impl SqlCorrelationScope {
+    /// Scope of a statement-level `SELECT`: no enclosing tables, correlation allowed.
+    fn root() -> Self {
+        Self::default()
+    }
+
+    /// Scope of a write statement: subqueries may not read the written row.
+    fn write() -> Self {
+        Self { outer: Vec::new(), blocked: Some(SqlCorrelatedBlock::WriteStatement) }
+    }
+
+    /// Scope of one subquery whose enclosing query exposes `sources`.
+    fn subquery(&self, sources: &[SqlCatalogBoundTable]) -> Self {
+        Self {
+            outer: sources.to_vec(),
+            blocked: self.blocked.or_else(|| (!self.outer.is_empty()).then_some(SqlCorrelatedBlock::Nested)),
+        }
+    }
+
+    /// Scope of a `FROM` body: enclosing tables stay visible only to be rejected.
+    fn from_clause(&self, sources: &[SqlCatalogBoundTable]) -> Self {
+        let mut outer = self.outer.clone();
+        outer.extend(sources.iter().cloned());
+        Self { outer, blocked: Some(SqlCorrelatedBlock::FromClause) }
+    }
+}
+
 /// Binds a parsed SQL surface to a specific catalog revision.
 ///
 /// `@@`-prefixed references are rejected — use
@@ -536,6 +613,8 @@ fn bind_insert(
 ) -> Result<SqlCatalogBoundInsert, SqlFrontendError> {
     let table = find_table(catalog, &insert.table)?;
     let source = [table.clone()];
+    // 写语句没有「当前外层行」，子查询引用目标表列会读到错误行，绑定期就拒绝。
+    let scope = SqlCorrelationScope::write();
     // `EXCLUDED` 是 `DO UPDATE` 里提议写入的那一行：同一个 catalog 表占用第二个
     // 行槽，它的列因此带上 `ROW_ID_STRIDE` 偏移，与既有行区分开。既有行仍是槽 0。
     let proposed = SqlCatalogBoundTable { alias: Some("EXCLUDED".to_string()), row_slot: 1, ..table.clone() };
@@ -584,6 +663,7 @@ fn bind_insert(
                                     canonicalize_excluded(assignment.value),
                                     &update_scope,
                                     &[],
+                                    &scope,
                                     catalog,
                                     variables,
                                 )?,
@@ -594,7 +674,7 @@ fn bind_insert(
                         assignments: bound_assignments,
                         // `WHERE` 仍只对既有行求值，因此看不到 `EXCLUDED` 的列。
                         predicate: predicate
-                            .map(|predicate| bind_expression(predicate, &source, &[], catalog, variables))
+                            .map(|predicate| bind_expression(predicate, &source, &[], &scope, catalog, variables))
                             .transpose()?,
                     }
                 }
@@ -606,7 +686,7 @@ fn bind_insert(
         Some(projections) => {
             let mut bound = Vec::new();
             for projection in projections {
-                bound.extend(bind_projection(projection, &source, &[], catalog, variables)?);
+                bound.extend(bind_projection(projection, &source, &[], &scope, catalog, variables)?);
             }
             Some(bound)
         }
@@ -635,8 +715,10 @@ fn bind_insert(
                 row.len()
             )));
         }
-        let bound_row =
-            row.iter().map(|v| bind_expression(v.clone(), &source, &[], catalog, variables)).collect::<Result<Vec<_>, _>>()?;
+        let bound_row = row
+            .iter()
+            .map(|v| bind_expression(v.clone(), &source, &[], &scope, catalog, variables))
+            .collect::<Result<Vec<_>, _>>()?;
         rows.push(bound_row);
     }
     Ok(SqlCatalogBoundInsert { table, fields: bound_fields, rows, select: None, conflict, returning })
@@ -674,7 +756,8 @@ fn canonicalize_excluded(expression: SqlBoundExpression) -> SqlBoundExpression {
             InSubquery { expression: Box::new(canonicalize_excluded(*expression)), select, negated }
         }
         Exists { select, negated } => Exists { select, negated },
-        // 标量子查询不引用外层列，`EXCLUDED` 折叠无内容可改。
+        // 写语句禁止相关子查询，所以这里的子查询不会把外层列当作 `EXCLUDED` 别名，
+        // 折叠无内容可改。
         ScalarSubquery { select } => ScalarSubquery { select },
         Case { branches, else_branch } => Case {
             branches: branches
@@ -696,17 +779,18 @@ fn bind_update(
 ) -> Result<SqlCatalogBoundUpdate, SqlFrontendError> {
     let table = find_table(catalog, &update.table)?;
     let source = [table.clone()];
+    let scope = SqlCorrelationScope::write();
     let assignments = update
         .assignments
         .into_iter()
         .map(|SqlBoundAssignment { column, value }| {
             let field = find_field(&column, &source, catalog)?;
-            let bound_value = bind_expression(value, &source, &[], catalog, variables)?;
+            let bound_value = bind_expression(value, &source, &[], &scope, catalog, variables)?;
             Ok((field, bound_value))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let predicate =
-        update.predicate.map(|p| bind_expression(p, &source, &[], catalog, variables)).transpose()?;
+        update.predicate.map(|p| bind_expression(p, &source, &[], &scope, catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundUpdate { table, assignments, predicate })
 }
 
@@ -717,7 +801,8 @@ fn bind_delete(
 ) -> Result<SqlCatalogBoundDelete, SqlFrontendError> {
     let table = find_table(catalog, &delete.table)?;
     let source = [table.clone()];
-    let predicate = delete.predicate.map(|p| bind_expression(p, &source, &[], catalog, variables)).transpose()?;
+    let scope = SqlCorrelationScope::write();
+    let predicate = delete.predicate.map(|p| bind_expression(p, &source, &[], &scope, catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundDelete { table, predicate })
 }
 
@@ -727,12 +812,13 @@ fn bind_set_operation(
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSetOperation, SqlFrontendError> {
     // `WITH` 写在集合运算前面时作用域覆盖整个运算，左右两侧共享同一份定义。
+    let scope = SqlCorrelationScope::root();
     let mut left_select = *set.left;
-    let inherited = resolve_cte_scope(std::mem::take(&mut left_select.with), &[], catalog, variables)?;
+    let inherited = resolve_cte_scope(std::mem::take(&mut left_select.with), &[], catalog, variables, &scope)?;
     Ok(SqlCatalogBoundSetOperation {
-        left: Box::new(bind_select_in(left_select, catalog, variables, &inherited)?),
+        left: Box::new(bind_select_in(left_select, catalog, variables, &inherited, &scope)?),
         operator: set.operator,
-        right: Box::new(bind_select_in(*set.right, catalog, variables, &inherited)?),
+        right: Box::new(bind_select_in(*set.right, catalog, variables, &inherited, &scope)?),
         order_by: set.order_by,
         limit: set.limit,
         offset: set.offset,
@@ -744,7 +830,7 @@ fn bind_select(
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
-    bind_select_in(select, catalog, variables, &[])
+    bind_select_in(select, catalog, variables, &[], &SqlCorrelationScope::root())
 }
 
 /// Resolves the `WITH` definitions of one select into the scope its `FROM` sees,
@@ -760,6 +846,7 @@ fn resolve_cte_scope(
     inherited: &[SqlCatalogCte],
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+    scope: &SqlCorrelationScope,
 ) -> Result<Vec<SqlCatalogCte>, SqlFrontendError> {
     let mut ctes: Vec<SqlCatalogCte> = inherited.to_vec();
     for cte in own {
@@ -770,6 +857,7 @@ fn resolve_cte_scope(
             &definition.name,
             "common table expression",
             &definition.visible,
+            &scope.from_clause(&[]),
             catalog,
             variables,
             &mut probe,
@@ -785,15 +873,18 @@ fn bind_select_in(
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
     inherited: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
 ) -> Result<SqlCatalogBoundSelect, SqlFrontendError> {
     // CTE 在引用处才被展开成基表，同一条 CTE 被引用两次就得到两个互不覆盖的行槽。
-    let ctes = resolve_cte_scope(select.with, inherited, catalog, variables)?;
+    let ctes = resolve_cte_scope(select.with, inherited, catalog, variables, scope)?;
     let mut occurrences: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
     // 派生表被扁平化成它自己的基表，内层 `WHERE` 改由外层 `WHERE` 表达。
     let mut derived_predicates: Vec<SqlCatalogBoundExpression> = Vec::new();
     let mut source = None;
+    // FROM 里的表在解析时还不构成「外层行」，因此这里只把外层表传给 FROM 以显式拒绝。
     if let Some(bound_source) = select.source.as_ref() {
-        let (table, predicate) = bind_source(bound_source, catalog, variables, &mut occurrences, &ctes)?;
+        let (table, predicate) =
+            bind_source(bound_source, catalog, variables, &mut occurrences, &ctes, &scope.from_clause(&[]))?;
         source = Some(table);
         if let Some(predicate) = predicate {
             // 保留侧的过滤移动到外层 `WHERE` 语义不变；可空侧会因 NULL 扩张丢行。
@@ -807,7 +898,8 @@ fn bind_select_in(
     let mut sources: Vec<SqlCatalogBoundTable> = source.iter().cloned().collect();
     let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
     for join in select.joins {
-        let (table, derived_predicate) = bind_source(&join.source, catalog, variables, &mut occurrences, &ctes)?;
+        let (table, derived_predicate) =
+            bind_source(&join.source, catalog, variables, &mut occurrences, &ctes, &scope.from_clause(&sources))?;
         if let Some(predicate) = derived_predicate {
             if !matches!(join.kind, SqlBoundJoinKind::Inner) {
                 return Err(unsupported_source("derived table", "a filtered source can only feed an INNER join"));
@@ -824,15 +916,15 @@ fn bind_select_in(
             ));
         }
         sources.push(table.clone());
-        let on = bind_expression(join.on, &sources, &ctes, catalog, variables)?;
+        let on = bind_expression(join.on, &sources, &ctes, scope, catalog, variables)?;
         joins.push(SqlCatalogBoundJoin { kind: join.kind, table, on });
     }
     let mut projections: Vec<SqlCatalogBoundProjection> = Vec::new();
     for projection in select.projections {
-        projections.extend(bind_projection(projection, &sources, &ctes, catalog, variables)?);
+        projections.extend(bind_projection(projection, &sources, &ctes, scope, catalog, variables)?);
     }
     let mut predicate =
-        select.predicate.map(|expression| bind_expression(expression, &sources, &ctes, catalog, variables)).transpose()?;
+        select.predicate.map(|expression| bind_expression(expression, &sources, &ctes, scope, catalog, variables)).transpose()?;
     for derived in derived_predicates {
         predicate = merge_predicates(predicate, Some(derived));
     }
@@ -841,18 +933,18 @@ fn bind_select_in(
         .map(|exprs| {
             exprs
                 .into_iter()
-                .map(|e| bind_expression(e, &sources, &ctes, catalog, variables))
+                .map(|e| bind_expression(e, &sources, &ctes, scope, catalog, variables))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
-    let having = select.having.map(|e| bind_expression(e, &sources, &ctes, catalog, variables)).transpose()?;
+    let having = select.having.map(|e| bind_expression(e, &sources, &ctes, scope, catalog, variables)).transpose()?;
     let order_by = match select.order_by {
         Some(items) => {
             let bound = items
                 .into_iter()
                 .map(|item| {
                     Ok(SqlCatalogBoundOrderByItem {
-                        expression: bind_expression(item.expr, &sources, &ctes, catalog, variables)?,
+                        expression: bind_expression(item.expr, &sources, &ctes, scope, catalog, variables)?,
                         direction: item.direction,
                         nulls: item.nulls,
                     })
@@ -882,6 +974,7 @@ fn bind_projection(
     projection: SqlBoundProjection,
     sources: &[SqlCatalogBoundTable],
     ctes: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<Vec<SqlCatalogBoundProjection>, SqlFrontendError> {
@@ -893,7 +986,7 @@ fn bind_projection(
             Ok(sources.iter().cloned().map(SqlCatalogBoundProjection::Star).collect())
         }
         SqlBoundProjection::Expression { expression, alias } => Ok(vec![SqlCatalogBoundProjection::Expression {
-            expression: bind_expression(expression, sources, ctes, catalog, variables)?,
+            expression: bind_expression(expression, sources, ctes, scope, catalog, variables)?,
             alias,
         }]),
     }
@@ -903,6 +996,7 @@ fn bind_expression(
     expression: SqlBoundExpression,
     sources: &[SqlCatalogBoundTable],
     ctes: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundExpression, SqlFrontendError> {
@@ -912,15 +1006,23 @@ fn bind_expression(
             if name.starts_with("@@") {
                 return variables(&name).map(SqlCatalogBoundExpression::Literal);
             }
-            let field = match find_field(&name, sources, catalog) {
-                Ok(field) => field,
+            // 本层作用域解析不到时，再按「直接外层查询的列」找一次：相关子查询按外层行
+            // 逐行重算，值不来自子查询自己的行。该位置禁止相关时在这里显式拒绝。
+            let outcome = match find_field(&name, sources, catalog) {
+                Ok(field) => Ok(SqlCatalogBoundExpression::Column(field)),
+                Err(error) => match find_outer_column(&name, scope, catalog) {
+                    Ok(Some(column)) => Ok(SqlCatalogBoundExpression::OuterColumn(column)),
+                    Ok(None) => Err(error),
+                    Err(error) => Err(error),
+                },
+            };
+            match outcome {
+                Ok(expression) => Ok(expression),
                 // SQL 标准把 `CURRENT_DATE` / `CURRENT_TIME` / `CURRENT_TIMESTAMP` 写成
                 // 无括号关键字，Oak 的树里没有对应节点。列解析失败后回退为无参内建函数，
                 // 同名列优先，作用域与普通列引用一致。
-                Err(error) => {
-                    let keyword =
-                        if error.kind == SqlErrorKind::UnknownColumn { SqlScalarFunction::from_keyword(&name) } else { None };
-                    return match keyword {
+                Err(error) if error.kind == SqlErrorKind::UnknownColumn => {
+                    match SqlScalarFunction::from_keyword(&name) {
                         Some(function) => Ok(SqlCatalogBoundExpression::Function {
                             name: function.name().to_ascii_lowercase(),
                             args: Vec::new(),
@@ -928,47 +1030,49 @@ fn bind_expression(
                             window: None,
                         }),
                         None => Err(error),
-                    };
+                    }
                 }
-            };
-            Ok(SqlCatalogBoundExpression::Column(field))
+                Err(error) => Err(error),
+            }
         }
         SqlBoundExpression::Literal(literal) => Ok(SqlCatalogBoundExpression::Literal(literal)),
         SqlBoundExpression::Wildcard => Ok(SqlCatalogBoundExpression::Wildcard),
         SqlBoundExpression::Binary { left, operator, right } => Ok(SqlCatalogBoundExpression::Binary {
-            left: Box::new(bind_expression(*left, sources, ctes, catalog, variables)?),
+            left: Box::new(bind_expression(*left, sources, ctes, scope, catalog, variables)?),
             operator,
-            right: Box::new(bind_expression(*right, sources, ctes, catalog, variables)?),
+            right: Box::new(bind_expression(*right, sources, ctes, scope, catalog, variables)?),
         }),
         SqlBoundExpression::Unary { operator, expression } => Ok(SqlCatalogBoundExpression::Unary {
             operator,
-            expression: Box::new(bind_expression(*expression, sources, ctes, catalog, variables)?),
+            expression: Box::new(bind_expression(*expression, sources, ctes, scope, catalog, variables)?),
         }),
         SqlBoundExpression::Function { name, args, distinct, window } => {
             let bound_args = args
                 .into_iter()
-                .map(|arg| bind_expression(arg, sources, ctes, catalog, variables))
+                .map(|arg| bind_expression(arg, sources, ctes, scope, catalog, variables))
                 .collect::<Result<Vec<_>, _>>()?;
             let window = window
-                .map(|spec| bind_window_spec(spec, sources, ctes, catalog, variables))
+                .map(|spec| bind_window_spec(spec, sources, ctes, scope, catalog, variables))
                 .transpose()?;
             Ok(SqlCatalogBoundExpression::Function { name, args: bound_args, distinct, window })
         }
         SqlBoundExpression::InSubquery { expression, select, negated } => {
-            // 子查询自带 FROM 作用域，不继承外层 sources，因此不支持相关子查询；
-            // 但外层 `WITH` 定义仍然可见，子查询可以直接引用同一个 CTE。
-            let bound_select = bind_select_in(*select, catalog, variables, ctes)?;
+            // 子查询自带 FROM 作用域，直接外层查询的列仍可见一层；外层 `WITH` 定义同样
+            // 可见。执行期按外层行重算整个子查询，因此只有单层相关可以表达。
+            let bound_select = bind_select_in(*select, catalog, variables, ctes, &scope.subquery(sources))?;
+            reject_correlated_grouping(&bound_select)?;
             let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
             Ok(SqlCatalogBoundExpression::InSubquery {
-                expression: Box::new(bind_expression(*expression, sources, ctes, catalog, variables)?),
+                expression: Box::new(bind_expression(*expression, sources, ctes, scope, catalog, variables)?),
                 plan: Box::new(plan),
                 negated,
             })
         }
         SqlBoundExpression::ScalarSubquery { select } => {
-            // 标量子查询与 `EXISTS` 一样不相关：外层 `WITH` 可见，外层列不可见。
+            // 标量子查询与 `EXISTS` 一样按外层行重算，外层 `WITH` 可见，外层列可见一层。
             // 它的值必须是单一列，因此在绑定期就拒绝多列投影，而不是在执行期近似取首列。
-            let bound_select = bind_select_in(*select, catalog, variables, ctes)?;
+            let bound_select = bind_select_in(*select, catalog, variables, ctes, &scope.subquery(sources))?;
+            reject_correlated_grouping(&bound_select)?;
             let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
             if crate::sql_describe::describe_plan(&plan).len() != 1 {
                 return Err(SqlFrontendError::unsupported("SQL scalar subquery must select exactly one column"));
@@ -976,8 +1080,9 @@ fn bind_expression(
             Ok(SqlCatalogBoundExpression::ScalarSubquery { plan: Box::new(plan) })
         }
         SqlBoundExpression::Exists { select, negated } => {
-            // `EXISTS` 与 `IN` 一样是不相关子查询，外层 `WITH` 定义同样可见。
-            let bound_select = bind_select_in(*select, catalog, variables, ctes)?;
+            // `EXISTS` 与 `IN` 一样按外层行重算，外层 `WITH` 定义同样可见。
+            let bound_select = bind_select_in(*select, catalog, variables, ctes, &scope.subquery(sources))?;
+            reject_correlated_grouping(&bound_select)?;
             let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
             Ok(SqlCatalogBoundExpression::Exists { plan: Box::new(plan), negated })
         }
@@ -985,24 +1090,95 @@ fn bind_expression(
             let bound_branches = branches
                 .into_iter()
                 .map(|(when, then)| {
-                    let w = bind_expression(*when, sources, ctes, catalog, variables)?;
-                    let t = bind_expression(*then, sources, ctes, catalog, variables)?;
+                    let w = bind_expression(*when, sources, ctes, scope, catalog, variables)?;
+                    let t = bind_expression(*then, sources, ctes, scope, catalog, variables)?;
                     Ok((Box::new(w), Box::new(t)))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let bound_else = match else_branch {
-                Some(els) => Some(Box::new(bind_expression(*els, sources, ctes, catalog, variables)?)),
+                Some(els) => Some(Box::new(bind_expression(*els, sources, ctes, scope, catalog, variables)?)),
                 None => None,
             };
             Ok(SqlCatalogBoundExpression::Case { branches: bound_branches, else_branch: bound_else })
         }
         SqlBoundExpression::Cast { expr, target } => {
             Ok(SqlCatalogBoundExpression::Cast {
-                expr: Box::new(bind_expression(*expr, sources, ctes, catalog, variables)?),
+                expr: Box::new(bind_expression(*expr, sources, ctes, scope, catalog, variables)?),
                 target,
             })
         }
     }
+}
+
+/// Resolves a column name against the tables of the directly enclosing query.
+///
+/// `Ok(None)` means the name belongs to neither the current scope nor the enclosing
+/// one, so the caller keeps reporting the original unknown-column error. A match in
+/// an enclosing scope that the current position forbids reports the reason instead,
+/// which keeps `UnknownColumn` from hiding an explicitly unsupported form.
+fn find_outer_column(
+    name: &str,
+    scope: &SqlCorrelationScope,
+    catalog: &SqlCatalog,
+) -> Result<Option<SqlCatalogOuterColumn>, SqlFrontendError> {
+    if scope.outer.is_empty() {
+        return Ok(None);
+    }
+    let column = match find_field(name, &scope.outer, catalog) {
+        Ok(column) => column,
+        Err(error) if matches!(error.kind, SqlErrorKind::UnknownColumn | SqlErrorKind::UnknownTableQualifier) => {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(blocked) = scope.blocked {
+        return Err(SqlFrontendError::unsupported(blocked.message()));
+    }
+    let field_type = field_type_of(catalog, &column)?;
+    Ok(Some(SqlCatalogOuterColumn { column, field_type }))
+}
+
+/// Looks up the declared type of a bound column through its catalog identity.
+fn field_type_of(catalog: &SqlCatalog, column: &SqlCatalogBoundColumn) -> Result<SqlFieldType, SqlFrontendError> {
+    let table = catalog
+        .tables
+        .iter()
+        .find(|candidate| candidate.type_id == column.type_id)
+        .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+    Ok(table
+        .fields
+        .iter()
+        .find(|field| field.field_id == column.field_id)
+        .map(|field| field.field_type.clone())
+        .unwrap_or(SqlFieldType::Unknown))
+}
+
+/// Rejects a correlated subquery whose `GROUP BY` / `HAVING` / `ORDER BY` reads an
+/// enclosing column.
+///
+/// The subquery is re-executed once per outer row, so those terms would be constant
+/// for that execution. That is expressible, but keeping it unsupported is what
+/// bounds the feature to the placements the planner can validate statically.
+fn reject_correlated_grouping(select: &SqlCatalogBoundSelect) -> Result<(), SqlFrontendError> {
+    let reads_outer = |clause: &str, hit: bool| {
+        if hit {
+            Err(SqlFrontendError::unsupported(format!("SQL correlated column cannot appear in a subquery {clause}")))
+        } else {
+            Ok(())
+        }
+    };
+    reads_outer(
+        "GROUP BY",
+        select.group_by.iter().flatten().any(crate::sql_planner::expression_reads_outer),
+    )?;
+    reads_outer(
+        "HAVING",
+        select.having.as_ref().is_some_and(crate::sql_planner::expression_reads_outer),
+    )?;
+    reads_outer(
+        "ORDER BY",
+        select.order_by.iter().flatten().any(|item| crate::sql_planner::expression_reads_outer(&item.expression)),
+    )
 }
 
 /// Catalog-binds one window spec, keeping partition / ordering terms resolvable
@@ -1011,18 +1187,19 @@ fn bind_window_spec(
     spec: SqlBoundWindowSpec,
     sources: &[SqlCatalogBoundTable],
     ctes: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundWindowSpec, SqlFrontendError> {
     let partition_by = spec
         .partition_by
         .into_iter()
-        .map(|expr| bind_expression(expr, sources, ctes, catalog, variables))
+        .map(|expr| bind_expression(expr, sources, ctes, scope, catalog, variables))
         .collect::<Result<Vec<_>, _>>()?;
     let mut order_by = Vec::with_capacity(spec.order_by.len());
     for item in spec.order_by {
         order_by.push(SqlCatalogBoundOrderByItem {
-            expression: bind_expression(item.expr, sources, ctes, catalog, variables)?,
+            expression: bind_expression(item.expr, sources, ctes, scope, catalog, variables)?,
             direction: item.direction,
             nulls: item.nulls,
         });
@@ -1059,6 +1236,7 @@ fn bind_source(
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
     occurrences: &mut std::collections::BTreeMap<u64, u64>,
     ctes: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
 ) -> Result<(SqlCatalogBoundTable, Option<SqlCatalogBoundExpression>), SqlFrontendError> {
     match source {
         SqlBoundSource::Table { name, alias } => match ctes.iter().rev().find(|cte| cte.name == *name) {
@@ -1067,6 +1245,7 @@ fn bind_source(
                 alias.as_deref().unwrap_or(name),
                 "common table expression",
                 &cte.visible,
+                scope,
                 catalog,
                 variables,
                 occurrences,
@@ -1078,7 +1257,7 @@ fn bind_source(
             }
         },
         SqlBoundSource::Derived { query, alias } => {
-            flatten_body(query, alias, "derived table", ctes, catalog, variables, occurrences)
+            flatten_body(query, alias, "derived table", ctes, scope, catalog, variables, occurrences)
         }
     }
 }
@@ -1109,6 +1288,7 @@ fn flatten_body(
     alias: &str,
     subject: &str,
     visible: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
     occurrences: &mut std::collections::BTreeMap<u64, u64>,
@@ -1145,6 +1325,7 @@ fn flatten_body(
             inner_alias.as_deref().unwrap_or(name),
             "common table expression",
             &cte.visible,
+            scope,
             catalog,
             variables,
             occurrences,
@@ -1162,7 +1343,16 @@ fn flatten_body(
     let predicate = query
         .predicate
         .clone()
-        .map(|expression| bind_expression(expression, std::slice::from_ref(&table), visible, catalog, variables))
+        .map(|expression| {
+            bind_expression(
+                expression,
+                std::slice::from_ref(&table),
+                visible,
+                &scope.from_clause(std::slice::from_ref(&table)),
+                catalog,
+                variables,
+            )
+        })
         .transpose()?;
     let mut table = table;
     table.alias = Some(alias.to_string());
@@ -1328,9 +1518,11 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
             collect_column_ids(right, out);
         }
         SqlCatalogBoundExpression::Unary { expression, .. } => collect_column_ids(expression, out),
-        SqlCatalogBoundExpression::InSubquery { expression, .. } | SqlCatalogBoundExpression::InValues { expression, .. } => {
-            collect_column_ids(expression, out)
+        SqlCatalogBoundExpression::InSubquery { expression, plan, .. } => {
+            collect_column_ids(expression, out);
+            crate::sql_planner::collect_plan_outer_row_ids(plan, out);
         }
+        SqlCatalogBoundExpression::InValues { expression, .. } => collect_column_ids(expression, out),
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             for (w, t) in branches {
                 collect_column_ids(w, out);
@@ -1341,10 +1533,14 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
             }
         }
         SqlCatalogBoundExpression::Cast { expr, .. } => collect_column_ids(expr, out),
-        // `EXISTS` 不引用任何外层列，行值键集合不受影响。
-        SqlCatalogBoundExpression::Exists { .. } => {}
-        // 标量子查询同样只依赖自己的结果，不引用任何外层列。
-        SqlCatalogBoundExpression::ScalarSubquery { .. } => {}
+        // 子查询对外层列的引用绑成 `OuterColumn`，值取自外层行而不是本层行值，因此
+        // 子查询的 `EXISTS` / 标量子查询本身不为本层贡献行值键；外层行的行值键由
+        // 外层计划的表达式收集，这里只把子查询计划里的外层引用透传出去。
+        SqlCatalogBoundExpression::Exists { plan, .. } | SqlCatalogBoundExpression::ScalarSubquery { plan } => {
+            crate::sql_planner::collect_plan_outer_row_ids(plan, out)
+        }
+        // 外层列不在本层的行值里，不能要求本层行携带它的键。
+        SqlCatalogBoundExpression::OuterColumn(_) => {}
         SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
     }
 }

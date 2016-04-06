@@ -136,6 +136,8 @@ fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &B
     use SqlCatalogBoundExpression::*;
     match expression {
         Column(column) => field_types.get(&column.row_id).cloned().unwrap_or(SqlFieldType::Unknown).inner(),
+        // 外层列的类型随绑定一起带过来，计划里没有它的行值映射。
+        OuterColumn(column) => column.field_type.inner(),
         Literal(literal) => match literal {
             SqlBoundLiteral::Integer(_) => SqlFieldType::Int64,
             SqlBoundLiteral::Number(_) => SqlFieldType::Float64,

@@ -20,7 +20,7 @@ use crate::{
         collect_column_ids, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundConflict, SqlCatalogBoundConflictAction,
         SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert, SqlCatalogBoundOrderByItem,
         SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperation, SqlCatalogBoundStatement,
-        SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlFieldType,
+        SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlCatalogOuterColumn, SqlFieldType,
     },
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundOrderByItem,
@@ -136,6 +136,7 @@ pub fn plan_select_for_dialect(
         return Err(planner_error("cannot mix aggregate and non-aggregate projections without GROUP BY"));
     }
     validate_grouped_select(&select, has_aggregate)?;
+    validate_correlated_placement(&select, has_aggregate, has_window)?;
     if select.distinct {
         validate_distinct_order_by(select.order_by.as_ref(), &projection_fields, &projection_expressions)?;
     }
@@ -871,6 +872,9 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
         SqlCatalogBoundExpression::Wildcard => {
             Err(planner_error("SQL gateway write values must be literals; `*` is not a value"))
         }
+        SqlCatalogBoundExpression::OuterColumn(_) => {
+            Err(planner_error("SQL gateway write values must be simple literals"))
+        }
         SqlCatalogBoundExpression::Function { .. }
         | SqlCatalogBoundExpression::Binary { .. }
         | SqlCatalogBoundExpression::Unary { .. }
@@ -1464,9 +1468,8 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
         SqlCatalogBoundExpression::Cast { expr, .. } => expression_has_aggregate(expr),
         // 子查询只依赖自己的结果，对分组恒定：它内部的聚合不属于外层分组。
         SqlCatalogBoundExpression::Exists { .. } | SqlCatalogBoundExpression::ScalarSubquery { .. } => false,
-        SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {
-            false
-        }
+        SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::OuterColumn(_) => false,
+        SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => false,
     }
 }
 
@@ -1494,11 +1497,193 @@ fn expression_has_window(expr: &SqlCatalogBoundExpression) -> bool {
         }
         SqlCatalogBoundExpression::Cast { expr, .. } => expression_has_window(expr),
         SqlCatalogBoundExpression::Column(_)
+        | SqlCatalogBoundExpression::OuterColumn(_)
         | SqlCatalogBoundExpression::Literal(_)
         | SqlCatalogBoundExpression::Wildcard
         | SqlCatalogBoundExpression::Exists { .. }
         | SqlCatalogBoundExpression::ScalarSubquery { .. } => false,
     }
+}
+
+/// 表达式是否读取直接外层查询的列，即自身或内部子查询是否相关。
+///
+/// 相关子查询按外层行逐行重算，因此不能在被过滤/投影的行确定之前一次性物化。
+/// 执行层用这个判定在「一次物化」与「逐行重算」之间选择。
+pub(crate) fn expression_reads_outer(expr: &SqlCatalogBoundExpression) -> bool {
+    let mut found = false;
+    visit_outer_columns(expr, &mut |_| found = true);
+    found
+}
+
+/// 执行计划是否读取直接外层查询的列（递归下探嵌套子查询计划）。
+pub(crate) fn plan_reads_outer(plan: &SqlExecutionPlan) -> bool {
+    let mut found = false;
+    visit_plan_outer_columns(plan, &mut |_| found = true);
+    found
+}
+
+/// 收集表达式（含内部子查询计划）读取的外层行键。
+///
+/// 外层行按这些 row id 改成整行解码，相关子查询逐行重算时才能真的拿到该行的值，
+/// 而不是把未解码的字段当成 SQL NULL。行槽偏移已包含在 row id 里。
+pub(crate) fn collect_outer_row_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec<u64>) {
+    visit_outer_columns(expr, &mut |column| push_outer_row_id(column, out));
+}
+
+/// 收集一个子查询计划读取的外层行键，语义同 [`collect_outer_row_ids`]。
+pub(crate) fn collect_plan_outer_row_ids(plan: &SqlExecutionPlan, out: &mut Vec<u64>) {
+    visit_plan_outer_columns(plan, &mut |column| push_outer_row_id(column, out));
+}
+
+fn push_outer_row_id(column: &SqlCatalogOuterColumn, out: &mut Vec<u64>) {
+    if !out.contains(&column.column.row_id) {
+        out.push(column.column.row_id);
+    }
+}
+
+/// 深度优先访问表达式里的每个外层列引用，含嵌套子查询计划里的引用。
+fn visit_outer_columns(expr: &SqlCatalogBoundExpression, visit: &mut impl FnMut(&SqlCatalogOuterColumn)) {
+    match expr {
+        SqlCatalogBoundExpression::OuterColumn(column) => visit(column),
+        SqlCatalogBoundExpression::Function { args, window, .. } => {
+            for arg in args {
+                visit_outer_columns(arg, &mut *visit);
+            }
+            if let Some(window) = window {
+                for element in &window.partition_by {
+                    visit_outer_columns(element, &mut *visit);
+                }
+                for item in &window.order_by {
+                    visit_outer_columns(&item.expression, &mut *visit);
+                }
+            }
+        }
+        SqlCatalogBoundExpression::Binary { left, right, .. } => {
+            visit_outer_columns(left, &mut *visit);
+            visit_outer_columns(right, &mut *visit);
+        }
+        SqlCatalogBoundExpression::Unary { expression, .. }
+        | SqlCatalogBoundExpression::InValues { expression, .. }
+        | SqlCatalogBoundExpression::Cast { expr: expression, .. } => visit_outer_columns(expression, &mut *visit),
+        SqlCatalogBoundExpression::InSubquery { expression, plan, .. } => {
+            visit_outer_columns(expression, &mut *visit);
+            visit_plan_outer_columns(plan, &mut *visit);
+        }
+        SqlCatalogBoundExpression::Case { branches, else_branch } => {
+            for (when, then) in branches {
+                visit_outer_columns(when, &mut *visit);
+                visit_outer_columns(then, &mut *visit);
+            }
+            if let Some(else_branch) = else_branch {
+                visit_outer_columns(else_branch, &mut *visit);
+            }
+        }
+        SqlCatalogBoundExpression::Exists { plan, .. } | SqlCatalogBoundExpression::ScalarSubquery { plan } => {
+            visit_plan_outer_columns(plan, &mut *visit)
+        }
+        SqlCatalogBoundExpression::Column(_) | SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
+    }
+}
+
+/// 深度优先访问一个执行计划里的每个外层列引用，含嵌套子查询计划里的引用。
+fn visit_plan_outer_columns(plan: &SqlExecutionPlan, visit: &mut impl FnMut(&SqlCatalogOuterColumn)) {
+    match plan {
+        SqlExecutionPlan::Read(read) => {
+            if let Some(predicate) = &read.remaining_predicate {
+                visit_outer_columns(predicate, &mut *visit);
+            }
+            for (expression, _) in &read.projection_expressions {
+                visit_outer_columns(expression, &mut *visit);
+            }
+        }
+        SqlExecutionPlan::Scan(scan) => {
+            if let Some(predicate) = &scan.remaining_predicate {
+                visit_outer_columns(predicate, &mut *visit);
+            }
+            if let Some(having) = &scan.having {
+                visit_outer_columns(having, &mut *visit);
+            }
+            for expression in scan.group_by.iter().flatten() {
+                visit_outer_columns(expression, &mut *visit);
+            }
+            for item in scan.order_by.iter().flatten() {
+                visit_outer_columns(&item.expression, &mut *visit);
+            }
+            for (expression, _) in &scan.projection_expressions {
+                visit_outer_columns(expression, &mut *visit);
+            }
+        }
+        SqlExecutionPlan::Join(join) => {
+            for on in join.base.on.iter().chain(join.joins.iter().filter_map(|source| source.on.as_ref())) {
+                visit_outer_columns(on, &mut *visit);
+            }
+            if let Some(predicate) = &join.remaining_predicate {
+                visit_outer_columns(predicate, &mut *visit);
+            }
+            for item in join.order_by.iter().flatten() {
+                visit_outer_columns(&item.expression, &mut *visit);
+            }
+            for (expression, _) in &join.projection_expressions {
+                visit_outer_columns(expression, &mut *visit);
+            }
+        }
+        SqlExecutionPlan::Scalar(scalar) => {
+            for (expression, _) in &scalar.projections {
+                visit_outer_columns(expression, &mut *visit);
+            }
+        }
+        SqlExecutionPlan::SetOperation(set) => {
+            visit_plan_outer_columns(&set.left, &mut *visit);
+            visit_plan_outer_columns(&set.right, &mut *visit);
+        }
+        SqlExecutionPlan::InsertSelect(insert) => visit_plan_outer_columns(&insert.source, &mut *visit),
+        // 写语句计划不接受相关子查询，绑定期已经拒绝，因此没有外层列可读。
+        SqlExecutionPlan::Insert(_)
+        | SqlExecutionPlan::MultiInsert(_)
+        | SqlExecutionPlan::Update(_)
+        | SqlExecutionPlan::UpdateScan(_)
+        | SqlExecutionPlan::Delete(_)
+        | SqlExecutionPlan::DeleteScan(_) => {}
+    }
+}
+
+/// 拒绝「外层已经无法指向具体行」的位置上的相关子查询。
+///
+/// 分组或聚合之后，一行输出不再对应一行外层输入；窗口函数同样按分区整体求值。
+/// 逐行重算在这些位置没有可替换的外层行，因此在计划期显式拒绝，而不是挑一行近似。
+fn validate_correlated_placement(
+    select: &SqlCatalogBoundSelect,
+    has_aggregate: bool,
+    has_window: bool,
+) -> Result<(), SqlFrontendError> {
+    let projection_expressions = || {
+        select.projections.iter().filter_map(|projection| match projection {
+            SqlCatalogBoundProjection::Expression { expression, .. } => Some(expression),
+            SqlCatalogBoundProjection::Star(_) => None,
+        })
+    };
+    if has_aggregate || select.group_by.is_some() {
+        if projection_expressions().any(expression_reads_outer) {
+            return Err(planner_error(
+                "SQL correlated subquery cannot be projected once the enclosing rows are grouped",
+            ));
+        }
+        if select.having.as_ref().is_some_and(expression_reads_outer) {
+            return Err(planner_error("SQL correlated subquery cannot appear in HAVING"));
+        }
+        if select
+            .order_by
+            .as_ref()
+            .is_some_and(|items| items.iter().any(|item| expression_reads_outer(&item.expression)))
+        {
+            return Err(planner_error("SQL correlated subquery cannot appear in the ORDER BY of a grouped query"));
+        }
+    }
+    if has_window && projection_expressions().any(|expression| expression_has_window(expression) && expression_reads_outer(expression))
+    {
+        return Err(planner_error("SQL correlated subquery cannot be evaluated inside a window function"));
+    }
+    Ok(())
 }
 
 /// 窗口函数只允许出现在投影列表里：WHERE / GROUP BY / HAVING / ORDER BY 拿到窗口
@@ -1585,6 +1770,8 @@ fn grouped_expression_allowed(
     }
     match expression {
         SqlCatalogBoundExpression::Column(column) => group_columns.contains(&column.row_id),
+        // 外层列属于某一行外层输入，分组后不再有确定的取值来源。
+        SqlCatalogBoundExpression::OuterColumn(_) => false,
         SqlCatalogBoundExpression::Literal(_) => true,
         SqlCatalogBoundExpression::Wildcard => false,
         SqlCatalogBoundExpression::Function { name, .. } if SqlAggregateFunction::from_name(name).is_some() => true,

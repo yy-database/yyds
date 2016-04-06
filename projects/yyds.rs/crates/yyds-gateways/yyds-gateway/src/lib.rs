@@ -20,7 +20,7 @@ pub use crate::{
     catalog_bind::{
         bind_sql_catalog, bind_sql_catalog_with_variables, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression,
         SqlCatalogBoundJoin, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperation,
-        SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable, SqlFieldType,
+        SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogOuterColumn, SqlCatalogTable, SqlFieldType,
     },
     sql_describe::{describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
