@@ -328,6 +328,38 @@ pub fn crud_cases() -> Vec<Case> {
             .sql("SELECT id FROM users WHERE id IN (SELECT id FROM users WHERE age = 20)")
             .rows(&[&[Int(2)]])
             .build(),
+        // 相关子查询按外层行重算：下面的期望值都只在「外层列值真的进入子查询」时成立，
+        // 忽略相关会得到空集或另一组行。
+        case("select correlated exists")
+            .sql("SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM users o WHERE o.age > u.age) ORDER BY id")
+            .rows(&[&[Int(1)], &[Int(2)]])
+            .build(),
+        case("select correlated not exists")
+            .sql("SELECT id FROM users u WHERE NOT EXISTS (SELECT 1 FROM users o WHERE o.age > u.age) ORDER BY id")
+            .rows(&[&[Int(3)]])
+            .build(),
+        case("select correlated in subquery")
+            .sql(
+                "SELECT id FROM users u WHERE u.age IN (SELECT o.age FROM users o WHERE o.age > 20 AND o.id >= u.id) \
+                 ORDER BY id",
+            )
+            .rows(&[&[Int(1)], &[Int(3)]])
+            .build(),
+        case("select correlated not in subquery")
+            .sql(
+                "SELECT id FROM users u WHERE u.age NOT IN (SELECT o.age FROM users o WHERE o.age > 20 AND o.id >= u.id) \
+                 ORDER BY id",
+            )
+            .rows(&[&[Int(2)]])
+            .build(),
+        case("select correlated scalar projection")
+            .sql("SELECT id, (SELECT MIN(o.age) FROM users o WHERE o.id >= u.id) FROM users u ORDER BY id")
+            .rows(&[&[Int(1), Int(20)], &[Int(2), Int(20)], &[Int(3), Int(40)]])
+            .build(),
+        case("select correlated scalar comparison")
+            .sql("SELECT id FROM users u WHERE u.age > (SELECT MIN(o.age) FROM users o WHERE o.id > u.id) ORDER BY id")
+            .rows(&[&[Int(1)]])
+            .build(),
         case("select null equality stays unknown").sql("SELECT id FROM users WHERE tag = NULL").rows(&[]).build(),
         case("select null three valued logic").sql("SELECT id FROM users WHERE NULL AND TRUE").rows(&[]).build(),
         case("select null not stays unknown").sql("SELECT id FROM users WHERE NOT (NULL = NULL)").rows(&[]).build(),
@@ -1194,6 +1226,29 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
         "upsert subquery assignment",
         "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
          ON CONFLICT (id) DO UPDATE SET age = (SELECT MAX(age) FROM users)",
+    ),
+    // 相关子查询只放开单层，且外层列只能出现在子查询的行级表达式里：再嵌套一层、
+    // 出现在派生表或排序键、被写语句的赋值右值引用，都在绑定期带原因拒绝。
+    (
+        "nested correlated subquery",
+        "SELECT id FROM users u WHERE EXISTS ( \
+         SELECT 1 FROM users o WHERE o.age > u.age AND EXISTS (SELECT 1 FROM users p WHERE p.age > o.age))",
+    ),
+    (
+        "correlated column in a derived table",
+        "SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM (SELECT id FROM users WHERE age > u.age) d)",
+    ),
+    (
+        "correlated column in a subquery ORDER BY",
+        "SELECT id FROM users u WHERE EXISTS (SELECT 1 FROM users o ORDER BY u.age)",
+    ),
+    (
+        "correlated subquery in an UPDATE assignment",
+        "UPDATE users SET age = (SELECT MIN(o.age) FROM users o WHERE o.id > users.id)",
+    ),
+    (
+        "correlated subquery in a DELETE predicate",
+        "DELETE FROM users WHERE EXISTS (SELECT 1 FROM users o WHERE o.id > users.id)",
     ),
 ];
 
