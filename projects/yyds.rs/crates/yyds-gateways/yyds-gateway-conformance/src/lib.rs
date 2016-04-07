@@ -839,6 +839,56 @@ pub fn group_cases() -> Vec<Case> {
     ]
 }
 
+/// Aggregates over an empty input. SQL keeps the aggregate row when the query has
+/// no `GROUP BY`, so `COUNT` yields `0` and `SUM` / `AVG` / `MIN` / `MAX` yield
+/// `NULL`, while a grouped query over the same input yields no rows at all. An
+/// empty table and a filtered-to-empty input must produce identical results.
+pub fn aggregate_empty_cases() -> Vec<Case> {
+    use Lit::{Int, Null};
+
+    vec![
+        case("count aggregates over a filtered empty input")
+            .sql("SELECT COUNT(*), COUNT(tag), COUNT(DISTINCT tag) FROM users WHERE age > 1000")
+            .rows(&[&[Int(0), Int(0), Int(0)]])
+            .build(),
+        case("value aggregates over a filtered empty input")
+            .sql("SELECT SUM(age), AVG(score), MIN(age), MAX(score) FROM users WHERE age > 1000")
+            .rows(&[&[Null, Null, Null, Null]])
+            .build(),
+        case("group by over a filtered empty input")
+            .sql("SELECT tag, COUNT(*) FROM users WHERE age > 1000 GROUP BY tag")
+            .rows(&[])
+            .build(),
+        case("mixed aggregates over a filtered empty input")
+            .sql("SELECT COUNT(*), SUM(age), COUNT(DISTINCT tag), AVG(score) FROM users WHERE age > 1000")
+            .rows(&[&[Int(0), Null, Int(0), Null]])
+            .build(),
+        case("count aggregates over all null arguments")
+            .setup(NULL_GROUP_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_group_state())
+            .sql("SELECT COUNT(tag), COUNT(DISTINCT tag) FROM users")
+            .rows(&[&[Int(0), Int(0)]])
+            .build(),
+        case("value aggregates over all null arguments")
+            .sql(
+                "SELECT SUM(CASE WHEN age > 1000 THEN age END), AVG(CASE WHEN age > 1000 THEN age END), \
+                 MIN(CASE WHEN age > 1000 THEN age END), MAX(CASE WHEN age > 1000 THEN age END) FROM users",
+            )
+            .rows(&[&[Null, Null, Null, Null]])
+            .build(),
+        case("aggregates over an empty table")
+            .setup(&[])
+            .state(DEFAULT_STATE_COLUMNS, &[])
+            .sql("SELECT COUNT(*), SUM(age), COUNT(tag), AVG(score) FROM users")
+            .rows(&[&[Int(0), Null, Int(0), Null]])
+            .build(),
+        case("aggregates filtered to empty match an empty table")
+            .sql("SELECT COUNT(*), SUM(age), COUNT(tag), AVG(score) FROM users WHERE age > 1000")
+            .rows(&[&[Int(0), Null, Int(0), Null]])
+            .build(),
+    ]
+}
+
 /// Window functions: ranking over a partition and order, aggregate windows over
 /// the default frame, explicit `ROWS` frames, and dialect-dependent `NULL`
 /// placement of the window `ORDER BY`.
@@ -1261,6 +1311,7 @@ pub fn all_cases() -> Vec<Case> {
     cases.extend(numeric_cases());
     cases.extend(distinct_cases());
     cases.extend(group_cases());
+    cases.extend(aggregate_empty_cases());
     cases.extend(window_cases());
     cases.extend(order_cases());
     cases.extend(null_order_cases());

@@ -13,9 +13,9 @@ use yyds_gateway::{
     SqlErrorKind, SqlParameterStyle, SqlResult, SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, group_cases, nested_call_cases, null_order_cases, numeric_cases, order_cases,
-    returning_cases, rows, seed_state, set_operation_cases, string_function_cases, type_cases, upsert_cases, window_cases,
-    Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
+    aggregate_empty_cases, crud_cases, distinct_cases, group_cases, nested_call_cases, null_order_cases, numeric_cases,
+    order_cases, returning_cases, rows, seed_state, set_operation_cases, string_function_cases, type_cases, upsert_cases,
+    window_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -157,6 +157,14 @@ fn sql_conformance_distinct() {
 #[test]
 fn sql_conformance_group_by_and_having() {
     run_cases(&group_cases());
+}
+
+/// 空输入下的聚合：没有 `GROUP BY` 时 SQL 仍返回一行，`COUNT` 为 `0`，
+/// `SUM` / `AVG` / `MIN` / `MAX` 为 `NULL`。带 `GROUP BY` 的空输入是零行。
+/// 空表与「有行但被 `WHERE` 过滤成空」必须给出同一结果。
+#[test]
+fn sql_conformance_aggregates_over_empty_input() {
+    run_cases(&aggregate_empty_cases());
 }
 
 /// 窗口函数：分区 + 排序的排名、默认 frame 的累计/整分区聚合、显式 `ROWS` frame
