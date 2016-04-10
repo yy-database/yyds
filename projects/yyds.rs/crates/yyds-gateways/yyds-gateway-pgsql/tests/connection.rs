@@ -184,6 +184,25 @@ fn sqlstate_reflects_structured_gateway_errors() {
     assert_eq!(inserted[0].0, b'C');
     assert_sqlstate(&mut client, "INSERT INTO users VALUES (1, 'bob')", b"23505");
 
+    // 同名列限定后可正常查询：匹配行带回右表值，未匹配左行保留并把右侧列填 NULL。
+    send_query(&mut client, "INSERT INTO users VALUES (2, 'bob')");
+    assert_eq!(receive_until_ready(&mut client)[0].0, b'C');
+    send_query(&mut client, "INSERT INTO orders VALUES (1, 1)");
+    assert_eq!(receive_until_ready(&mut client)[0].0, b'C');
+    send_query(
+        &mut client,
+        "SELECT users.id, orders.user_id FROM users LEFT JOIN orders ON users.id = orders.user_id ORDER BY users.id",
+    );
+    let joined = receive_until_ready(&mut client);
+    assert_eq!(joined[0].0, b'T', "a qualified outer join returns a result set");
+    let rows: Vec<Vec<Option<Vec<u8>>>> =
+        joined.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(
+        rows,
+        vec![vec![Some(b"1".to_vec()), Some(b"1".to_vec())], vec![Some(b"2".to_vec()), None]],
+        "the matched left row carries the right value and the unmatched one stays NULL"
+    );
+
     drop(client);
     server.join().unwrap();
 }

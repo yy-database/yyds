@@ -958,6 +958,48 @@ fn error_numbers_reflect_structured_gateway_errors() {
     server.join().unwrap();
 }
 
+/// 同名列限定后可正常执行：未匹配左行保留，右侧列以 `NULL`（`0xFB`）补齐。
+#[test]
+fn mysql_left_join_keeps_unmatched_left_rows_with_null_right_side() {
+    let (mut client, server) = start_server_with_join_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    // 第三个用户没有订单，必须作为未匹配左行保留。
+    expect_ok(&mut client, "INSERT INTO users (id, name) VALUES (3, 'carol')");
+
+    let sql = "SELECT users.id, orders.total FROM users LEFT JOIN orders ON users.id = orders.user_id ORDER BY users.id";
+    client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
+    let (_, count_packet) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&count_packet).0, 2, "`{sql}` projects two columns");
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "id");
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "total");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    let mut joined = Vec::new();
+    for _ in 0..3 {
+        let (_, row) = read_packet_full(&mut client);
+        let (id, consumed) = read_lenenc_str(&row);
+        let (total, _) = read_lenenc_str(&row[consumed..]);
+        joined.push((id.to_vec(), total.to_vec()));
+    }
+    assert_eq!(
+        joined,
+        vec![(b"1".to_vec(), b"100".to_vec()), (b"2".to_vec(), b"70".to_vec()), (b"3".to_vec(), Vec::new())],
+        "the matched left rows carry the right value and the unmatched one stays `NULL`"
+    );
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 窗口函数的排名列在 MySQL 协议上必须声明为 `LONGLONG`（`0x08`），与普通整数列
 /// 一致。列类型取自计划的声明类型，不按返回值的文本形状推断成 `VAR_STRING`。
 #[test]
