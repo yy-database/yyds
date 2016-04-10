@@ -544,7 +544,9 @@ fn pg_sqlstate(kind: SqlErrorKind) -> &'static str {
         Parameter => "08P01",
         UniqueViolation => "23505",
         Conflict => "40001",
-        Execution => "XX000",
+        // Execution layer failures (storage or executor errors) are distinct from
+        // catalog construction errors, and map to the PostgreSQL IO error class.
+        Execution => "58030",
         DivisionByZero => "22012",
         NumericOverflow => "22003",
         InvalidSubstringLength => "22011",

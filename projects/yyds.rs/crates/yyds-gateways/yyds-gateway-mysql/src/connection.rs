@@ -714,7 +714,8 @@ fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
         Parameter => (1210, "HY000"),
         UniqueViolation => (1062, "23000"),
         Conflict => (1213, "40001"),
-        Execution => (1105, "HY000"),
+        // Execution layer failures are distinct from catalog construction errors.
+        Execution => (1296, "HY000"),
         DivisionByZero => (1365, "22012"),
         // MySQL 用 `1690` 报 BIGINT 越界，SQLSTATE 与 PostgreSQL 一致是 `22003`。
         NumericOverflow => (1690, "22003"),
