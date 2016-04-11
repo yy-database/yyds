@@ -58,6 +58,19 @@ pub enum SqlValue {
     Null,
 }
 
+/// utf8mb4_general_ci 风格的大小写不敏感比较：所有字符串相等/排序/分桶路径共用。
+fn eq_string_ci(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+fn cmp_string_ci(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_lowercase().cmp(&b.to_lowercase())
+}
+
+fn canonical_string(s: &str) -> String {
+    s.to_lowercase()
+}
+
 /// 解析 SQL 数值字面量：不带小数点或指数的文本优先按 `i64` 精确解析，
 /// 只有真正的小数/指数形式才转成 `f64`。
 fn numeric_literal(text: &str) -> SqlValue {
@@ -2810,14 +2823,17 @@ fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue, di
         (Integer(a), Number(b)) => float_binary(op, *a as f64, *b, dialect)?,
         (Number(a), Integer(b)) => float_binary(op, *a, *b as f64, dialect)?,
         (Number(a), Number(b)) => float_binary(op, *a, *b, dialect)?,
+        // utf8mb4_general_ci / en_US.UTF-8 default — case-insensitive equality,
+        // ordering and LIKE matching so that `'ABC' = 'abc'` and `'A' < 'b'`
+        // follow the collation declared in `SET NAMES utf8mb4 COLLATE utf8mb4_general_ci`.
         (String(a), String(b)) => match op {
-            SqlBoundBinaryOperator::Equal => Boolean(a == b),
-            SqlBoundBinaryOperator::NotEqual => Boolean(a != b),
-            SqlBoundBinaryOperator::Less => Boolean(a < b),
-            SqlBoundBinaryOperator::Greater => Boolean(a > b),
-            SqlBoundBinaryOperator::LessEqual => Boolean(a <= b),
-            SqlBoundBinaryOperator::GreaterEqual => Boolean(a >= b),
-            SqlBoundBinaryOperator::Like => Boolean(like_match(a, b)),
+            SqlBoundBinaryOperator::Equal => Boolean(eq_string_ci(a, b)),
+            SqlBoundBinaryOperator::NotEqual => Boolean(!eq_string_ci(a, b)),
+            SqlBoundBinaryOperator::Less => Boolean(cmp_string_ci(a, b).is_lt()),
+            SqlBoundBinaryOperator::Greater => Boolean(cmp_string_ci(a, b).is_gt()),
+            SqlBoundBinaryOperator::LessEqual => Boolean(!cmp_string_ci(a, b).is_gt()),
+            SqlBoundBinaryOperator::GreaterEqual => Boolean(!cmp_string_ci(a, b).is_lt()),
+            SqlBoundBinaryOperator::Like => Boolean(like_match_ci(a, b)),
             _ => Null,
         },
         (Boolean(a), Boolean(b)) => match op {
@@ -2954,11 +2970,13 @@ fn float_binary(op: SqlBoundBinaryOperator, a: f64, b: f64, dialect: SqlDialect)
 }
 
 /// SQL LIKE 匹配。`%` 匹配 0+ 任意字符，`_` 匹配正好 1 个任意字符。
-fn like_match(haystack: &str, pattern: &str) -> bool {
-    let haystack_chars: Vec<char> = haystack.chars().collect();
-    let pattern_chars: Vec<char> = pattern.chars().collect();
-    let n = haystack_chars.len();
-    let m = pattern_chars.len();
+/// utf8mb4_general_ci 风格的 LIKE 匹配：非通配符字符按大小写不敏感方式比较。
+/// 与运算符比较共享同一 collation 语义，避免 `WHERE name LIKE 'bob%'` 漏掉 `'BOBBY'`。
+fn like_match_ci(haystack: &str, pattern: &str) -> bool {
+    let haystack: Vec<char> = haystack.chars().collect();
+    let pattern: Vec<char> = pattern.chars().collect();
+    let n = haystack.len();
+    let m = pattern.len();
 
     // dp[i][j] = haystack[0..i] 能否匹配 pattern[0..j]
     let mut dp = vec![vec![false; m + 1]; n + 1];
@@ -2966,14 +2984,14 @@ fn like_match(haystack: &str, pattern: &str) -> bool {
 
     // pattern 前缀全是 % 的情况
     let mut j = 1;
-    while j <= m && pattern_chars[j - 1] == '%' {
+    while j <= m && pattern[j - 1] == '%' {
         dp[0][j] = true;
         j += 1;
     }
 
     for i in 1..=n {
         for j in 1..=m {
-            match pattern_chars[j - 1] {
+            match pattern[j - 1] {
                 '%' => {
                     // % 可以跳过（用 dp[i][j-1]）或吃掉当前 haystack 字符（用 dp[i-1][j]）
                     dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
@@ -2983,12 +3001,16 @@ fn like_match(haystack: &str, pattern: &str) -> bool {
                     dp[i][j] = dp[i - 1][j - 1];
                 }
                 p => {
-                    dp[i][j] = dp[i - 1][j - 1] && haystack_chars[i - 1] == p;
+                    dp[i][j] = dp[i - 1][j - 1] && chars_eq_ci(haystack[i - 1], p);
                 }
             }
         }
     }
     dp[n][m]
+}
+
+fn chars_eq_ci(a: char, b: char) -> bool {
+    a.eq_ignore_ascii_case(&b) || a.to_lowercase().next() == b.to_lowercase().next()
 }
 
 struct Cursor<'a> {
@@ -3062,7 +3084,7 @@ fn serialize_group_key(values: &[SqlValue]) -> String {
             }
             SqlValue::String(s) => {
                 buf.push_str("S:");
-                buf.push_str(s);
+                buf.push_str(&canonical_string(s));
             }
             SqlValue::Boolean(b) => {
                 buf.push_str(if *b { "B:true" } else { "B:false" });
@@ -3182,7 +3204,7 @@ fn values_equal(left: &SqlValue, right: &SqlValue) -> bool {
         (SqlValue::Number(left), SqlValue::Number(right)) => {
             left.partial_cmp(right).unwrap_or(Ordering::Equal) == Ordering::Equal
         }
-        (SqlValue::String(left), SqlValue::String(right)) => left == right,
+        (SqlValue::String(left), SqlValue::String(right)) => eq_string_ci(left, right),
         (SqlValue::Boolean(left), SqlValue::Boolean(right)) => left == right,
         (SqlValue::Null, SqlValue::Null) => true,
         _ => false,
@@ -3252,7 +3274,7 @@ fn compare_values_with_nulls(a: Option<&SqlValue>, b: Option<&SqlValue>, nulls_f
                 compare_integer_float(*n2, *n1).map(Ordering::reverse).unwrap_or(Ordering::Equal)
             }
             (SqlValue::Number(n1), SqlValue::Number(n2)) => n1.partial_cmp(n2).unwrap_or(Ordering::Equal),
-            (SqlValue::String(s1), SqlValue::String(s2)) => s1.cmp(s2),
+            (SqlValue::String(s1), SqlValue::String(s2)) => cmp_string_ci(s1, s2),
             (SqlValue::Boolean(b1), SqlValue::Boolean(b2)) => b1.cmp(b2),
             _ => Ordering::Equal,
         },
