@@ -341,6 +341,48 @@ fn handle_simple_query(
                 write_command_complete(stream, "ROLLBACK")
             }
         },
+        Ok(Some(SqlSessionCommand::Savepoint(intent))) => {
+            use yyds_gateway::SavepointIntent;
+            if session.failed {
+                return write_error_response(
+                    stream,
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block",
+                );
+            }
+            let handle = match session.handle.as_ref() {
+                Some(handle) => handle.as_ref(),
+                None => {
+                    session.fail();
+                    return write_error_response(stream, "25001", "SAVEPOINT is only valid inside a transaction");
+                }
+            };
+            let result = match &intent {
+                SavepointIntent::Create { name } => handle.savepoint_create(name),
+                SavepointIntent::RollbackTo { name } => handle.savepoint_rollback_to(name),
+                SavepointIntent::Release { name } => handle.savepoint_release(name),
+            };
+            match result {
+                Ok(()) => {
+                    let tag = match intent {
+                        SavepointIntent::Create { .. } => "SAVEPOINT",
+                        SavepointIntent::RollbackTo { .. } => "ROLLBACK",
+                        SavepointIntent::Release { .. } => "RELEASE",
+                    };
+                    write_command_complete(stream, tag)
+                }
+                Err(yyds_types::Error::Unsupported(msg))
+                    if msg.contains("does not exist") || msg.contains("already exists") =>
+                {
+                    session.fail();
+                    write_error_response(stream, "3B000", msg)
+                }
+                Err(err) => {
+                    session.fail();
+                    write_error_response(stream, "58P01", &format!("savepoint failed: {err}"))
+                }
+            }
+        },
         Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
             if session.failed {
                 return write_error_response(

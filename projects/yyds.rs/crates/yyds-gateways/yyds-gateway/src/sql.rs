@@ -97,6 +97,8 @@ pub enum SqlSessionCommand {
     SetNames { character_set: String, collation: Option<String> },
     /// Transaction boundary used by SQL protocol sessions.
     Transaction(SqlTransactionAction),
+    /// `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE SAVEPOINT`.
+    Savepoint(SavepointIntent),
     /// `SHOW [GLOBAL|SESSION] VARIABLES [LIKE 'pattern']` — variable table probe.
     ShowVariables {
         /// Requested scope prefix, absent when the client did not name one.
@@ -127,6 +129,21 @@ pub enum SqlSessionCommand {
         /// Optional assigned value.
         value: Option<SqlBoundExpression>,
     },
+}
+
+/// One of the three savepoint verbs the gateway recognises.
+///
+/// Oak's SQL AST does not project a Savepoint node yet, so the gateway lowers the
+/// verbs itself via [`parse_session_command`]'s pre-filter rather than routing them
+/// through Oak.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavepointIntent {
+    /// `SAVEPOINT <name>` — create a new named savepoint.
+    Create { name: String },
+    /// `ROLLBACK TO SAVEPOINT <name>` — restore buffer state to the named savepoint.
+    RollbackTo { name: String },
+    /// `RELEASE SAVEPOINT <name>` — remove the savepoint without rolling back.
+    Release { name: String },
 }
 
 /// Scope prefix carried by `SET` and `SHOW` session statements.
@@ -169,6 +186,9 @@ pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError
 
 /// Projects the small set of protocol session commands from Oak's SQL AST.
 pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, SqlFrontendError> {
+    if let Some(intent) = detect_savepoint_statement(source) {
+        return Ok(Some(SqlSessionCommand::Savepoint(intent)));
+    }
     let normalized = normalize_start_transaction(source).or_else(|| normalize_quoted_set_names(source));
     let root = parse_sql(normalized.as_deref().unwrap_or(source))?;
     if root.statements.len() != 1 {
@@ -204,6 +224,47 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
         }),
         _ => None,
     })
+}
+
+/// Matches `SAVEPOINT`, `ROLLBACK TO SAVEPOINT`, and `RELEASE SAVEPOINT` at the
+/// text level so the gateway can honour savepoints before Oak grows a Savepoint
+/// AST node. Returns `None` when the source is not a savepoint verb.
+pub fn detect_savepoint_statement(source: &str) -> Option<SavepointIntent> {
+    let trimmed = source.trim();
+    let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+    let mut words = trimmed.split_whitespace();
+    let first = words.next()?;
+    if first.eq_ignore_ascii_case("SAVEPOINT") {
+        let name = words.next()?;
+        if words.next().is_some() {
+            return None;
+        }
+        return Some(SavepointIntent::Create { name: name.to_string() });
+    }
+    if first.eq_ignore_ascii_case("RELEASE") {
+        let second = words.next()?;
+        if !second.eq_ignore_ascii_case("SAVEPOINT") {
+            return None;
+        }
+        let name = words.next()?;
+        if words.next().is_some() {
+            return None;
+        }
+        return Some(SavepointIntent::Release { name: name.to_string() });
+    }
+    if first.eq_ignore_ascii_case("ROLLBACK") {
+        let second = words.next()?;
+        if !second.eq_ignore_ascii_case("TO") {
+            return None;
+        }
+        let third = words.next()?;
+        let name = if third.eq_ignore_ascii_case("SAVEPOINT") { words.next()? } else { third };
+        if words.next().is_some() {
+            return None;
+        }
+        return Some(SavepointIntent::RollbackTo { name: name.to_string() });
+    }
+    None
 }
 
 /// MySQL and PostgreSQL clients may spell the opening boundary as `START

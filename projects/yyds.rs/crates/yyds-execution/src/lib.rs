@@ -139,6 +139,29 @@ pub trait TransactionHandle: Debug {
 
     /// Aborts the transaction and discards any pending state.
     fn rollback(self: Box<Self>);
+
+    /// Creates a named savepoint that can be restored to later.
+    ///
+    /// Handles without savepoint support must return `Error::Unsupported` rather than silently
+    /// accepting the savepoint name, otherwise clients will believe rollback-to works when it
+    /// does not.
+    fn savepoint_create(&self, _name: &str) -> yyds_types::Result<()> {
+        Err(Error::Unsupported("savepoints are not implemented by this handle"))
+    }
+
+    /// Rolls the transaction back to a previously created savepoint without ending it.
+    ///
+    /// Implementations must reject unknown savepoint names with `Error::Unsupported` or a
+    /// dedicated error so callers can distinguish missing names from other failures.
+    fn savepoint_rollback_to(&self, _name: &str) -> yyds_types::Result<()> {
+        Err(Error::Unsupported("savepoints are not implemented by this handle"))
+    }
+
+    /// Removes a savepoint without rolling anything back. Subsequent rollback-to that name
+    /// must fail.
+    fn savepoint_release(&self, _name: &str) -> yyds_types::Result<()> {
+        Err(Error::Unsupported("savepoints are not implemented by this handle"))
+    }
 }
 
 /// Executor-wide mutex that serialises every [`LocalExecutor::execute`] and
@@ -298,16 +321,21 @@ enum BufferedState {
 /// [`TransactionHandle::commit`] or [`TransactionHandle::rollback`] is called. Reads are
 /// served by consulting the buffer first (snapshot reads), then delegating to the underlying
 /// executor so that transactions observe their own writes.
+///
+/// Named savepoints live alongside the buffer as a stack of snapshots so that
+/// [`TransactionHandle::savepoint_rollback_to`] can restore an earlier buffer state
+/// without ending the transaction.
 #[derive(Debug)]
 pub struct LocalTransactionHandle {
     executor: Arc<dyn KeyValueExecutor>,
     buffer: Mutex<HashMap<(String, Vec<u8>), BufferedState>>,
+    savepoints: Mutex<Vec<(String, HashMap<(String, Vec<u8>), BufferedState>)>>,
 }
 
 impl LocalTransactionHandle {
     /// Creates a new handle bound to an executor via a shared Arc.
     pub fn new(executor: Arc<dyn KeyValueExecutor>) -> Self {
-        Self { executor, buffer: Mutex::new(HashMap::new()) }
+        Self { executor, buffer: Mutex::new(HashMap::new()), savepoints: Mutex::new(Vec::new()) }
     }
 
     /// Resolves the current observable value for `(namespace, key)` by merging the buffer
@@ -502,6 +530,42 @@ impl TransactionHandle for LocalTransactionHandle {
     fn rollback(self: Box<Self>) {
         // Dropping the handle discards the buffered HashMap; nothing touches the executor.
     }
+
+    fn savepoint_create(&self, name: &str) -> yyds_types::Result<()> {
+        let mut savepoints = self.savepoints.lock().map_err(|_| Error::Corrupt("transaction savepoint stack poisoned"))?;
+        if savepoints.iter().any(|(existing, _)| existing == name) {
+            return Err(Error::Unsupported(leak_str(&format!("savepoint `{name}` already exists"))));
+        }
+        let buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+        savepoints.push((name.to_owned(), buffer.clone()));
+        Ok(())
+    }
+
+    fn savepoint_rollback_to(&self, name: &str) -> yyds_types::Result<()> {
+        let mut savepoints = self.savepoints.lock().map_err(|_| Error::Corrupt("transaction savepoint stack poisoned"))?;
+        let index = savepoints
+            .iter()
+            .rposition(|(existing, _)| existing == name)
+            .ok_or_else(|| Error::Unsupported(leak_str(&format!("savepoint `{name}` does not exist"))))?;
+        let (_, snapshot) = savepoints.remove(index);
+        // Drop every savepoint strictly above the named one so later rollback-to cannot jump
+        // past its own restore barrier.
+        savepoints.truncate(index);
+        drop(savepoints);
+        let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+        *buffer = snapshot;
+        Ok(())
+    }
+
+    fn savepoint_release(&self, name: &str) -> yyds_types::Result<()> {
+        let mut savepoints = self.savepoints.lock().map_err(|_| Error::Corrupt("transaction savepoint stack poisoned"))?;
+        let index = savepoints
+            .iter()
+            .rposition(|(existing, _)| existing == name)
+            .ok_or_else(|| Error::Unsupported(leak_str(&format!("savepoint `{name}` does not exist"))))?;
+        savepoints.remove(index);
+        Ok(())
+    }
 }
 
 impl<S> KeyValueExecutor for LocalExecutor<S>
@@ -670,4 +734,12 @@ fn merge_sorted(slices: &[Vec<(Vec<u8>, Vec<u8>)>], limit: usize) -> Vec<(Vec<u8
         }
     }
     out
+}
+
+/// Boxes `text` on the heap and leaks the allocation so it can be passed to
+/// APIs that require `&'static str`. Use only for error messages whose lifetime
+/// is already bound to process exit; the amount per call is tiny and bounded
+/// by the number of distinct savepoint name collisions.
+fn leak_str(text: &str) -> &'static str {
+    Box::leak(text.to_string().into_boxed_str())
 }

@@ -404,6 +404,41 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?;
                         }
                     },
+                    Ok(Some(SqlSessionCommand::Savepoint(intent))) => {
+                        use yyds_gateway::SavepointIntent;
+                        let handle = match session.handle.as_ref() {
+                            Some(handle) => handle.as_ref(),
+                            None => {
+                                session.fail();
+                                write_error(
+                                    &mut stream,
+                                    sequence.wrapping_add(1),
+                                    1305,
+                                    "42000",
+                                    "SAVEPOINT is only valid inside a transaction",
+                                )?;
+                                continue;
+                            }
+                        };
+                        let result = match intent {
+                            SavepointIntent::Create { name } => handle.savepoint_create(&name),
+                            SavepointIntent::RollbackTo { name } => handle.savepoint_rollback_to(&name),
+                            SavepointIntent::Release { name } => handle.savepoint_release(&name),
+                        };
+                        match result {
+                            Ok(()) => write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?,
+                            Err(yyds_types::Error::Unsupported(msg))
+                                if msg.contains("does not exist") || msg.contains("already exists") =>
+                            {
+                                session.fail();
+                                write_error(&mut stream, sequence.wrapping_add(1), 1305, "42000", msg)?;
+                            }
+                            Err(err) => {
+                                session.fail();
+                                write_error(&mut stream, sequence.wrapping_add(1), 1105, "HY000", &format!("savepoint failed: {err}"))?;
+                            }
+                        }
+                    }
                     Ok(Some(SqlSessionCommand::ShowVariables { pattern, .. })) => {
                         let mut rows = Vec::new();
                         for (name, value) in MYSQL_VARIABLES {
