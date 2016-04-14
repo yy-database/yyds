@@ -632,6 +632,9 @@ struct PreparedStatement {
 }
 
 struct Portal {
+    /// Statement name this portal was bound from, used to cascade-close portals
+    /// when the parent statement is removed (PostgreSQL protocol contract).
+    statement_name: String,
     sql: String,
     parameters: Vec<SqlValue>,
     description: Vec<SqlColumn>,
@@ -765,7 +768,15 @@ fn handle_bind(
 
     extended
         .portals
-        .insert(portal_name.to_string(), Portal { sql, parameters, description, result_formats, outcome: None, sent_rows: 0 });
+        .insert(portal_name.to_string(), Portal {
+            statement_name: statement_name.to_string(),
+            sql,
+            parameters,
+            description,
+            result_formats,
+            outcome: None,
+            sent_rows: 0,
+        });
     write_message(stream, b'2', &[])?;
     Ok(ExtendedStep::Continue)
 }
@@ -938,6 +949,8 @@ fn handle_close(stream: &mut impl Write, payload: &[u8], extended: &mut Extended
     match kind {
         b'S' => {
             extended.statements.remove(name);
+            // PostgreSQL invalidates any portal bound to the closed statement.
+            extended.portals.retain(|_, portal| portal.statement_name != name);
         }
         b'P' => {
             extended.portals.remove(name);
