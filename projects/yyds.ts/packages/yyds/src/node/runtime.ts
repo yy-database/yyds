@@ -9,6 +9,7 @@ export interface StartNodeOptions {
     dataDir: string;
     clusterId: string;
     nodeId: string;
+    catalogPath?: string;
     redisPort?: number;
     pgsqlPort?: number;
     mysqlPort?: number;
@@ -55,6 +56,10 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
             options.nodeId = args[++index] ?? "";
             continue;
         }
+        if (argument === "--catalog-path") {
+            options.catalogPath = args[++index] ?? "";
+            continue;
+        }
         if (argument === "--redis-port") {
             options.redisPort = Number(args[++index]);
             continue;
@@ -81,6 +86,10 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
     if (!options.dataDir || !options.clusterId || !options.nodeId) {
         throw new Error("start requires --data-dir, --cluster-id, and --node-id");
     }
+    if (options.catalogPath !== undefined && options.catalogPath.length === 0) {
+        // 空字符串视为未提供；避免将空值传给 Rust。
+        options.catalogPath = undefined;
+    }
     const defaultPort = defaultPorts[protocol];
     if (protocol === "mysql" && options.mysqlPort === undefined && defaultPort !== undefined) {
         options.mysqlPort = defaultPort;
@@ -88,6 +97,7 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
     if (protocol === "postgresql" && options.pgsqlPort === undefined && defaultPort !== undefined) {
         options.pgsqlPort = defaultPort;
     }
+    void portFlags; // 变量声明用于协议完整性校验，运行时不再读取
     return options;
 }
 
@@ -96,20 +106,37 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     const native = loadYydsNative();
     const identity = new native.NodeIdentityHandle(options.clusterId, options.nodeId);
     const lease = native.NodeLeaseHandle.acquire(options.dataDir, identity);
-    const executor = new native.LocalExecutorHandle(options.dataDir);
+    const executor = new native.LocalExecutorHandle(options.dataDir, options.catalogPath);
     const redis = new native.RedisServiceHandle(
         lease,
         options.redisPort ?? DEFAULT_REDIS_PORT,
         executor,
     );
+
+    // SQL runtimes 仅在提供了 catalog 时启动完整执行路径；否则保持协议壳。
+    const hasRuntime = options.catalogPath !== undefined;
     const pgsql =
         options.pgsqlPort === undefined
             ? undefined
-            : new native.PgsqlServiceHandle(lease, options.pgsqlPort);
+            : hasRuntime
+                ? native.PgsqlServiceHandle.start_with_executor(
+                      lease,
+                      options.pgsqlPort,
+                      executor,
+                      options.catalogPath!,
+                  )
+                : new native.PgsqlServiceHandle(lease, options.pgsqlPort);
     const mysql =
         options.mysqlPort === undefined
             ? undefined
-            : new native.MysqlServiceHandle(lease, options.mysqlPort);
+            : hasRuntime
+                ? native.MysqlServiceHandle.start_with_executor(
+                      lease,
+                      options.mysqlPort,
+                      executor,
+                      options.catalogPath!,
+                  )
+                : new native.MysqlServiceHandle(lease, options.mysqlPort);
     const mongo =
         options.mongoPort === undefined
             ? undefined
@@ -131,8 +158,9 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     };
     native.nodeWriteRuntimeStatus(options.dataDir, JSON.stringify(runtime));
 
+    const runtimeTag = hasRuntime ? "sql-runtime" : "protocol-only";
     process.stdout.write(
-        `yyds running pid=${runtime.pid} redis=${runtime.redisAddress} pgsql=${runtime.pgsqlAddress ?? "null"} mysql=${runtime.mysqlAddress ?? "null"} mongo=${mongo?.address() ?? "null"} wire=${runtime.wireAddress ?? "null"}\n`,
+        `yyds running pid=${runtime.pid} mode=${runtimeTag} redis=${runtime.redisAddress} pgsql=${runtime.pgsqlAddress ?? "null"} mysql=${runtime.mysqlAddress ?? "null"} mongo=${mongo?.address() ?? "null"} wire=${runtime.wireAddress ?? "null"}\n`,
     );
 
     while (true) {

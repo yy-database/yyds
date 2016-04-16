@@ -6,14 +6,30 @@ export interface YydsBindings {
     NodeLeaseHandle: {
         acquire(dataDir: string, identity: unknown): unknown;
     };
-    LocalExecutorHandle: new (dataDir: string) => unknown;
+    LocalExecutorHandle: new (dataDir: string, catalogPath?: string | null) => unknown;
     RedisServiceHandle: new (
         lease: unknown,
         port: number,
         executor: unknown,
     ) => RedisServiceBinding;
-    PgsqlServiceHandle: new (lease: unknown, port: number) => PgsqlServiceBinding;
-    MysqlServiceHandle: new (lease: unknown, port: number) => MysqlServiceBinding;
+    PgsqlServiceHandle: {
+        new (lease: unknown, port: number): PgsqlServiceBinding;
+        start_with_executor(
+            lease: unknown,
+            port: number,
+            executor: unknown,
+            catalogPath: string,
+        ): PgsqlServiceBinding;
+    };
+    MysqlServiceHandle: {
+        new (lease: unknown, port: number): MysqlServiceBinding;
+        start_with_executor(
+            lease: unknown,
+            port: number,
+            executor: unknown,
+            catalogPath: string,
+        ): MysqlServiceBinding;
+    };
     MongoServiceHandle: new (
         lease: unknown,
         port: number,
