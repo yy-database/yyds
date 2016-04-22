@@ -1,62 +1,62 @@
 {
-  "name": "@yydb/mongodb",
-  "version": "0.0.19",
-  "description": "Pretend you installed MongoDB. YYDS scripting runtime underneath.",
-  "license": "MPL-2.0",
-  "type": "module",
-  "sideEffects": false,
-  "exports": {
-    ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts",
-      "default": "./src/index.ts"
+    "name": "@yydb/mongodb",
+    "version": "0.0.19",
+    "description": "Pretend you installed MongoDB. YYDS scripting runtime underneath.",
+    "license": "MPL-2.0",
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./src/index.ts",
+            "import": "./src/index.ts",
+            "default": "./src/index.ts"
+        },
+        "./node": {
+            "types": "./src/node.ts",
+            "import": "./src/node.ts",
+            "default": "./src/node.ts"
+        }
     },
-    "./node": {
-      "types": "./src/node.ts",
-      "import": "./src/node.ts",
-      "default": "./src/node.ts"
+    "bin": {
+        "mongod": "bin/mongod.mjs",
+        "mongo": "bin/mongo.mjs"
+    },
+    "files": [
+        "bin",
+        "src",
+        "readme.md"
+    ],
+    "scripts": {
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\""
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/yyds.ts/emulators/mongodb"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/emulators/mongodb#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "keywords": [
+        "yyds",
+        "mongodb",
+        "disguise"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "dependencies": {
+        "@yydb/yyds": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.0",
+        "@yydb/yyds-node-harness": "workspace:*",
+        "mongodb": "^7.7.0",
+        "typescript": "^5.9.2"
+    },
+    "engines": {
+        "node": ">=18"
     }
-  },
-  "bin": {
-    "mongod": "bin/mongod.mjs",
-    "mongo": "bin/mongo.mjs"
-  },
-  "files": [
-    "bin",
-    "src",
-    "readme.md"
-  ],
-  "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\""
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/yy-database/yyds.git",
-    "directory": "projects/yyds.ts/emulators/mongodb"
-  },
-  "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/emulators/mongodb#readme",
-  "bugs": {
-    "url": "https://github.com/yy-database/yyds/issues"
-  },
-  "keywords": [
-    "yyds",
-    "mongodb",
-    "disguise"
-  ],
-  "publishConfig": {
-    "access": "public"
-  },
-  "dependencies": {
-    "@yydb/yyds": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^22.15.0",
-    "@yydb/yyds-node-harness": "workspace:*",
-    "mongodb": "^7.7.0",
-    "typescript": "^5.9.2"
-  },
-  "engines": {
-    "node": ">=18"
-  }
 }

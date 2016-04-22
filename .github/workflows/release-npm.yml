@@ -31,9 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: nightly-2026-07-20
-    defaults:
-      run:
-        working-directory: projects/yyds.py/packages/yyds
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -58,19 +55,20 @@ jobs:
         working-directory: projects/yyds.rs
         run: cargo test -p yyds-pyo3
       - name: Build wheel
-        working-directory: projects/yyds.rs
+        working-directory: projects/yyds.py/packages/yyds
         run: maturin build --release --out ../../../../dist
       - name: Install wheel in clean venv + import + unittest + example
+        working-directory: projects/yyds.py/packages/yyds
         shell: bash
         run: |
           set -euo pipefail
           python -m venv .venv
           VENV_PY=.venv/bin/python
           "$VENV_PY" -m pip install --upgrade pip
-          "$VENV_PY" -m pip install dist/*.whl
+          "$VENV_PY" -m pip install ../../../../dist/*.whl
           "$VENV_PY" -c "import yyds; print('yyds import ok')"
-          "$VENV_PY" -m unittest discover -s projects/yyds.py/packages/yyds/tests -v
-          "$VENV_PY" projects/yyds.py/packages/yyds/examples/local-node/main.py
+          "$VENV_PY" -m unittest discover -s tests -v
+          "$VENV_PY" examples/local-node/main.py
 
   build-engine:
     name: engine ${{ matrix.pkg }}
