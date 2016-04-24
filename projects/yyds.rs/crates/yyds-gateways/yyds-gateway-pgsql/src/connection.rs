@@ -1368,7 +1368,8 @@ fn send_backend_key(stream: &mut impl Write) -> io::Result<()> {
 }
 
 fn send_ready(stream: &mut impl Write, session: &TransactionSession) -> io::Result<()> {
-    write_message(stream, b'Z', &[session.ready_byte()])
+    let ready = session.ready_byte();
+    write_message(stream, b'Z', &[ready])
 }
 
 fn write_command_complete(stream: &mut impl Write, tag: &str) -> io::Result<()> {

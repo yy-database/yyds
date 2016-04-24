@@ -153,6 +153,21 @@ fn assert_sqlstate(client: &mut TcpStream, sql: &str, state: &[u8]) {
     assert_eq!(responses.last().unwrap(), &(b'Z', b"I".to_vec()), "{sql} leaves the session ready");
 }
 
+/// Like `assert_sqlstate` but expects the session to be in Failed state
+/// after the error, i.e. the SQL was issued inside a transaction block.
+fn assert_sqlstate_in_tx(client: &mut TcpStream, sql: &str, state: &[u8]) {
+    send_query(client, sql);
+    let responses = receive_until_ready(client);
+    assert_eq!(responses[0].0, b'E', "{sql} must fail");
+    assert!(
+        responses[0].1.windows(state.len()).any(|window| window == state),
+        "{sql} must report SQLSTATE {}, got {}",
+        String::from_utf8_lossy(state),
+        String::from_utf8_lossy(&responses[0].1)
+    );
+    assert_eq!(responses.last().unwrap(), &(b'Z', b"E".to_vec()), "{sql} leaves the session in transaction-failed state");
+}
+
 #[test]
 fn sqlstate_reflects_structured_gateway_errors() {
     let (mut client, server) = start_server_with_runtime();
@@ -636,4 +651,149 @@ fn describe_of(statement: &[u8]) -> Vec<u8> {
     let mut describe = vec![b'S'];
     describe.extend_from_slice(statement);
     describe
+}
+
+/// `SAVEPOINT sp`、`ROLLBACK TO sp`、`RELEASE SAVEPOINT sp` 在 PostgreSQL 协议上
+/// 各自发出对应的 CommandComplete 标签，并保持 ReadyForQuery 在事务内是 `T`。
+/// 未知名字或重复名字的 SQLSTATE 都是 `3B000`。
+#[test]
+fn pgsql_savepoint_commands_emit_command_complete_tags() {
+    let (mut client, server) = start_server_with_runtime();
+
+    // 事务外发 SAVEPOINT 必须报 25001 (active_sql_transaction)。
+    send_query(&mut client, "SAVEPOINT sp");
+    let outside_tx = receive_until_ready(&mut client);
+    assert_eq!(outside_tx[0].0, b'E');
+    assert!(outside_tx[0].1.windows(5).any(|window| window == b"25001"));
+    assert_eq!(outside_tx.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    // 成功创建 savepoint → CommandComplete "SAVEPOINT" + ReadyForQuery(T)
+    send_query(&mut client, "SAVEPOINT sp");
+    let created = receive_until_ready(&mut client);
+    assert_eq!(created[0], (b'C', b"SAVEPOINT\0".to_vec()));
+    assert_eq!(created.last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    // 重复名字报 3B000，事务内错误后期望 ReadyForQuery(E)。
+    assert_sqlstate_in_tx(&mut client, "SAVEPOINT sp", b"3B000");
+    // 事务失败后必须 ROLLBACK 才能继续。
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // 重新开始测试 ROLLBACK TO / RELEASE 的错误码。
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "SAVEPOINT sp");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SAVEPOINT\0".to_vec()));
+
+    assert_sqlstate_in_tx(&mut client, "ROLLBACK TO nope", b"3B000");
+
+    // 事务失败后必须 ROLLBACK + 重新 BEGIN 才能继续测试 RELEASE。
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "SAVEPOINT sp");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SAVEPOINT\0".to_vec()));
+
+    assert_sqlstate_in_tx(&mut client, "RELEASE SAVEPOINT nope", b"3B000");
+
+    // ROLLBACK TO 成功路径 — 独立事务。
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "SAVEPOINT sp");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SAVEPOINT\0".to_vec()));
+    send_query(&mut client, "ROLLBACK TO sp");
+    let rolled = receive_until_ready(&mut client);
+    assert_eq!(rolled[0], (b'C', b"ROLLBACK\0".to_vec()));
+    assert_eq!(rolled.last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "COMMIT");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // RELEASE SAVEPOINT 成功路径 — 独立事务（RELEASE 不移除写状态只移除名字）。
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "SAVEPOINT sp");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SAVEPOINT\0".to_vec()));
+    send_query(&mut client, "RELEASE SAVEPOINT sp");
+    let released = receive_until_ready(&mut client);
+    assert_eq!(released[0], (b'C', b"RELEASE\0".to_vec()));
+    assert_eq!(released.last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "COMMIT");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 事务内写→savepoint→写→rollback-to 必须把 PostgreSQL 状态恢复到 savepoint 时刻。
+#[test]
+fn pgsql_savepoint_rollback_restores_snapshot() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    send_query(&mut client, "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 2\0".to_vec()));
+
+    send_query(&mut client, "SAVEPOINT sp");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SAVEPOINT\0".to_vec()));
+
+    send_query(&mut client, "INSERT INTO users VALUES (3, 'carol')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+
+    // ROLLBACK TO 之后只剩 savepoint 之前的行。
+    send_query(&mut client, "ROLLBACK TO sp");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"ROLLBACK\0".to_vec()));
+
+    send_query(&mut client, "SELECT COUNT(*) FROM users");
+    let count = receive_until_ready(&mut client);
+    assert_eq!(parse_data_row(&count[1].1), vec![Some(b"2".to_vec())]);
+
+    send_query(&mut client, "COMMIT");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// `RELEASE SAVEPOINT sp` 移除命名但不回滚状态。
+/// 之后 ROLLBACK TO 该名字必须报 3B000。
+#[test]
+fn pgsql_savepoint_release_removes_name_without_dropping_state() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    send_query(&mut client, "SAVEPOINT a");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SAVEPOINT\0".to_vec()));
+    send_query(&mut client, "SAVEPOINT b");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SAVEPOINT\0".to_vec()));
+
+    send_query(&mut client, "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 2\0".to_vec()));
+
+    send_query(&mut client, "RELEASE SAVEPOINT a");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"RELEASE\0".to_vec()));
+
+    // 释放之后状态仍然可见。
+    send_query(&mut client, "SELECT COUNT(*) FROM users");
+    let count = receive_until_ready(&mut client);
+    assert_eq!(parse_data_row(&count[1].1), vec![Some(b"2".to_vec())]);
+
+    // 已释放的名字不可再 rollback。
+    assert_sqlstate_in_tx(&mut client, "ROLLBACK TO a", b"3B000");
+
+    // 失败事务需要 COMMIT/ROLLBACK 恢复。
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
 }

@@ -1111,3 +1111,100 @@ fn mysql_date_spellings_render_utc_text_rows() {
     drop(client);
     server.join().unwrap();
 }
+
+/// `SAVEPOINT sp_name`、`ROLLBACK TO sp_name`、`RELEASE sp_name` 是事务内的
+/// 有线协议命令：MySQL 全部回 OK 包，错误名则按 `1305` 拒绝。事务外发出
+/// 的 `SAVEPOINT` 必须显式失败，而不是被静默忽略。
+#[test]
+fn mysql_savepoint_commands_emit_ok_and_validate_names() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    // 事务外发 SAVEPOINT 必须报错：MySQL 规定 savepoint 只能在事务内。
+    let (code, state) = expect_error(&mut client, "SAVEPOINT sp");
+    assert_eq!((code, state.as_str()), (1305, "42000"));
+
+    expect_ok(&mut client, "BEGIN");
+    expect_ok(&mut client, "SAVEPOINT sp");
+    expect_ok(&mut client, "SAVEPOINT another");
+
+    // 重复名字按 MySQL 语义报 1305。
+    let (code, state) = expect_error(&mut client, "SAVEPOINT sp");
+    assert_eq!((code, state.as_str()), (1305, "42000"));
+
+    // 未知名字的 ROLLBACK TO / RELEASE SAVEPOINT 同码。
+    let (code, state) = expect_error(&mut client, "ROLLBACK TO nope");
+    assert_eq!((code, state.as_str()), (1305, "42000"));
+    let (code, state) = expect_error(&mut client, "RELEASE SAVEPOINT nope");
+    assert_eq!((code, state.as_str()), (1305, "42000"));
+
+    expect_ok(&mut client, "ROLLBACK TO another");
+    expect_ok(&mut client, "RELEASE SAVEPOINT sp");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 事务内写→savepoint→写→rollback-to 必须把状态恢复到 savepoint 时刻，
+/// savepoint 之后的写入全部丢弃。
+#[test]
+fn mysql_savepoint_rollback_restores_snapshot() {
+    let (mut client, server) = start_server_with_join_runtime();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(&mut client, "BEGIN");
+    expect_ok(&mut client, "INSERT INTO users (id, name) VALUES (3, 'carol')");
+    expect_ok(&mut client, "SAVEPOINT sp");
+    expect_ok(&mut client, "INSERT INTO users (id, name) VALUES (4, 'dave')");
+
+    // ROLLBACK TO 之后只看到 savepoint 之前的写入。
+    expect_ok(&mut client, "ROLLBACK TO sp");
+    assert_eq!(expect_single_value(&mut client, "SELECT COUNT(*) FROM users"), b"3".to_vec());
+    let name = expect_single_value(&mut client, "SELECT name FROM users WHERE id = 3");
+    assert_eq!(name, b"carol");
+
+    expect_ok(&mut client, "COMMIT");
+    assert_eq!(expect_single_value(&mut client, "SELECT COUNT(*) FROM users"), b"3".to_vec());
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// `RELEASE SAVEPOINT sp` 从 savepoint 栈上移除命名条目，但不回滚任何状态。
+/// 之后 ROLLBACK TO 该名字必须失败。
+/// 注意：ROLLBACK TO 失败会标记 session 为 failed，需要显式 ROLLBACK 才能恢复。
+#[test]
+fn mysql_savepoint_release_removes_name_without_dropping_state() {
+    let (mut client, server) = start_server_with_join_runtime();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(&mut client, "BEGIN");
+    expect_ok(&mut client, "SAVEPOINT a");
+    expect_ok(&mut client, "SAVEPOINT b");
+    expect_ok(&mut client, "INSERT INTO users (id, name) VALUES (3, 'carol')");
+
+    expect_ok(&mut client, "RELEASE SAVEPOINT a");
+    // 释放之后状态仍然可见——RELEASE 不回滚。
+    assert_eq!(expect_single_value(&mut client, "SELECT COUNT(*) FROM users"), b"3".to_vec());
+
+    // 已释放的名字不可再 rollback。
+    let (code, state) = expect_error(&mut client, "ROLLBACK TO a");
+    assert_eq!((code, state.as_str()), (1305, "42000"));
+
+    // ROLLBACK TO 失败会标记 session 为 failed，必须显式 ROLLBACK 才能继续。
+    expect_ok(&mut client, "ROLLBACK");
+    // 整个事务回滚，INSERT id=3 也被撤销。
+    assert_eq!(expect_single_value(&mut client, "SELECT COUNT(*) FROM users"), b"2".to_vec());
+
+    drop(client);
+    server.join().unwrap();
+}
