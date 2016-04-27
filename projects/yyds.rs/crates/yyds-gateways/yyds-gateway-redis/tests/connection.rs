@@ -432,3 +432,199 @@ fn expired_key_is_removed_on_access() {
     // GET after expiry → $-1, TTL → -2, EXISTS → 0
     assert_eq!(response, b"+OK\r\n:1\r\n$-1\r\n:-2\r\n:0\r\n");
 }
+
+// ---------- MULTI/EXEC conformance: queue runtime errors ----------
+
+#[test]
+fn multi_exec_queue_runtime_wrongtype_is_reported_in_result_array() {
+    // SET a string value, then INCR it in the same transaction. The INCR cannot parse
+    // "hello" as an integer, so executor returns an error. Redis semantics: per-command
+    // runtime errors land in the EXEC result array, not at queue time.
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*1\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$3\r\nnum\r\n$5\r\nhello\r\n*2\r\n$4\r\nINCR\r\n$3\r\nnum\r\n*1\r\n$4\r\nEXEC\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+    // MULTI: OK, SET: QUEUED, INCR: QUEUED, EXEC: *2 elements
+    assert!(response.starts_with(b"+OK\r\n+QUEUED\r\n+QUEUED\r\n*2\r\n"), "response={response:?}");
+    // First element inside EXEC result: +OK (SET succeeded)
+    // Second element: an error reply starting with -ERR (INCR failed on non-integer)
+    let exec_body = &response[response.windows(4).position(|w| w == b"*2\r\n").unwrap() + 4..];
+    assert!(exec_body.starts_with(b"+OK\r\n"), "first result must be SET OK: {exec_body:?}");
+    let after_ok = &exec_body[5..]; // skip "+OK\r\n" which is 5 bytes
+    assert!(after_ok.starts_with(b"-ERR "), "second result must be an error: {after_ok:?}");
+}
+
+// ---------- MULTI/EXEC conformance: queue syntax errors ----------
+
+#[test]
+fn multi_exec_unknown_command_is_rejected_at_queue_time() {
+    // A completely unknown command (no bind() match, not whitelisted in
+    // validate_command_for_queue) must be rejected at QUEUE time with an
+    // immediate error — it never enters the queue and EXEC sees an empty
+    // queue. This differs from real Redis where unknown commands go in the
+    // queue but EXEC aborts the whole transaction.
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*1\r\n$5\r\nMULTI\r\n*1\r\n$6\r\nFOOBAR\r\n*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\nval\r\n*1\r\n$4\r\nEXEC\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+    assert!(
+        response.starts_with(b"+OK\r\n-ERR unsupported command"),
+        "unknown command must be rejected at queue time: {response:?}"
+    );
+    // SET got queued successfully, EXEC returns a 1-element array
+    assert!(response.ends_with(b"\r\n*1\r\n+OK\r\n"), "SET should still run: {response:?}");
+}
+
+#[test]
+fn multi_exec_mixed_syntax_error_and_good_command_queue_independent() {
+    // First command has wrong arity inside MULTI → immediate error.
+    // Second valid command still goes QUEUED (not blocked by the first error).
+    // EXEC only runs the valid queued commands.
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*1\r\n$5\r\nMULTI\r\n*1\r\n$3\r\nGET\r\n*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\nval\r\n*1\r\n$4\r\nEXEC\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        response,
+        b"+OK\r\n-ERR wrong number of arguments\r\n+QUEUED\r\n*1\r\n+OK\r\n"
+    );
+}
+
+// ---------- MULTI/EXEC conformance: session isolation ----------
+
+#[test]
+fn multi_exec_session_isolation_two_clients_does_not_leak_state() {
+    // Client A opens MULTI and queues commands but never EXECs.
+    // Client B (on a separate connection) still runs normal commands
+    // as if nothing happened. Per-ConnectionState must not be shared.
+    let shard = ShardId("local".into());
+    let executor = Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
+            HashMap::from([(shard, MemoryShard::new())]),
+        )
+        .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_b = Arc::clone(&stopping);
+    let exec_a = Arc::clone(&executor);
+
+    let server = std::thread::spawn(move || {
+        while !stop_b.load(std::sync::atomic::Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let cancel = Arc::clone(&stop_b);
+                    let exec_clone = Arc::clone(&exec_a);
+                    std::thread::spawn(move || {
+                        let _ = serve_cancellable_with_executor(
+                            stream,
+                            RequestLimits::default(),
+                            cancel,
+                            exec_clone,
+                        );
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Client A: MULTI → +OK
+    let mut client_a = TcpStream::connect(address).unwrap();
+    client_a.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    client_a.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+    client_a.write_all(b"*1\r\n$5\r\nMULTI\r\n").unwrap();
+    client_a.flush().unwrap();
+    let mut a_buf = [0u8; 5];
+    client_a.read_exact(&mut a_buf).unwrap();
+    assert_eq!(&a_buf, b"+OK\r\n", "A must enter MULTI");
+
+    // Client A: SET foo bar → +QUEUED
+    client_a.write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n").unwrap();
+    client_a.flush().unwrap();
+    let mut a_q = [0u8; 9];
+    client_a.read_exact(&mut a_q).unwrap();
+    assert_eq!(&a_q, b"+QUEUED\r\n", "A's SET must queue");
+
+    // Client B: PING — must get PONG immediately, unaffected by A's MULTI
+    let mut client_b = TcpStream::connect(address).unwrap();
+    client_b.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    client_b.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+    client_b.write_all(b"*1\r\n$4\r\nPING\r\n").unwrap();
+    client_b.flush().unwrap();
+    let mut b_buf = [0u8; 7];
+    client_b.read_exact(&mut b_buf).unwrap();
+    assert_eq!(&b_buf, b"+PONG\r\n", "B's PING must be answered directly");
+
+    // Client A does DISCARD, then GET foo → $-1 (SET was never flushed)
+    client_a.write_all(b"*1\r\n$7\r\nDISCARD\r\n*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n").unwrap();
+    client_a.shutdown(Shutdown::Write).unwrap();
+    let mut a_rest = Vec::new();
+    client_a.read_to_end(&mut a_rest).unwrap();
+    assert_eq!(a_rest, b"+OK\r\n$-1\r\n");
+
+    stopping.store(true, std::sync::atomic::Ordering::Release);
+    drop(client_a);
+    drop(client_b);
+    server.join().unwrap();
+}
+
+// ---------- MULTI/EXEC conformance: EXPIRE inside transaction ----------
+
+#[test]
+fn multi_exec_queue_set_and_expire_executes_expiry_correctly() {
+    // SET key value + EXPIRE key 2 inside MULTI → EXEC → GET returns value,
+    // TTL reports positive remaining time.
+    // NOTE: We deliberately do NOT test expiry-firing-after-wait here, that
+    // requires wall-clock sleep and would make the suite slow. The TTL value
+    // read right after EXEC already proves EXPIRE was correctly queued and
+    // executed under the transaction.
+    let (mut client, server) = executor_server();
+    client
+        .write_all(
+            b"*1\r\n$5\r\nMULTI\r\n*3\r\n$3\r\nSET\r\n$2\r\nk1\r\n$5\r\nhello\r\n*3\r\n$6\r\nEXPIRE\r\n$2\r\nk1\r\n$1\r\n2\r\n*1\r\n$4\r\nEXEC\r\n*2\r\n$3\r\nGET\r\n$2\r\nk1\r\n*2\r\n$3\r\nTTL\r\n$2\r\nk1\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    server.join().unwrap();
+
+    // MULTI: OK, SET: QUEUED, EXPIRE: QUEUED
+    assert!(response.starts_with(b"+OK\r\n+QUEUED\r\n+QUEUED\r\n"), "queue phase mismatch: {response:?}");
+    // EXEC must contain 2 results: +OK for SET, :1 for EXPIRE
+    assert!(response.windows(13).any(|w| w == b"*2\r\n+OK\r\n:1\r\n"), "EXEC results must be [OK, 1]: {response:?}");
+    // GET after EXEC → $5\r\nhello\r\n
+    assert!(response.windows(11).any(|w| w == b"$5\r\nhello\r\n"), "GET after EXEC must return value: {response:?}");
+    // Response must end with a TTL reply starting with ":"
+    assert!(response.ends_with(b"\r\n") && response.len() > 5, "response too short: {response:?}");
+    let ttl_start = response.iter().rposition(|&b| b == b':').expect("TTL reply must contain ':'");
+    let ttl_end = response.iter().rposition(|&b| b == b'\r').expect("TTL reply must end with \\r");
+    let ttl_bytes = &response[ttl_start + 1..ttl_end];
+    let ttl_val: i64 = std::str::from_utf8(ttl_bytes).unwrap().parse().unwrap();
+    assert!((0..=2).contains(&ttl_val), "TTL out of range: {ttl_val}");
+}
