@@ -1,22 +1,18 @@
 //! Per-connection OP_MSG loop.
 //!
-//! First step: read a frame, call `crate::handle_command` with the command
-//! name extracted from the OP_MSG body, and write the reply. BSON doc
-//! extraction lands once the wire skeleton is stable.
+//! Reads a frame, dispatches the OP_MSG body through `crate::handle_op_msg`,
+//! and wraps the returned BSON document back into an OP_MSG response.
 
-use std::{
-    io::{self},
-    net::TcpStream,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::io;
+use std::net::TcpStream;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 use yyds_execution::KeyValueExecutor;
 
 use crate::{
-    handle_command,
     wire::{read_frame, write_frame, FrameLimits},
 };
 
@@ -29,7 +25,8 @@ pub fn serve_cancellable(stream: TcpStream, limits: FrameLimits, cancellation: A
 }
 
 /// Same as [`serve_cancellable`] but additionally runs command bodies through
-/// a YYDS KV executor. Currently unused — lands when the handshake skeleton compiles.
+/// a YYDS KV executor so `insert` / `find` / `delete` CRUD lands on the
+/// backing store.
 pub fn serve_cancellable_with_executor(
     stream: TcpStream,
     limits: FrameLimits,
@@ -43,7 +40,7 @@ fn serve_inner(
     mut stream: TcpStream,
     limits: FrameLimits,
     cancellation: Arc<AtomicBool>,
-    _executor: Option<Arc<dyn KeyValueExecutor>>,
+    executor: Option<Arc<dyn KeyValueExecutor>>,
 ) -> io::Result<()> {
     while !cancellation.load(Ordering::Acquire) {
         let frame = match read_frame(&mut stream, limits) {
@@ -55,13 +52,9 @@ fn serve_inner(
             }
         };
 
-        let body = match crate::command_name_from_frame(&frame) {
-            Some(name) => match handle_command(name) {
-                Ok(body) => body,
-                Err(_) => crate::generic_error_body(name),
-            },
-            None => crate::generic_error_body("unknown"),
-        };
+        // Dispatch through the new BSON-aware handler. All errors are already
+        // turned into a generic BSON document by the handler itself.
+        let body = crate::handle_op_msg(&frame.body, executor.as_deref());
 
         // OP_MSG replies carry flag bits and a section kind before the BSON
         // document. Drivers reject a bare document as a malformed message.

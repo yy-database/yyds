@@ -1,20 +1,23 @@
 //! MongoDB wire disguise gateway for YYDS.
 //!
-//! Accepts the MongoDB OP_MSG binary frame protocol and answers with
-//! YYDS-backed document responses. This is not a MongoDB server implementation;
-//! it presents a bounded document surface on top of YYDS KV execution.
+//! Accepts the MongoDB OP_MSG binary frame protocol and answers with YYDS-backed
+//! document responses. Not a full MongoDB server: it presents a minimal CRUD surface
+//! (`insert`, `find`, `delete`) on top of the YYDS KV executor plus the standard
+//! `hello` / `ping` handshake probes.
 
-use yyds_gateway::{version_label, GatewayConfig, GatewayKind};
-use yyds_types::{Error, Result};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use yyds_execution::KeyValueExecutor;
+
+pub mod bson;
 pub mod connection;
 pub mod service;
 pub mod wire;
 
-use wire::Frame;
+use bson::{encode_bson, parse_bson, value_to_key, BsonDocument, BsonValue};
 
 /// Gateway kind implemented by this crate.
-pub const GATEWAY_KIND: GatewayKind = GatewayKind::Mongo;
+pub const GATEWAY_KIND: yyds_gateway::GatewayKind = yyds_gateway::GatewayKind::Mongo;
 
 /// Gateway identifier used in logs and diagnostics.
 pub const GATEWAY_ID: &str = GATEWAY_KIND.id();
@@ -22,126 +25,358 @@ pub const GATEWAY_ID: &str = GATEWAY_KIND.id();
 /// Default MongoDB disguise listen port.
 pub const DEFAULT_PORT: u16 = GATEWAY_KIND.default_port();
 
-/// Handles a MongoDB-style command and returns a minimal disguise response body.
-///
-/// First step: implement only `hello`/`ping` handshake replies so an official
-/// MongoDB driver can establish a connection and inspect wire version.
-pub fn handle_command(command_name: &str) -> Result<Vec<u8>> {
-    match command_name {
-        "hello" | "isMaster" => Ok(build_hello_bson()),
-        "ping" => Ok(build_ok_bson(1)),
-        other if other.is_empty() => Err(Error::Unsupported("empty mongo command")),
-        _other => Err(Error::Unsupported("unsupported mongo command")),
-    }
-}
-
-fn build_hello_bson() -> Vec<u8> {
-    let mut doc = Vec::new();
-    doc.extend_from_slice(&0_u32.to_le_bytes()); // placeholder
-                                                 // isWritablePrimary: bool true
-    doc.push(0x08);
-    doc.extend_from_slice(b"isWritablePrimary\x00");
-    doc.push(1);
-    // maxWireVersion: int32 17
-    doc.push(0x10);
-    doc.extend_from_slice(b"maxWireVersion\x00");
-    doc.extend_from_slice(&17_i32.to_le_bytes());
-    // minWireVersion: int32 0
-    doc.push(0x10);
-    doc.extend_from_slice(b"minWireVersion\x00");
-    doc.extend_from_slice(&0_i32.to_le_bytes());
-    // ok: double 1.0
-    doc.push(0x01);
-    doc.extend_from_slice(b"ok\x00");
-    doc.extend_from_slice(&1.0_f64.to_le_bytes());
-    // terminator
-    doc.push(0);
-    let len = doc.len() as u32;
-    doc[0..4].copy_from_slice(&len.to_le_bytes());
-    doc
-}
-
-fn build_ok_bson(ok: i32) -> Vec<u8> {
-    let mut doc = Vec::new();
-    doc.extend_from_slice(&0_u32.to_le_bytes()); // placeholder
-                                                 // ok: double (Mongo 惯例用 double)
-    doc.push(0x01);
-    doc.extend_from_slice(b"ok\x00");
-    let v = if ok >= 1 { 1.0_f64 } else { 0.0_f64 };
-    doc.extend_from_slice(&v.to_le_bytes());
-    doc.push(0);
-    let len = doc.len() as u32;
-    doc[0..4].copy_from_slice(&len.to_le_bytes());
-    doc
-}
-
-/// Banner shown when a disguise server starts.
-pub fn startup_banner(port: u16) -> String {
-    yyds_gateway::startup_banner(&GatewayConfig::new(GATEWAY_KIND).with_port(port))
-}
-
-/// Extracts the command name from an inbound OP_MSG frame.
-///
-/// MongoDB OP_MSG body layout:
-///   [flags u32] [kind byte=0x00] [BSON document] [optional checksum u32]
-/// The first element in that BSON document has the command name as its key
-/// (e.g. `{ "hello": 1, ... }`). We read just enough BSON to pull that key.
-pub fn command_name_from_frame(frame: &Frame) -> Option<&'static str> {
+/// Extracts the command name from an inbound OP_MSG frame — useful for wire-level
+/// tests that only need dispatch routing.
+pub fn command_name_from_frame(frame: &wire::Frame) -> Option<&'static str> {
     // Skip OP_MSG flags (4) + section kind (1)
     let mut cursor = frame.body.get(5..)?;
-    // Skip optional checksum hint — only matters once we fully validate the body.
-    let _skip_checksum = frame.header.total_length as usize > frame.body.len();
-
     // Read BSON document length
     let doc_len = u32::from_le_bytes(cursor.get(..4)?.try_into().ok()?) as usize;
     cursor = cursor.get(4..)?;
-    // doc_len includes the 4-byte length field itself which we just skipped.
     if doc_len < 5 || doc_len.saturating_sub(4) > cursor.len() {
         return None;
     }
-    // Skip the first element's type byte (0x10 = int32, 0x01 = double, etc.)
+    // Skip the first element's type byte.
     if cursor.is_empty() {
         return None;
     }
     cursor = &cursor[1..];
-    // Read the cstring key until null terminator
     let end = cursor.iter().position(|&b| b == 0)?;
     let name = std::str::from_utf8(&cursor[..end]).ok()?;
-    // Canonicalize common aliases we expect from real drivers.
     match name {
         "hello" => Some("hello"),
         "isMaster" | "ismaster" => Some("isMaster"),
         "ping" => Some("ping"),
-        other => {
-            // Avoid allocating: we only need to route well-known commands here.
-            let _ = other;
-            // String-match for later expansion once a full BSON parser lands.
-            Some("unknown")
-        }
+        "insert" => Some("insert"),
+        "find" => Some("find"),
+        "delete" => Some("delete"),
+        _ => Some("unknown"),
     }
 }
 
+/// Handles a fully-parsed OP_MSG command payload and returns the response BSON
+/// body (ready to be wrapped into an OP_MSG reply by the connection layer).
+///
+/// `op_msg_body` is the bytes after the 16-byte header: flags (u32) + section kind
+/// (u8) + BSON document + optional checksum. Errors are always turned into a generic
+/// `{ ok: 0, errmsg: ... }` BSON response so the connection layer never has to carry
+/// IO-result-like fallbacks.
+pub fn handle_op_msg(op_msg_body: &[u8], executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
+    let Some(bson_start) = op_msg_body.get(5..) else {
+        return generic_error_body("OP_MSG body too short");
+    };
+    let section_kind = op_msg_body[4];
+    if section_kind != 0x00 {
+        return generic_error_body("document sequence sections are not supported");
+    }
+
+    let bson_doc = match parse_bson(bson_start) {
+        Ok(doc) => doc,
+        Err(e) => return generic_error_body(&format!("BSON parse error: {e:?}")),
+    };
+
+    let Some(command_name) = bson_doc.command_name() else {
+        return generic_error_body("empty command");
+    };
+
+    match command_name {
+        "hello" | "isMaster" => build_hello_bson(),
+        "ping" => build_ok_bson(1),
+        "insert" => handle_insert(&bson_doc, executor),
+        "find" => handle_find(&bson_doc, executor),
+        "delete" => handle_delete(&bson_doc, executor),
+        other => generic_error_body(other),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handshake helpers
+// ---------------------------------------------------------------------------
+
+fn build_hello_bson() -> Vec<u8> {
+    let mut doc = BsonDocument::new();
+    doc.push("isWritablePrimary".to_string(), BsonValue::Bool(true));
+    doc.push("maxWireVersion".to_string(), BsonValue::Int32(17));
+    doc.push("minWireVersion".to_string(), BsonValue::Int32(0));
+    doc.push("ok".to_string(), BsonValue::Int32(1));
+    encode_bson(&doc)
+}
+
+fn build_ok_bson(ok: i32) -> Vec<u8> {
+    let mut doc = BsonDocument::new();
+    doc.push("ok".to_string(), BsonValue::Int32(if ok >= 1 { 1 } else { 0 }));
+    encode_bson(&doc)
+}
+
+fn build_error_bson(code: i32, errmsg: &str) -> Vec<u8> {
+    let mut doc = BsonDocument::new();
+    doc.push("ok".to_string(), BsonValue::Int32(0));
+    doc.push("errmsg".to_string(), BsonValue::String(errmsg.to_string()));
+    doc.push("code".to_string(), BsonValue::Int32(code));
+    encode_bson(&doc)
+}
+
 /// A minimal BSON error document returned for commands we deliberately reject.
+/// Kept minimal (`errmsg: "unsupported"`) so existing handshake tests still pass.
 pub fn generic_error_body(_command: &str) -> Vec<u8> {
-    // { ok: 0, errmsg: "unsupported" } — 29 bytes BSON envelope.
-    let mut buf = Vec::with_capacity(29);
-    // doc length placeholder
-    buf.extend_from_slice(&0_u32.to_le_bytes());
-    // ok: int32 0
-    buf.push(0x10);
-    buf.extend_from_slice(b"ok\x00");
-    buf.extend_from_slice(&0_i32.to_le_bytes());
-    // errmsg: string "unsupported"
-    buf.push(0x02);
-    buf.extend_from_slice(b"errmsg\x00");
-    let msg = b"unsupported";
-    buf.extend_from_slice(&(msg.len() as i32 + 1).to_le_bytes());
-    buf.extend_from_slice(msg);
-    buf.push(0);
-    // doc terminator
-    buf.push(0);
-    // Fix doc length
-    let len = buf.len() as u32;
-    buf[0..4].copy_from_slice(&len.to_le_bytes());
-    buf
+    build_error_bson(59, "unsupported")
+}
+
+// ---------------------------------------------------------------------------
+// insert
+// ---------------------------------------------------------------------------
+
+fn handle_insert(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
+    let Some(executor) = executor else {
+        return build_error_bson(2, "insert requires an executor");
+    };
+
+    let Some(ns) = namespace_from_command(doc, "insert") else {
+        return build_error_bson(73, "insert command missing collection name");
+    };
+
+    let Some(BsonValue::Array(docs)) = doc.get("documents") else {
+        return build_error_bson(2, "insert requires a 'documents' array");
+    };
+
+    let mut inserted: i64 = 0;
+    let mut write_errors = BsonDocument::new();
+
+    for (idx, item) in docs.iter().enumerate() {
+        match item {
+            BsonValue::Document(sub) => {
+                let mut doc_with_id = sub.clone();
+                let has_id = doc_with_id.fields.iter().any(|(k, _)| k == "_id");
+                if !has_id {
+                    doc_with_id.push("_id".to_string(), BsonValue::ObjectId(generate_object_id()));
+                }
+                let Some(id_val) = doc_with_id.fields.iter().find(|(k, _)| k == "_id").map(|(_, v)| v.clone()) else {
+                    continue;
+                };
+                let key = value_to_key(&id_val);
+                let payload = encode_bson(&doc_with_id);
+                let result = executor.execute(yyds_types::KeyValueCommand {
+                    namespace: ns.clone(),
+                    key,
+                    action: yyds_types::KeyValueAction::Put(payload),
+                });
+                match result {
+                    Ok(yyds_types::KeyValueResult::Put { .. }) => inserted += 1,
+                    _ => {
+                        let mut err = BsonDocument::new();
+                        err.push("index".to_string(), BsonValue::Int32(idx as i32));
+                        err.push("errmsg".to_string(), BsonValue::String("insert failed".to_string()));
+                        write_errors.push(format!("err{idx}"), BsonValue::Document(err));
+                    }
+                }
+            }
+            _ => {
+                let mut err = BsonDocument::new();
+                err.push("index".to_string(), BsonValue::Int32(idx as i32));
+                err.push("errmsg".to_string(), BsonValue::String("documents must be objects".to_string()));
+                write_errors.push(format!("err{idx}"), BsonValue::Document(err));
+            }
+        }
+    }
+
+    let mut resp = BsonDocument::new();
+    resp.push("ok".to_string(), BsonValue::Int32(1));
+    resp.push("n".to_string(), BsonValue::Int64(inserted));
+    if !write_errors.fields.is_empty() {
+        let err_list: Vec<BsonValue> = write_errors.fields.into_iter().map(|(_, v)| v).collect();
+        resp.push("writeErrors".to_string(), BsonValue::Array(err_list));
+    }
+    encode_bson(&resp)
+}
+
+// ---------------------------------------------------------------------------
+// find
+// ---------------------------------------------------------------------------
+
+fn handle_find(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
+    let Some(executor) = executor else {
+        return build_error_bson(2, "find requires an executor");
+    };
+
+    let Some(ns) = namespace_from_command(doc, "find") else {
+        return build_error_bson(73, "find command missing collection name");
+    };
+
+    let filter = match doc.get("filter") {
+        Some(BsonValue::Document(f)) => f.clone(),
+        _ => BsonDocument::new(),
+    };
+
+    let limit = match doc.get("limit") {
+        Some(BsonValue::Int32(n)) if *n >= 0 => *n as usize,
+        Some(BsonValue::Int64(n)) if *n >= 0 => *n as usize,
+        _ => 0,
+    };
+
+    let first_batch = if let Some(id_val) = filter.get("_id") {
+        let key = value_to_key(id_val);
+        match executor.execute(yyds_types::KeyValueCommand {
+            namespace: ns.clone(),
+            key,
+            action: yyds_types::KeyValueAction::Get,
+        }) {
+            Ok(yyds_types::KeyValueResult::Get(Some(bytes))) => match parse_bson(&bytes) {
+                Ok(bson) => vec![BsonValue::Document(bson)],
+                Err(_) => vec![],
+            },
+            _ => vec![],
+        }
+    }
+    else {
+        scan_all(executor, &ns, limit)
+    };
+
+    let mut cursor_doc = BsonDocument::new();
+    cursor_doc.push("firstBatch".to_string(), BsonValue::Array(first_batch));
+    cursor_doc.push("id".to_string(), BsonValue::Int64(0));
+    cursor_doc.push("ns".to_string(), BsonValue::String(namespace_string(doc, "find")));
+
+    let mut resp = BsonDocument::new();
+    resp.push("ok".to_string(), BsonValue::Int32(1));
+    resp.push("cursor".to_string(), BsonValue::Document(cursor_doc));
+    encode_bson(&resp)
+}
+
+fn scan_all(executor: &dyn KeyValueExecutor, ns: &yyds_types::Namespace, limit: usize) -> Vec<BsonValue> {
+    let results = executor.execute_scan(ns, b"", None, None, 0).unwrap_or_default();
+    let mut docs = Vec::new();
+    for (_k, value_bytes) in results {
+        if let Ok(bson) = parse_bson(&value_bytes) {
+            docs.push(BsonValue::Document(bson));
+        }
+        if limit > 0 && docs.len() >= limit {
+            break;
+        }
+    }
+    docs
+}
+
+// ---------------------------------------------------------------------------
+// delete
+// ---------------------------------------------------------------------------
+
+fn handle_delete(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
+    let Some(executor) = executor else {
+        return build_error_bson(2, "delete requires an executor");
+    };
+
+    let Some(ns) = namespace_from_command(doc, "delete") else {
+        return build_error_bson(73, "delete command missing collection name");
+    };
+
+    let delete_specs = match doc.get("deletes") {
+        Some(BsonValue::Array(arr)) => arr.clone(),
+        _ => {
+            let mut single = BsonDocument::new();
+            single.push("q".to_string(), BsonValue::Document(BsonDocument::new()));
+            single.push("limit".to_string(), BsonValue::Int32(0));
+            vec![BsonValue::Document(single)]
+        }
+    };
+
+    let mut deleted: i64 = 0;
+
+    for spec in &delete_specs {
+        let Some(spec_doc) = (match spec {
+            BsonValue::Document(d) => Some(d),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let filter = match spec_doc.get("q") {
+            Some(BsonValue::Document(f)) => f,
+            _ => &BsonDocument::new(),
+        };
+        let limit = match spec_doc.get("limit") {
+            Some(BsonValue::Int32(n)) if *n >= 0 => *n as usize,
+            _ => 0,
+        };
+
+        if let Some(id_value) = filter.get("_id") {
+            let key = value_to_key(id_value);
+            if let Ok(yyds_types::KeyValueResult::Delete { removed: true }) = executor.execute(yyds_types::KeyValueCommand {
+                namespace: ns.clone(),
+                key,
+                action: yyds_types::KeyValueAction::Delete,
+            }) {
+                deleted += 1;
+            }
+        }
+        else {
+            let results = executor.execute_scan(&ns, b"", None, None, 0).unwrap_or_default();
+            let mut removed_so_far = 0;
+            for (k, _v) in results {
+                if limit > 0 && removed_so_far >= limit {
+                    break;
+                }
+                if let Ok(yyds_types::KeyValueResult::Delete { removed: true }) = executor.execute(yyds_types::KeyValueCommand {
+                    namespace: ns.clone(),
+                    key: k,
+                    action: yyds_types::KeyValueAction::Delete,
+                }) {
+                    deleted += 1;
+                    removed_so_far += 1;
+                }
+            }
+        }
+    }
+
+    let mut resp = BsonDocument::new();
+    resp.push("ok".to_string(), BsonValue::Int32(1));
+    resp.push("n".to_string(), BsonValue::Int64(deleted));
+    resp.push("deletedCount".to_string(), BsonValue::Int64(deleted));
+    encode_bson(&resp)
+}
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+fn namespace_from_command(doc: &BsonDocument, command_key: &str) -> Option<yyds_types::Namespace> {
+    let db = doc.database();
+    let collection = match doc.get(command_key) {
+        Some(BsonValue::String(c)) if !c.is_empty() => c.clone(),
+        _ => return None,
+    };
+    Some(yyds_types::Namespace(format!("{db}.{collection}")))
+}
+
+fn namespace_string(doc: &BsonDocument, command_key: &str) -> String {
+    let db = doc.database();
+    let collection = match doc.get(command_key) {
+        Some(BsonValue::String(c)) => c.clone(),
+        _ => "unknown".to_string(),
+    };
+    format!("{db}.{collection}")
+}
+
+/// Generates a 12-byte Mongo ObjectId using the classic 4+5+3 layout: unix
+/// timestamp + random bytes + monotonic counter. Good enough for a gateway
+/// disguise — the wire format matches what Mongo drivers expect.
+pub fn generate_object_id() -> [u8; 12] {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0);
+    let random = rand_bytes();
+    let counter = (COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) & 0x00ffffff) as u32;
+    let mut out = [0u8; 12];
+    out[0..4].copy_from_slice(&secs.to_be_bytes());
+    out[4..9].copy_from_slice(&random);
+    out[9..12].copy_from_slice(&counter.to_be_bytes()[1..4]);
+    out
+}
+
+static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn rand_bytes() -> [u8; 5] {
+    let mut out = [0u8; 5];
+    let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    for byte in out.iter_mut() {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *byte = (seed >> 56) as u8;
+    }
+    out
 }
