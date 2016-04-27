@@ -15,7 +15,7 @@ use std::{
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
-    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundLiteral, SqlCatalog,
+    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
     SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
     SqlParameterStyle, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
@@ -190,11 +190,14 @@ struct MysqlTransactionSession {
     executor: Option<Arc<dyn KeyValueExecutor>>,
     handle: Option<Box<dyn TransactionHandle + 'static>>,
     failed: bool,
+    /// Whether `autocommit` session variable is ON (default). `SET autocommit = OFF`
+    /// clears the `SERVER_STATUS_AUTOCOMMIT` flag on subsequent OK / EOF responses.
+    autocommit: bool,
 }
 
 impl MysqlTransactionSession {
     fn new() -> Self {
-        Self { executor: None, handle: None, failed: false }
+        Self { executor: None, handle: None, failed: false, autocommit: true }
     }
 
     fn fail(&mut self) {
@@ -203,11 +206,26 @@ impl MysqlTransactionSession {
         }
     }
 
+    /// Parse a session-variable value (`ON` / `OFF` / `1` / `0` / `TRUE` / `FALSE`)
+    /// into a boolean. Treats anything not explicitly falsy as true (MySQL default).
+    fn parse_bool_value(s: &str) -> bool {
+        matches!(s.to_ascii_lowercase().as_str(), "on" | "1" | "true" | "yes")
+    }
+
     /// MySQL server-status flags for the current OK / EOF response.
-    /// In YYDS the implicit autocommit is always on (each statement commits by itself);
-    /// an explicit `BEGIN` flips the status to `IN_TRANS` until `COMMIT` or `ROLLBACK`.
+    /// `SERVER_STATUS_IN_TRANS` when an explicit transaction is open;
+    /// `SERVER_STATUS_AUTOCOMMIT` when autocommit is on and no explicit handle;
+    /// 0 when autocommit is off and no explicit handle.
     fn status_flags(&self) -> u16 {
-        if self.handle.is_some() { SERVER_STATUS_IN_TRANS } else { SERVER_STATUS_AUTOCOMMIT }
+        if self.handle.is_some() {
+            SERVER_STATUS_IN_TRANS
+        }
+        else if self.autocommit {
+            SERVER_STATUS_AUTOCOMMIT
+        }
+        else {
+            0
+        }
     }
 }
 
@@ -443,7 +461,12 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         let mut rows = Vec::new();
                         for (name, value) in MYSQL_VARIABLES {
                             if pattern.as_deref().is_none_or(|pattern| like_matches(pattern, name)) {
-                                rows.push(vec![SqlValue::String((*name).to_string()), SqlValue::String((*value).to_string())]);
+                                let effective_value =
+                                    if *name == "autocommit" { if session.autocommit { "ON" } else { "OFF" } } else { value };
+                                rows.push(vec![
+                                    SqlValue::String((*name).to_string()),
+                                    SqlValue::String(effective_value.to_string()),
+                                ]);
                             }
                         }
                         let result =
@@ -463,9 +486,17 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             )?;
                             continue;
                         }
-                        // autocommit=0 在 YYDS 上是空操作：引擎每条语句立即提交，
-                        // 没有隐式事务，因此接受但不记录 warning。
-                        let _ = value;
+                        let needle = name.trim().to_ascii_lowercase();
+                        if needle == "autocommit" {
+                            let autocommit = match value {
+                                SqlBoundExpression::Literal(SqlBoundLiteral::String(s)) => {
+                                    MysqlTransactionSession::parse_bool_value(&s)
+                                }
+                                SqlBoundExpression::Literal(SqlBoundLiteral::Integer(n)) => n != 0,
+                                _ => true, // 默认 ON
+                            };
+                            session.autocommit = autocommit;
+                        }
                         write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
                     }
                     Ok(Some(SqlSessionCommand::ShowParameter { name, .. })) => {

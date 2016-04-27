@@ -423,9 +423,9 @@ fn session_variable_statements_report_gateway_capabilities() {
     client.write_all(&encode_packet(0, b"\x03SET autocommit = 1").unwrap()).unwrap();
     assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
 
-    // SET autocommit = 0 — YYDS 每条语句立即提交，接受为 no-op
+    // SET autocommit = 0 — 真实切换 session 状态，OK 包里不再带 SERVER_STATUS_AUTOCOMMIT。
     client.write_all(&encode_packet(0, b"\x03SET autocommit = 0").unwrap()).unwrap();
-    assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
+    assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 0, 0, 0, 0]));
 
     // PRAGMA 不是 MySQL 语法
     client.write_all(&encode_packet(0, b"\x03PRAGMA user_version").unwrap()).unwrap();
