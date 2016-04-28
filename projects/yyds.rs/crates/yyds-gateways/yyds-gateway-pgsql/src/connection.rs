@@ -32,9 +32,9 @@ const OID_FLOAT4: u32 = 700;
 const OID_FLOAT8: u32 = 701;
 const OID_VARCHAR: u32 = 1043;
 
-/// Reported PostgreSQL version — kept identical in the startup `server_version`
-/// parameter and `SHOW server_version` so the two sources agree.
-const PG_SERVER_VERSION: &str = "16.4";
+/// Reported gateway version — YYDS crate version surfaced both in the startup
+/// `server_version` parameter and `SHOW server_version` so the two sources agree.
+const PG_SERVER_VERSION: &str = concat!("YYDS ", env!("CARGO_PKG_VERSION"));
 
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
@@ -205,7 +205,8 @@ struct TransactionSession {
     /// (e.g. the PostgreSQL protocol test).
     protocol_only_transaction: bool,
     failed: bool,
-    /// `search_path` as last set via `SET search_path = ...`. Defaults to `"public"`.
+    /// `search_path` as last set via `SET search_path = ...`. Defaults to the
+    /// PostgreSQL convention `"$user, public"`.
     search_path: String,
 }
 
@@ -216,7 +217,7 @@ impl TransactionSession {
             handle: None,
             protocol_only_transaction: false,
             failed: false,
-            search_path: "public".to_string(),
+            search_path: "$user, public".to_string(),
         }
     }
 
@@ -1119,7 +1120,7 @@ const PG_PARAMETERS: &[(&str, &str)] = &[
     ("intervalstyle", "postgres"),
     ("server_encoding", "UTF8"),
     ("server_version", PG_SERVER_VERSION),
-    ("search_path", "public"),
+    ("search_path", "$user, public"),
     ("standard_conforming_strings", "on"),
     ("timezone", "UTC"),
     ("transaction_isolation", "read committed"),

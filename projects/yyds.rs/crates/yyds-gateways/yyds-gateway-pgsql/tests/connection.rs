@@ -63,14 +63,42 @@ fn session_variable_statements_follow_postgresql_semantics() {
     send_query(&mut client, "SET client_encoding = 'UTF8'");
     assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"SET\0".to_vec()), (b'Z', b"I".to_vec())]);
 
+    // `SHOW server_version` must surface the crate version from the gateway,
+    // not a hard-coded PostgreSQL release tag.
     send_query(&mut client, "SHOW server_version");
     let shown = receive_until_ready(&mut client);
     assert_eq!(shown.len(), 4);
     assert_eq!(shown[0].0, b'T');
     assert_eq!(shown[1].0, b'D');
-    assert!(shown[1].1.windows(4).any(|window| window == b"16.4"));
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(
+        text.contains("YYDS ") && text.contains(env!("CARGO_PKG_VERSION")),
+        "server_version must carry the YYDS crate version, got {text}"
+    );
     assert_eq!(shown[2], (b'C', b"SHOW\0".to_vec()));
     assert_eq!(shown[3], (b'Z', b"I".to_vec()));
+
+    // `SHOW search_path` defaults to PostgreSQL convention `"$user, public"`.
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    assert_eq!(shown[1].0, b'D');
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(
+        text.contains("$user") && text.contains("public"),
+        "default search_path must include $user and public, got {text}"
+    );
+
+    // `SET search_path` mutates the session; a subsequent `SHOW` must reflect it.
+    send_query(&mut client, "SET search_path = 'public'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    assert_eq!(shown[1].0, b'D');
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(
+        text.contains("public"),
+        "after SET search_path = 'public', SHOW must echo it, got {text}"
+    );
 
     // MySQL 专有语法在 PostgreSQL 下必须报语法错误
     send_query(&mut client, "SHOW VARIABLES");
