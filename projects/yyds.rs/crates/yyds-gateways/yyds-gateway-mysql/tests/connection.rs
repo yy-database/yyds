@@ -1208,3 +1208,42 @@ fn mysql_savepoint_release_removes_name_without_dropping_state() {
     drop(client);
     server.join().unwrap();
 }
+
+/// MySQL `SET unknown_var = value` must report error 1193 with SQLSTATE HY000
+/// rather than being silently accepted or using the wrong SQLSTATE class.
+/// Known-but-unsupported variables such as `time_zone` must be accepted.
+#[test]
+fn mysql_set_rejects_unknown_variables_with_1193_hy000() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    // 未知变量 → 1193 / HY000，不能静默吞掉。
+    let (code, state) = expect_error(&mut client, "SET nope_var = 1");
+    assert_eq!((code, state.as_str()), (1193, "HY000"));
+
+    // 带作用域前缀的未知变量同样报错。
+    let (code, state) = expect_error(&mut client, "SET @@session.nope_var = 1");
+    assert_eq!((code, state.as_str()), (1193, "HY000"));
+
+    // 已知但 gateway 暂不实际生效的变量（如 time_zone、character_set_client）
+    // 必须接受为 no-op，不报 unknown。
+    expect_ok(&mut client, "SET time_zone = '+00:00'");
+    expect_ok(&mut client, "SET character_set_client = 'utf8mb4'");
+    expect_ok(&mut client, "SET transaction_isolation = 'READ-COMMITTED'");
+
+    // autocommit 切换仍被跟踪到 session 状态：SET autocommit=0 的 OK 包
+    // 必须不带 SERVER_STATUS_AUTOCOMMIT，SET autocommit=1 必须带上。
+    let (_, ok) = exchange(&mut client, "SET autocommit = 0");
+    assert_eq!(ok[0], 0x00);
+    assert_eq!(u16::from_le_bytes([ok[3], ok[4]]) & 0x0002, 0, "autocommit=0 must clear SERVER_STATUS_AUTOCOMMIT");
+
+    let (_, ok) = exchange(&mut client, "SET autocommit = 1");
+    assert_eq!(ok[0], 0x00);
+    assert_ne!(u16::from_le_bytes([ok[3], ok[4]]) & 0x0002, 0, "autocommit=1 must set SERVER_STATUS_AUTOCOMMIT");
+
+    drop(client);
+    server.join().unwrap();
+}

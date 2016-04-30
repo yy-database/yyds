@@ -825,3 +825,44 @@ fn pgsql_savepoint_release_removes_name_without_dropping_state() {
     drop(client);
     server.join().unwrap();
 }
+
+/// PostgreSQL `SET known_var` must be accepted (no-op for non-`search_path` params),
+/// `SET unknown_var` must report 42704, and in a failed transaction both must be rejected with 25P02.
+#[test]
+fn pgsql_set_known_variables_are_accepted_unknown_rejected() {
+    let (mut client, server) = start_server();
+
+    // 事务外：已知的非 search_path 参数接受为 no-op。
+    send_query(&mut client, "SET client_encoding = 'UTF8'");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"SET\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    send_query(&mut client, "SET timezone = 'UTC'");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"SET\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    // 未知参数必须明确报 42704。
+    send_query(&mut client, "SET nope_param = 'value'");
+    let unknown = receive_until_ready(&mut client);
+    assert_eq!(unknown[0].0, b'E');
+    assert!(unknown[0].1.windows(5).any(|window| window == b"42704"));
+    assert_eq!(unknown.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // 事务内执行一条导致 session.failed 的语句。
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "SELECT (");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"E".to_vec()));
+
+    // 失败事务内任何 SET / SHOW 都必须被 25P02 拒绝。
+    assert_sqlstate_in_tx(&mut client, "SET client_encoding = 'UTF8'", b"25P02");
+    assert_sqlstate_in_tx(&mut client, "SHOW server_version", b"25P02");
+
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // 恢复后 SET 又能工作。
+    send_query(&mut client, "SET search_path = 'public'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
+}

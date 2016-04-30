@@ -287,7 +287,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
         write_error(&mut stream, 2, 1045, "28000", "access denied: loopback accepts only an empty password")?;
         return Ok(());
     }
-    write_ok(&mut stream, 2, SERVER_STATUS_AUTOCOMMIT)?;
+    write_ok(&mut stream, 2, session.status_flags())?;
 
     loop {
         let Some((sequence, payload)) = read_packet(&mut stream)?
@@ -481,7 +481,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                                 &mut stream,
                                 sequence.wrapping_add(1),
                                 1193,
-                                "42S02",
+                                "HY000",
                                 &format!("Unknown system variable '{name}'"),
                             )?;
                             continue;
