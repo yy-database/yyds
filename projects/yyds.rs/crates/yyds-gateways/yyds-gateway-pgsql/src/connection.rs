@@ -996,9 +996,9 @@ fn parameter_value(oid: u32, bytes: &[u8]) -> Result<SqlValue, (String, String)>
     let text = std::str::from_utf8(bytes).map_err(|_| ("22021".to_string(), "parameter is not valid UTF-8".to_string()))?;
     match oid {
         0 => Ok(infer_parameter_value(text)),
-        16 => match text {
-            "t" | "true" | "1" => Ok(SqlValue::Boolean(true)),
-            "f" | "false" | "0" => Ok(SqlValue::Boolean(false)),
+        16 => match text.to_ascii_lowercase().as_str() {
+            "t" | "true" | "1" | "on" | "yes" | "y" => Ok(SqlValue::Boolean(true)),
+            "f" | "false" | "0" | "off" | "no" | "n" => Ok(SqlValue::Boolean(false)),
             _ => Err(("22P02".to_string(), format!("invalid input syntax for type boolean: \"{text}\""))),
         },
         20 | 21 | 23 | 26 => text

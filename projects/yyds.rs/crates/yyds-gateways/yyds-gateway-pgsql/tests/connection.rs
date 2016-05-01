@@ -866,3 +866,80 @@ fn pgsql_set_known_variables_are_accepted_unknown_rejected() {
     drop(client);
     server.join().unwrap();
 }
+
+/// 事务内执行除零会把 session 切到 Failed 状态，之后任何非 ROLLBACK/COMMIT
+/// 语句都被 25P02 拒绝。ROLLBACK 之后回到 Idle，正常查询恢复。
+#[test]
+fn pgsql_transaction_error_recovery_after_division_by_zero() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    // PG 除零报 22012，并标记 session 失败 → ReadyForQuery(E)。
+    send_query(&mut client, "SELECT 1 / 0");
+    let divide = receive_until_ready(&mut client);
+    assert_eq!(divide[0].0, b'E');
+    assert!(divide[0].1.windows(5).any(|window| window == b"22012"));
+    assert_eq!(divide.last().unwrap(), &(b'Z', b"E".to_vec()));
+
+    // Failed 事务内后续 SELECT 被 25P02 拒绝。
+    send_query(&mut client, "SELECT id FROM users");
+    let aborted = receive_until_ready(&mut client);
+    assert_eq!(aborted[0].0, b'E');
+    assert!(aborted[0].1.windows(5).any(|window| window == b"25P02"));
+    assert_eq!(aborted.last().unwrap(), &(b'Z', b"E".to_vec()));
+
+    // ROLLBACK 回到 Idle。
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"ROLLBACK\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    // 恢复后 SELECT 正常执行。
+    send_query(&mut client, "SELECT 1");
+    let ok = receive_until_ready(&mut client);
+    assert_eq!(ok[0].0, b'T');
+    assert_eq!(ok.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// PostgreSQL Bind 参数的 boolean OID 必须接受 `on`/`off`/`yes`/`no`/`y`/`n`
+/// 等 PG 扩展字面量，大小写不敏感。
+#[test]
+fn pgsql_boolean_parameter_accepts_postgres_extended_literals() {
+    let (mut client, server) = start_server_with_runtime();
+
+    // 准备一条带 bool 参数的语句，不指定 OID 让 gateway 自动推断。
+    let mut parse = cstring("b1");
+    parse.extend_from_slice(&cstring("SELECT id FROM metrics WHERE active = $1"));
+    parse.extend_from_slice(&0_i16.to_be_bytes()); // parameter_count = 0 → 自动推断
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'S', &[]);
+    let parsed = receive_until_ready(&mut client);
+    assert!(parsed.iter().all(|(tag, _)| *tag != b'E'), "parse must succeed");
+
+    // Bind + Execute 用 'On'（大小写混合）作为参数值，gateway 会走 infer_parameter_value。
+    let mut bind = cstring("");
+    bind.extend_from_slice(&cstring("b1"));
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 0 param format codes
+    bind.extend_from_slice(&1_i16.to_be_bytes()); // 1 parameter
+    let val: Vec<u8> = b"On".to_vec();
+    bind.extend_from_slice(&(val.len() as i32).to_be_bytes());
+    bind.extend_from_slice(&val);
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 0 result format codes
+    send_message(&mut client, b'B', &bind);
+    let mut execute = cstring("");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'S', &[]);
+    let executed = receive_until_ready(&mut client);
+    assert!(
+        !executed.iter().any(|(tag, _)| *tag == b'E'),
+        "Bind must accept 'On' as boolean-compatible value, got {:?}",
+        executed
+    );
+
+    drop(client);
+    server.join().unwrap();
+}

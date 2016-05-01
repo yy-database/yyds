@@ -1247,3 +1247,33 @@ fn mysql_set_rejects_unknown_variables_with_1193_hy000() {
     drop(client);
     server.join().unwrap();
 }
+
+/// 事务内语法错误或唯一约束违反会把 MySQL session 切到 failed 状态，
+/// 后续语句被拒绝。ROLLBACK 之后恢复。
+#[test]
+fn mysql_transaction_error_recovery_after_unique_violation() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(&mut client, "BEGIN");
+
+    // users 预置了 id=42，重复写入触发唯一约束 → 1062，session 标记 failed。
+    let (code, state) = expect_error(&mut client, "INSERT INTO users VALUES (42, 'dup', 0)");
+    assert_eq!((code, state.as_str()), (1062, "23000"));
+
+    // Failed 事务内后续普通 SELECT 被拒绝（error 40001）。
+    let (code, _) = expect_error(&mut client, "SELECT id FROM users");
+    assert_eq!(code, 40001, "failed transaction must abort subsequent statements");
+
+    // ROLLBACK 回到正常状态。
+    expect_ok(&mut client, "ROLLBACK");
+
+    // 恢复后正常查询通过。
+    let _ = expect_single_value(&mut client, "SELECT id FROM users WHERE id = 42");
+
+    drop(client);
+    server.join().unwrap();
+}
