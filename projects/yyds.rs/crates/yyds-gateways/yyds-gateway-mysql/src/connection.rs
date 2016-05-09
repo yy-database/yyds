@@ -421,6 +421,17 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             session.failed = false;
                             write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?;
                         }
+                        SqlTransactionAction::Savepoint(_)
+                        | SqlTransactionAction::RollbackToSavepoint(_)
+                        | SqlTransactionAction::ReleaseSavepoint(_) => {
+                            write_error(
+                                &mut stream,
+                                sequence.wrapping_add(1),
+                                1235,
+                                "42000",
+                                "SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT are not yet supported by the gateway",
+                            )?;
+                        }
                     },
                     Ok(Some(SqlSessionCommand::Savepoint(intent))) => {
                         use yyds_gateway::SavepointIntent;

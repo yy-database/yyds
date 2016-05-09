@@ -341,6 +341,15 @@ fn handle_simple_query(
                 session.failed = false;
                 write_command_complete(stream, "ROLLBACK")
             }
+            SqlTransactionAction::Savepoint(_)
+            | SqlTransactionAction::RollbackToSavepoint(_)
+            | SqlTransactionAction::ReleaseSavepoint(_) => {
+                write_error_response(
+                    stream,
+                    "0A000",
+                    "SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT are not yet supported by the gateway",
+                )
+            }
         },
         Ok(Some(SqlSessionCommand::Savepoint(intent))) => {
             use yyds_gateway::SavepointIntent;

@@ -158,7 +158,7 @@ pub enum SqlVariableScope {
 }
 
 /// Transaction operation recognized by Oak and projected for protocol adapters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SqlTransactionAction {
     /// Start a transaction.
     Begin,
@@ -166,6 +166,12 @@ pub enum SqlTransactionAction {
     Commit,
     /// Roll back a transaction.
     Rollback,
+    /// Create a named savepoint.
+    Savepoint(String),
+    /// Roll back to a named savepoint.
+    RollbackToSavepoint(String),
+    /// Release a named savepoint.
+    ReleaseSavepoint(String),
 }
 
 /// Parses one SQL surface statement through the official Oak SQL frontend.
@@ -199,10 +205,13 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
             character_set: statement.character_set.to_string(),
             collation: statement.collation.as_deref().map(str::to_string),
         }),
-        SqlStatement::Transaction(statement) => Some(SqlSessionCommand::Transaction(match statement.action {
+        SqlStatement::Transaction(statement) => Some(SqlSessionCommand::Transaction(match &statement.action {
             oak_sql::ast::TransactionAction::Begin => SqlTransactionAction::Begin,
             oak_sql::ast::TransactionAction::Commit => SqlTransactionAction::Commit,
             oak_sql::ast::TransactionAction::Rollback => SqlTransactionAction::Rollback,
+            oak_sql::ast::TransactionAction::Savepoint(name) => SqlTransactionAction::Savepoint(name.to_string()),
+            oak_sql::ast::TransactionAction::RollbackToSavepoint(name) => SqlTransactionAction::RollbackToSavepoint(name.to_string()),
+            oak_sql::ast::TransactionAction::ReleaseSavepoint(name) => SqlTransactionAction::ReleaseSavepoint(name.to_string()),
         })),
         SqlStatement::SetVariable(statement) => Some(SqlSessionCommand::SetVariable {
             scope: statement.scope.map(project_variable_scope),
@@ -430,6 +439,8 @@ pub enum SqlBoundJoinKind {
     Right,
     /// `FULL [OUTER] JOIN`.
     Full,
+    /// `CROSS JOIN` — Cartesian product, no `ON` clause.
+    Cross,
 }
 
 /// One SQL ORDER BY item — expression, direction and explicit NULL placement.
@@ -1126,6 +1137,13 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
                             ));
                         }
                     },
+                    oak_sql::ast::GroupByItem::GroupingSets(_)
+                    | oak_sql::ast::GroupByItem::Rollup(_)
+                    | oak_sql::ast::GroupByItem::Cube(_) => {
+                        return Err(SqlFrontendError::unsupported(
+                            "GROUPING SETS, ROLLUP and CUBE are not yet supported by the YYDS gateway",
+                        ));
+                    }
                 });
             }
             Some(expressions)
@@ -1137,20 +1155,25 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
         .joins
         .iter()
         .map(|join| {
-            Ok(SqlBoundJoin {
-                kind: match join.join_type {
-                    oak_sql::ast::JoinType::Inner => SqlBoundJoinKind::Inner,
-                    oak_sql::ast::JoinType::Left => SqlBoundJoinKind::Left,
-                    oak_sql::ast::JoinType::Right => SqlBoundJoinKind::Right,
-                    oak_sql::ast::JoinType::Full => SqlBoundJoinKind::Full,
-                },
-                source: bind_table_source(&join.table)?,
-                on: join
-                    .on
+            let kind = match join.join_type {
+                oak_sql::ast::JoinType::Inner => SqlBoundJoinKind::Inner,
+                oak_sql::ast::JoinType::Left => SqlBoundJoinKind::Left,
+                oak_sql::ast::JoinType::Right => SqlBoundJoinKind::Right,
+                oak_sql::ast::JoinType::Full => SqlBoundJoinKind::Full,
+                oak_sql::ast::JoinType::Cross => SqlBoundJoinKind::Cross,
+            };
+            let on = if matches!(join.join_type, oak_sql::ast::JoinType::Cross) {
+                // CROSS JOIN has no ON clause — use a tautology so downstream
+                // binders keep treating it as a predicate. The executor ignores
+                // the condition for the Cartesian product.
+                SqlBoundExpression::Literal(SqlBoundLiteral::Boolean(true))
+            } else {
+                join.on
                     .as_ref()
                     .ok_or_else(|| bind_error("SQL JOIN requires an ON condition"))
-                    .and_then(bind_expression)?,
-            })
+                    .and_then(bind_expression)?
+            };
+            Ok(SqlBoundJoin { kind, source: bind_table_source(&join.table)?, on })
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(SqlBoundSelect {
@@ -1171,16 +1194,24 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
 /// Binds one Oak set operation. `ORDER BY` stays in surface form because it
 /// references the combined output columns rather than catalog columns.
 fn bind_set_operation(set: &oak_sql::ast::SetOperationStatement) -> Result<SqlBoundSetOperation, SqlFrontendError> {
+    if set.operands.len() != 2 {
+        return Err(SqlFrontendError::unsupported(
+            "chained set operations (more than two operands) are not yet supported by the YYDS gateway",
+        ));
+    }
+    let left = &set.operands[0];
+    let right = &set.operands[1];
+    let operator = set.operators.first().copied().ok_or_else(|| bind_error("set operation missing operator"))?;
     let (limit, offset) = bind_limit_clause(set.limit.as_ref())?;
     Ok(SqlBoundSetOperation {
-        left: Box::new(bind_select_statement(&set.left)?),
-        operator: match set.operator {
+        left: Box::new(bind_select_statement(left)?),
+        operator: match operator {
             oak_sql::ast::SetOperator::Union => SqlBoundSetOperator::Union,
             oak_sql::ast::SetOperator::UnionAll => SqlBoundSetOperator::UnionAll,
             oak_sql::ast::SetOperator::Intersect => SqlBoundSetOperator::Intersect,
             oak_sql::ast::SetOperator::Except => SqlBoundSetOperator::Except,
         },
-        right: Box::new(bind_select_statement(&set.right)?),
+        right: Box::new(bind_select_statement(right)?),
         order_by: bind_order_by_clause(set.order_by.as_ref())?,
         limit,
         offset,

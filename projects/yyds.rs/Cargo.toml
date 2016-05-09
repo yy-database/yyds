@@ -31,7 +31,7 @@ yyds-execution = { path = "crates/yyds-execution" }
 yyds-gateway = { path = "crates/yyds-gateways/yyds-gateway" }
 yyds-gateway-conformance = { path = "crates/yyds-gateways/yyds-gateway-conformance" }
 serde_json = "1"
-oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "8ff5cbf4f34006001eb1b86ca31b8599352df2cf", package = "oak-sql" }
+oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "8c85395188b882cef129f32cf5e8588bb91f1186", package = "oak-sql" }
 # Overlaid by local path `projects/yyds.rs/.cargo/config.toml` (git ignored).
 boost-fs = { git = "https://github.com/oovm/rust-boost", rev = "9aa52745d6eae2d7748c76e4e3e6555e1f6e4b86" }
 windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
