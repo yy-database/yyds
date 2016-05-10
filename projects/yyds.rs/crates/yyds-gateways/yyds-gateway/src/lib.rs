@@ -24,7 +24,7 @@ pub use crate::{
     },
     sql_describe::{describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
-    sql_parameters::{neutralized_sql_parameters, substitute_sql_parameters, SqlParameterStyle},
+    sql_parameters::{neutralized_sql_parameters, nulled_sql_parameters, substitute_sql_parameters, SqlParameterStyle},
     sql_planner::{
         plan_select, plan_select_for_dialect, plan_statement, plan_statement_for_dialect, DeletePlan, InsertSelectColumn,
         InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, SqlSetOrderByItem,

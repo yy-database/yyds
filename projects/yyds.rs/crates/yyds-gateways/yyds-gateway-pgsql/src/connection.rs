@@ -14,7 +14,7 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
+    bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, nulled_sql_parameters, parse_session_command,
     plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlColumn,
     SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSessionCommand,
     SqlTransactionAction, SqlValue,
@@ -766,7 +766,7 @@ fn handle_bind(
     }
 
     if statement.description.is_none() {
-        match statement_description(&sql, runtime) {
+        match statement_description(&sql, runtime, Some(&parameters)) {
             Ok(description) => statement.description = Some(description),
             Err((code, message)) => return extended_protocol_error(stream, &code, &message),
         }
@@ -815,7 +815,7 @@ fn handle_describe(
             };
             let parameters = statement_parameter_description(&statement.sql, &statement.parameter_oids);
             if statement.description.is_none() {
-                match statement_description(&statement.sql, runtime) {
+                match statement_description(&statement.sql, runtime, None) {
                     Ok(description) => statement.description = Some(description),
                     Err((code, message)) => {
                         write_error_response(stream, &code, &message)?;
@@ -879,14 +879,39 @@ fn resolve_formats(formats: &[i16], columns: usize) -> Vec<i16> {
 }
 
 /// Derives the statement result shape from the catalog without executing.
-fn statement_description(sql: &str, runtime: Option<&Arc<PgsqlSqlRuntime>>) -> Result<Vec<SqlColumn>, (String, String)> {
+///
+/// Bound parameters are rendered exactly when they are available, so a
+/// describe after Bind cannot disagree with the execution. Metadata-only
+/// describes neutralize each placeholder to `0` because a numeric literal
+/// keeps pk lookups plannable, and retry with `NULL` when `0` is not writable
+/// for the target column.
+fn statement_description(
+    sql: &str,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
+    parameters: Option<&[SqlValue]>,
+) -> Result<Vec<SqlColumn>, (String, String)> {
     let Some(runtime) = runtime
     else {
         return Err(("0A000".to_string(), "PostgreSQL query execution is not implemented (no SQL runtime)".to_string()));
     };
+    if let Some(parameters) = parameters {
+        let rendered = substitute_sql_parameters(sql, parameters, SqlParameterStyle::DollarNumber)
+            .map_err(|error| statement_error("parameter", error))?;
+        return plan_description(&rendered, runtime);
+    }
     let (neutral_sql, _) = neutralized_sql_parameters(sql, SqlParameterStyle::DollarNumber)
         .map_err(|error| statement_error("parameter", error))?;
-    let bound = bind_sql_catalog(&neutral_sql, &runtime.catalog, runtime.schema_version)
+    if let Ok(description) = plan_description(&neutral_sql, runtime) {
+        return Ok(description);
+    }
+    let (nulled_sql, _) = nulled_sql_parameters(sql, SqlParameterStyle::DollarNumber)
+        .map_err(|error| statement_error("parameter", error))?;
+    plan_description(&nulled_sql, runtime)
+}
+
+/// Binds and plans rendered SQL only to read its result shape.
+fn plan_description(sql: &str, runtime: &Arc<PgsqlSqlRuntime>) -> Result<Vec<SqlColumn>, (String, String)> {
+    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version)
         .map_err(|error| statement_error("bind", error))?;
     let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres)
         .map_err(|error| statement_error("plan", error))?;

@@ -54,6 +54,13 @@ pub fn neutralized_sql_parameters(sql: &str, style: SqlParameterStyle) -> Result
     walk_parameters(sql, style, &mut |_| Ok("0".to_string()))
 }
 
+/// Renders every referenced placeholder as `NULL` for metadata-only describes
+/// whose target column rejects the `0` stand-in, since every column type
+/// accepts `NULL`.
+pub fn nulled_sql_parameters(sql: &str, style: SqlParameterStyle) -> Result<(String, usize), SqlFrontendError> {
+    walk_parameters(sql, style, &mut |_| Ok("NULL".to_string()))
+}
+
 fn walk_parameters(
     sql: &str,
     style: SqlParameterStyle,
