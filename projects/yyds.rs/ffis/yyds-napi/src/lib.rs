@@ -5,6 +5,7 @@
 use napi_derive::napi;
 use yyds_types::version;
 
+mod catalog;
 mod executor;
 mod mongo;
 mod mysql;

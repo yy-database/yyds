@@ -14,7 +14,7 @@ export interface YydsBindings {
     ) => RedisServiceBinding;
     PgsqlServiceHandle: {
         new (lease: unknown, port: number): PgsqlServiceBinding;
-        start_with_executor(
+        startWithExecutor(
             lease: unknown,
             port: number,
             executor: unknown,
@@ -23,7 +23,7 @@ export interface YydsBindings {
     };
     MysqlServiceHandle: {
         new (lease: unknown, port: number): MysqlServiceBinding;
-        start_with_executor(
+        startWithExecutor(
             lease: unknown,
             port: number,
             executor: unknown,
@@ -36,6 +36,7 @@ export interface YydsBindings {
         executor: unknown,
     ) => MongoServiceBinding;
     WireServerHandle: new (port: number, executor: unknown) => WireServiceBinding;
+    catalogPublishSchema(catalogPath: string, schemaVersion: number, schemaDocument: string): void;
     nodeInit(dataDir: string, identity: unknown): void;
     nodeInspect(dataDir: string): NodeStatusBinding;
     nodeReadRuntimeStatus(dataDir: string): string | null;

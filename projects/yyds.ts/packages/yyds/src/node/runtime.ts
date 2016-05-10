@@ -119,7 +119,7 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
         options.pgsqlPort === undefined
             ? undefined
             : hasRuntime
-                ? native.PgsqlServiceHandle.start_with_executor(
+                ? native.PgsqlServiceHandle.startWithExecutor(
                       lease,
                       options.pgsqlPort,
                       executor,
@@ -130,7 +130,7 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
         options.mysqlPort === undefined
             ? undefined
             : hasRuntime
-                ? native.MysqlServiceHandle.start_with_executor(
+                ? native.MysqlServiceHandle.startWithExecutor(
                       lease,
                       options.mysqlPort,
                       executor,

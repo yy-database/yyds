@@ -1,14 +1,20 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+
 import { loadYydsNative } from "../src/node/load.ts";
 import { parseStartOptions, runNodeStart } from "../src/node/runtime.ts";
 import { parseWebuiArgs, runWebui } from "../src/node/webui-cmd.ts";
 
 function usage() {
-    return "usage: yyds <init|start|status|stop|webui> ...";
+    return "usage: yyds <init|start|status|stop|webui|catalog> ...";
 }
 
 function startUsage() {
-    return "usage: yyds start --data-dir DIR --cluster-id ID --node-id ID [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--mongo-port PORT] [--wire-port PORT]";
+    return "usage: yyds start --data-dir DIR --cluster-id ID --node-id ID [--catalog-path FILE] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--mongo-port PORT] [--wire-port PORT]";
+}
+
+function catalogUsage() {
+    return "usage: yyds catalog --catalog-path FILE --schema-file FILE [--schema-version NUMBER]";
 }
 
 function webuiUsage() {
@@ -20,6 +26,7 @@ function parseCommonArgs(command, args) {
         dataDir: "",
         clusterId: "",
         nodeId: "",
+        catalogPath: undefined,
         redisPort: 6379,
         pgsqlPort: undefined,
         mysqlPort: undefined,
@@ -41,6 +48,12 @@ function parseCommonArgs(command, args) {
                 break;
             case "--node-id":
                 options.nodeId = value;
+                index += 1;
+                break;
+            case "--catalog-path":
+                if (command !== "start")
+                    throw new Error(`option ${flag} is not valid for this command`);
+                options.catalogPath = value;
                 index += 1;
                 break;
             case "--redis-port":
@@ -84,6 +97,39 @@ function parseCommonArgs(command, args) {
     return options;
 }
 
+function runCatalog(native, args) {
+    let catalogPath = "";
+    let schemaFile = "";
+    let schemaVersion = 1;
+    for (let index = 0; index < args.length; index += 1) {
+        const flag = args[index];
+        const value = args[index + 1];
+        if (!value || value.startsWith("--")) throw new Error(`missing value for ${flag}\n${catalogUsage()}`);
+        switch (flag) {
+            case "--catalog-path":
+                catalogPath = value;
+                index += 1;
+                break;
+            case "--schema-file":
+                schemaFile = value;
+                index += 1;
+                break;
+            case "--schema-version": {
+                const parsed = Number(value);
+                if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`invalid schema version '${value}'`);
+                schemaVersion = parsed;
+                index += 1;
+                break;
+            }
+            default:
+                throw new Error(`unknown option '${flag}'\n${catalogUsage()}`);
+        }
+    }
+    if (!catalogPath || !schemaFile) throw new Error(catalogUsage());
+    native.catalogPublishSchema(catalogPath, schemaVersion, readFileSync(schemaFile, "utf8"));
+    console.log(`published schema version ${schemaVersion} into ${catalogPath}`);
+}
+
 async function main(args) {
     const command = args[0];
     const rest = args.slice(1);
@@ -94,6 +140,12 @@ async function main(args) {
     }
 
     const native = loadYydsNative();
+
+    if (command === "catalog") {
+        runCatalog(native, rest);
+        return;
+    }
+
     const options = parseCommonArgs(command, rest);
 
     switch (command) {
@@ -108,6 +160,7 @@ async function main(args) {
                 dataDir: options.dataDir,
                 clusterId: options.clusterId,
                 nodeId: options.nodeId,
+                catalogPath: options.catalogPath,
                 redisPort: options.redisPort,
                 pgsqlPort: options.pgsqlPort,
                 mysqlPort: options.mysqlPort,
@@ -139,7 +192,7 @@ async function main(args) {
             return;
         }
         default:
-            throw new Error(command ? `unknown command '${command}'` : `${usage()}\n${startUsage()}\n${webuiUsage()}`);
+            throw new Error(command ? `unknown command '${command}'` : `${usage()}\n${startUsage()}\n${webuiUsage()}\n${catalogUsage()}`);
     }
 }
 
