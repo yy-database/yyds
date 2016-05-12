@@ -1,0 +1,1 @@
+table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }
