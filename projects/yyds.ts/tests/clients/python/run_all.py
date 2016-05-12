@@ -14,10 +14,11 @@ from __future__ import annotations
 import argparse
 import sys
 
+import mysql_suite
 import postgres_suite
 from harness import CaseResult, NodeFailure, attach_node, start_node
 
-GATEWAYS = {"postgresql": postgres_suite.run_postgresql}
+GATEWAYS = {"postgresql": postgres_suite.run_postgresql, "mysql": mysql_suite.run_mysql}
 
 
 def _parse_arguments(argv: list[str]) -> argparse.Namespace:
