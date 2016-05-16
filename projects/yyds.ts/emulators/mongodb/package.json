@@ -1,6 +1,6 @@
 {
     "name": "@yydb/mongodb",
-    "version": "0.0.21",
+    "version": "0.0.22",
     "description": "Pretend you installed MongoDB. YYDS scripting runtime underneath.",
     "license": "MPL-2.0",
     "type": "module",
