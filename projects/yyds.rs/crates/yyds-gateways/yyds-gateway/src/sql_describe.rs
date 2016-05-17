@@ -142,6 +142,7 @@ fn infer_expression_type(expression: &SqlCatalogBoundExpression, field_types: &B
             SqlBoundLiteral::Integer(_) => SqlFieldType::Int64,
             SqlBoundLiteral::Number(_) => SqlFieldType::Float64,
             SqlBoundLiteral::String(_) => SqlFieldType::String,
+            SqlBoundLiteral::Bytes(_) => SqlFieldType::Bytes,
             SqlBoundLiteral::Boolean(_) => SqlFieldType::Bool,
             SqlBoundLiteral::Null => SqlFieldType::Unknown,
         },
@@ -210,6 +211,9 @@ fn merge_numeric(left: SqlFieldType, right: SqlFieldType) -> SqlFieldType {
 fn cast_target_to_field_type(target: &str) -> SqlFieldType {
     let t = target.trim().to_ascii_uppercase();
     let base_type = t.split('(').next().unwrap_or(&t);
+    if crate::sql::is_binary_type_name(base_type) {
+        return SqlFieldType::Bytes;
+    }
     match base_type {
         "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT" => SqlFieldType::Int64,
         "REAL" | "DOUBLE" | "FLOAT" | "NUMBER" => SqlFieldType::Float64,

@@ -825,17 +825,37 @@ pub(crate) fn check_write_literal(
     field_type: &SqlFieldType,
     column: &str,
 ) -> Result<(), SqlFrontendError> {
+    // `bytes` 列单独处理：容量诊断必须指名 octets 与声明上限，不能与普通类型不匹配混在一起。
+    if matches!(field_type.inner(), SqlFieldType::Bytes) {
+        return match literal {
+            // NULL 与文本字面量保持既有行为：文本按 UTF-8 写入，ASCII payload 无损。
+            SqlBoundLiteral::Null | SqlBoundLiteral::String(_) => Ok(()),
+            SqlBoundLiteral::Bytes(bytes) if bytes.len() <= SqlFieldType::BYTES_CAPACITY => Ok(()),
+            SqlBoundLiteral::Bytes(bytes) => Err(SqlFrontendError::new(
+                SqlErrorKind::TypeMismatch,
+                format!(
+                    "binary payload of {} octets exceeds the declared capacity of {} for column `{column}`",
+                    bytes.len(),
+                    SqlFieldType::BYTES_CAPACITY
+                ),
+            )),
+            _ => Err(SqlFrontendError::new(
+                SqlErrorKind::TypeMismatch,
+                format!("SQL value {:?} cannot be written to column `{column}`", literal),
+            )),
+        };
+    }
     let fits = match field_type.inner() {
         SqlFieldType::Unknown => true,
         SqlFieldType::Int64 | SqlFieldType::Int32 => match literal {
             SqlBoundLiteral::Null | SqlBoundLiteral::Integer(_) => true,
             SqlBoundLiteral::String(text) => text.parse::<i64>().is_ok(),
-            SqlBoundLiteral::Number(_) | SqlBoundLiteral::Boolean(_) => false,
+            SqlBoundLiteral::Number(_) | SqlBoundLiteral::Boolean(_) | SqlBoundLiteral::Bytes(_) => false,
         },
         SqlFieldType::Float64 => match literal {
             SqlBoundLiteral::Null | SqlBoundLiteral::Integer(_) | SqlBoundLiteral::Number(_) => true,
             SqlBoundLiteral::String(text) => text.parse::<f64>().is_ok(),
-            SqlBoundLiteral::Boolean(_) => false,
+            SqlBoundLiteral::Boolean(_) | SqlBoundLiteral::Bytes(_) => false,
         },
         SqlFieldType::Bool => match literal {
             SqlBoundLiteral::Null | SqlBoundLiteral::Boolean(_) => true,
@@ -843,12 +863,10 @@ pub(crate) fn check_write_literal(
             SqlBoundLiteral::String(text) => {
                 matches!(text.to_ascii_lowercase().as_str(), "true" | "false" | "t" | "f" | "1" | "0")
             }
-            SqlBoundLiteral::Number(_) => false,
+            SqlBoundLiteral::Number(_) | SqlBoundLiteral::Bytes(_) => false,
         },
-        SqlFieldType::String | SqlFieldType::Bytes => {
-            matches!(literal, SqlBoundLiteral::Null | SqlBoundLiteral::String(_))
-        }
-        SqlFieldType::Optional(_) => unreachable!("inner() strips Optional"),
+        SqlFieldType::String => matches!(literal, SqlBoundLiteral::Null | SqlBoundLiteral::String(_)),
+        SqlFieldType::Bytes | SqlFieldType::Optional(_) => unreachable!("handled above"),
     };
     if fits {
         Ok(())
@@ -875,6 +893,15 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
         SqlCatalogBoundExpression::OuterColumn(_) => {
             Err(planner_error("SQL gateway write values must be simple literals"))
         }
+        // 二进制写入值只能来自 wire 层渲染的 `CAST('<hex>' AS BYTEA|BLOB)`：
+        // SQL 文本字面量无法承载非 UTF-8 octets，因此这是唯一的二进制入参通道。
+        SqlCatalogBoundExpression::Cast { expr, target } if crate::sql::is_binary_type_name(target) => match expr.as_ref() {
+            SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Bytes(bytes)) => Ok(SqlBoundLiteral::Bytes(bytes.clone())),
+            SqlCatalogBoundExpression::Literal(SqlBoundLiteral::String(text)) => {
+                crate::sql::decode_binary_literal(text).map(SqlBoundLiteral::Bytes)
+            }
+            _ => Err(planner_error("binary write values must be a hexadecimal literal")),
+        },
         SqlCatalogBoundExpression::Function { .. }
         | SqlCatalogBoundExpression::Binary { .. }
         | SqlCatalogBoundExpression::Unary { .. }
@@ -1383,6 +1410,7 @@ pub(crate) fn pk_literal_to_rowid(literal: &SqlBoundLiteral) -> Result<Vec<u8>, 
         SqlBoundLiteral::Integer(value) => Ok(value.to_string().into_bytes()),
         SqlBoundLiteral::Number(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::String(text) => Ok(text.as_bytes().to_vec()),
+        SqlBoundLiteral::Bytes(bytes) => Ok(bytes.clone()),
         SqlBoundLiteral::Boolean(value) => Ok((if *value { "1" } else { "0" }).as_bytes().to_vec()),
         SqlBoundLiteral::Null => Err(SqlFrontendError::new(SqlErrorKind::NotNullViolation, "primary key must not be NULL")),
     }
@@ -1435,6 +1463,7 @@ fn scalar_projection_label(expr: &SqlCatalogBoundExpression) -> String {
         SqlCatalogBoundExpression::Literal(lit) => match lit {
             SqlBoundLiteral::Integer(value) => value.to_string(),
             SqlBoundLiteral::Number(text) | SqlBoundLiteral::String(text) => text.clone(),
+            SqlBoundLiteral::Bytes(bytes) => crate::sql::encode_hex(bytes),
             SqlBoundLiteral::Boolean(value) => if *value { "true" } else { "false" }.to_string(),
             SqlBoundLiteral::Null => "NULL".to_string(),
         },

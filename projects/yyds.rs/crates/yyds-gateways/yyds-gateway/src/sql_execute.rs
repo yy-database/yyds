@@ -52,6 +52,9 @@ pub enum SqlValue {
     Number(f64),
     /// 字符串。
     String(String),
+    /// 原始 octets。只有声明为 `bytes` 的列（或 `CAST(... AS BYTEA|BLOB)`）才使用这个变体，
+    /// 值不在任何位置经过 UTF-8 解码，因此可以承载 NUL、非 UTF-8 字节与空值。
+    Bytes(Vec<u8>),
     /// 布尔。
     Boolean(bool),
     /// NULL。
@@ -107,10 +110,11 @@ impl SqlValue {
     /// 按声明的 `field_type` 精确解码 bytes。
     ///
     /// - `String` 字段永远返回 [`SqlValue::String`]，保留前导零、空串、非数字文本。
+    /// - `Bytes` 字段返回 [`SqlValue::Bytes`]，原始 octets 不做 UTF-8 解码，空 bytes 是空值而不是 NULL。
     /// - `Int64`/`Int32` 按整数解析。
     /// - `Float64` 按浮点解析。
     /// - `Bool` 识别 `true`/`false`/`1`/`0`。
-    /// - `Unknown` / `Bytes` 退回到 [`Self::from_row_bytes`] 的宽松推断。
+    /// - `Unknown` 退回到 [`Self::from_row_bytes`] 的宽松推断。
     ///
     /// 解码失败时降级为 [`SqlValue::String`] 保留原始 UTF-8 文本，
     /// 让上层继续处理而不是 panic。
@@ -144,7 +148,8 @@ impl SqlValue {
                     _ => SqlValue::String(text),
                 }
             }
-            crate::catalog_bind::SqlFieldType::Bytes => SqlValue::String(String::from_utf8_lossy(bytes).into_owned()),
+            // `bytes` 列是原始 octets：不做 UTF-8 解码，NUL、非 UTF-8 字节与空值都原样保留。
+            crate::catalog_bind::SqlFieldType::Bytes => SqlValue::Bytes(bytes.to_vec()),
             // 没有类型信息时只能宽松推断。gateway 写入 NULL 时会省略字段，
             // 因此这里把空 bytes 视为空串，真正缺失的字段由调用方映射为 NULL。
             crate::catalog_bind::SqlFieldType::Unknown => Self::from_row_bytes(bytes),
@@ -158,6 +163,7 @@ impl SqlValue {
             SqlBoundLiteral::Integer(value) => SqlValue::Integer(*value),
             SqlBoundLiteral::Number(text) => numeric_literal(text),
             SqlBoundLiteral::String(text) => SqlValue::String(text.clone()),
+            SqlBoundLiteral::Bytes(bytes) => SqlValue::Bytes(bytes.clone()),
             SqlBoundLiteral::Boolean(v) => SqlValue::Boolean(*v),
             SqlBoundLiteral::Null => SqlValue::Null,
         }
@@ -613,6 +619,7 @@ fn value_to_literal(value: SqlValue) -> SqlBoundLiteral {
         SqlValue::Integer(value) => SqlBoundLiteral::Integer(value),
         SqlValue::Number(value) => SqlBoundLiteral::Number(format_number(value)),
         SqlValue::String(value) => SqlBoundLiteral::String(value),
+        SqlValue::Bytes(value) => SqlBoundLiteral::Bytes(value),
         SqlValue::Boolean(value) => SqlBoundLiteral::Boolean(value),
         SqlValue::Null => SqlBoundLiteral::Null,
     }
@@ -1794,6 +1801,7 @@ fn sql_value_to_bytes(lit: &SqlBoundLiteral) -> Option<Vec<u8>> {
         SqlBoundLiteral::Integer(value) => Some(value.to_string().into_bytes()),
         SqlBoundLiteral::Number(text) => Some(text.as_bytes().to_vec()),
         SqlBoundLiteral::String(text) => Some(text.as_bytes().to_vec()),
+        SqlBoundLiteral::Bytes(bytes) => Some(bytes.clone()),
         SqlBoundLiteral::Boolean(v) => Some((if *v { "1" } else { "0" }).as_bytes().to_vec()),
         SqlBoundLiteral::Null => None,
     }
@@ -1838,6 +1846,7 @@ fn truthy(v: &SqlValue) -> bool {
         SqlValue::Integer(n) => *n != 0,
         SqlValue::Number(n) => *n != 0.0,
         SqlValue::String(s) => !s.is_empty(),
+        SqlValue::Bytes(bytes) => !bytes.is_empty(),
         SqlValue::Null => false,
     }
 }
@@ -2459,8 +2468,14 @@ fn eval_cast(value: SqlValue, target: &str) -> Result<SqlValue, SqlFrontendError
         (SqlValue::Boolean(b), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
             Ok(SqlValue::String(if b { "TRUE".to_string() } else { "FALSE".to_string() }))
         }
+        (SqlValue::Bytes(bytes), target) if crate::sql::is_binary_type_name(target) => Ok(SqlValue::Bytes(bytes)),
+        (SqlValue::String(text), target) if crate::sql::is_binary_type_name(target) => {
+            // 十六进制拼写是 text → binary 的唯一无损转换。非法拼写必须报错，
+            // 不能像旧实现那样静默返回 NULL。
+            crate::sql::decode_binary_literal(&text).map(SqlValue::Bytes)
+        }
         (_, "BLOB" | "BINARY") => {
-            // BLOB 在本网关里没有原生承载，退化成 TEXT 表示
+            // 其它类型没有到二进制列的文档化转换，维持 NULL 结果。
             Ok(SqlValue::Null)
         }
         _ => {
@@ -2508,6 +2523,16 @@ fn eval_scalar_function(
     dialect: SqlDialect,
 ) -> Result<SqlValue, SqlFrontendError> {
     use SqlValue::{Integer, Null, Number, String as Text};
+    // 二进制实参只在语义明确的函数里有定义。其余函数没有无损的文本形式，
+    // 显式报类型错误，而不是悄悄退化成 NULL。
+    if !matches!(function, SqlScalarFunction::Length | SqlScalarFunction::Coalesce)
+        && args.iter().any(|value| matches!(value, SqlValue::Bytes(_)))
+    {
+        return Err(SqlFrontendError::new(
+            SqlErrorKind::TypeMismatch,
+            format!("{}() is not defined for binary values", function.name()),
+        ));
+    }
     Ok(match function {
         SqlScalarFunction::Version => Text(crate::version_label()),
         // 未选择数据库 / schema 时，MySQL 与 PostgreSQL 都返回 NULL。
@@ -2539,12 +2564,16 @@ fn eval_scalar_function(
             None => Null,
         },
         // MySQL 的 `LENGTH` 是 UTF-8 字节数，PostgreSQL 的 `length` 是字符数。
-        SqlScalarFunction::Length => match scalar_text(args, 0) {
-            Some(text) => Integer(match dialect {
-                SqlDialect::Mysql => i64::try_from(text.len()).unwrap_or(i64::MAX),
-                SqlDialect::Postgres => i64::try_from(text.chars().count()).unwrap_or(i64::MAX),
-            }),
-            None => Null,
+        // 二进制值在两种方言下都按 octets 计数，结果一致。
+        SqlScalarFunction::Length => match args.first() {
+            Some(SqlValue::Bytes(bytes)) => Integer(i64::try_from(bytes.len()).unwrap_or(i64::MAX)),
+            _ => match scalar_text(args, 0) {
+                Some(text) => Integer(match dialect {
+                    SqlDialect::Mysql => i64::try_from(text.len()).unwrap_or(i64::MAX),
+                    SqlDialect::Postgres => i64::try_from(text.chars().count()).unwrap_or(i64::MAX),
+                }),
+                None => Null,
+            },
         },
         SqlScalarFunction::CharLength => match scalar_text(args, 0) {
             Some(text) => Integer(i64::try_from(text.chars().count()).unwrap_or(i64::MAX)),
@@ -2701,6 +2730,9 @@ fn scalar_text(args: &[SqlValue], index: usize) -> Option<String> {
         Some(SqlValue::Integer(value)) => Some(value.to_string()),
         Some(SqlValue::Number(value)) => Some(format_number(*value)),
         Some(SqlValue::Boolean(value)) => Some(if *value { "1" } else { "0" }.to_string()),
+        // 二进制值是原始 octets，没有无损的文本形式。`LENGTH` 这类对二进制有
+        // 明确定义的函数在上层单独判定，不经过本函数。
+        Some(SqlValue::Bytes(_)) => None,
         Some(SqlValue::Null) | None => None,
     }
 }
@@ -2712,6 +2744,7 @@ fn scalar_integer(args: &[SqlValue], index: usize) -> Option<i64> {
         SqlValue::Number(value) => Some(*value as i64),
         SqlValue::String(text) => text.trim().parse::<i64>().ok(),
         SqlValue::Boolean(value) => Some(i64::from(*value)),
+        SqlValue::Bytes(_) => None,
         SqlValue::Null => None,
     }
 }
@@ -2836,6 +2869,8 @@ fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue, di
             SqlBoundBinaryOperator::Like => Boolean(like_match_ci(a, b)),
             _ => Null,
         },
+        // 二进制值按字节序比较；字符串的 case-insensitive 排序规则不适用于 octets。
+        (Bytes(a), Bytes(b)) if is_comparison(op) => comparison_value(op, a.cmp(b)),
         (Boolean(a), Boolean(b)) => match op {
             SqlBoundBinaryOperator::Equal => Boolean(a == b),
             SqlBoundBinaryOperator::NotEqual => Boolean(a != b),
@@ -3089,6 +3124,10 @@ fn serialize_group_key(values: &[SqlValue]) -> String {
             SqlValue::Boolean(b) => {
                 buf.push_str(if *b { "B:true" } else { "B:false" });
             }
+            SqlValue::Bytes(bytes) => {
+                buf.push_str("X:");
+                buf.push_str(&crate::sql::encode_hex(bytes));
+            }
         }
     }
     buf
@@ -3276,6 +3315,8 @@ fn compare_values_with_nulls(a: Option<&SqlValue>, b: Option<&SqlValue>, nulls_f
             (SqlValue::Number(n1), SqlValue::Number(n2)) => n1.partial_cmp(n2).unwrap_or(Ordering::Equal),
             (SqlValue::String(s1), SqlValue::String(s2)) => cmp_string_ci(s1, s2),
             (SqlValue::Boolean(b1), SqlValue::Boolean(b2)) => b1.cmp(b2),
+            // 二进制列按原始 octets 的字节序排序，不经过任何文本折叠。
+            (SqlValue::Bytes(a), SqlValue::Bytes(b)) => a.cmp(b),
             _ => Ordering::Equal,
         },
     }

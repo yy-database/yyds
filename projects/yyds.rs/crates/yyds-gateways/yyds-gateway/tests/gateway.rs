@@ -3238,7 +3238,7 @@ fn catalog_types_drive_decode_on_read_scan_and_transaction_paths() {
             SqlValue::Integer(-7),
             SqlValue::Number(0.5),
             SqlValue::Boolean(true),
-            SqlValue::String("blob".into()),
+            SqlValue::Bytes(b"blob".to_vec()),
             SqlValue::String("007".into()),
             SqlValue::Null,
         ]]
@@ -3255,7 +3255,8 @@ fn catalog_types_drive_decode_on_read_scan_and_transaction_paths() {
             SqlValue::Integer(0),
             SqlValue::Number(-2.25),
             SqlValue::Boolean(false),
-            SqlValue::String(String::new()),
+            // 二进制列的空串是零长 octets，不是空文本。
+            SqlValue::Bytes(Vec::new()),
             SqlValue::String(String::new()),
             SqlValue::String(String::new()),
         ]
@@ -3268,6 +3269,59 @@ fn catalog_types_drive_decode_on_read_scan_and_transaction_paths() {
         run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, &format!("SELECT {columns} FROM metrics ORDER BY id"));
     assert_eq!(txn_scan.rows, scan.rows);
     handle.rollback();
+}
+
+#[test]
+fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
+    use yyds_gateway::{SqlErrorKind, SqlValue};
+
+    let catalog = catalog("table payloads { @@id: i64, body: bytes }\n");
+    let executor = empty_executor();
+
+    // 写值只能走十六进制 CAST：SQL 文本无法直接承载非 UTF-8 octets。
+    run_sql(&executor, None, &catalog, "INSERT INTO payloads VALUES (1, CAST('00FF41' AS BYTEA))");
+    run_sql(&executor, None, &catalog, "INSERT INTO payloads VALUES (2, CAST('' AS BLOB))");
+    run_sql(&executor, None, &catalog, "INSERT INTO payloads VALUES (3, NULL)");
+
+    // NUL、非 ASCII 字节与零长 octets 都必须原样回读，NULL 保持 NULL。
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT body FROM payloads ORDER BY id").rows,
+        vec![
+            vec![SqlValue::Bytes(vec![0x00, 0xFF, 0x41])],
+            vec![SqlValue::Bytes(Vec::new())],
+            vec![SqlValue::Null],
+        ]
+    );
+    // `LENGTH` 对二进制按 octets 计数，两种方言一致。
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT LENGTH(body) FROM payloads WHERE id = 1").rows,
+        vec![vec![SqlValue::Integer(3)]]
+    );
+
+    // 非法十六进制拼写必须显式拒绝，不能截断或悄悄写成 NULL。
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO payloads VALUES (4, CAST('0G' AS BYTEA))", &catalog, 7)
+        .expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("bad hex");
+    assert!(error.message.contains("non-hexadecimal"), "{}", error.message);
+
+    // 超过声明容量（MySQL 裸 BLOB 的 65 535 octets）必须拒绝并给出诊断。
+    let too_big = "00".repeat(yyds_gateway::SqlFieldType::BYTES_CAPACITY + 1);
+    let bound = yyds_gateway::bind_sql_catalog(
+        &format!("INSERT INTO payloads VALUES (4, CAST('{too_big}' AS BYTEA))"),
+        &catalog,
+        7,
+    )
+    .expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("capacity");
+    assert_eq!(error.kind, SqlErrorKind::TypeMismatch);
+    assert!(error.message.contains("exceeds the declared capacity"), "{}", error.message);
+
+    // 文本函数没有二进制的文本形式，显式拒绝而不是退化成 NULL。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT LOWER(body) FROM payloads", &catalog, 7).expect("bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+    let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres)
+        .expect_err("text function on binary");
+    assert_eq!(error.kind, SqlErrorKind::TypeMismatch);
 }
 
 #[test]

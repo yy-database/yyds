@@ -180,6 +180,15 @@ fn render_parameter(parameters: &[SqlValue], index: usize, style: SqlParameterSt
             literal.push('\'');
             literal
         }
+        SqlValue::Bytes(value) => {
+            // 原始 octets 无法放进 SQL 文本的字符串字面量，只有十六进制 CAST 能承载它们。
+            // PostgreSQL 用 `bytea` 的 `\x` 拼写，MySQL 用裸十六进制 `BLOB` 拼写。
+            let hex = crate::sql::encode_hex(value);
+            match style {
+                SqlParameterStyle::DollarNumber => format!("CAST('\\x{hex}' AS BYTEA)"),
+                SqlParameterStyle::QuestionMark => format!("CAST('{hex}' AS BLOB)"),
+            }
+        }
         SqlValue::Null => "NULL".to_string(),
     })
 }

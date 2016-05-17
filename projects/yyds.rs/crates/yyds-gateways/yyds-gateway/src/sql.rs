@@ -906,6 +906,10 @@ pub enum SqlBoundLiteral {
     Number(String),
     /// SQL string literal contents.
     String(String),
+    /// Raw octets produced by `CAST(<hex> AS BYTEA|BLOB)`. The gateway renders
+    /// binary bind parameters as exactly that cast because the SQL text
+    /// substitution layer cannot carry non-UTF-8 octets inside a string literal.
+    Bytes(Vec<u8>),
     /// SQL boolean literal.
     Boolean(bool),
     /// SQL NULL literal.
@@ -1634,6 +1638,62 @@ fn bind_literal(literal: &Literal) -> Result<SqlBoundLiteral, SqlFrontendError> 
         Literal::Boolean(value, _) => Ok(SqlBoundLiteral::Boolean(*value)),
         Literal::Null(_) => Ok(SqlBoundLiteral::Null),
     }
+}
+
+/// Encodes raw octets as upper-case hexadecimal, the spelling PostgreSQL uses
+/// for `bytea` text output and the one MySQL hexadecimal literals accept.
+pub fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02X}");
+    }
+    out
+}
+
+/// Whether a `CAST(... AS <target>)` names a binary column type.
+///
+/// Length modifiers (`BLOB(1024)`) and case do not change the answer. The
+/// gateway uses this to decide that a cast carries raw octets instead of text.
+pub fn is_binary_type_name(target: &str) -> bool {
+    let upper = target.trim().to_ascii_uppercase();
+    let base = upper.split('(').next().unwrap_or(&upper);
+    matches!(
+        base,
+        "BYTEA" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "BYTES"
+    )
+}
+
+/// Decodes a binary literal spelling into raw octets.
+///
+/// Both SQL wire dialects spell binary payloads as hexadecimal text: PostgreSQL
+/// `bytea` uses the `\x…` form and MySQL uses bare `X'…'` content. The optional
+/// `\x`/`0x` prefix is accepted so one helper serves both. An odd number of
+/// digits or a non-hexadecimal character is rejected instead of yielding a
+/// truncated payload.
+pub fn decode_binary_literal(text: &str) -> Result<Vec<u8>, SqlFrontendError> {
+    let digits = text
+        .strip_prefix("\\x")
+        .or_else(|| text.strip_prefix("\\X"))
+        .or_else(|| text.strip_prefix("0x"))
+        .or_else(|| text.strip_prefix("0X"))
+        .unwrap_or(text);
+    if digits.len() % 2 != 0 {
+        return Err(bind_error("binary literal must contain an even number of hexadecimal digits"));
+    }
+    let mut out = Vec::with_capacity(digits.len() / 2);
+    let mut high: Option<u8> = None;
+    for character in digits.chars() {
+        let Some(digit) = character.to_digit(16)
+        else {
+            return Err(bind_error(&format!("binary literal contains a non-hexadecimal character: {character}")));
+        };
+        match high.take() {
+            Some(value) => out.push(value << 4 | digit as u8),
+            None => high = Some(digit as u8),
+        }
+    }
+    Ok(out)
 }
 
 /// Numeric literal binding: pure integer spellings must fit `i64` exactly,

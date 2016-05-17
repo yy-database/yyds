@@ -1,31 +1,31 @@
 {
-    "name": "@yydb/yyds-linux-x64",
-    "version": "0.0.22",
-    "description": "YYDS Node-API binary for Linux x64",
-    "license": "MPL-2.0",
-    "type": "module",
-    "main": "./index.js",
-    "files": [
-        "index.js",
-        "lib",
-        "readme.md"
-    ],
-    "os": [
-        "linux"
-    ],
-    "cpu": [
-        "x64"
-    ],
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/yy-database/yyds.git",
-        "directory": "projects/yyds.ts/platforms/yyds-linux-x64"
-    },
-    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/platforms/yyds-linux-x64#readme",
-    "bugs": {
-        "url": "https://github.com/yy-database/yyds/issues"
-    },
-    "publishConfig": {
-        "access": "public"
-    }
+  "name": "@yydb/yyds-linux-x64",
+  "version": "0.0.22",
+  "description": "YYDS Node-API binary for Linux x64",
+  "license": "MPL-2.0",
+  "type": "module",
+  "main": "./index.js",
+  "files": [
+    "index.js",
+    "lib",
+    "readme.md"
+  ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yy-database/yyds.git",
+    "directory": "projects/yyds.ts/platforms/yyds-linux-x64"
+  },
+  "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/platforms/yyds-linux-x64#readme",
+  "bugs": {
+    "url": "https://github.com/yy-database/yyds/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

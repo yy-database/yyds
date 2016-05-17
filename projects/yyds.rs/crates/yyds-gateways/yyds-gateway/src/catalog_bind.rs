@@ -28,6 +28,11 @@ pub enum SqlFieldType {
     /// Boolean (`bool`).
     Bool,
     /// Raw opaque bytes (`bytes`).
+    ///
+    /// This is a precise binary type, not a loose "some opaque value" fallback:
+    /// values decode to [`crate::SqlValue::Bytes`] without any UTF-8 conversion
+    /// and the column carries [`Self::BYTES_CAPACITY`] as its declared length
+    /// limit.
     Bytes,
     /// Optional wrapper — inner type + NULL. Box breaks the recursion
     Optional(Box<SqlFieldType>),
@@ -36,6 +41,15 @@ pub enum SqlFieldType {
 }
 
 impl SqlFieldType {
+    /// Declared capacity of one binary column, in octets.
+    ///
+    /// Both SQL gateways describe a `bytes` column as a length-prefixed binary
+    /// column: PostgreSQL `BYTEA` and MySQL `BLOB`. MySQL's plain `BLOB` protocol
+    /// type is capped at 65 535 octets, so the smaller wire limit is the declared
+    /// capacity of the column type. A longer payload is rejected at bind time
+    /// instead of being truncated or silently widened into another column type.
+    pub const BYTES_CAPACITY: usize = 65_535;
+
     /// Extract the innermost non-optional type.
     pub fn inner(&self) -> SqlFieldType {
         match self {
