@@ -584,6 +584,141 @@ fn describe_statement_reports_catalog_types_and_binary_rows_round_trip() {
     server.join().unwrap();
 }
 
+/// `bytea` 的二进制格式直接携带原始 octets：NUL、非 UTF-8 字节与零长载荷
+/// 都必须原样往返；文本格式无法承载时按 `0A000` 稳定拒绝。
+#[test]
+fn bytea_binary_parameters_round_trip_and_text_format_is_rejected() {
+    let (mut client, server) = start_server_with_runtime();
+    let payload: Vec<u8> = vec![0x00, 0xFF, 0xFE, 0x00, 0x41, 0xC3, 0x28];
+
+    // 两个参数都按二进制格式绑定：`id` 是 int8，`blob` 是 bytea。
+    let mut parse = cstring("b1");
+    parse.extend_from_slice(&cstring("INSERT INTO metrics VALUES ($1, 1.5, 1, $2, 7)"));
+    parse.extend_from_slice(&2_i16.to_be_bytes());
+    parse.extend_from_slice(&20_u32.to_be_bytes());
+    parse.extend_from_slice(&17_u32.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+
+    let mut bind = cstring("bp1");
+    bind.extend_from_slice(&cstring("b1"));
+    bind.extend_from_slice(&1_i16.to_be_bytes()); // 一个 format 码作用于全部参数
+    bind.extend_from_slice(&1_i16.to_be_bytes()); // binary
+    bind.extend_from_slice(&2_i16.to_be_bytes());
+    bind.extend_from_slice(&8_i32.to_be_bytes());
+    bind.extend_from_slice(&1_i64.to_be_bytes());
+    bind.extend_from_slice(&(payload.len() as i32).to_be_bytes());
+    bind.extend_from_slice(&payload);
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 结果格式沿用文本
+    send_message(&mut client, b'B', &bind);
+    let mut execute = cstring("bp1");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'S', &[]);
+    let executed = receive_until_ready(&mut client);
+    let command = executed.iter().find(|(tag, _)| *tag == b'C').expect("CommandComplete");
+    assert_eq!(command.1, b"INSERT 0 1\0", "{executed:?}");
+
+    // 零长载荷同样是合法的二进制值，不是 NULL。
+    let mut parse = cstring("b2");
+    parse.extend_from_slice(&cstring("INSERT INTO metrics VALUES (2, 1.5, 1, $1, 7)"));
+    parse.extend_from_slice(&1_i16.to_be_bytes());
+    parse.extend_from_slice(&17_u32.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    let mut bind = cstring("bp2");
+    bind.extend_from_slice(&cstring("b2"));
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i32.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    let mut execute = cstring("bp2");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'S', &[]);
+    let inserted = receive_until_ready(&mut client);
+    assert!(inserted.iter().any(|(tag, payload)| *tag == b'C' && payload == b"INSERT 0 1\0"), "{inserted:?}");
+
+    // NULL 保持 NULL，不会退化成零长载荷。
+    send_query(&mut client, "INSERT INTO metrics VALUES (3, 1.5, 1, NULL, 7)");
+    assert_eq!(receive_until_ready(&mut client)[0].0, b'C');
+
+    // 二进制结果格式原样回读；`type_size` 仍按变长（-1）声明。
+    let mut parse = cstring("b3");
+    parse.extend_from_slice(&cstring("SELECT id, blob FROM metrics ORDER BY id"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    let mut bind = cstring("bp3");
+    bind.extend_from_slice(&cstring("b3"));
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    let mut describe = vec![b'P'];
+    describe.extend_from_slice(&cstring("bp3"));
+    send_message(&mut client, b'D', &describe);
+    let mut execute = cstring("bp3");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'S', &[]);
+    let rows = receive_until_ready(&mut client);
+    let description = rows
+        .iter()
+        .find(|(tag, _)| *tag == b'T')
+        .map(|(_, payload)| parse_row_description(payload))
+        .expect("RowDescription");
+    assert_eq!(description, vec![("id".to_string(), 20, 8, 1), ("blob".to_string(), 17, -1, 1)]);
+    let data: Vec<Vec<Option<Vec<u8>>>> =
+        rows.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(data.len(), 3);
+    assert_eq!(data[0][1], Some(payload.clone()));
+    assert_eq!(data[1][1], Some(Vec::new()));
+    assert_eq!(data[2][1], None);
+
+    // 文本结果格式用 PostgreSQL 的 `\\x` 十六进制拼写，仍是无损表示。
+    let mut bind = cstring("bp4");
+    bind.extend_from_slice(&cstring("b3"));
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    let mut execute = cstring("bp4");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'S', &[]);
+    let rows = receive_until_ready(&mut client);
+    let data: Vec<Vec<Option<Vec<u8>>>> =
+        rows.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(data[0][1], Some(b"\\x00FFFE0041C328".to_vec()));
+
+    // 文本格式的 bytea 参数是转义拼写而不是原始 octets，必须稳定拒绝。
+    let mut parse = cstring("b4");
+    parse.extend_from_slice(&cstring("INSERT INTO metrics VALUES (9, 1.5, 1, $1, 7)"));
+    parse.extend_from_slice(&1_i16.to_be_bytes());
+    parse.extend_from_slice(&17_u32.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    let mut bind = cstring("bp5");
+    bind.extend_from_slice(&cstring("b4"));
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // text
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&6_i32.to_be_bytes());
+    bind.extend_from_slice(b"\\x00FF");
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    send_message(&mut client, b'S', &[]);
+    let rejected = receive_until_ready(&mut client);
+    let error = rejected.iter().find(|(tag, _)| *tag == b'E').expect("text-format bytea must be rejected");
+    let text = String::from_utf8_lossy(&error.1).to_string();
+    assert!(text.contains("0A000"), "{text}");
+    assert!(text.contains("bytea"), "{text}");
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 窗口函数的排名列经 `Describe` 下发的是声明的 `int8`（OID 20，8 字节），
 /// 不按结果行推断，也不退化成 `text`。
 #[test]

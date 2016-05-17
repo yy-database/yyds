@@ -14,10 +14,10 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, nulled_sql_parameters, parse_session_command,
-    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlColumn,
-    SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSessionCommand,
-    SqlTransactionAction, SqlValue,
+    bind_sql_catalog, describe_plan, execute_plan, encode_hex, neutralized_sql_parameters, nulled_sql_parameters,
+    parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral,
+    SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
+    SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -1027,6 +1027,15 @@ fn prepare_portal(portal: &mut Portal, session: &mut TransactionSession, runtime
 }
 
 fn parameter_value(oid: u32, bytes: &[u8]) -> Result<SqlValue, (String, String)> {
+    // `bytea` 的文本形态是转义或十六进制拼写，不是原始 octets。网关不把这段
+    // 拼写当成文本收下，否则转义字符本身会被当作载荷写进列里。二进制格式或
+    // `CAST('<hex>' AS BYTEA)` 才是无损通道。
+    if oid == OID_BYTEA {
+        return Err((
+            "0A000".to_string(),
+            "text-format bytea parameters are not supported, send the binary format or a hexadecimal CAST".to_string(),
+        ));
+    }
     let text = std::str::from_utf8(bytes).map_err(|_| ("22021".to_string(), "parameter is not valid UTF-8".to_string()))?;
     match oid {
         0 => Ok(infer_parameter_value(text)),
@@ -1080,7 +1089,9 @@ fn binary_parameter_value(oid: u32, bytes: &[u8]) -> Result<SqlValue, (String, S
             [a, b, c, d, e, f, g, h] => Ok(SqlValue::Number(f64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h]))),
             _ => Err(width_error(8)),
         },
-        OID_TEXT | OID_VARCHAR | OID_NAME | OID_BYTEA => std::str::from_utf8(bytes)
+        // `bytea` 的二进制格式就是原始 octets，原样收下，不做任何文本解码。
+        OID_BYTEA => Ok(SqlValue::Bytes(bytes.to_vec())),
+        OID_TEXT | OID_VARCHAR | OID_NAME => std::str::from_utf8(bytes)
             .map(|text| SqlValue::String(text.to_string()))
             .map_err(|_| ("22021".to_string(), "binary parameter is not valid UTF-8".to_string())),
         _ => Err(("0A000".to_string(), format!("binary input for parameter type OID {oid} is not supported"))),
@@ -1261,8 +1272,8 @@ fn pg_binary_value(oid: u32, value: &SqlValue) -> Result<Vec<u8>, (String, Strin
         OID_FLOAT8 => Ok(float_value(value)?.to_be_bytes().to_vec()),
         OID_TEXT | OID_VARCHAR | OID_NAME => Ok(sql_value_to_pg_text(value).into_bytes()),
         OID_BYTEA => match value {
-            SqlValue::String(text) => Ok(text.as_bytes().to_vec()),
-            other => Ok(sql_value_to_pg_text(other).into_bytes()),
+            SqlValue::Bytes(bytes) => Ok(bytes.clone()),
+            other => Err(("22P02".to_string(), format!("value {other:?} is not a bytea payload"))),
         },
         _ => Err(("0A000".to_string(), format!("binary output for type OID {oid} is not supported"))),
     }
@@ -1310,6 +1321,8 @@ fn sql_value_to_pg_text(value: &SqlValue) -> String {
         SqlValue::Integer(n) => n.to_string(),
         SqlValue::Number(n) => format!("{n}"),
         SqlValue::String(s) => s.clone(),
+        // PostgreSQL 的 `bytea` 文本格式就是十六进制拼写，可以无损表达任意 octets。
+        SqlValue::Bytes(bytes) => format!("\\x{}", encode_hex(bytes)),
         SqlValue::Boolean(b) => {
             if *b {
                 "t".into()
