@@ -1080,19 +1080,17 @@ fn decode_parameter(payload: &[u8], cursor: &mut usize, code: u8, unsigned: bool
             Ok(SqlValue::Number(f64::from_le_bytes(bytes.try_into().expect("checked length"))))
         }
         MYSQL_TYPE_NULL => Ok(SqlValue::Null),
-        MYSQL_TYPE_DECIMAL
-        | MYSQL_TYPE_NEWDECIMAL
-        | MYSQL_TYPE_VAR_STRING
-        | MYSQL_TYPE_STRING
-        | MYSQL_TYPE_TINY_BLOB
-        | MYSQL_TYPE_MEDIUM_BLOB
-        | MYSQL_TYPE_LONG_BLOB
-        | MYSQL_TYPE_BLOB => {
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL | MYSQL_TYPE_VAR_STRING | MYSQL_TYPE_STRING => {
             let length = take_length_encoded(payload, cursor)?;
             let bytes = take_slice(payload, cursor, length)?;
             let text = std::str::from_utf8(bytes)
                 .map_err(|_| format!("COM_STMT_EXECUTE parameter type {code:#04X} is not valid UTF-8"))?;
             Ok(SqlValue::String(text.to_string()))
+        }
+        // BLOB 家族在二进制协议里就是原始 octets，原样收下，不做文本解码。
+        MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB | MYSQL_TYPE_BLOB => {
+            let length = take_length_encoded(payload, cursor)?;
+            Ok(SqlValue::Bytes(take_slice(payload, cursor, length)?.to_vec()))
         }
         _ => Err(format!("COM_STMT_EXECUTE parameter type {code:#04X} is not supported")),
     }
@@ -1247,6 +1245,7 @@ fn column_type(rows: &[Vec<SqlValue>], index: usize) -> u8 {
             Some(SqlValue::Number(_)) => Some(MYSQL_TYPE_DOUBLE),
             Some(SqlValue::Boolean(_)) => Some(MYSQL_TYPE_TINY),
             Some(SqlValue::String(_)) => Some(MYSQL_TYPE_VAR_STRING),
+            Some(SqlValue::Bytes(_)) => Some(MYSQL_TYPE_BLOB),
             Some(SqlValue::Null) | None => None,
         })
         .unwrap_or(MYSQL_TYPE_VAR_STRING)
@@ -1265,8 +1264,14 @@ fn encode_column_definition(name: &str, column_type: u8, nullable: bool) -> Vec<
     out.extend_from_slice(name.as_bytes());
     encode_length_encoded(&mut out, 0); // org_name
     out.push(0x0C); // fixed length
-    out.extend_from_slice(&0x000C_u16.to_le_bytes()); // charset = utf8_bin
-    let column_length: u32 = if column_type == MYSQL_TYPE_TINY { 1 } else { 255 };
+    // BLOB 列必须声明 binary 字符集（63），驱动才会把载荷当作原始 octets 而不是文本。
+    let charset: u16 = if column_type == MYSQL_TYPE_BLOB { 63 } else { 0x000C };
+    out.extend_from_slice(&charset.to_le_bytes()); // charset
+    let column_length: u32 = match column_type {
+        MYSQL_TYPE_TINY => 1,
+        MYSQL_TYPE_BLOB => 65_535,
+        _ => 255,
+    };
     out.extend_from_slice(&column_length.to_le_bytes());
     out.push(column_type);
     let flags: u16 = if !nullable { 0x0002 } else { 0 };
@@ -1292,6 +1297,11 @@ fn encode_sql_value(out: &mut Vec<u8>, value: &SqlValue) {
         SqlValue::String(s) => {
             encode_length_encoded(out, s.len() as u64);
             out.extend_from_slice(s.as_bytes());
+        }
+        // 原始 octets 按 length-encoded string 原样发出，文本与二进制行协议一致。
+        SqlValue::Bytes(bytes) => {
+            encode_length_encoded(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
         }
         SqlValue::Boolean(b) => {
             let text = if *b { "1" } else { "0" };

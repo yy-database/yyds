@@ -1248,6 +1248,176 @@ fn mysql_set_rejects_unknown_variables_with_1193_hy000() {
     server.join().unwrap();
 }
 
+/// 读出列定义里的字符集 id（MySQL `binary` 为 63）。
+fn column_charset(definition: &[u8]) -> u16 {
+    let mut cursor = 0usize;
+    // def, schema, table, org_table, name, org_name
+    for _ in 0..6 {
+        let (length, consumed) = read_lenenc(&definition[cursor..]);
+        cursor += consumed + length as usize;
+    }
+    // fixed length (1) + charset (2)
+    u16::from_le_bytes([definition[cursor + 1], definition[cursor + 2]])
+}
+
+/// 含 `bytes?` 列的 runtime：`payloads(id, blob)`，无预置行。
+fn start_server_with_payload_runtime() -> (TcpStream, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlCatalog;
+    use yyds_gateway_mysql::connection::MysqlSqlRuntime;
+    use yyds_kv::MemoryShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let source = "table payloads { @@id: i64, blob: bytes? }\n";
+    let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
+    let manifest = vos::types::IdentityManifest {
+        format_version: vos::types::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::types::TypeIdentity {
+            canonical_path: vec!["payloads".into()],
+            type_id: 1,
+            kind: vos::types::TypeContractKind::Table,
+            fields: vec![
+                vos::types::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: Some(0) },
+                vos::types::FieldIdentity { canonical_name: "blob".into(), field_id: 2, virtual_field_index: Some(1) },
+            ],
+        }],
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
+
+    let shard = MemoryShard::new();
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards).expect("executor");
+
+    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    spawn_runtime_server(runtime)
+}
+
+/// `bytes` 列在二进制协议（`COM_STMT_EXECUTE`）上原样往返 NUL、非 UTF-8 与空载荷，
+/// 结果列声明为 `BLOB` + binary 字符集 63。文本协议只能经十六进制 `CAST` 写入，
+/// 非 UTF-8 的查询文本按 `1300` 稳定拒绝。
+#[test]
+fn blob_columns_round_trip_raw_octets_and_reject_text_only_paths() {
+    let (mut client, server) = start_server_with_payload_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    // NUL、0xFF、0xFE、非 UTF-8 尾字节。
+    let payload: &[u8] = &[0x00, 0xFF, 0xFE, 0x00, 0x41, 0xC3, 0x28];
+
+    let (insert_id, columns, parameters, _, _) = prepare(&mut client, "INSERT INTO payloads (id, blob) VALUES (?, ?)");
+    assert_eq!((columns, parameters), (0, 2));
+
+    let id_one = 1_i64.to_le_bytes();
+    let blob_one = lenenc_bytes(payload);
+    let statement = execute_payload(insert_id, &[(0x08, false), (0xFC, false)], &[Some(&id_one), Some(&blob_one)], true);
+    let (_, ok) = execute(&mut client, &statement);
+    assert_eq!(ok[0], 0x00, "binary `BLOB` parameter must round trip: {ok:?}");
+    assert_eq!(read_lenenc(&ok[1..]).0, 1);
+
+    // 零长载荷必须是 0 长度，而不是被当成 NULL。
+    let id_two = 2_i64.to_le_bytes();
+    let blob_two = lenenc_bytes(b"");
+    let statement = execute_payload(insert_id, &[], &[Some(&id_two), Some(&blob_two)], false);
+    let (_, ok) = execute(&mut client, &statement);
+    assert_eq!(ok[0], 0x00, "empty `BLOB` payload must be accepted: {ok:?}");
+
+    // 文本协议无法携带任意 octets，唯一通道是十六进制 `CAST`。
+    expect_ok(&mut client, "INSERT INTO payloads (id, blob) VALUES (3, CAST('00FF' AS BLOB))");
+    // NULL 载荷由字段缺失表示。
+    expect_ok(&mut client, "INSERT INTO payloads (id, blob) VALUES (4, NULL)");
+
+    // prepared 结果列：`id` 为 `LONGLONG`，`blob` 为 `BLOB` 且字符集 63（binary）。
+    let (select_id, columns, parameters, names, types) = prepare(&mut client, "SELECT id, blob FROM payloads ORDER BY id");
+    assert_eq!((columns, parameters), (2, 0));
+    assert_eq!(names, vec!["id".to_string(), "blob".to_string()]);
+    assert_eq!(types, vec![0x08, 0xFC]);
+    // prepare 阶段已经校验过列定义，这里再确认二进制结果集的声明。
+    let statement = execute_payload(select_id, &[], &[], true);
+    let (_, count) = execute(&mut client, &statement);
+    assert_eq!(read_lenenc(&count).0, 2);
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "id");
+    assert_eq!(column_type_byte(&definition), 0x08);
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "blob");
+    assert_eq!(column_type_byte(&definition), 0xFC);
+    assert_eq!(column_charset(&definition), 63, "`BLOB` columns must declare the binary character set");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // 二进制行：header + NULL 位图 + 类型化值。两列只需 1 字节位图。
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(row[0], 0x00, "binary row header");
+    assert_eq!(row[1], 0x00, "id=1 carries no NULL columns");
+    assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 1);
+    let (blob, consumed) = read_lenenc_str(&row[10..]);
+    assert_eq!(blob, payload, "raw octets must survive the binary result row");
+    assert_eq!(10 + consumed, row.len());
+
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(row[1], 0x00);
+    assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 2);
+    assert_eq!(read_lenenc_str(&row[10..]), (&[][..], 1), "empty payload is a zero-length value");
+
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 3);
+    assert_eq!(read_lenenc_str(&row[10..]).0, &[0x00, 0xFF], "text `CAST` writes the hexadecimal payload");
+
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 4);
+    assert_eq!(row[1], 0x08, "`blob` NULL bit (column index 1 + 2) must be set in the bitmap");
+    assert_eq!(row.len(), 10, "NULL columns carry no value bytes");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // 文本协议结果：列元数据仍是 `BLOB` + charset 63，行载荷原样发出。
+    client.write_all(&encode_packet(0, &sql_payload("SELECT blob FROM payloads WHERE id = 1")).unwrap()).unwrap();
+    let (_, count) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&count).0, 1);
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "blob");
+    assert_eq!(column_type_byte(&definition), 0xFC);
+    assert_eq!(column_charset(&definition), 63);
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc_str(&row), (payload, row.len()));
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // 文本协议无法承载非 UTF-8 的查询文本，必须稳定拒绝而不是猜测重建。
+    let mut query = vec![0x03];
+    query.extend_from_slice(b"SELECT '");
+    query.push(0xFF);
+    query.extend_from_slice(b"' AS raw");
+    client.write_all(&encode_packet(0, &query).unwrap()).unwrap();
+    let (_, error) = read_packet_full(&mut client);
+    assert_eq!(error[0], 0xFF, "non-UTF-8 query text must be rejected: {error:?}");
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1300);
+
+    // 非法十六进制拼写按语法错误拒绝，不截断成部分载荷。
+    assert_eq!(
+        expect_error(&mut client, "INSERT INTO payloads (id, blob) VALUES (5, CAST('0G' AS BLOB))"),
+        (1064, "42000".into())
+    );
+
+    // 超出声明容量在 bind 期拒绝，而不是写入截断值。
+    let oversized = "00".repeat(yyds_gateway::SqlFieldType::BYTES_CAPACITY + 1);
+    let oversized_sql = format!("INSERT INTO payloads (id, blob) VALUES (5, CAST('{oversized}' AS BLOB))");
+    assert_eq!(expect_error(&mut client, &oversized_sql), (1366, "HY000".into()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 事务内语法错误或唯一约束违反会把 MySQL session 切到 failed 状态，
 /// 后续语句被拒绝。ROLLBACK 之后恢复。
 #[test]
