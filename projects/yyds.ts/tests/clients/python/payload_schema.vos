@@ -1,0 +1,1 @@
+table payloads { @@id: i64, blob: bytes? }

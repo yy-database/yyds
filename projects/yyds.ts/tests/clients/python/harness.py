@@ -193,8 +193,13 @@ def _wait_until_ready(node: YydsNode, timeout: float) -> None:
     raise NodeFailure(f"node did not accept SQL connections within {timeout:.0f}s\n{node.logs()}")
 
 
-def start_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> YydsNode:
-    """Starts one node with both SQL gateways mounted from a published catalog."""
+def start_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS, schema_path: Path = SCHEMA_PATH) -> YydsNode:
+    """Starts one node with both SQL gateways mounted from a published catalog.
+
+    `schema_path` selects the VOS catalog the node publishes. The binary payload
+    suite needs its own `payloads` table, so it passes its own schema file while
+    the regular matrix keeps `schema.vos`.
+    """
 
     reserved: set[int] = set()
     redis_port = _free_port(reserved)
@@ -223,7 +228,7 @@ def start_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> YydsNode:
                 "--catalog-path",
                 str(catalog_path),
                 "--schema-file",
-                str(SCHEMA_PATH),
+                str(schema_path),
                 "--schema-version",
                 str(SCHEMA_VERSION),
             ],

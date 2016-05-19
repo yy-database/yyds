@@ -1664,6 +1664,74 @@ pub fn is_binary_type_name(target: &str) -> bool {
     )
 }
 
+/// Rejects the `::<type>` cast operator when it names a binary type.
+///
+/// Oak's SQL surface lexes `::` but does not build a cast node, so `'…'::bytea`
+/// binds as a plain string and would be stored as UTF-8 text instead of the raw
+/// octets the client meant to send. The gateway refuses that spelling instead of
+/// accepting a lossy value. Only code positions are inspected, so `::` inside
+/// string literals, quoted identifiers and comments is left alone.
+pub fn reject_binary_cast_operator(sql: &str) -> Result<(), SqlFrontendError> {
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            quote @ (b'\'' | b'"' | b'`') => index = skip_quoted_bytes(bytes, index, quote),
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index < bytes.len() {
+                    if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b':' if bytes.get(index + 1) == Some(&b':') => {
+                let target: String = sql[index + 2..]
+                    .chars()
+                    .take_while(|character| character.is_alphanumeric() || *character == '_')
+                    .collect();
+                if is_binary_type_name(&target) {
+                    return Err(SqlFrontendError::unsupported(format!(
+                        "`::{target}` casts to a binary type are not supported, send the binary wire format or a hexadecimal `CAST(... AS {target})`"
+                    )));
+                }
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Advances past one quoted run, honouring both doubled quotes and the MySQL
+/// backslash escape inside single-quoted strings.
+fn skip_quoted_bytes(bytes: &[u8], mut index: usize, quote: u8) -> usize {
+    index += 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && quote == b'\'' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == quote {
+            if bytes.get(index + 1) == Some(&quote) {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
+}
+
 /// Decodes a binary literal spelling into raw octets.
 ///
 /// Both SQL wire dialects spell binary payloads as hexadecimal text: PostgreSQL

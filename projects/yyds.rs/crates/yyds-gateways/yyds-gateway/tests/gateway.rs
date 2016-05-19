@@ -3304,6 +3304,17 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("bad hex");
     assert!(error.message.contains("non-hexadecimal"), "{}", error.message);
 
+    // `::bytea` 在 Oak 里只有词法没有节点：网关稳定拒绝，避免把转义拼写当载荷存下。
+    let error = yyds_gateway::bind_sql_catalog("INSERT INTO payloads VALUES (4, '\\x00FF'::bytea)", &catalog, 7)
+        .expect_err("`::bytea` must be rejected");
+    assert_eq!(error.kind, SqlErrorKind::Unsupported);
+    assert!(error.message.contains("::bytea"), "{}", error.message);
+    // 字符串字面量里的 `::` 不是类型转换，照常通过。
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT '::bytea'").rows,
+        vec![vec![SqlValue::String("::bytea".into())]]
+    );
+
     // 超过声明容量（MySQL 裸 BLOB 的 65 535 octets）必须拒绝并给出诊断。
     let too_big = "00".repeat(yyds_gateway::SqlFieldType::BYTES_CAPACITY + 1);
     let bound = yyds_gateway::bind_sql_catalog(
