@@ -1658,10 +1658,7 @@ pub fn encode_hex(bytes: &[u8]) -> String {
 pub fn is_binary_type_name(target: &str) -> bool {
     let upper = target.trim().to_ascii_uppercase();
     let base = upper.split('(').next().unwrap_or(&upper);
-    matches!(
-        base,
-        "BYTEA" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "BYTES"
-    )
+    matches!(base, "BYTEA" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "BYTES")
 }
 
 /// Rejects the `::<type>` cast operator when it names a binary type.
@@ -1694,10 +1691,8 @@ pub fn reject_binary_cast_operator(sql: &str) -> Result<(), SqlFrontendError> {
                 }
             }
             b':' if bytes.get(index + 1) == Some(&b':') => {
-                let target: String = sql[index + 2..]
-                    .chars()
-                    .take_while(|character| character.is_alphanumeric() || *character == '_')
-                    .collect();
+                let target: String =
+                    sql[index + 2..].chars().take_while(|character| character.is_alphanumeric() || *character == '_').collect();
                 if is_binary_type_name(&target) {
                     return Err(SqlFrontendError::unsupported(format!(
                         "`::{target}` casts to a binary type are not supported, send the binary wire format or a hexadecimal `CAST(... AS {target})`"

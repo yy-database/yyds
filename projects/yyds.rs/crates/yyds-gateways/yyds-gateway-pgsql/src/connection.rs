@@ -14,10 +14,10 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, describe_plan, execute_plan, encode_hex, neutralized_sql_parameters, nulled_sql_parameters,
+    bind_sql_catalog, describe_plan, encode_hex, execute_plan, neutralized_sql_parameters, nulled_sql_parameters,
     parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral,
-    SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
-    SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle,
+    SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.

@@ -3310,19 +3310,13 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     assert_eq!(error.kind, SqlErrorKind::Unsupported);
     assert!(error.message.contains("::bytea"), "{}", error.message);
     // 字符串字面量里的 `::` 不是类型转换，照常通过。
-    assert_eq!(
-        run_sql(&executor, None, &catalog, "SELECT '::bytea'").rows,
-        vec![vec![SqlValue::String("::bytea".into())]]
-    );
+    assert_eq!(run_sql(&executor, None, &catalog, "SELECT '::bytea'").rows, vec![vec![SqlValue::String("::bytea".into())]]);
 
     // 超过声明容量（MySQL 裸 BLOB 的 65 535 octets）必须拒绝并给出诊断。
     let too_big = "00".repeat(yyds_gateway::SqlFieldType::BYTES_CAPACITY + 1);
-    let bound = yyds_gateway::bind_sql_catalog(
-        &format!("INSERT INTO payloads VALUES (4, CAST('{too_big}' AS BYTEA))"),
-        &catalog,
-        7,
-    )
-    .expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog(&format!("INSERT INTO payloads VALUES (4, CAST('{too_big}' AS BYTEA))"), &catalog, 7)
+            .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("capacity");
     assert_eq!(error.kind, SqlErrorKind::TypeMismatch);
     assert!(error.message.contains("exceeds the declared capacity"), "{}", error.message);
@@ -3330,8 +3324,7 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     // 文本函数没有二进制的文本形式，显式拒绝而不是退化成 NULL。
     let bound = yyds_gateway::bind_sql_catalog("SELECT LOWER(body) FROM payloads", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres)
-        .expect_err("text function on binary");
+    let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("text function on binary");
     assert_eq!(error.kind, SqlErrorKind::TypeMismatch);
 }
 

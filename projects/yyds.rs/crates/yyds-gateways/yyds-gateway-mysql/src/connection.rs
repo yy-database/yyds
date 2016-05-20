@@ -1253,6 +1253,7 @@ fn column_type(rows: &[Vec<SqlValue>], index: usize) -> u8 {
 
 /// MySQL wire protocol ColumnDefinition 编码。`NOT_NULL = 0x0002` 在列不可空时设置。
 /// TINY 列的 column_length 设置为 1，等价于 TINYINT(1)，驱动程序据此把 BOOLEAN 当成 0/1。
+/// BLOB 列声明 binary 字符集（63），驱动据此把载荷当作原始 octets 而不是文本。
 fn encode_column_definition(name: &str, column_type: u8, nullable: bool) -> Vec<u8> {
     let mut out = Vec::new();
     encode_length_encoded(&mut out, b"def".len() as u64);
@@ -1264,7 +1265,6 @@ fn encode_column_definition(name: &str, column_type: u8, nullable: bool) -> Vec<
     out.extend_from_slice(name.as_bytes());
     encode_length_encoded(&mut out, 0); // org_name
     out.push(0x0C); // fixed length
-    // BLOB 列必须声明 binary 字符集（63），驱动才会把载荷当作原始 octets 而不是文本。
     let charset: u16 = if column_type == MYSQL_TYPE_BLOB { 63 } else { 0x000C };
     out.extend_from_slice(&charset.to_le_bytes()); // charset
     let column_length: u32 = match column_type {
@@ -1352,7 +1352,6 @@ fn like_matches(pattern: &str, value: &str) -> bool {
     }
     walk(pattern.to_ascii_lowercase().as_bytes(), value.to_ascii_lowercase().as_bytes())
 }
-
 
 fn packet_error(error: PacketError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("invalid MySQL packet: {error:?}"))
