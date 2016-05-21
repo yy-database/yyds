@@ -267,9 +267,7 @@ fn resolve_set_operation_order_by(
             SqlBoundExpression::Identifier(name) => columns
                 .iter()
                 .position(|column| column.name.eq_ignore_ascii_case(name))
-                .ok_or_else(|| {
-                    planner_error(&format!("ORDER BY `{name}` is not a column of the set operation result"))
-                })?,
+                .ok_or_else(|| planner_error(&format!("ORDER BY `{name}` is not a column of the set operation result")))?,
             SqlBoundExpression::Literal(SqlBoundLiteral::Integer(position)) => {
                 let position = usize::try_from(*position).ok().filter(|value| *value >= 1 && *value <= columns.len());
                 let Some(position) = position
@@ -279,9 +277,7 @@ fn resolve_set_operation_order_by(
                 position - 1
             }
             _ => {
-                return Err(planner_error(
-                    "set operation ORDER BY accepts result column names and ordinal positions only",
-                ));
+                return Err(planner_error("set operation ORDER BY accepts result column names and ordinal positions only"));
             }
         };
         resolved.push(SqlSetOrderByItem { column, direction: item.direction, nulls: item.nulls });
@@ -413,13 +409,7 @@ fn join_source_plan(
             row_ids.push(row_id);
         }
     }
-    Ok(JoinSourcePlan {
-        namespace: format!("table:{}", catalog_table.type_id),
-        needed_field_ids,
-        row_ids,
-        on,
-        kind,
-    })
+    Ok(JoinSourcePlan { namespace: format!("table:{}", catalog_table.type_id), needed_field_ids, row_ids, on, kind })
 }
 
 /// 计划一个没有 FROM 的 SELECT：只允许常量与内建函数，不访问任何 namespace。
@@ -474,16 +464,7 @@ pub fn plan_insert(
     let conflict = plan_on_conflict(conflict, table, dialect)?;
     let returning = plan_returning(returning, table, dialect)?;
     if let Some(select) = select {
-        return plan_insert_select(
-            *select,
-            target_fields,
-            namespace,
-            field_types,
-            catalog,
-            dialect,
-            conflict,
-            returning,
-        );
+        return plan_insert_select(*select, target_fields, namespace, field_types, catalog, dialect, conflict, returning);
     }
 
     let mut plans = Vec::with_capacity(rows.len());
@@ -552,9 +533,7 @@ fn plan_on_conflict(
             for (column, expression) in assignments {
                 // 行以主键为 KV key，改写主键等于「删除 + 插入」，网关显式拒绝而不是近似执行。
                 if column.field_id == pk.field_id {
-                    return Err(SqlFrontendError::unsupported(
-                        "ON CONFLICT DO UPDATE cannot reassign the table primary key",
-                    ));
+                    return Err(SqlFrontendError::unsupported("ON CONFLICT DO UPDATE cannot reassign the table primary key"));
                 }
                 let field_type = table
                     .fields
@@ -724,8 +703,7 @@ fn write_types_compatible(target: &crate::catalog_bind::SqlFieldType, source: &c
         || target == source
         || matches!(
             (&target, &source),
-            (SqlFieldType::Int64, SqlFieldType::Int32)
-                | (SqlFieldType::Float64, SqlFieldType::Int32 | SqlFieldType::Int64)
+            (SqlFieldType::Int64, SqlFieldType::Int32) | (SqlFieldType::Float64, SqlFieldType::Int32 | SqlFieldType::Int64)
         )
 }
 
@@ -890,9 +868,7 @@ fn literal_from_expression(expr: &SqlCatalogBoundExpression) -> Result<SqlBoundL
         SqlCatalogBoundExpression::Wildcard => {
             Err(planner_error("SQL gateway write values must be literals; `*` is not a value"))
         }
-        SqlCatalogBoundExpression::OuterColumn(_) => {
-            Err(planner_error("SQL gateway write values must be simple literals"))
-        }
+        SqlCatalogBoundExpression::OuterColumn(_) => Err(planner_error("SQL gateway write values must be simple literals")),
         // 二进制写入值只能来自 wire 层渲染的 `CAST('<hex>' AS BYTEA|BLOB)`：
         // SQL 文本字面量无法承载非 UTF-8 octets，因此这是唯一的二进制入参通道。
         SqlCatalogBoundExpression::Cast { expr, target } if crate::sql::is_binary_type_name(target) => match expr.as_ref() {
@@ -1510,12 +1486,8 @@ fn is_window_call(expr: &SqlCatalogBoundExpression) -> bool {
 /// 表达式里是否出现窗口函数调用（含嵌套在运算或实参里的情况）。
 fn expression_has_window(expr: &SqlCatalogBoundExpression) -> bool {
     match expr {
-        SqlCatalogBoundExpression::Function { args, window, .. } => {
-            window.is_some() || args.iter().any(expression_has_window)
-        }
-        SqlCatalogBoundExpression::Binary { left, right, .. } => {
-            expression_has_window(left) || expression_has_window(right)
-        }
+        SqlCatalogBoundExpression::Function { args, window, .. } => window.is_some() || args.iter().any(expression_has_window),
+        SqlCatalogBoundExpression::Binary { left, right, .. } => expression_has_window(left) || expression_has_window(right),
         SqlCatalogBoundExpression::Unary { expression, .. } => expression_has_window(expression),
         SqlCatalogBoundExpression::InSubquery { expression, .. } | SqlCatalogBoundExpression::InValues { expression, .. } => {
             expression_has_window(expression)
@@ -1693,22 +1665,17 @@ fn validate_correlated_placement(
     };
     if has_aggregate || select.group_by.is_some() {
         if projection_expressions().any(expression_reads_outer) {
-            return Err(planner_error(
-                "SQL correlated subquery cannot be projected once the enclosing rows are grouped",
-            ));
+            return Err(planner_error("SQL correlated subquery cannot be projected once the enclosing rows are grouped"));
         }
         if select.having.as_ref().is_some_and(expression_reads_outer) {
             return Err(planner_error("SQL correlated subquery cannot appear in HAVING"));
         }
-        if select
-            .order_by
-            .as_ref()
-            .is_some_and(|items| items.iter().any(|item| expression_reads_outer(&item.expression)))
-        {
+        if select.order_by.as_ref().is_some_and(|items| items.iter().any(|item| expression_reads_outer(&item.expression))) {
             return Err(planner_error("SQL correlated subquery cannot appear in the ORDER BY of a grouped query"));
         }
     }
-    if has_window && projection_expressions().any(|expression| expression_has_window(expression) && expression_reads_outer(expression))
+    if has_window
+        && projection_expressions().any(|expression| expression_has_window(expression) && expression_reads_outer(expression))
     {
         return Err(planner_error("SQL correlated subquery cannot be evaluated inside a window function"));
     }
@@ -1828,9 +1795,8 @@ fn grouped_expression_allowed(
                 grouped_expression_allowed(w, group_expressions, group_columns)
                     && grouped_expression_allowed(t, group_expressions, group_columns)
             });
-            let else_ok = else_branch.as_ref().map_or(true, |e| {
-                grouped_expression_allowed(e, group_expressions, group_columns)
-            });
+            let else_ok =
+                else_branch.as_ref().map_or(true, |e| grouped_expression_allowed(e, group_expressions, group_columns));
             branches_ok && else_ok
         }
         SqlCatalogBoundExpression::Cast { expr, .. } => grouped_expression_allowed(expr, group_expressions, group_columns),
@@ -1866,9 +1832,7 @@ fn validate_distinct_order_by(
     };
     for item in items {
         let projected = match &item.expression {
-            SqlCatalogBoundExpression::Column(column) => {
-                projection_fields.iter().any(|(row_id, _)| *row_id == column.row_id)
-            }
+            SqlCatalogBoundExpression::Column(column) => projection_fields.iter().any(|(row_id, _)| *row_id == column.row_id),
             other => projection_expressions.iter().any(|(candidate, _)| candidate == other),
         };
         if !projected {

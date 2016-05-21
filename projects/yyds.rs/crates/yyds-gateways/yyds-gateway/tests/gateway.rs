@@ -1,7 +1,6 @@
 use yyds_gateway::{
     bind_sql, GatewayConfig, GatewayKind, SqlBoundExpression, SqlBoundLiteral, SqlBoundProjection, SqlBoundStatement,
-    SqlDialect,
-    ALL_GATEWAY_KINDS, FORBIDDEN_LEGACY_SURFACES,
+    SqlDialect, ALL_GATEWAY_KINDS, FORBIDDEN_LEGACY_SURFACES,
 };
 
 /// 提取数值列的 `f64` 视图。整数列现在是精确的 `Integer`，浮点结果仍是 `Number`。
@@ -539,7 +538,8 @@ fn sql_count_distinct_deduplicates_non_null_values() {
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(2)]);
 
     // COUNT(DISTINCT age) — unique non-NULL ages = 2 distinct values (0 and 10)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7).expect("bind COUNT DISTINCT");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7).expect("bind COUNT DISTINCT");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(2)], "COUNT(DISTINCT age) on default fixture");
@@ -559,22 +559,30 @@ fn sql_count_distinct_deduplicates_non_null_values() {
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(6)]);
 
     // COUNT(age) = 5 (original 2 non-NULL + 3 inserted)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7).expect("bind COUNT col after insert");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7).expect("bind COUNT col after insert");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT col");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT col after insert");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(5)]);
 
     // COUNT(DISTINCT age) = 3 (unique non-NULL: 0, 10, 5)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7).expect("bind COUNT DISTINCT after insert");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7)
+        .expect("bind COUNT DISTINCT after insert");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT");
-    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT after insert");
+    let result =
+        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT after insert");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(3)], "COUNT(DISTINCT age) must dedup 10s and ignore NULL");
 
     // COUNT(DISTINCT *) is not semantically different from COUNT(*) — still 6 rows
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT *) FROM users", &catalog, 7).expect("bind COUNT DISTINCT star");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT *) FROM users", &catalog, 7).expect("bind COUNT DISTINCT star");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT star");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT star");
-    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(6)], "COUNT(DISTINCT *) should behave as COUNT(*) for row count");
+    assert_eq!(
+        result.rows[0],
+        vec![yyds_gateway::SqlValue::Integer(6)],
+        "COUNT(DISTINCT *) should behave as COUNT(*) for row count"
+    );
 }
 
 #[test]
@@ -589,7 +597,8 @@ fn sql_aggregate_rejects_wildcard_for_non_count_functions() {
     {
         let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-        let err = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("`*` is only valid for COUNT");
+        let err =
+            yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("`*` is only valid for COUNT");
         assert!(format!("{err:?}").contains("does not accept `*`"), "{sql} error: {err:?}");
     }
 }
@@ -891,10 +900,7 @@ fn sql_insert_select_from_constants_writes_rows() {
     assert!(inserted.rows.is_empty());
 
     let selected = run_sql(&executor, None, &catalog, "SELECT id, name FROM users WHERE id = 7");
-    assert_eq!(
-        selected.rows,
-        vec![vec![yyds_gateway::SqlValue::Integer(7), yyds_gateway::SqlValue::String("alice".into())]]
-    );
+    assert_eq!(selected.rows, vec![vec![yyds_gateway::SqlValue::Integer(7), yyds_gateway::SqlValue::String("alice".into())]]);
 }
 
 #[test]
@@ -922,8 +928,7 @@ fn sql_insert_select_copies_filtered_rows_from_a_table() {
 #[test]
 fn sql_insert_select_requires_matching_column_counts() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let bound =
-        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT id FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT id FROM users", &catalog, 7).expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("column count mismatch");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
     assert!(error.message.contains("column count mismatch"), "{}", error.message);
@@ -932,8 +937,8 @@ fn sql_insert_select_requires_matching_column_counts() {
 #[test]
 fn sql_insert_select_rejects_incompatible_column_types() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT name, name FROM users", &catalog, 7)
-        .expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT name, name FROM users", &catalog, 7).expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("type mismatch");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::TypeMismatch);
 }
@@ -946,11 +951,10 @@ fn sql_insert_select_unique_conflict_publishes_nothing() {
     run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
     run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (2, 'bob')");
 
-    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO admins (id, name) SELECT id, name FROM users", &catalog, 7)
-        .expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("INSERT INTO admins (id, name) SELECT id, name FROM users", &catalog, 7).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
-    let error =
-        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("duplicate primary key");
+    let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("duplicate primary key");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
 
     // 第一条冲突时整条语句不发布，id=2 不能落到目标表。
@@ -968,20 +972,13 @@ fn sql_insert_select_inside_transaction_rolls_back() {
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
 
     run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (1, 'alice')");
-    let inserted = run_sql(
-        executor.as_ref(),
-        Some(handle.as_ref()),
-        &catalog,
-        "INSERT INTO admins (id, name) SELECT id, name FROM users",
-    );
+    let inserted =
+        run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO admins (id, name) SELECT id, name FROM users");
     assert_eq!(inserted.affected_rows, 1);
 
     // 源查询读到本事务未提交的行，写入也留在事务缓冲里。
     let inside = run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "SELECT id, name FROM admins");
-    assert_eq!(
-        inside.rows,
-        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())]]
-    );
+    assert_eq!(inside.rows, vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())]]);
     let outside = run_sql(executor.as_ref(), None, &catalog, "SELECT id FROM admins");
     assert!(outside.rows.is_empty());
 
@@ -1023,8 +1020,12 @@ fn sql_on_conflict_do_nothing_skips_conflicting_insert_select_rows() {
     run_sql(&executor, None, &catalog, "INSERT INTO admins VALUES (2, 'stale')");
 
     // 只有 id=1 与 id=3 落库，已存在的 id=2 保持原值。
-    let inserted =
-        run_sql(&executor, None, &catalog, "INSERT INTO admins (id, name) SELECT id, name FROM users ON CONFLICT (id) DO NOTHING");
+    let inserted = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO admins (id, name) SELECT id, name FROM users ON CONFLICT (id) DO NOTHING",
+    );
     assert_eq!(inserted.affected_rows, 2);
 
     let copied = run_sql(&executor, None, &catalog, "SELECT id, name FROM admins ORDER BY id");
@@ -1057,8 +1058,8 @@ fn sql_on_conflict_rejects_non_unique_targets_and_mysql() {
     let bound =
         yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT DO NOTHING", &catalog, 7)
             .expect("bind");
-    let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
-        .expect_err("MySQL has no ON CONFLICT");
+    let error =
+        yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql).expect_err("MySQL has no ON CONFLICT");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
 }
 
@@ -1069,13 +1070,21 @@ fn sql_on_conflict_do_update_rewrites_existing_rows() {
     run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
 
     // 命中既有行：改写而不是新增。
-    let updated =
-        run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob'");
+    let updated = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob'",
+    );
     assert_eq!(updated.affected_rows, 1);
 
     // 未命中：按普通插入落库。
-    let inserted =
-        run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (2, 'carol') ON CONFLICT (id) DO UPDATE SET name = 'x'");
+    let inserted = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (2, 'carol') ON CONFLICT (id) DO UPDATE SET name = 'x'",
+    );
     assert_eq!(inserted.affected_rows, 1);
 
     let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM users ORDER BY id");
@@ -1143,10 +1152,8 @@ fn sql_on_conflict_do_update_applies_to_every_values_row() {
 #[test]
 fn sql_on_conflict_do_update_applies_to_insert_select_rows() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
-    let executor = make_executor_with_rows(
-        "table:1",
-        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")])],
-    );
+    let executor =
+        make_executor_with_rows("table:1", &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")])]);
     run_sql(&executor, None, &catalog, "INSERT INTO admins VALUES (2, 'stale')");
 
     let upserted = run_sql(
@@ -1205,8 +1212,8 @@ fn sql_on_conflict_do_update_rejects_invalid_shapes() {
         7,
     )
     .expect("bind");
-    let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
-        .expect_err("MySQL has no ON CONFLICT");
+    let error =
+        yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql).expect_err("MySQL has no ON CONFLICT");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
 }
 
@@ -1383,8 +1390,8 @@ fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
         7,
     )
     .expect("bind");
-    let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
-        .expect_err("MySQL has no ON CONFLICT");
+    let error =
+        yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql).expect_err("MySQL has no ON CONFLICT");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
 }
 
@@ -1397,19 +1404,13 @@ fn sql_insert_returning_reports_the_written_row() {
 
     let inserted = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING id, name");
     assert_eq!(inserted.columns, vec!["id".to_string(), "name".to_string()]);
-    assert_eq!(
-        inserted.rows,
-        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())]]
-    );
+    assert_eq!(inserted.rows, vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())]]);
     assert_eq!(inserted.affected_rows, 1);
 
     // `RETURNING *` 按 catalog 字段顺序展开。
     let star = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (2, 'bob') RETURNING *");
     assert_eq!(star.columns, vec!["id".to_string(), "name".to_string()]);
-    assert_eq!(
-        star.rows,
-        vec![vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("bob".into())]]
-    );
+    assert_eq!(star.rows, vec![vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("bob".into())]]);
 
     // 别名覆盖默认列名。
     let aliased = run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (3, 'carol') RETURNING name AS who");
@@ -1453,10 +1454,7 @@ fn sql_insert_returning_reports_the_skipped_and_updated_rows() {
         &catalog,
         "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob' RETURNING id, name",
     );
-    assert_eq!(
-        updated.rows,
-        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("bob".into())]]
-    );
+    assert_eq!(updated.rows, vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("bob".into())]]);
     assert_eq!(updated.affected_rows, 1);
 }
 
@@ -1466,23 +1464,16 @@ fn sql_insert_returning_rejects_unknown_columns_and_mysql() {
     let executor = empty_executor();
 
     // 未知列在 catalog 绑定层拒绝，语句不执行。
-    let bound = yyds_gateway::bind_sql_catalog(
-        "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING missing",
-        &catalog,
-        7,
-    )
-    .expect_err("unknown RETURNING column");
+    let bound =
+        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING missing", &catalog, 7)
+            .expect_err("unknown RETURNING column");
     assert_eq!(bound.kind, yyds_gateway::SqlErrorKind::UnknownColumn);
     let rows = run_sql(&executor, None, &catalog, "SELECT id FROM users");
     assert!(rows.rows.is_empty(), "the rejected statement must not write");
 
     // MySQL 的 INSERT 没有 RETURNING。
-    let bound = yyds_gateway::bind_sql_catalog(
-        "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING id",
-        &catalog,
-        7,
-    )
-    .expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING id", &catalog, 7)
+        .expect("bind");
     let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
         .expect_err("MySQL has no INSERT ... RETURNING");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
@@ -2140,7 +2131,8 @@ fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
     // 扫描路径：NULL > 5 求值为 NULL，不进入结果，也不报错。
     let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE age > 5", &catalog, 7).expect("scan bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("scan plan");
-    let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("null predicate should not error");
+    let result =
+        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("null predicate should not error");
     assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::Integer(3)]]);
 
     // 主键 Read 路径的剩余谓词同样按三值逻辑处理：NULL 条件为假，影响 0 行。
@@ -2160,7 +2152,12 @@ fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
     let ids = |sql: &str| -> Vec<yyds_gateway::SqlValue> {
         let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("order bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("order plan");
-        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("order exec").rows.into_iter().map(|r| r[0].clone()).collect()
+        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres)
+            .expect("order exec")
+            .rows
+            .into_iter()
+            .map(|r| r[0].clone())
+            .collect()
     };
     assert_eq!(
         ids("SELECT id FROM users ORDER BY age ASC"),
@@ -2579,15 +2576,10 @@ fn sql_outer_join_keeps_present_side_when_other_table_is_empty() {
     // 左表为空：RIGHT / FULL JOIN 仍返回全部右行，左字段 NULL；INNER JOIN 为空。
     let orders_only = make_executor_with_tables(&[("table:2", &[(b"10", &[(3, b"10"), (4, b"1"), (5, b"100")])])]);
     let expected = vec![vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(100)]];
-    let right = query(
-        &orders_only,
-        "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON users.id = orders.user_id",
-    );
+    let right =
+        query(&orders_only, "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON users.id = orders.user_id");
     assert_eq!(right.rows, expected);
-    let full = query(
-        &orders_only,
-        "SELECT users.name, orders.total FROM users FULL JOIN orders ON users.id = orders.user_id",
-    );
+    let full = query(&orders_only, "SELECT users.name, orders.total FROM users FULL JOIN orders ON users.id = orders.user_id");
     assert_eq!(full.rows, expected);
     let inner = query(&orders_only, "SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id");
     assert!(inner.rows.is_empty(), "inner join with an empty left table must be empty");
@@ -2721,16 +2713,15 @@ fn sql_table_alias_replaces_the_table_qualifier() {
     let (catalog, executor) = join_fixture();
 
     // 别名接管限定名：`u.id` 可用，主键等值仍然下推成单点读。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT u.name FROM users u WHERE u.id = 2", &catalog, 7)
-        .expect("aliased bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT u.name FROM users u WHERE u.id = 2", &catalog, 7).expect("aliased bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Read(_)), "got {plan:?}");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::String("bob".into())]]);
 
     // `AS` 拼写等价。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT u.id FROM users AS u ORDER BY u.id", &catalog, 7)
-        .expect("AS alias bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT u.id FROM users AS u ORDER BY u.id", &catalog, 7).expect("AS alias bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(result.rows.len(), 2);
@@ -2870,20 +2861,14 @@ fn sql_common_table_expression_flattens_onto_its_base_table() {
 
     // 同一条 CTE 被引用两次就像自连接，两次出现各有自己的行槽。
     let twice = run("WITH u AS (SELECT * FROM users) SELECT a.id, b.name FROM u a JOIN u b ON a.id = b.id + 1");
-    assert_eq!(
-        twice.rows,
-        vec![vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("alice".into())]]
-    );
+    assert_eq!(twice.rows, vec![vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("alice".into())]]);
 
     // 带过滤的 CTE 与同一张表的另一次出现共存时，过滤落在 CTE 自己的行槽上。
-    let shared = run(
-        "WITH u AS (SELECT * FROM users WHERE id = 2) SELECT a.name, u.name FROM users a JOIN u ON a.id = u.id - 1",
-    );
+    let shared =
+        run("WITH u AS (SELECT * FROM users WHERE id = 2) SELECT a.name, u.name FROM users a JOIN u ON a.id = u.id - 1");
     assert_eq!(
         shared.rows,
-        vec![
-            vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::String("bob".into())]
-        ]
+        vec![vec![yyds_gateway::SqlValue::String("alice".into()), yyds_gateway::SqlValue::String("bob".into())]]
     );
 
     // CTE 可以引用更早定义的 CTE。
@@ -2918,13 +2903,11 @@ fn sql_subqueries_inherit_the_enclosing_cte_scope() {
     assert_eq!(existence.rows, vec![vec![SqlValue::Integer(1)], vec![SqlValue::Integer(2)]]);
 
     // 子查询在投影位置引用 CTE 也一样，CTE 名在子查询里被真实展开。
-    let projected = run("WITH u AS (SELECT * FROM users) SELECT id, EXISTS (SELECT 1 FROM u WHERE u.id = 9) AS any FROM users ORDER BY id");
+    let projected =
+        run("WITH u AS (SELECT * FROM users) SELECT id, EXISTS (SELECT 1 FROM u WHERE u.id = 9) AS any FROM users ORDER BY id");
     assert_eq!(
         projected.rows,
-        vec![
-            vec![SqlValue::Integer(1), SqlValue::Boolean(false)],
-            vec![SqlValue::Integer(2), SqlValue::Boolean(false)],
-        ]
+        vec![vec![SqlValue::Integer(1), SqlValue::Boolean(false)], vec![SqlValue::Integer(2), SqlValue::Boolean(false)],]
     );
 
     // 作用域只放宽 CTE 名，未知名字仍然按 `UnknownTable` 拒绝。
@@ -2960,8 +2943,7 @@ fn sql_scalar_subquery_yields_one_value_and_pins_its_cardinality() {
     assert_eq!(aggregate.rows, vec![vec![SqlValue::Integer(3)]]);
 
     // 比较右值复用同一物化路径。
-    let predicate =
-        run_sql(&executor, None, &catalog, "SELECT id FROM users WHERE age = (SELECT age FROM users WHERE id = 3)");
+    let predicate = run_sql(&executor, None, &catalog, "SELECT id FROM users WHERE age = (SELECT age FROM users WHERE id = 3)");
     assert_eq!(predicate.rows, vec![vec![SqlValue::Integer(3)]]);
 
     // 多行 → 基数违规，按执行错误上报（不是语法错误）。
@@ -2983,8 +2965,7 @@ fn sql_scalar_subquery_yields_one_value_and_pins_its_cardinality() {
 fn sql_common_table_expression_reports_unflattenable_shapes() {
     let (catalog, _executor) = join_fixture();
     let reject = |sql: &str| {
-        yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
-            .expect_err(&format!("`{sql}` must stay outside the gateway subset"))
+        yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect_err(&format!("`{sql}` must stay outside the gateway subset"))
     };
 
     for (label, sql, reason) in [
@@ -2996,11 +2977,7 @@ fn sql_common_table_expression_reports_unflattenable_shapes() {
             "WITH u AS (SELECT * FROM users JOIN orders ON users.id = orders.user_id) SELECT * FROM u",
             "joins more than one table",
         ),
-        (
-            "nested WITH",
-            "WITH u AS (WITH v AS (SELECT * FROM users) SELECT * FROM v) SELECT * FROM u",
-            "its own WITH clause",
-        ),
+        ("nested WITH", "WITH u AS (WITH v AS (SELECT * FROM users) SELECT * FROM v) SELECT * FROM u", "its own WITH clause"),
     ] {
         let error = reject(sql);
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{label}: {}", error.message);
@@ -3286,11 +3263,7 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     // NUL、非 ASCII 字节与零长 octets 都必须原样回读，NULL 保持 NULL。
     assert_eq!(
         run_sql(&executor, None, &catalog, "SELECT body FROM payloads ORDER BY id").rows,
-        vec![
-            vec![SqlValue::Bytes(vec![0x00, 0xFF, 0x41])],
-            vec![SqlValue::Bytes(Vec::new())],
-            vec![SqlValue::Null],
-        ]
+        vec![vec![SqlValue::Bytes(vec![0x00, 0xFF, 0x41])], vec![SqlValue::Bytes(Vec::new())], vec![SqlValue::Null],]
     );
     // `LENGTH` 对二进制按 octets 计数，两种方言一致。
     assert_eq!(
@@ -3299,8 +3272,8 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     );
 
     // 非法十六进制拼写必须显式拒绝，不能截断或悄悄写成 NULL。
-    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO payloads VALUES (4, CAST('0G' AS BYTEA))", &catalog, 7)
-        .expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("INSERT INTO payloads VALUES (4, CAST('0G' AS BYTEA))", &catalog, 7).expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("bad hex");
     assert!(error.message.contains("non-hexadecimal"), "{}", error.message);
 

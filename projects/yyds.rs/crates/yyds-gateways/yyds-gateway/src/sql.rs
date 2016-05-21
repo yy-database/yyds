@@ -210,7 +210,9 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
             oak_sql::ast::TransactionAction::Commit => SqlTransactionAction::Commit,
             oak_sql::ast::TransactionAction::Rollback => SqlTransactionAction::Rollback,
             oak_sql::ast::TransactionAction::Savepoint(name) => SqlTransactionAction::Savepoint(name.to_string()),
-            oak_sql::ast::TransactionAction::RollbackToSavepoint(name) => SqlTransactionAction::RollbackToSavepoint(name.to_string()),
+            oak_sql::ast::TransactionAction::RollbackToSavepoint(name) => {
+                SqlTransactionAction::RollbackToSavepoint(name.to_string())
+            }
             oak_sql::ast::TransactionAction::ReleaseSavepoint(name) => SqlTransactionAction::ReleaseSavepoint(name.to_string()),
         })),
         SqlStatement::SetVariable(statement) => Some(SqlSessionCommand::SetVariable {
@@ -1171,11 +1173,9 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
                 // binders keep treating it as a predicate. The executor ignores
                 // the condition for the Cartesian product.
                 SqlBoundExpression::Literal(SqlBoundLiteral::Boolean(true))
-            } else {
-                join.on
-                    .as_ref()
-                    .ok_or_else(|| bind_error("SQL JOIN requires an ON condition"))
-                    .and_then(bind_expression)?
+            }
+            else {
+                join.on.as_ref().ok_or_else(|| bind_error("SQL JOIN requires an ON condition")).and_then(bind_expression)?
             };
             Ok(SqlBoundJoin { kind, source: bind_table_source(&join.table)?, on })
         })
@@ -1226,7 +1226,8 @@ fn bind_set_operation(set: &oak_sql::ast::SetOperationStatement) -> Result<SqlBo
 fn bind_limit_clause(clause: Option<&oak_sql::ast::LimitClause>) -> Result<(Option<usize>, Option<usize>), SqlFrontendError> {
     Ok(match clause {
         Some(clause) => {
-            let count = extract_u64(&clause.limit).ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))?
+            let count = extract_u64(&clause.limit)
+                .ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))?
                 as usize;
             let offset = clause.offset.as_ref().and_then(extract_u64).map(|value| value as usize);
             (Some(count), offset)
@@ -1308,13 +1309,8 @@ fn bind_window_frame(frame: &oak_sql::ast::WindowFrame) -> Result<SqlBoundWindow
         // 单 bound 的 `ROWS <start>` 就是 `BETWEEN <start> AND CURRENT ROW`。起点在
         // 当前行之后时该区间恒为空，标准 SQL 要求显式写出 end。
         None => {
-            if matches!(
-                start,
-                SqlBoundWindowFrameBound::Following(_) | SqlBoundWindowFrameBound::UnboundedFollowing
-            ) {
-                return Err(bind_error(
-                    "SQL window frame starting at a following row requires `BETWEEN ... AND ...`",
-                ));
+            if matches!(start, SqlBoundWindowFrameBound::Following(_) | SqlBoundWindowFrameBound::UnboundedFollowing) {
+                return Err(bind_error("SQL window frame starting at a following row requires `BETWEEN ... AND ...`"));
             }
             Some(SqlBoundWindowFrameBound::CurrentRow)
         }
@@ -1342,8 +1338,7 @@ fn bind_table_source(source: &oak_sql::ast::TableSource) -> Result<SqlBoundSourc
             alias: table.alias.as_ref().map(|alias| normalize_identifier(alias.name.as_ref())),
         }),
         oak_sql::ast::TableSource::Derived { query, alias, .. } => {
-            let alias =
-                alias.as_ref().ok_or_else(|| bind_error("SQL derived table requires an alias"))?;
+            let alias = alias.as_ref().ok_or_else(|| bind_error("SQL derived table requires an alias"))?;
             Ok(SqlBoundSource::Derived {
                 query: Box::new(bind_select_statement(query)?),
                 alias: normalize_identifier(alias.name.as_ref()),
@@ -1479,9 +1474,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                     return Err(SqlFrontendError::unsupported(format!("{display}() takes no arguments")));
                 }
                 if *distinct {
-                    return Err(SqlFrontendError::unsupported(format!(
-                        "{display}() does not accept the DISTINCT quantifier"
-                    )));
+                    return Err(SqlFrontendError::unsupported(format!("{display}() does not accept the DISTINCT quantifier")));
                 }
                 return Ok(SqlBoundExpression::Function {
                     name: fname,
@@ -1494,9 +1487,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
             if SqlAggregateFunction::from_name(&fname).is_some() {
                 if bound_args.is_empty() {
-                    return Err(SqlFrontendError::unsupported(
-                        "aggregate functions require an argument",
-                    ));
+                    return Err(SqlFrontendError::unsupported("aggregate functions require an argument"));
                 }
                 if let Some(nested) = bound_args.iter().find_map(find_aggregate_call) {
                     return Err(SqlFrontendError::unsupported(format!(
@@ -1504,14 +1495,10 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                     )));
                 }
                 if *distinct && fname != "count" {
-                    return Err(SqlFrontendError::unsupported(
-                        "only COUNT supports the DISTINCT quantifier",
-                    ));
+                    return Err(SqlFrontendError::unsupported("only COUNT supports the DISTINCT quantifier"));
                 }
                 if *distinct && bound_window.is_some() {
-                    return Err(SqlFrontendError::unsupported(
-                        "DISTINCT is not supported in window aggregates",
-                    ));
+                    return Err(SqlFrontendError::unsupported("DISTINCT is not supported in window aggregates"));
                 }
                 return Ok(SqlBoundExpression::Function {
                     name: fname,
@@ -1525,9 +1512,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 // `OVER (...)` 只挂在已知的窗口/聚合函数上；其余名字既不是标量函数
                 // 也没有窗口语义（`NTILE` / `LAG` / `LEAD` / `FIRST_VALUE` / ...）。
                 return Err(if bound_window.is_some() {
-                    SqlFrontendError::unsupported(format!(
-                        "SQL window function is not supported by the gateway: {display}"
-                    ))
+                    SqlFrontendError::unsupported(format!("SQL window function is not supported by the gateway: {display}"))
                 }
                 else {
                     SqlFrontendError::new(
@@ -1582,19 +1567,15 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             Ok(SqlBoundExpression::Case { branches: bound_branches, else_branch: bound_else })
         }
         Expression::Cast { expr, target, .. } => {
-            Ok(SqlBoundExpression::Cast {
-                expr: Box::new(bind_expression(expr)?),
-                target: target.to_string(),
-            })
+            Ok(SqlBoundExpression::Cast { expr: Box::new(bind_expression(expr)?), target: target.to_string() })
         }
         // 单独出现的 `(SELECT ...)` 是标量子查询：值语义由 planner 与执行层固定。
         Expression::Subquery { query, .. } => {
             Ok(SqlBoundExpression::ScalarSubquery { select: Box::new(bind_select_statement(query)?) })
         }
-        Expression::Exists { query, negated, .. } => Ok(SqlBoundExpression::Exists {
-            select: Box::new(bind_select_statement(query)?),
-            negated: *negated,
-        }),
+        Expression::Exists { query, negated, .. } => {
+            Ok(SqlBoundExpression::Exists { select: Box::new(bind_select_statement(query)?), negated: *negated })
+        }
         Expression::Vector { .. } => {
             Err(SqlFrontendError::unsupported("SQL vector literals are outside the gateway binding subset"))
         }

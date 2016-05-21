@@ -329,7 +329,9 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                     statements.entries.remove(&id);
                 }
             }
-            COM_STMT_RESET => handle_reset(&mut stream, sequence.wrapping_add(1), &payload, &statements, session.status_flags())?,
+            COM_STMT_RESET => {
+                handle_reset(&mut stream, sequence.wrapping_add(1), &payload, &statements, session.status_flags())?
+            }
             COM_QUERY => {
                 let sql = match std::str::from_utf8(&payload[1..]) {
                     Ok(sql) => sql,
@@ -464,7 +466,13 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             }
                             Err(err) => {
                                 session.fail();
-                                write_error(&mut stream, sequence.wrapping_add(1), 1105, "HY000", &format!("savepoint failed: {err}"))?;
+                                write_error(
+                                    &mut stream,
+                                    sequence.wrapping_add(1),
+                                    1105,
+                                    "HY000",
+                                    &format!("savepoint failed: {err}"),
+                                )?;
                             }
                         }
                     }
@@ -472,8 +480,17 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         let mut rows = Vec::new();
                         for (name, value) in MYSQL_VARIABLES {
                             if pattern.as_deref().is_none_or(|pattern| like_matches(pattern, name)) {
-                                let effective_value =
-                                    if *name == "autocommit" { if session.autocommit { "ON" } else { "OFF" } } else { value };
+                                let effective_value = if *name == "autocommit" {
+                                    if session.autocommit {
+                                        "ON"
+                                    }
+                                    else {
+                                        "OFF"
+                                    }
+                                }
+                                else {
+                                    value
+                                };
                                 rows.push(vec![
                                     SqlValue::String((*name).to_string()),
                                     SqlValue::String(effective_value.to_string()),
@@ -482,7 +499,15 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         }
                         let result =
                             SqlResult { columns: vec!["Variable_name".into(), "Value".into()], rows, affected_rows: 0 };
-                        write_result_set(&mut stream, sequence.wrapping_add(1), &result, &[], &[false, false], false, session.status_flags())?;
+                        write_result_set(
+                            &mut stream,
+                            sequence.wrapping_add(1),
+                            &result,
+                            &[],
+                            &[false, false],
+                            false,
+                            session.status_flags(),
+                        )?;
                     }
                     Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
                         // MySQL 只接受已知 session 变量；未知变量应返回 1193。
@@ -548,7 +573,9 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             continue;
                         }
                         match runtime.as_ref() {
-                            Some(rt) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, rt, &mut session, &[], false, &[])?,
+                            Some(rt) => {
+                                execute_sql(&mut stream, sequence.wrapping_add(1), sql, rt, &mut session, &[], false, &[])?
+                            }
                             None => write_error(
                                 &mut stream,
                                 sequence.wrapping_add(1),

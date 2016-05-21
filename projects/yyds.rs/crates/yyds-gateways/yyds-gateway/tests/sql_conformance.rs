@@ -288,9 +288,8 @@ fn sql_string_functions_agree_across_dialects() {
     use Lit::{Int, Null, Text};
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
         let fixture = Fixture::with_dialect(dialect);
-        let vals = |sql: &str| {
-            fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under {dialect:?}: {error}")).rows
-        };
+        let vals =
+            |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under {dialect:?}: {error}")).rows;
         assert_eq!(vals("SELECT SUBSTRING('abcdef', 2, 3)"), rows(&[&[Text("bcd")]]), "under {dialect:?}");
         assert_eq!(vals("SELECT SUBSTR('abcdef', 4)"), rows(&[&[Text("def")]]), "under {dialect:?}");
         assert_eq!(vals("SELECT SUBSTRING('abcdef', 7)"), rows(&[&[Text("")]]), "under {dialect:?}");
@@ -314,8 +313,7 @@ fn sql_string_functions_split_by_dialect() {
     use Lit::{Int, Null, Text};
 
     let mysql = Fixture::with_dialect(SqlDialect::Mysql);
-    let mysql_vals =
-        |sql: &str| mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows;
+    let mysql_vals = |sql: &str| mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows;
     let pg = Fixture::with_dialect(SqlDialect::Postgres);
     let pg_vals = |sql: &str| pg.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under Postgres: {error}")).rows;
 
@@ -566,9 +564,12 @@ fn sql_table_alias_and_self_join_agree_across_dialects() {
                 .expect_err("ambiguous shared column");
         assert_eq!(ambiguous_column.kind, SqlErrorKind::AmbiguousColumn, "under {dialect:?}: {}", ambiguous_column.message);
 
-        let ambiguous_table =
-            bind_sql_catalog("SELECT users.name FROM users JOIN users ON users.id = users.id", &fixture.catalog, SCHEMA_VERSION)
-                .expect_err("duplicate unaliased source");
+        let ambiguous_table = bind_sql_catalog(
+            "SELECT users.name FROM users JOIN users ON users.id = users.id",
+            &fixture.catalog,
+            SCHEMA_VERSION,
+        )
+        .expect_err("duplicate unaliased source");
         assert_eq!(ambiguous_table.kind, SqlErrorKind::AmbiguousTable, "under {dialect:?}: {}", ambiguous_table.message);
     }
 }
@@ -618,11 +619,7 @@ fn sql_exists_predicates_agree_across_dialects() {
         let present = fixture
             .execute(None, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM users WHERE age = 20) ORDER BY id")
             .unwrap_or_else(|error| panic!("EXISTS with rows under {dialect:?}: {error}"));
-        assert_eq!(
-            present.rows,
-            rows(&[&[Lit::Int(1)], &[Lit::Int(2)], &[Lit::Int(3)]]),
-            "EXISTS with rows under {dialect:?}"
-        );
+        assert_eq!(present.rows, rows(&[&[Lit::Int(1)], &[Lit::Int(2)], &[Lit::Int(3)]]), "EXISTS with rows under {dialect:?}");
 
         let absent = fixture
             .execute(None, "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM users WHERE age = 99)")
@@ -643,12 +640,9 @@ fn sql_exists_predicates_agree_across_dialects() {
             .unwrap_or_else(|error| panic!("NOT EXISTS without rows under {dialect:?}: {error}"));
         assert!(negated_present.rows.is_empty(), "NOT EXISTS without rows under {dialect:?}");
 
-        let unknown = bind_sql_catalog(
-            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
-            &fixture.catalog,
-            SCHEMA_VERSION,
-        )
-        .expect_err("unknown inner table");
+        let unknown =
+            bind_sql_catalog("SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)", &fixture.catalog, SCHEMA_VERSION)
+                .expect_err("unknown inner table");
         assert_eq!(unknown.kind, SqlErrorKind::UnknownTable, "under {dialect:?}: {}", unknown.message);
     }
 }
@@ -666,11 +660,7 @@ fn sql_scalar_subquery_agrees_across_dialects() {
         let single = fixture
             .execute(None, "SELECT id, (SELECT age FROM users WHERE id = 1) AS peer FROM users WHERE id = 2")
             .unwrap_or_else(|error| panic!("scalar subquery under {dialect:?}: {error}"));
-        assert_eq!(
-            single.rows,
-            rows(&[&[Lit::Int(2), Lit::Int(30)]]),
-            "scalar subquery with one row under {dialect:?}"
-        );
+        assert_eq!(single.rows, rows(&[&[Lit::Int(2), Lit::Int(30)]]), "scalar subquery with one row under {dialect:?}");
 
         let empty = fixture
             .execute(None, "SELECT (SELECT age FROM users WHERE id = 99) AS none FROM users WHERE id = 1")
@@ -711,11 +701,7 @@ fn sql_common_table_expressions_agree_across_dialects() {
         let filtered = fixture
             .execute(None, "WITH u AS (SELECT * FROM users WHERE age > 20) SELECT u.id FROM u ORDER BY u.id")
             .unwrap_or_else(|error| panic!("filtered CTE under {dialect:?}: {error}"));
-        assert_eq!(
-            filtered.rows,
-            rows(&[&[Lit::Int(1)], &[Lit::Int(3)]]),
-            "filtered CTE under {dialect:?}"
-        );
+        assert_eq!(filtered.rows, rows(&[&[Lit::Int(1)], &[Lit::Int(3)]]), "filtered CTE under {dialect:?}");
 
         let twice = fixture
             .execute(
@@ -737,19 +723,19 @@ fn sql_common_table_expressions_agree_across_dialects() {
                  UNION SELECT id FROM u WHERE id = 3 ORDER BY id",
             )
             .unwrap_or_else(|error| panic!("CTE over a set operation under {dialect:?}: {error}"));
-        assert_eq!(
-            union.rows,
-            rows(&[&[Lit::Int(1)], &[Lit::Int(3)]]),
-            "CTE over a set operation under {dialect:?}"
-        );
+        assert_eq!(union.rows, rows(&[&[Lit::Int(1)], &[Lit::Int(3)]]), "CTE over a set operation under {dialect:?}");
 
         let rejected = fixture
             .execute(None, "WITH u AS (SELECT * FROM users LIMIT 1) SELECT * FROM u")
             .expect_err("an inner LIMIT cannot be flattened");
         assert!(rejected.contains("common table expression"), "under {dialect:?}: {rejected}");
 
-        let unknown = bind_sql_catalog("WITH u AS (SELECT * FROM users) SELECT * FROM u JOIN missing ON TRUE", &fixture.catalog, SCHEMA_VERSION)
-            .expect_err("unknown joined table");
+        let unknown = bind_sql_catalog(
+            "WITH u AS (SELECT * FROM users) SELECT * FROM u JOIN missing ON TRUE",
+            &fixture.catalog,
+            SCHEMA_VERSION,
+        )
+        .expect_err("unknown joined table");
         assert_eq!(unknown.kind, SqlErrorKind::UnknownTable, "under {dialect:?}: {}", unknown.message);
     }
 }
@@ -773,10 +759,7 @@ fn sql_cte_scope_reaches_into_subqueries_across_dialects() {
         assert_eq!(membership.rows, rows(&[&[Lit::Int(2)]]), "CTE inside IN under {dialect:?}");
 
         let existence = fixture
-            .execute(
-                None,
-                "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM u WHERE u.id = 3)",
-            )
+            .execute(None, "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM u WHERE u.id = 3)")
             .unwrap_or_else(|error| panic!("CTE inside EXISTS under {dialect:?}: {error}"));
         assert_eq!(
             existence.rows,
@@ -797,8 +780,7 @@ fn sql_cte_scope_reaches_into_subqueries_across_dialects() {
             "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE id IN (SELECT id FROM missing)",
             "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
         ] {
-            let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION)
-                .expect_err("unknown name inside a subquery");
+            let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err("unknown name inside a subquery");
             assert_eq!(error.kind, SqlErrorKind::UnknownTable, "under {dialect:?} `{sql}`: {}", error.message);
         }
     }
@@ -919,14 +901,7 @@ fn sql_multi_row_insert_values_are_split_and_executed_together() {
     assert_eq!(count.rows, rows(&[&[Int(3)]]), "three rows must be visible");
 
     let all = fixture.execute(None, "SELECT id, name FROM users ORDER BY id").expect("ordered rows");
-    assert_eq!(
-        all.rows,
-        rows(&[
-            &[Int(101), Text("ana")],
-            &[Int(102), Text("bob2")],
-            &[Int(103), Text("carol2")],
-        ])
-    );
+    assert_eq!(all.rows, rows(&[&[Int(101), Text("ana")], &[Int(102), Text("bob2")], &[Int(103), Text("carol2")],]));
 }
 
 /// MySQL `/ 0` 与 `% 0` 返回 NULL 值（wire 层另上报 1365 + 22012）。
@@ -936,9 +911,7 @@ fn sql_division_by_zero_is_dialect_aware() {
     use Lit::Null;
 
     let mysql = Fixture::with_dialect(SqlDialect::Mysql);
-    let mysql_vals = |sql: &str| {
-        mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows
-    };
+    let mysql_vals = |sql: &str| mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows;
     assert_eq!(mysql_vals("SELECT 1/0"), rows(&[&[Null]]));
     assert_eq!(mysql_vals("SELECT 0/0"), rows(&[&[Null]]));
     assert_eq!(mysql_vals("SELECT 10 % 0"), rows(&[&[Null]]));
@@ -961,9 +934,7 @@ fn sql_division_and_modulo_keep_dialect_defaults() {
     use Lit::{Float, Int};
 
     let mysql = Fixture::with_dialect(SqlDialect::Mysql);
-    let mysql_vals = |sql: &str| {
-        mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows
-    };
+    let mysql_vals = |sql: &str| mysql.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}` under MySQL: {error}")).rows;
     assert_eq!(mysql_vals("SELECT 7 / 2"), rows(&[&[Float(3.5)]]));
     assert_eq!(mysql_vals("SELECT 7 % 2"), rows(&[&[Int(1)]]));
     assert_eq!(mysql_vals("SELECT -7 % 2"), rows(&[&[Int(-1)]]));
@@ -990,28 +961,19 @@ fn sql_conformance_case_when() {
     assert_eq!(vals("SELECT CASE WHEN 1 = 2 THEN 'yes' ELSE 'no' END"), rows(&[&[Text("no")]]));
 
     // 多 WHEN 取第一个命中
-    assert_eq!(
-        vals("SELECT CASE WHEN 1 = 2 THEN 'a' WHEN 1 = 1 THEN 'b' ELSE 'c' END"),
-        rows(&[&[Text("b")]])
-    );
+    assert_eq!(vals("SELECT CASE WHEN 1 = 2 THEN 'a' WHEN 1 = 1 THEN 'b' ELSE 'c' END"), rows(&[&[Text("b")]]));
 
     // 无 ELSE：全部落空返回 NULL
     assert_eq!(vals("SELECT CASE WHEN 1 = 2 THEN 'hit' END"), rows(&[&[Null]]));
 
     // 条件为 NULL 继续下一分支
-    assert_eq!(
-        vals("SELECT CASE WHEN NULL THEN 'a' WHEN 1 = 1 THEN 'b' END"),
-        rows(&[&[Text("b")]])
-    );
+    assert_eq!(vals("SELECT CASE WHEN NULL THEN 'a' WHEN 1 = 1 THEN 'b' END"), rows(&[&[Text("b")]]));
 
     // THEN 分支求值为 NULL 也是合法返回
     assert_eq!(vals("SELECT CASE WHEN 1 = 1 THEN NULL ELSE 'no' END"), rows(&[&[Null]]));
 
     // 与数字运算组合
-    assert_eq!(
-        vals("SELECT CASE WHEN 1 = 1 THEN 10 ELSE 20 END + 5"),
-        rows(&[&[Int(15)]])
-    );
+    assert_eq!(vals("SELECT CASE WHEN 1 = 1 THEN 10 ELSE 20 END + 5"), rows(&[&[Int(15)]]));
 }
 
 #[test]

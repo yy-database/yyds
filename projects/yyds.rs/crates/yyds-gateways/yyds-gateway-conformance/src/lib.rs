@@ -1340,11 +1340,7 @@ pub fn numeric_cases() -> Vec<Case> {
         case("modulo keeps the dividend sign").sql("SELECT -7 % 2").rows(&[&[Int(-1)]]).build(),
         case("modulo accepts a negative divisor").sql("SELECT 7 % -2").rows(&[&[Int(1)]]).build(),
         // PostgreSQL 的整数除法向零截断，MySQL 把 INT / INT 提升成浮点。
-        case("integer division truncates toward zero")
-            .sql("SELECT -7 / 2")
-            .rows(&[&[Int(-3)]])
-            .only(Driver::Postgres)
-            .build(),
+        case("integer division truncates toward zero").sql("SELECT -7 / 2").rows(&[&[Int(-3)]]).only(Driver::Postgres).build(),
         case("integer division promotes to float").sql("SELECT -7 / 2").rows(&[&[Float(-3.5)]]).only(Driver::Mysql).build(),
         // MySQL 的 `/ 0` 返回 NULL，PostgreSQL 直接报错（错误码由适配器套件断言）。
         case("division by zero yields null").sql("SELECT 1 / 0").rows(&[&[Null]]).only(Driver::Mysql).build(),

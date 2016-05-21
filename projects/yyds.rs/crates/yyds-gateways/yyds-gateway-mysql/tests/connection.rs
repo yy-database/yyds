@@ -810,7 +810,10 @@ fn mysql_insert_select_writes_rows_and_reports_affected_rows() {
     assert_eq!(expect_single_value(&mut client, "SELECT name FROM users WHERE id = 43"), b"bob");
 
     // 源查询命中已存在的主键 → 唯一约束错误。
-    assert_eq!(expect_error(&mut client, "INSERT INTO users (id, name, age) SELECT id, name, age FROM users"), (1062, "23000".into()));
+    assert_eq!(
+        expect_error(&mut client, "INSERT INTO users (id, name, age) SELECT id, name, age FROM users"),
+        (1062, "23000".into())
+    );
     // 列数不符 → 语法错误，类型不符 → 类型错误。
     assert_eq!(expect_error(&mut client, "INSERT INTO users (id, name, age) SELECT id FROM users"), (1064, "42000".into()));
     assert_eq!(

@@ -756,18 +756,13 @@ fn canonicalize_excluded(expression: SqlBoundExpression) -> SqlBoundExpression {
             }
             _ => Identifier(name),
         },
-        Binary { left, operator, right } => Binary {
-            left: Box::new(canonicalize_excluded(*left)),
-            operator,
-            right: Box::new(canonicalize_excluded(*right)),
-        },
+        Binary { left, operator, right } => {
+            Binary { left: Box::new(canonicalize_excluded(*left)), operator, right: Box::new(canonicalize_excluded(*right)) }
+        }
         Unary { operator, expression } => Unary { operator, expression: Box::new(canonicalize_excluded(*expression)) },
-        Function { name, args, distinct, window } => Function {
-            name,
-            args: args.into_iter().map(canonicalize_excluded).collect(),
-            distinct,
-            window,
-        },
+        Function { name, args, distinct, window } => {
+            Function { name, args: args.into_iter().map(canonicalize_excluded).collect(), distinct, window }
+        }
         InSubquery { expression, select, negated } => {
             InSubquery { expression: Box::new(canonicalize_excluded(*expression)), select, negated }
         }
@@ -805,8 +800,7 @@ fn bind_update(
             Ok((field, bound_value))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let predicate =
-        update.predicate.map(|p| bind_expression(p, &source, &[], &scope, catalog, variables)).transpose()?;
+    let predicate = update.predicate.map(|p| bind_expression(p, &source, &[], &scope, catalog, variables)).transpose()?;
     Ok(SqlCatalogBoundUpdate { table, assignments, predicate })
 }
 
@@ -939,8 +933,10 @@ fn bind_select_in(
     for projection in select.projections {
         projections.extend(bind_projection(projection, &sources, &ctes, scope, catalog, variables)?);
     }
-    let mut predicate =
-        select.predicate.map(|expression| bind_expression(expression, &sources, &ctes, scope, catalog, variables)).transpose()?;
+    let mut predicate = select
+        .predicate
+        .map(|expression| bind_expression(expression, &sources, &ctes, scope, catalog, variables))
+        .transpose()?;
     for derived in derived_predicates {
         predicate = merge_predicates(predicate, Some(derived));
     }
@@ -1037,17 +1033,15 @@ fn bind_expression(
                 // SQL 标准把 `CURRENT_DATE` / `CURRENT_TIME` / `CURRENT_TIMESTAMP` 写成
                 // 无括号关键字，Oak 的树里没有对应节点。列解析失败后回退为无参内建函数，
                 // 同名列优先，作用域与普通列引用一致。
-                Err(error) if error.kind == SqlErrorKind::UnknownColumn => {
-                    match SqlScalarFunction::from_keyword(&name) {
-                        Some(function) => Ok(SqlCatalogBoundExpression::Function {
-                            name: function.name().to_ascii_lowercase(),
-                            args: Vec::new(),
-                            distinct: false,
-                            window: None,
-                        }),
-                        None => Err(error),
-                    }
-                }
+                Err(error) if error.kind == SqlErrorKind::UnknownColumn => match SqlScalarFunction::from_keyword(&name) {
+                    Some(function) => Ok(SqlCatalogBoundExpression::Function {
+                        name: function.name().to_ascii_lowercase(),
+                        args: Vec::new(),
+                        distinct: false,
+                        window: None,
+                    }),
+                    None => Err(error),
+                },
                 Err(error) => Err(error),
             }
         }
@@ -1067,9 +1061,7 @@ fn bind_expression(
                 .into_iter()
                 .map(|arg| bind_expression(arg, sources, ctes, scope, catalog, variables))
                 .collect::<Result<Vec<_>, _>>()?;
-            let window = window
-                .map(|spec| bind_window_spec(spec, sources, ctes, scope, catalog, variables))
-                .transpose()?;
+            let window = window.map(|spec| bind_window_spec(spec, sources, ctes, scope, catalog, variables)).transpose()?;
             Ok(SqlCatalogBoundExpression::Function { name, args: bound_args, distinct, window })
         }
         SqlBoundExpression::InSubquery { expression, select, negated } => {
@@ -1117,12 +1109,10 @@ fn bind_expression(
             };
             Ok(SqlCatalogBoundExpression::Case { branches: bound_branches, else_branch: bound_else })
         }
-        SqlBoundExpression::Cast { expr, target } => {
-            Ok(SqlCatalogBoundExpression::Cast {
-                expr: Box::new(bind_expression(*expr, sources, ctes, scope, catalog, variables)?),
-                target,
-            })
-        }
+        SqlBoundExpression::Cast { expr, target } => Ok(SqlCatalogBoundExpression::Cast {
+            expr: Box::new(bind_expression(*expr, sources, ctes, scope, catalog, variables)?),
+            target,
+        }),
     }
 }
 
@@ -1179,18 +1169,13 @@ fn reject_correlated_grouping(select: &SqlCatalogBoundSelect) -> Result<(), SqlF
     let reads_outer = |clause: &str, hit: bool| {
         if hit {
             Err(SqlFrontendError::unsupported(format!("SQL correlated column cannot appear in a subquery {clause}")))
-        } else {
+        }
+        else {
             Ok(())
         }
     };
-    reads_outer(
-        "GROUP BY",
-        select.group_by.iter().flatten().any(crate::sql_planner::expression_reads_outer),
-    )?;
-    reads_outer(
-        "HAVING",
-        select.having.as_ref().is_some_and(crate::sql_planner::expression_reads_outer),
-    )?;
+    reads_outer("GROUP BY", select.group_by.iter().flatten().any(crate::sql_planner::expression_reads_outer))?;
+    reads_outer("HAVING", select.having.as_ref().is_some_and(crate::sql_planner::expression_reads_outer))?;
     reads_outer(
         "ORDER BY",
         select.order_by.iter().flatten().any(|item| crate::sql_planner::expression_reads_outer(&item.expression)),

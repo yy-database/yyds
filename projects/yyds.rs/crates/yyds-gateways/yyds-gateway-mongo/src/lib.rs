@@ -62,7 +62,8 @@ pub fn command_name_from_frame(frame: &wire::Frame) -> Option<&'static str> {
 /// `{ ok: 0, errmsg: ... }` BSON response so the connection layer never has to carry
 /// IO-result-like fallbacks.
 pub fn handle_op_msg(op_msg_body: &[u8], executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
-    let Some(bson_start) = op_msg_body.get(5..) else {
+    let Some(bson_start) = op_msg_body.get(5..)
+    else {
         return generic_error_body("OP_MSG body too short");
     };
     let section_kind = op_msg_body[4];
@@ -75,7 +76,8 @@ pub fn handle_op_msg(op_msg_body: &[u8], executor: Option<&dyn KeyValueExecutor>
         Err(e) => return generic_error_body(&format!("BSON parse error: {e:?}")),
     };
 
-    let Some(command_name) = bson_doc.command_name() else {
+    let Some(command_name) = bson_doc.command_name()
+    else {
         return generic_error_body("empty command");
     };
 
@@ -127,15 +129,18 @@ pub fn generic_error_body(_command: &str) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 fn handle_insert(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
-    let Some(executor) = executor else {
+    let Some(executor) = executor
+    else {
         return build_error_bson(2, "insert requires an executor");
     };
 
-    let Some(ns) = namespace_from_command(doc, "insert") else {
+    let Some(ns) = namespace_from_command(doc, "insert")
+    else {
         return build_error_bson(73, "insert command missing collection name");
     };
 
-    let Some(BsonValue::Array(docs)) = doc.get("documents") else {
+    let Some(BsonValue::Array(docs)) = doc.get("documents")
+    else {
         return build_error_bson(2, "insert requires a 'documents' array");
     };
 
@@ -150,7 +155,8 @@ fn handle_insert(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) ->
                 if !has_id {
                     doc_with_id.push("_id".to_string(), BsonValue::ObjectId(generate_object_id()));
                 }
-                let Some(id_val) = doc_with_id.fields.iter().find(|(k, _)| k == "_id").map(|(_, v)| v.clone()) else {
+                let Some(id_val) = doc_with_id.fields.iter().find(|(k, _)| k == "_id").map(|(_, v)| v.clone())
+                else {
                     continue;
                 };
                 let key = value_to_key(&id_val);
@@ -194,11 +200,13 @@ fn handle_insert(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) ->
 // ---------------------------------------------------------------------------
 
 fn handle_find(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
-    let Some(executor) = executor else {
+    let Some(executor) = executor
+    else {
         return build_error_bson(2, "find requires an executor");
     };
 
-    let Some(ns) = namespace_from_command(doc, "find") else {
+    let Some(ns) = namespace_from_command(doc, "find")
+    else {
         return build_error_bson(73, "find command missing collection name");
     };
 
@@ -261,11 +269,13 @@ fn scan_all(executor: &dyn KeyValueExecutor, ns: &yyds_types::Namespace, limit: 
 // ---------------------------------------------------------------------------
 
 fn handle_delete(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> Vec<u8> {
-    let Some(executor) = executor else {
+    let Some(executor) = executor
+    else {
         return build_error_bson(2, "delete requires an executor");
     };
 
-    let Some(ns) = namespace_from_command(doc, "delete") else {
+    let Some(ns) = namespace_from_command(doc, "delete")
+    else {
         return build_error_bson(73, "delete command missing collection name");
     };
 
@@ -285,7 +295,8 @@ fn handle_delete(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) ->
         let Some(spec_doc) = (match spec {
             BsonValue::Document(d) => Some(d),
             _ => None,
-        }) else {
+        })
+        else {
             continue;
         };
         let filter = match spec_doc.get("q") {
@@ -314,11 +325,13 @@ fn handle_delete(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) ->
                 if limit > 0 && removed_so_far >= limit {
                     break;
                 }
-                if let Ok(yyds_types::KeyValueResult::Delete { removed: true }) = executor.execute(yyds_types::KeyValueCommand {
-                    namespace: ns.clone(),
-                    key: k,
-                    action: yyds_types::KeyValueAction::Delete,
-                }) {
+                if let Ok(yyds_types::KeyValueResult::Delete { removed: true }) =
+                    executor.execute(yyds_types::KeyValueCommand {
+                        namespace: ns.clone(),
+                        key: k,
+                        action: yyds_types::KeyValueAction::Delete,
+                    })
+                {
                     deleted += 1;
                     removed_so_far += 1;
                 }

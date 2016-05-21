@@ -99,10 +99,9 @@ fn set_operations_bind_both_operands_and_the_combined_tail() {
 fn insert_clauses_are_bound_for_dialect_planning() {
     use yyds_gateway::{bind_sql, SqlBoundConflictAction, SqlBoundProjection, SqlBoundStatement};
 
-    let do_update = bind_sql(
-        "INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO UPDATE SET name = 'Jane' WHERE name = 'John'",
-    )
-    .expect("ON CONFLICT DO UPDATE binds");
+    let do_update =
+        bind_sql("INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO UPDATE SET name = 'Jane' WHERE name = 'John'")
+            .expect("ON CONFLICT DO UPDATE binds");
     let SqlBoundStatement::Insert(insert) = do_update
     else {
         panic!("expected insert");
@@ -117,7 +116,8 @@ fn insert_clauses_are_bound_for_dialect_planning() {
     assert_eq!(assignments[0].column, "name");
     assert!(predicate.is_some(), "the DO UPDATE WHERE predicate is retained");
 
-    let do_nothing = bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT (id) DO NOTHING").expect("DO NOTHING binds");
+    let do_nothing =
+        bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT (id) DO NOTHING").expect("DO NOTHING binds");
     let SqlBoundStatement::Insert(insert) = do_nothing
     else {
         panic!("expected insert");
@@ -126,7 +126,8 @@ fn insert_clauses_are_bound_for_dialect_planning() {
     assert_eq!(conflict.columns, vec!["id".to_string()]);
     assert!(matches!(conflict.action, SqlBoundConflictAction::DoNothing));
 
-    let no_target = bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT DO NOTHING").expect("target is optional");
+    let no_target =
+        bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT DO NOTHING").expect("target is optional");
     let SqlBoundStatement::Insert(insert) = no_target
     else {
         panic!("expected insert");

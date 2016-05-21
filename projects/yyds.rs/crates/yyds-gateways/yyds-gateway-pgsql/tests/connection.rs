@@ -83,10 +83,7 @@ fn session_variable_statements_follow_postgresql_semantics() {
     let shown = receive_until_ready(&mut client);
     assert_eq!(shown[1].0, b'D');
     let text = String::from_utf8_lossy(&shown[1].1);
-    assert!(
-        text.contains("$user") && text.contains("public"),
-        "default search_path must include $user and public, got {text}"
-    );
+    assert!(text.contains("$user") && text.contains("public"), "default search_path must include $user and public, got {text}");
 
     // `SET search_path` mutates the session; a subsequent `SHOW` must reflect it.
     send_query(&mut client, "SET search_path = 'public'");
@@ -95,10 +92,7 @@ fn session_variable_statements_follow_postgresql_semantics() {
     let shown = receive_until_ready(&mut client);
     assert_eq!(shown[1].0, b'D');
     let text = String::from_utf8_lossy(&shown[1].1);
-    assert!(
-        text.contains("public"),
-        "after SET search_path = 'public', SHOW must echo it, got {text}"
-    );
+    assert!(text.contains("public"), "after SET search_path = 'public', SHOW must echo it, got {text}");
 
     // MySQL 专有语法在 PostgreSQL 下必须报语法错误
     send_query(&mut client, "SHOW VARIABLES");
@@ -285,7 +279,10 @@ fn insert_select_reports_affected_rows_as_a_write() {
     send_query(&mut client, "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (id) DO UPDATE SET name = 'bob'");
     let updated = receive_until_ready(&mut client);
     assert_eq!(updated[0], (b'C', b"INSERT 0 1\0".to_vec()));
-    send_query(&mut client, "INSERT INTO orders (id, user_id) SELECT id, id FROM users ON CONFLICT (id) DO UPDATE SET user_id = 7");
+    send_query(
+        &mut client,
+        "INSERT INTO orders (id, user_id) SELECT id, id FROM users ON CONFLICT (id) DO UPDATE SET user_id = 7",
+    );
     let updated_many = receive_until_ready(&mut client);
     assert_eq!(updated_many[0], (b'C', b"INSERT 0 1\0".to_vec()));
 
@@ -295,11 +292,7 @@ fn insert_select_reports_affected_rows_as_a_write() {
     assert!(rewritten[1].1.windows(3).any(|window| window == b"bob"), "the conflicting row is rewritten");
 
     // 不符唯一约束的目标继续显式拒绝。
-    assert_sqlstate(
-        &mut client,
-        "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (name) DO NOTHING",
-        b"0A000",
-    );
+    assert_sqlstate(&mut client, "INSERT INTO users (id, name) VALUES (1, 'bob') ON CONFLICT (name) DO NOTHING", b"0A000");
 
     // `INSERT ... RETURNING` 在简单查询路径上返回列定义与数据行，命令标签仍是写语句。
     send_query(&mut client, "INSERT INTO users (id, name) VALUES (2, 'carol') RETURNING id, name");
@@ -663,11 +656,8 @@ fn bytea_binary_parameters_round_trip_and_text_format_is_rejected() {
     send_message(&mut client, b'E', &execute);
     send_message(&mut client, b'S', &[]);
     let rows = receive_until_ready(&mut client);
-    let description = rows
-        .iter()
-        .find(|(tag, _)| *tag == b'T')
-        .map(|(_, payload)| parse_row_description(payload))
-        .expect("RowDescription");
+    let description =
+        rows.iter().find(|(tag, _)| *tag == b'T').map(|(_, payload)| parse_row_description(payload)).expect("RowDescription");
     assert_eq!(description, vec![("id".to_string(), 20, 8, 1), ("blob".to_string(), 17, -1, 1)]);
     let data: Vec<Vec<Option<Vec<u8>>>> =
         rows.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
@@ -756,10 +746,7 @@ fn window_rank_columns_are_described_as_int8() {
     send_query(&mut client, "SELECT id, ROW_NUMBER() OVER (ORDER BY id) FROM users ORDER BY id");
     let rows = receive_until_ready(&mut client);
     assert_eq!(rows[0].0, b'T');
-    assert_eq!(
-        parse_row_description(&rows[0].1),
-        vec![("id".to_string(), 20, 8, 0), ("ROW_NUMBER".to_string(), 20, 8, 0)]
-    );
+    assert_eq!(parse_row_description(&rows[0].1), vec![("id".to_string(), 20, 8, 0), ("ROW_NUMBER".to_string(), 20, 8, 0)]);
     let data: Vec<Vec<Option<Vec<u8>>>> =
         rows.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
     assert_eq!(data.len(), 3);

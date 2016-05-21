@@ -265,9 +265,7 @@ fn multi_exec_queue_and_run_basic_commands() {
 #[test]
 fn multi_exec_empty_queue_yields_empty_array() {
     let (mut client, server) = executor_server();
-    client
-        .write_all(b"*1\r\n$5\r\nMULTI\r\n*1\r\n$4\r\nEXEC\r\n")
-        .unwrap();
+    client.write_all(b"*1\r\n$5\r\nMULTI\r\n*1\r\n$4\r\nEXEC\r\n").unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
@@ -288,28 +286,18 @@ fn discard_clears_queue_and_nested_multi_is_rejected() {
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
     // MULTI: OK, SET: QUEUED, MULTI: error (nested), DISCARD: OK, GET: $-1 (queue discarded)
-    assert_eq!(
-        response,
-        b"+OK\r\n+QUEUED\r\n-ERR MULTI calls can not be nested\r\n+OK\r\n$-1\r\n"
-    );
+    assert_eq!(response, b"+OK\r\n+QUEUED\r\n-ERR MULTI calls can not be nested\r\n+OK\r\n$-1\r\n");
 }
 
 #[test]
 fn exec_without_multi_and_discard_without_multi_are_rejected() {
     let (mut client, server) = executor_server();
-    client
-        .write_all(
-            b"*1\r\n$4\r\nEXEC\r\n*1\r\n$7\r\nDISCARD\r\n",
-        )
-        .unwrap();
+    client.write_all(b"*1\r\n$4\r\nEXEC\r\n*1\r\n$7\r\nDISCARD\r\n").unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
-    assert_eq!(
-        response,
-        b"-ERR EXEC without MULTI\r\n-ERR DISCARD without MULTI\r\n"
-    );
+    assert_eq!(response, b"-ERR EXEC without MULTI\r\n-ERR DISCARD without MULTI\r\n");
 }
 
 #[test]
@@ -317,18 +305,13 @@ fn multi_exec_nested_ping_echo_are_buffered_and_flattened() {
     // PING and ECHO are not executor-backed, so they are also queued and executed under EXEC.
     let (mut client, server) = executor_server();
     client
-        .write_all(
-            b"*1\r\n$5\r\nMULTI\r\n*1\r\n$4\r\nPING\r\n*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n*1\r\n$4\r\nEXEC\r\n",
-        )
+        .write_all(b"*1\r\n$5\r\nMULTI\r\n*1\r\n$4\r\nPING\r\n*2\r\n$4\r\nECHO\r\n$5\r\nhello\r\n*1\r\n$4\r\nEXEC\r\n")
         .unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
-    assert_eq!(
-        response,
-        b"+OK\r\n+QUEUED\r\n+QUEUED\r\n*2\r\n+PONG\r\n$5\r\nhello\r\n"
-    );
+    assert_eq!(response, b"+OK\r\n+QUEUED\r\n+QUEUED\r\n*2\r\n+PONG\r\n$5\r\nhello\r\n");
 }
 
 #[test]
@@ -336,20 +319,13 @@ fn multi_exec_command_syntax_error_is_rejected_at_queue_time() {
     // GET needs 1 argument inside MULTI — a missing argument is a syntax error and must be
     // reported immediately (no QUEUED).
     let (mut client, server) = executor_server();
-    client
-        .write_all(
-            b"*1\r\n$5\r\nMULTI\r\n*1\r\n$3\r\nGET\r\n*1\r\n$4\r\nEXEC\r\n",
-        )
-        .unwrap();
+    client.write_all(b"*1\r\n$5\r\nMULTI\r\n*1\r\n$3\r\nGET\r\n*1\r\n$4\r\nEXEC\r\n").unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
     // GET inside MULTI with no args → bind() fails with WrongArity → immediate error, EXEC runs empty queue.
-    assert_eq!(
-        response,
-        b"+OK\r\n-ERR wrong number of arguments\r\n*0\r\n"
-    );
+    assert_eq!(response, b"+OK\r\n-ERR wrong number of arguments\r\n*0\r\n");
 }
 
 // ---------- EXPIRE / TTL / PTTL ----------
@@ -367,10 +343,7 @@ fn expire_sets_ttl_and_ttl_reports_countdown() {
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
     // SET +OK, EXPIRE :1, TTL :<n> where n is between 5 and 10.
-    assert!(
-        response.starts_with(b"+OK\r\n:1\r\n:"),
-        "unexpected response: {response:?}"
-    );
+    assert!(response.starts_with(b"+OK\r\n:1\r\n:"), "unexpected response: {response:?}");
     // Find the third line (TTL response).
     let lines: Vec<&[u8]> = response.split(|&b| b == b'\n').collect();
     assert_eq!(lines.len(), 4); // "+OK\r" ":1\r" ":<n>\r" ""
@@ -414,16 +387,10 @@ fn expire_zero_deletes_key() {
 #[test]
 fn expired_key_is_removed_on_access() {
     let (mut client, server) = executor_server();
-    client
-        .write_all(
-            b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n1\r\n",
-        )
-        .unwrap();
+    client.write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n*3\r\n$6\r\nEXPIRE\r\n$3\r\nkey\r\n$1\r\n1\r\n").unwrap();
     std::thread::sleep(std::time::Duration::from_secs(2));
     client
-        .write_all(
-            b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n*2\r\n$6\r\nEXISTS\r\n$3\r\nkey\r\n",
-        )
+        .write_all(b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n*2\r\n$3\r\nTTL\r\n$3\r\nkey\r\n*2\r\n$6\r\nEXISTS\r\n$3\r\nkey\r\n")
         .unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
@@ -494,18 +461,13 @@ fn multi_exec_mixed_syntax_error_and_good_command_queue_independent() {
     // EXEC only runs the valid queued commands.
     let (mut client, server) = executor_server();
     client
-        .write_all(
-            b"*1\r\n$5\r\nMULTI\r\n*1\r\n$3\r\nGET\r\n*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\nval\r\n*1\r\n$4\r\nEXEC\r\n",
-        )
+        .write_all(b"*1\r\n$5\r\nMULTI\r\n*1\r\n$3\r\nGET\r\n*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$3\r\nval\r\n*1\r\n$4\r\nEXEC\r\n")
         .unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
     client.read_to_end(&mut response).unwrap();
     server.join().unwrap();
-    assert_eq!(
-        response,
-        b"+OK\r\n-ERR wrong number of arguments\r\n+QUEUED\r\n*1\r\n+OK\r\n"
-    );
+    assert_eq!(response, b"+OK\r\n-ERR wrong number of arguments\r\n+QUEUED\r\n*1\r\n+OK\r\n");
 }
 
 // ---------- MULTI/EXEC conformance: session isolation ----------
@@ -537,12 +499,7 @@ fn multi_exec_session_isolation_two_clients_does_not_leak_state() {
                     let cancel = Arc::clone(&stop_b);
                     let exec_clone = Arc::clone(&exec_a);
                     std::thread::spawn(move || {
-                        let _ = serve_cancellable_with_executor(
-                            stream,
-                            RequestLimits::default(),
-                            cancel,
-                            exec_clone,
-                        );
+                        let _ = serve_cancellable_with_executor(stream, RequestLimits::default(), cancel, exec_clone);
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {

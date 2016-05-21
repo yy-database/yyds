@@ -27,8 +27,8 @@ use crate::{
     },
     sql_planner::{
         check_write_literal, pk_literal_to_rowid, ConflictAssignment, ConflictPolicy, DeletePlan, DeleteScanPlan,
-        InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ReturningProjections, ScalarPlan, ScanPlan,
-        SetOperationPlan, SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WriteField, WritePlan,
+        InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ReturningProjections, ScalarPlan, ScanPlan, SetOperationPlan,
+        SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WriteField, WritePlan,
     },
 };
 
@@ -518,7 +518,10 @@ fn lower_expression(
         | SqlCatalogBoundExpression::Wildcard => expression,
         SqlCatalogBoundExpression::Function { name, args, distinct, window } => SqlCatalogBoundExpression::Function {
             name,
-            args: args.into_iter().map(|arg| lower_expression(arg, executor, transaction, dialect)).collect::<Result<Vec<_>, _>>()?,
+            args: args
+                .into_iter()
+                .map(|arg| lower_expression(arg, executor, transaction, dialect))
+                .collect::<Result<Vec<_>, _>>()?,
             distinct,
             window,
         },
@@ -606,10 +609,9 @@ fn lower_expression(
             };
             SqlCatalogBoundExpression::Case { branches: bound_branches, else_branch: bound_else }
         }
-        SqlCatalogBoundExpression::Cast { expr, target } => SqlCatalogBoundExpression::Cast {
-            expr: Box::new(lower_expression(*expr, executor, transaction, dialect)?),
-            target,
-        },
+        SqlCatalogBoundExpression::Cast { expr, target } => {
+            SqlCatalogBoundExpression::Cast { expr: Box::new(lower_expression(*expr, executor, transaction, dialect)?), target }
+        }
     })
 }
 
@@ -784,14 +786,8 @@ fn execute_join(
     let mut rows = scan_join_source(executor, transaction, &plan.base)?;
     for source in &plan.joins {
         let right_rows = scan_join_source(executor, transaction, source)?;
-        let keep_left = matches!(
-            source.kind,
-            crate::sql::SqlBoundJoinKind::Left | crate::sql::SqlBoundJoinKind::Full
-        );
-        let keep_right = matches!(
-            source.kind,
-            crate::sql::SqlBoundJoinKind::Right | crate::sql::SqlBoundJoinKind::Full
-        );
+        let keep_left = matches!(source.kind, crate::sql::SqlBoundJoinKind::Left | crate::sql::SqlBoundJoinKind::Full);
+        let keep_right = matches!(source.kind, crate::sql::SqlBoundJoinKind::Right | crate::sql::SqlBoundJoinKind::Full);
         let mut right_matched = vec![false; right_rows.len()];
         let mut merged = Vec::new();
         for left in &rows {
@@ -987,14 +983,7 @@ fn execute_scan(
                 Some(items) => items
                     .iter()
                     .map(|item| {
-                        Ok(Some(eval_row_expression(
-                            &item.expression,
-                            row,
-                            &plan.field_types,
-                            dialect,
-                            executor,
-                            transaction,
-                        )?))
+                        Ok(Some(eval_row_expression(&item.expression, row, &plan.field_types, dialect, executor, transaction)?))
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 None => Vec::new(),
@@ -1058,8 +1047,10 @@ fn execute_scan(
         let mut buckets: std::collections::BTreeMap<String, (Vec<SqlValue>, Vec<RowFieldValues>)> =
             std::collections::BTreeMap::new();
         for row in &all_rows {
-            let key_vals: Vec<SqlValue> =
-                group_exprs.iter().map(|e| eval_expression(e, row,&plan.field_types, dialect)).collect::<Result<Vec<_>, _>>()?;
+            let key_vals: Vec<SqlValue> = group_exprs
+                .iter()
+                .map(|e| eval_expression(e, row, &plan.field_types, dialect))
+                .collect::<Result<Vec<_>, _>>()?;
             let key_str = serialize_group_key(&key_vals);
             buckets.entry(key_str).or_insert_with(|| (key_vals, Vec::new())).1.push(row.clone());
         }
@@ -1151,19 +1142,19 @@ fn execute_scan(
         for (_rowid, value_bytes) in scanned {
             let row = decode_row_fields(&value_bytes, &needed_ids)?;
             if let Some(ref predicate) = plan.remaining_predicate {
-                let v = eval_expression(predicate, &row,&plan.field_types, dialect)?;
+                let v = eval_expression(predicate, &row, &plan.field_types, dialect)?;
                 if !truthy(&v) {
                     continue;
                 }
             }
 
-            let sort_key = Some(eval_expression(order_expr, &row,&plan.field_types, dialect)?);
+            let sort_key = Some(eval_expression(order_expr, &row, &plan.field_types, dialect)?);
             let mut row_values: Vec<SqlValue> = Vec::new();
             for (field_id, _) in &plan.projection_fields {
                 row_values.push(row.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
             }
             for (expr, _) in &plan.projection_expressions {
-                row_values.push(eval_expression(expr, &row,&plan.field_types, dialect)?);
+                row_values.push(eval_expression(expr, &row, &plan.field_types, dialect)?);
             }
 
             heap.push(SortableRow { sort_key, row_values, is_asc });
@@ -1331,10 +1322,7 @@ fn insert_row_if_absent(
             ));
         }
     };
-    let written = if affected == 1 { vec![row] }
-    else {
-        Vec::new()
-    };
+    let written = if affected == 1 { vec![row] } else { Vec::new() };
     returning_result(&plan.returning, &plan.field_types, written, affected, dialect)
 }
 
@@ -1396,14 +1384,13 @@ fn upsert_row(
             }
         }
         let encoded = encode_row(&row);
-        let command = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
+        let command =
+            KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
         match transaction {
             Some(handle) => handle
                 .write_if_unchanged(command, Some(existing_bytes))
                 .map_err(|e| write_error(format!("TransactionHandle.upsert failed: {e}"), &e))?,
-            None => {
-                executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?
-            }
+            None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?,
         };
         return returning_result(&plan.returning, &plan.field_types, vec![row], 1, dialect);
     }
@@ -1420,8 +1407,11 @@ fn put_if_absent(
     rowid: &[u8],
     bytes: Vec<u8>,
 ) -> Result<bool, SqlFrontendError> {
-    let command =
-        KeyValueCommand { namespace: Namespace(namespace.to_string()), key: rowid.to_vec(), action: KeyValueAction::PutIfAbsent(bytes) };
+    let command = KeyValueCommand {
+        namespace: Namespace(namespace.to_string()),
+        key: rowid.to_vec(),
+        action: KeyValueAction::PutIfAbsent(bytes),
+    };
     let result = match transaction {
         Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
         None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
@@ -1610,7 +1600,7 @@ fn execute_update(
 
     // 先评估 remaining_predicate —— 不通过就不写，影响 0 行。
     if let Some(ref predicate) = plan.remaining_predicate {
-        let v = eval_expression(predicate, &row,&plan.field_types, dialect)?;
+        let v = eval_expression(predicate, &row, &plan.field_types, dialect)?;
         if !truthy(&v) {
             return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
         }
@@ -1664,7 +1654,7 @@ fn execute_delete(
         if let Some(ref predicate) = plan.remaining_predicate {
             let needed_ids = expression_needed_field_ids(&[], &[], Some(predicate));
             let row = decode_row_fields(&existing_bytes, &needed_ids)?;
-            let v = eval_expression(predicate, &row,&plan.field_types, dialect)?;
+            let v = eval_expression(predicate, &row, &plan.field_types, dialect)?;
             if !truthy(&v) {
                 return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
             }
@@ -1715,7 +1705,7 @@ fn execute_update_scan(
     for (rowid, pre_image) in scanned {
         let mut row = decode_row(&pre_image)?;
         if let Some(predicate) = &plan.predicate {
-            let value = eval_expression(predicate, &row,&plan.field_types, dialect)?;
+            let value = eval_expression(predicate, &row, &plan.field_types, dialect)?;
             if !truthy(&value) {
                 continue;
             }
@@ -1763,7 +1753,7 @@ fn execute_delete_scan(
     for (rowid, pre_image) in scanned {
         if let Some(predicate) = &plan.predicate {
             let row = decode_row(&pre_image)?;
-            let value = eval_expression(predicate, &row,&plan.field_types, dialect)?;
+            let value = eval_expression(predicate, &row, &plan.field_types, dialect)?;
             if !truthy(&value) {
                 continue;
             }
@@ -1959,16 +1949,13 @@ fn eval_window_projection(
         let ordered_rows: Vec<RowFieldValues> = keyed.iter().map(|(_, index)| rows[*index].clone()).collect();
         for (position, (_, index)) in keyed.iter().enumerate() {
             let value = match ranking {
-                Some(SqlWindowFunction::RowNumber) => {
-                    SqlValue::Integer(i64::try_from(position + 1).unwrap_or(i64::MAX))
-                }
-                Some(SqlWindowFunction::Rank) => {
-                    SqlValue::Integer(i64::try_from(peer_start[position] + 1).unwrap_or(i64::MAX))
-                }
+                Some(SqlWindowFunction::RowNumber) => SqlValue::Integer(i64::try_from(position + 1).unwrap_or(i64::MAX)),
+                Some(SqlWindowFunction::Rank) => SqlValue::Integer(i64::try_from(peer_start[position] + 1).unwrap_or(i64::MAX)),
                 Some(SqlWindowFunction::DenseRank) => SqlValue::Integer(dense_rank[position]),
                 _ => {
                     let (frame_start, frame_end) = window_frame_bounds(spec, position, peer_end[position], ordered_rows.len());
-                    let frame = if frame_start < frame_end { &ordered_rows[frame_start..frame_end] } else { &ordered_rows[0..0] };
+                    let frame =
+                        if frame_start < frame_end { &ordered_rows[frame_start..frame_end] } else { &ordered_rows[0..0] };
                     eval_aggregate(expr, frame, field_types, dialect)?
                 }
             };
@@ -1982,12 +1969,7 @@ fn eval_window_projection(
 ///
 /// 没有显式 frame 时按 SQL 默认：有 `ORDER BY` 的聚合窗口累计到当前行的 peer 组末尾
 /// （`RANGE UNBOUNDED PRECEDING TO CURRENT ROW`），没有 `ORDER BY` 时覆盖整个分区。
-fn window_frame_bounds(
-    spec: &SqlCatalogBoundWindowSpec,
-    position: usize,
-    peer_end: usize,
-    len: usize,
-) -> (usize, usize) {
+fn window_frame_bounds(spec: &SqlCatalogBoundWindowSpec, position: usize, peer_end: usize, len: usize) -> (usize, usize) {
     let Some(frame) = spec.frame.as_ref()
     else {
         return if spec.order_by.is_empty() { (0, len) } else { (0, peer_end) };
@@ -2087,7 +2069,7 @@ fn eval_aggregate(
             let mut has_float = false;
             let mut has_value = false;
             for row in rows {
-                match eval_expression(&args[0], row,field_types, dialect)? {
+                match eval_expression(&args[0], row, field_types, dialect)? {
                     SqlValue::Integer(n) => {
                         integer_sum += i128::from(n);
                         float_sum += n as f64;
@@ -2115,7 +2097,7 @@ fn eval_aggregate(
             let mut sum: f64 = 0.0;
             let mut count: usize = 0;
             for row in rows {
-                let v = eval_expression(&args[0], row,field_types, dialect)?;
+                let v = eval_expression(&args[0], row, field_types, dialect)?;
                 match v {
                     SqlValue::Integer(n) => {
                         sum += n as f64;
@@ -2139,7 +2121,7 @@ fn eval_aggregate(
             let want_greater = agg == SqlAggregateFunction::MAX;
             let mut best: Option<SqlValue> = None;
             for row in rows {
-                let value = eval_expression(&args[0], row,field_types, dialect)?;
+                let value = eval_expression(&args[0], row, field_types, dialect)?;
                 if !matches!(value, SqlValue::Integer(_) | SqlValue::Number(_)) {
                     continue;
                 }
@@ -2264,14 +2246,10 @@ fn substitute_outer(expr: SqlCatalogBoundExpression, row: &RowFieldValues) -> Sq
                 frame: window.frame,
             }),
         },
-        Binary { left, operator, right } => Binary {
-            left: Box::new(substitute_outer(*left, row)),
-            operator,
-            right: Box::new(substitute_outer(*right, row)),
-        },
-        Unary { operator, expression } => {
-            Unary { operator, expression: Box::new(substitute_outer(*expression, row)) }
+        Binary { left, operator, right } => {
+            Binary { left: Box::new(substitute_outer(*left, row)), operator, right: Box::new(substitute_outer(*right, row)) }
         }
+        Unary { operator, expression } => Unary { operator, expression: Box::new(substitute_outer(*expression, row)) },
         InSubquery { expression, plan, negated } => InSubquery {
             expression: Box::new(substitute_outer(*expression, row)),
             plan: Box::new(substitute_outer_plan(*plan, row)),
@@ -2283,9 +2261,7 @@ fn substitute_outer(expr: SqlCatalogBoundExpression, row: &RowFieldValues) -> Sq
         Case { branches, else_branch } => Case {
             branches: branches
                 .into_iter()
-                .map(|(when, then)| {
-                    (Box::new(substitute_outer(*when, row)), Box::new(substitute_outer(*then, row)))
-                })
+                .map(|(when, then)| (Box::new(substitute_outer(*when, row)), Box::new(substitute_outer(*then, row))))
                 .collect(),
             else_branch: else_branch.map(|element| Box::new(substitute_outer(*element, row))),
         },
@@ -2344,10 +2320,7 @@ fn substitute_outer_plan(plan: SqlExecutionPlan, row: &RowFieldValues) -> SqlExe
     }
 }
 
-fn substitute_outer_order_by(
-    items: Vec<SqlCatalogBoundOrderByItem>,
-    row: &RowFieldValues,
-) -> Vec<SqlCatalogBoundOrderByItem> {
+fn substitute_outer_order_by(items: Vec<SqlCatalogBoundOrderByItem>, row: &RowFieldValues) -> Vec<SqlCatalogBoundOrderByItem> {
     items
         .into_iter()
         .map(|item| SqlCatalogBoundOrderByItem {
@@ -2434,37 +2407,23 @@ fn eval_cast(value: SqlValue, target: &str) -> Result<SqlValue, SqlFrontendError
     let base_type = t.split('(').next().unwrap_or(&t);
     match (value, base_type) {
         (SqlValue::Null, _) => Ok(SqlValue::Null),
-        (SqlValue::Integer(n), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
-            Ok(SqlValue::Integer(n))
-        }
-        (SqlValue::Integer(n), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => {
-            Ok(SqlValue::Number(n as f64))
-        }
-        (SqlValue::Integer(n), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
-            Ok(SqlValue::String(n.to_string()))
-        }
-        (SqlValue::Number(n), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
-            Ok(SqlValue::Integer(n as i64))
-        }
+        (SqlValue::Integer(n), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => Ok(SqlValue::Integer(n)),
+        (SqlValue::Integer(n), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => Ok(SqlValue::Number(n as f64)),
+        (SqlValue::Integer(n), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => Ok(SqlValue::String(n.to_string())),
+        (SqlValue::Number(n), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => Ok(SqlValue::Integer(n as i64)),
         (SqlValue::Number(n), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => Ok(SqlValue::Number(n)),
-        (SqlValue::Number(n), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
-            Ok(SqlValue::String(format_number(n)))
-        }
+        (SqlValue::Number(n), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => Ok(SqlValue::String(format_number(n))),
         (SqlValue::String(s), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
             Ok(s.trim().parse::<i64>().map(SqlValue::Integer).unwrap_or(SqlValue::Null))
         }
         (SqlValue::String(s), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => {
             Ok(s.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(SqlValue::Number).unwrap_or(SqlValue::Null))
         }
-        (SqlValue::String(s), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
-            Ok(SqlValue::String(s))
-        }
+        (SqlValue::String(s), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => Ok(SqlValue::String(s)),
         (SqlValue::Boolean(b), "INTEGER" | "INT" | "INT4" | "BIGINT" | "SMALLINT") => {
             Ok(SqlValue::Integer(if b { 1 } else { 0 }))
         }
-        (SqlValue::Boolean(b), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => {
-            Ok(SqlValue::Number(if b { 1.0 } else { 0.0 }))
-        }
+        (SqlValue::Boolean(b), "REAL" | "DOUBLE" | "FLOAT" | "NUMBER") => Ok(SqlValue::Number(if b { 1.0 } else { 0.0 })),
         (SqlValue::Boolean(b), "TEXT" | "STRING" | "VARCHAR" | "CHAR" | "CHARACTER") => {
             Ok(SqlValue::String(if b { "TRUE".to_string() } else { "FALSE".to_string() }))
         }
@@ -2485,8 +2444,12 @@ fn eval_cast(value: SqlValue, target: &str) -> Result<SqlValue, SqlFrontendError
     }
 }
 
-
-fn eval_in_values(target: SqlValue, values: &[SqlBoundLiteral], negated: bool, dialect: SqlDialect) -> Result<SqlValue, SqlFrontendError> {
+fn eval_in_values(
+    target: SqlValue,
+    values: &[SqlBoundLiteral],
+    negated: bool,
+    dialect: SqlDialect,
+) -> Result<SqlValue, SqlFrontendError> {
     if matches!(target, SqlValue::Null) {
         return Ok(SqlValue::Null);
     }
@@ -2830,7 +2793,12 @@ fn eval_unary(op: SqlBoundUnaryOperator, operand: SqlValue) -> Result<SqlValue, 
     })
 }
 
-fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue, dialect: SqlDialect) -> Result<SqlValue, SqlFrontendError> {
+fn eval_binary(
+    op: SqlBoundBinaryOperator,
+    left: &SqlValue,
+    right: &SqlValue,
+    dialect: SqlDialect,
+) -> Result<SqlValue, SqlFrontendError> {
     use SqlValue::*;
     // AND / OR 必须先于 NULL 传播处理，否则 `NULL AND FALSE` 会被错误地求成 NULL。
     match op {
@@ -3178,11 +3146,11 @@ fn eval_having(
         SqlCatalogBoundExpression::Binary { left, operator, right } => {
             let l = eval_having(left, bucket_rows, group_exprs, field_types, dialect)?;
             let r = eval_having(right, bucket_rows, group_exprs, field_types, dialect)?;
-            eval_binary(*operator, &l,&r, dialect)?
+            eval_binary(*operator, &l, &r, dialect)?
         }
         SqlCatalogBoundExpression::InValues { expression, values, negated } => {
             let target = eval_having(expression, bucket_rows, group_exprs, field_types, dialect)?;
-            eval_in_values(target, values,*negated, dialect)?
+            eval_in_values(target, values, *negated, dialect)?
         }
         SqlCatalogBoundExpression::InSubquery { .. } => {
             return Err(execute_error("IN subquery was not materialized before execution"))

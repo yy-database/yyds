@@ -139,13 +139,8 @@ fn serve_io(
             match decode_request(&pending, limits) {
                 Ok(Some(request)) => {
                     let consumed = request.consumed;
-                    let result = respond(
-                        &mut stream as &mut dyn Write,
-                        &request,
-                        executor.as_deref(),
-                        &mut namespace,
-                        &mut state,
-                    );
+                    let result =
+                        respond(&mut stream as &mut dyn Write, &request, executor.as_deref(), &mut namespace, &mut state);
                     if !result? {
                         return Ok(());
                     }
@@ -181,12 +176,7 @@ fn serve_io(
 /// Checks whether `(namespace, key)` has a stored expiry that has elapsed. When so, the
 /// expiry record is removed and the underlying KV entry is deleted via the executor (if one
 /// is available). Returns `true` when the key was expired-and-purged by this call.
-fn purge_if_expired(
-    state: &mut ConnectionState,
-    executor: Option<&dyn KeyValueExecutor>,
-    namespace: &str,
-    key: &[u8],
-) -> bool {
+fn purge_if_expired(state: &mut ConnectionState, executor: Option<&dyn KeyValueExecutor>, namespace: &str, key: &[u8]) -> bool {
     let ns_key = (namespace.to_owned(), key.to_vec());
     if let Some(due) = state.expiries.get(&ns_key) {
         if Instant::now() >= *due {
@@ -653,13 +643,7 @@ fn execute_transaction(
         let mut inner_state = ConnectionState::new();
         // Carry over expiries so EXEC sees any key-level TTL context.
         inner_state.expiries = state.expiries.clone();
-        let _ = respond(
-            &mut buf as &mut dyn Write,
-            &inner_request,
-            executor,
-            &mut inner_namespace,
-            &mut inner_state,
-        );
+        let _ = respond(&mut buf as &mut dyn Write, &inner_request, executor, &mut inner_namespace, &mut inner_state);
         // Reconcile any expiries the inner command may have created or removed.
         state.expiries = inner_state.expiries;
         stream.write_all(&buf)?;

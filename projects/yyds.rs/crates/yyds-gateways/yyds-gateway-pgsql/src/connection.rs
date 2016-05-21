@@ -343,13 +343,11 @@ fn handle_simple_query(
             }
             SqlTransactionAction::Savepoint(_)
             | SqlTransactionAction::RollbackToSavepoint(_)
-            | SqlTransactionAction::ReleaseSavepoint(_) => {
-                write_error_response(
-                    stream,
-                    "0A000",
-                    "SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT are not yet supported by the gateway",
-                )
-            }
+            | SqlTransactionAction::ReleaseSavepoint(_) => write_error_response(
+                stream,
+                "0A000",
+                "SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE SAVEPOINT are not yet supported by the gateway",
+            ),
         },
         Ok(Some(SqlSessionCommand::Savepoint(intent))) => {
             use yyds_gateway::SavepointIntent;
@@ -392,7 +390,7 @@ fn handle_simple_query(
                     write_error_response(stream, "58P01", &format!("savepoint failed: {err}"))
                 }
             }
-        },
+        }
         Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
             if session.failed {
                 return write_error_response(
@@ -776,9 +774,9 @@ fn handle_bind(
         return extended_protocol_error(stream, "08P01", "PostgreSQL result format count does not match columns");
     }
 
-    extended
-        .portals
-        .insert(portal_name.to_string(), Portal {
+    extended.portals.insert(
+        portal_name.to_string(),
+        Portal {
             statement_name: statement_name.to_string(),
             sql,
             parameters,
@@ -786,7 +784,8 @@ fn handle_bind(
             result_formats,
             outcome: None,
             sent_rows: 0,
-        });
+        },
+    );
     write_message(stream, b'2', &[])?;
     Ok(ExtendedStep::Continue)
 }
@@ -904,15 +903,15 @@ fn statement_description(
     if let Ok(description) = plan_description(&neutral_sql, runtime) {
         return Ok(description);
     }
-    let (nulled_sql, _) = nulled_sql_parameters(sql, SqlParameterStyle::DollarNumber)
-        .map_err(|error| statement_error("parameter", error))?;
+    let (nulled_sql, _) =
+        nulled_sql_parameters(sql, SqlParameterStyle::DollarNumber).map_err(|error| statement_error("parameter", error))?;
     plan_description(&nulled_sql, runtime)
 }
 
 /// Binds and plans rendered SQL only to read its result shape.
 fn plan_description(sql: &str, runtime: &Arc<PgsqlSqlRuntime>) -> Result<Vec<SqlColumn>, (String, String)> {
-    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version)
-        .map_err(|error| statement_error("bind", error))?;
+    let bound =
+        bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version).map_err(|error| statement_error("bind", error))?;
     let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres)
         .map_err(|error| statement_error("plan", error))?;
     Ok(describe_plan(&plan))

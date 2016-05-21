@@ -38,10 +38,9 @@ pub fn describe_plan(plan: &SqlExecutionPlan) -> Vec<SqlColumn> {
             })
             .collect(),
         SqlExecutionPlan::Insert(plan) => describe_returning(&plan.returning, &plan.field_types),
-        SqlExecutionPlan::MultiInsert(plans) => plans
-            .first()
-            .map(|plan| describe_returning(&plan.returning, &plan.field_types))
-            .unwrap_or_default(),
+        SqlExecutionPlan::MultiInsert(plans) => {
+            plans.first().map(|plan| describe_returning(&plan.returning, &plan.field_types)).unwrap_or_default()
+        }
         SqlExecutionPlan::InsertSelect(plan) => describe_returning(&plan.returning, &plan.field_types),
         SqlExecutionPlan::Update(_)
         | SqlExecutionPlan::UpdateScan(_)
@@ -51,10 +50,7 @@ pub fn describe_plan(plan: &SqlExecutionPlan) -> Vec<SqlColumn> {
 }
 
 /// `INSERT ... RETURNING` 的结果形状：写语句只有带 `RETURNING` 时才有列定义。
-fn describe_returning(
-    returning: &Option<ReturningProjections>,
-    field_types: &BTreeMap<u64, SqlFieldType>,
-) -> Vec<SqlColumn> {
+fn describe_returning(returning: &Option<ReturningProjections>, field_types: &BTreeMap<u64, SqlFieldType>) -> Vec<SqlColumn> {
     let Some(projections) = returning
     else {
         return Vec::new();

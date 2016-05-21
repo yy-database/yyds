@@ -5,10 +5,7 @@ use std::{
     collections::HashMap,
     io::{Cursor, Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
-    sync::{
-        atomic::AtomicBool,
-        Arc,
-    },
+    sync::{atomic::AtomicBool, Arc},
     thread,
     time::Duration,
 };
@@ -176,9 +173,7 @@ fn roundtrip(client: &mut TcpStream, request_id: i32, bson_doc: &[u8]) -> Vec<u8
     client.write_all(&build_op_msg(request_id, bson_doc)).unwrap();
     client.flush().unwrap();
 
-    let reply = wire::read_frame(client, FrameLimits::default())
-        .unwrap()
-        .expect("server closed connection");
+    let reply = wire::read_frame(client, FrameLimits::default()).unwrap().expect("server closed connection");
     assert_eq!(reply.header.request_id, 0);
     assert_eq!(reply.header.response_to, request_id);
     assert_eq!(reply.header.opcode, wire::OP_MSG);
@@ -230,11 +225,8 @@ fn find_exact_id_after_insert_returns_one_document() {
 
     // find with empty filter — should return cursor with one document
     let empty_filter = bson_document(&[]);
-    let find_cmd = bson_document(&[
-        bson_string("find", "users"),
-        bson_string("$db", "test"),
-        bson_doc_element("filter", &empty_filter),
-    ]);
+    let find_cmd =
+        bson_document(&[bson_string("find", "users"), bson_string("$db", "test"), bson_doc_element("filter", &empty_filter)]);
     let reply = roundtrip(&mut client, 2, &find_cmd);
     let ok = extract_int32(&reply, "ok");
     assert_eq!(ok, Some(1), "find reply ok");
@@ -262,10 +254,7 @@ fn delete_everything_from_collection() {
 
     // delete all: { delete: "users", $db: "test", deletes: [{ q: {}, limit: 0 }] }
     let empty_q = bson_document(&[]);
-    let delete_spec = bson_document(&[
-        bson_doc_element("q", &empty_q),
-        bson_int32("limit", 0),
-    ]);
+    let delete_spec = bson_document(&[bson_doc_element("q", &empty_q), bson_int32("limit", 0)]);
     let delete_cmd = bson_document(&[
         bson_string("delete", "users"),
         bson_string("$db", "test"),
@@ -312,16 +301,10 @@ fn different_databases_isolate_documents_of_same_collection_name() {
     let doc_a = bson_document(&[bson_object_id("_id", id_a), bson_string("name", "Alice")]);
     let doc_b = bson_document(&[bson_object_id("_id", id_b), bson_string("name", "Bob")]);
 
-    let insert_a = bson_document(&[
-        bson_string("insert", "users"),
-        bson_string("$db", "db_A"),
-        bson_array_element("documents", &[doc_a]),
-    ]);
-    let insert_b = bson_document(&[
-        bson_string("insert", "users"),
-        bson_string("$db", "db_B"),
-        bson_array_element("documents", &[doc_b]),
-    ]);
+    let insert_a =
+        bson_document(&[bson_string("insert", "users"), bson_string("$db", "db_A"), bson_array_element("documents", &[doc_a])]);
+    let insert_b =
+        bson_document(&[bson_string("insert", "users"), bson_string("$db", "db_B"), bson_array_element("documents", &[doc_b])]);
 
     let r1 = roundtrip(&mut client, 1, &insert_a);
     let r2 = roundtrip(&mut client, 2, &insert_b);
@@ -332,21 +315,15 @@ fn different_databases_isolate_documents_of_same_collection_name() {
 
     // Find Alice from db_A.users by _id → should get 1 doc
     let filter_by_id = bson_document(&[bson_object_id("_id", id_a)]);
-    let find_a = bson_document(&[
-        bson_string("find", "users"),
-        bson_string("$db", "db_A"),
-        bson_doc_element("filter", &filter_by_id),
-    ]);
+    let find_a =
+        bson_document(&[bson_string("find", "users"), bson_string("$db", "db_A"), bson_doc_element("filter", &filter_by_id)]);
     let ra = roundtrip(&mut client, 3, &find_a);
     assert_eq!(extract_int32(&ra, "ok"), Some(1));
     assert_eq!(extract_cursor_firstbatch_len(&ra), Some(1), "db_A must see Alice");
 
     // Find Alice from db_B.users by _id → should get 0 docs (isolated)
-    let find_a_in_b = bson_document(&[
-        bson_string("find", "users"),
-        bson_string("$db", "db_B"),
-        bson_doc_element("filter", &filter_by_id),
-    ]);
+    let find_a_in_b =
+        bson_document(&[bson_string("find", "users"), bson_string("$db", "db_B"), bson_doc_element("filter", &filter_by_id)]);
     let rab = roundtrip(&mut client, 4, &find_a_in_b);
     assert_eq!(extract_int32(&rab, "ok"), Some(1));
     assert_eq!(extract_cursor_firstbatch_len(&rab), Some(0), "db_B must NOT see db_A data");
@@ -380,10 +357,7 @@ fn delete_nonexistent_object_id_returns_zero_deleted_count() {
 
     let missing_id = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
     let filter = bson_document(&[bson_object_id("_id", missing_id)]);
-    let delete_spec = bson_document(&[
-        bson_doc_element("q", &filter),
-        bson_int32("limit", 1),
-    ]);
+    let delete_spec = bson_document(&[bson_doc_element("q", &filter), bson_int32("limit", 1)]);
     let delete_cmd = bson_document(&[
         bson_string("delete", "things"),
         bson_string("$db", "test"),
@@ -441,16 +415,8 @@ fn insert_with_duplicate_id_overwrites_without_unique_key_error() {
     let (mut client, server) = executor_server();
 
     let fixed_id = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
-    let doc_v1 = bson_document(&[
-        bson_object_id("_id", fixed_id),
-        bson_string("label", "first"),
-        bson_int32("version", 1),
-    ]);
-    let doc_v2 = bson_document(&[
-        bson_object_id("_id", fixed_id),
-        bson_string("label", "second"),
-        bson_int32("version", 2),
-    ]);
+    let doc_v1 = bson_document(&[bson_object_id("_id", fixed_id), bson_string("label", "first"), bson_int32("version", 1)]);
+    let doc_v2 = bson_document(&[bson_object_id("_id", fixed_id), bson_string("label", "second"), bson_int32("version", 2)]);
 
     let insert_v1 = bson_document(&[
         bson_string("insert", "dup_col"),
@@ -481,11 +447,8 @@ fn insert_with_duplicate_id_overwrites_without_unique_key_error() {
 
     // Only 1 doc visible under the namespace — v2 overwrote v1.
     let empty_filter = bson_document(&[]);
-    let find_cmd = bson_document(&[
-        bson_string("find", "dup_col"),
-        bson_string("$db", "test"),
-        bson_doc_element("filter", &empty_filter),
-    ]);
+    let find_cmd =
+        bson_document(&[bson_string("find", "dup_col"), bson_string("$db", "test"), bson_doc_element("filter", &empty_filter)]);
     let find_reply = roundtrip(&mut client, 3, &find_cmd);
     assert_eq!(extract_cursor_firstbatch_len(&find_reply), Some(1), "duplicate _id must result in 1 visible doc");
 
@@ -569,41 +532,55 @@ where
 
         let result = match elem_type {
             0x01 => {
-                if cursor + 8 > bson.len() { break; }
+                if cursor + 8 > bson.len() {
+                    break;
+                }
                 cursor += 8; // skip double
                 None
             }
             0x02 => {
-                if cursor + 4 > bson.len() { break; }
+                if cursor + 4 > bson.len() {
+                    break;
+                }
                 let str_len = i32::from_le_bytes([bson[cursor], bson[cursor + 1], bson[cursor + 2], bson[cursor + 3]]) as usize;
                 cursor += 4;
-                if cursor + str_len > bson.len() { break; }
+                if cursor + str_len > bson.len() {
+                    break;
+                }
                 let s = std::str::from_utf8(&bson[cursor..cursor + str_len - 1]).ok()?;
                 cursor += str_len;
                 f(BsonElem::String(key, s))
             }
             0x03 => {
-                if cursor + 4 > bson.len() { break; }
+                if cursor + 4 > bson.len() {
+                    break;
+                }
                 let sub_len = u32::from_le_bytes([bson[cursor], bson[cursor + 1], bson[cursor + 2], bson[cursor + 3]]) as usize;
                 let sub_start = cursor;
                 cursor += sub_len;
                 f(BsonElem::Document(key, bson[sub_start..cursor].to_vec()))
             }
             0x04 => {
-                if cursor + 4 > bson.len() { break; }
+                if cursor + 4 > bson.len() {
+                    break;
+                }
                 let sub_len = u32::from_le_bytes([bson[cursor], bson[cursor + 1], bson[cursor + 2], bson[cursor + 3]]) as usize;
                 let sub_start = cursor;
                 cursor += sub_len;
                 f(BsonElem::Array(key, bson[sub_start..cursor].to_vec()))
             }
             0x10 => {
-                if cursor + 4 > bson.len() { break; }
+                if cursor + 4 > bson.len() {
+                    break;
+                }
                 let v = i32::from_le_bytes([bson[cursor], bson[cursor + 1], bson[cursor + 2], bson[cursor + 3]]);
                 cursor += 4;
                 f(BsonElem::Int32(key, v))
             }
             0x12 => {
-                if cursor + 8 > bson.len() { break; }
+                if cursor + 8 > bson.len() {
+                    break;
+                }
                 let v = i64::from_le_bytes([
                     bson[cursor],
                     bson[cursor + 1],

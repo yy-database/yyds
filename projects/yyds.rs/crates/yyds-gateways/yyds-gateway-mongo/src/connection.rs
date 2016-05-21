@@ -3,18 +3,18 @@
 //! Reads a frame, dispatches the OP_MSG body through `crate::handle_op_msg`,
 //! and wraps the returned BSON document back into an OP_MSG response.
 
-use std::io;
-use std::net::TcpStream;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    io,
+    net::TcpStream,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use yyds_execution::KeyValueExecutor;
 
-use crate::{
-    wire::{read_frame, write_frame, FrameLimits},
-};
+use crate::wire::{read_frame, write_frame, FrameLimits};
 
 /// Runs the OP_MSG request/reply loop on a single TCP stream.
 ///
