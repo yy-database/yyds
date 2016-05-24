@@ -7,6 +7,10 @@ target/
 # Node
 node_modules/
 dist/
+# `napi build` output under the FFI crate, copied to `platforms/*/lib` by `scripts/build-napi.mjs`
+projects/yyds.rs/ffis/yyds-napi/index.js
+projects/yyds.rs/ffis/yyds-napi/index.d.ts
+projects/yyds.rs/ffis/yyds-napi/*.node
 projects/yyds.ts/packages/yyds/webui/
 .env.placeholder.local
 .cache/
