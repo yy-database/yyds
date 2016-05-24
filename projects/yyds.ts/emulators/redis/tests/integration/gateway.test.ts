@@ -62,10 +62,13 @@ test("node-redis drives string commands, batches and namespace isolation", { tim
     await client.select(0);
     assert.equal(await client.get("scoped"), "zero");
 
-    // MULTI/EXEC, AUTH and expiry are not implemented. They must fail loudly.
-    await assert.rejects(client.multi().set("tx", "1").exec(), /unsupported/i);
+    // MULTI/EXEC is executor-backed: queued writes commit together on EXEC.
+    const tx = await client.multi().set("tx", "1").incr("tx-counter").exec();
+    assert.deepEqual(tx, ["OK", 1]);
+    assert.equal(await client.get("tx"), "1");
+
+    // AUTH is not implemented and must fail loudly.
     await assert.rejects(client.sendCommand(["AUTH", "secret"]), /unsupported/i);
-    await assert.rejects(client.sendCommand(["MULTI"]), /unsupported/i);
     assert.equal(await client.ttl("scoped"), -1);
     assert.equal(await client.ttl("missing"), -2);
 });
