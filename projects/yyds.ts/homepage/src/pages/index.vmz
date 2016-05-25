@@ -9,38 +9,38 @@
                     <p>{{ brandFullLabel }}</p>
                     <p class="home__lede">{{ homeLedeLabel }}</p>
                     <div class="home__actions">
-                        <Button type="button" @click="goDocs">{{ homeOpenDocsLabel }}</Button>
-                        <Button type="button" variant="secondary" @click="goWire">{{ homeOpenWireLabel }}</Button>
+                        <Button type="button" @click="goInstall">{{ homeActionInstallLabel }}</Button>
+                        <Button type="button" variant="secondary" @click="goDocs">{{ homeActionDocsLabel }}</Button>
                     </div>
                 </div>
                 <div class="home__card">
-                    <code>@yydb/yydb-client</code>
-                    <p>Hello 帧本地编解码，默认不连接 live serve。</p>
-                    <Button type="button" variant="secondary" @click="goWire">{{ homeTryWireLabel }}</Button>
+                    <code>@yydb/yyds</code>
+                    <p>{{ homeTaglineLabel }}</p>
+                    <Button type="button" variant="secondary" @click="goWire">{{ homeWireLinkLabel }}</Button>
                 </div>
             </section>
 
             <section class="home__section">
                 <div class="home__section-head">
-                    <h2>{{ homeWhyTitleLabel }}</h2>
-                    <p>{{ homeWhyLedeLabel }}</p>
+                    <h2>{{ homeFeatureTitleLabel }}</h2>
+                    <p>{{ homeFeatureLedeLabel }}</p>
                 </div>
                 <div class="home__feature-grid">
                     <article>
-                        <h3>{{ homeFeatureVosTitleLabel }}</h3>
-                        <p>{{ homeFeatureVosBodyLabel }}</p>
+                        <h3>{{ homeFeatureSchemaTitleLabel }}</h3>
+                        <p>{{ homeFeatureSchemaBodyLabel }}</p>
+                    </article>
+                    <article>
+                        <h3>{{ homeFeatureDurabilityTitleLabel }}</h3>
+                        <p>{{ homeFeatureDurabilityBodyLabel }}</p>
+                    </article>
+                    <article>
+                        <h3>{{ homeFeatureHostTitleLabel }}</h3>
+                        <p>{{ homeFeatureHostBodyLabel }}</p>
                     </article>
                     <article>
                         <h3>{{ homeFeatureWireTitleLabel }}</h3>
                         <p>{{ homeFeatureWireBodyLabel }}</p>
-                    </article>
-                    <article>
-                        <h3>{{ homeFeatureSqliteTitleLabel }}</h3>
-                        <p>{{ homeFeatureSqliteBodyLabel }}</p>
-                    </article>
-                    <article>
-                        <h3>{{ homeFeatureServeTitleLabel }}</h3>
-                        <p>{{ homeFeatureServeBodyLabel }}</p>
                     </article>
                 </div>
             </section>
@@ -60,8 +60,8 @@
                         <p>{{ homePkgClientLabel }}</p>
                     </article>
                     <article>
-                        <code>@yydb/sqlite</code>
-                        <p>{{ homePkgSqliteLabel }}</p>
+                        <code>@yydb/yyds-webui</code>
+                        <p>{{ homePkgWebuiLabel }}</p>
                     </article>
                     <article>
                         <code>@yydb/yyds-skills</code>
@@ -80,25 +80,26 @@ import {
     brandFull,
     homeEyebrow,
     homeLede,
-    homeOpenDocs,
-    homeOpenWire,
-    homeWhyTitle,
-    homeWhyLede,
-    homeFeatureVosTitle,
-    homeFeatureVosBody,
+    homeTagline,
+    homeActionInstall,
+    homeActionDocs,
+    homeFeatureTitle,
+    homeFeatureLede,
+    homeFeatureSchemaTitle,
+    homeFeatureSchemaBody,
+    homeFeatureDurabilityTitle,
+    homeFeatureDurabilityBody,
+    homeFeatureHostTitle,
+    homeFeatureHostBody,
     homeFeatureWireTitle,
     homeFeatureWireBody,
-    homeFeatureSqliteTitle,
-    homeFeatureSqliteBody,
-    homeFeatureServeTitle,
-    homeFeatureServeBody,
     homePackagesTitle,
     homePackagesLede,
     homePkgYydb,
     homePkgClient,
-    homePkgSqlite,
+    homePkgWebui,
     homePkgSkills,
-    homeTryWire,
+    homeWireLink,
 } from "#locales/common";
 import { readLocaleId, withLocaleHint, watchDocumentLocale } from "../lib/locale-copy.ts";
 
@@ -107,25 +108,26 @@ export default class IndexPage {
     brandFullLabel = "";
     homeEyebrowLabel = "";
     homeLedeLabel = "";
-    homeOpenDocsLabel = "";
-    homeOpenWireLabel = "";
-    homeWhyTitleLabel = "";
-    homeWhyLedeLabel = "";
-    homeFeatureVosTitleLabel = "";
-    homeFeatureVosBodyLabel = "";
+    homeTaglineLabel = "";
+    homeActionInstallLabel = "";
+    homeActionDocsLabel = "";
+    homeFeatureTitleLabel = "";
+    homeFeatureLedeLabel = "";
+    homeFeatureSchemaTitleLabel = "";
+    homeFeatureSchemaBodyLabel = "";
+    homeFeatureDurabilityTitleLabel = "";
+    homeFeatureDurabilityBodyLabel = "";
+    homeFeatureHostTitleLabel = "";
+    homeFeatureHostBodyLabel = "";
     homeFeatureWireTitleLabel = "";
     homeFeatureWireBodyLabel = "";
-    homeFeatureSqliteTitleLabel = "";
-    homeFeatureSqliteBodyLabel = "";
-    homeFeatureServeTitleLabel = "";
-    homeFeatureServeBodyLabel = "";
     homePackagesTitleLabel = "";
     homePackagesLedeLabel = "";
     homePkgYydbLabel = "";
     homePkgClientLabel = "";
-    homePkgSqliteLabel = "";
+    homePkgWebuiLabel = "";
     homePkgSkillsLabel = "";
-    homeTryWireLabel = "";
+    homeWireLinkLabel = "";
     _unwatchLocale = null;
 
     onMount() {
@@ -145,29 +147,36 @@ export default class IndexPage {
         this.brandFullLabel = brandFull();
         this.homeEyebrowLabel = homeEyebrow();
         this.homeLedeLabel = homeLede();
-        this.homeOpenDocsLabel = homeOpenDocs();
-        this.homeOpenWireLabel = homeOpenWire();
-        this.homeWhyTitleLabel = homeWhyTitle();
-        this.homeWhyLedeLabel = homeWhyLede();
-        this.homeFeatureVosTitleLabel = homeFeatureVosTitle();
-        this.homeFeatureVosBodyLabel = homeFeatureVosBody();
+        this.homeTaglineLabel = homeTagline();
+        this.homeActionInstallLabel = homeActionInstall();
+        this.homeActionDocsLabel = homeActionDocs();
+        this.homeFeatureTitleLabel = homeFeatureTitle();
+        this.homeFeatureLedeLabel = homeFeatureLede();
+        this.homeFeatureSchemaTitleLabel = homeFeatureSchemaTitle();
+        this.homeFeatureSchemaBodyLabel = homeFeatureSchemaBody();
+        this.homeFeatureDurabilityTitleLabel = homeFeatureDurabilityTitle();
+        this.homeFeatureDurabilityBodyLabel = homeFeatureDurabilityBody();
+        this.homeFeatureHostTitleLabel = homeFeatureHostTitle();
+        this.homeFeatureHostBodyLabel = homeFeatureHostBody();
         this.homeFeatureWireTitleLabel = homeFeatureWireTitle();
         this.homeFeatureWireBodyLabel = homeFeatureWireBody();
-        this.homeFeatureSqliteTitleLabel = homeFeatureSqliteTitle();
-        this.homeFeatureSqliteBodyLabel = homeFeatureSqliteBody();
-        this.homeFeatureServeTitleLabel = homeFeatureServeTitle();
-        this.homeFeatureServeBodyLabel = homeFeatureServeBody();
         this.homePackagesTitleLabel = homePackagesTitle();
         this.homePackagesLedeLabel = homePackagesLede();
         this.homePkgYydbLabel = homePkgYydb();
         this.homePkgClientLabel = homePkgClient();
-        this.homePkgSqliteLabel = homePkgSqlite();
+        this.homePkgWebuiLabel = homePkgWebui();
         this.homePkgSkillsLabel = homePkgSkills();
-        this.homeTryWireLabel = homeTryWire();
+        this.homeWireLinkLabel = homeWireLink();
     }
 
     applyLocaleCopy(preferred) {
         withLocaleHint(readLocaleId(preferred), () => this.refreshCopy());
+    }
+
+    goInstall() {
+        if (typeof window !== "undefined") {
+            window.location.href = "/install";
+        }
     }
 
     goDocs() {

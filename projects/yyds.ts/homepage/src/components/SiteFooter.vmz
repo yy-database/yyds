@@ -29,8 +29,8 @@ import {
     navHome,
     navWire,
     footerBlurb,
-    footerExplore,
-    footerDocs,
+    footerResources,
+    footerOverviewDocs,
     footerCopyright,
     footerMono,
 } from "#locales/common";
@@ -68,8 +68,8 @@ export default class SiteFooter {
         this.navHomeLabel = navHome();
         this.navWireLabel = navWire();
         this.footerBlurbLabel = footerBlurb();
-        this.footerExploreLabel = footerExplore();
-        this.footerDocsLabel = footerDocs();
+        this.footerExploreLabel = footerResources();
+        this.footerDocsLabel = footerOverviewDocs();
         this.footerCopyrightLabel = footerCopyright();
         this.footerCopyrightLine = `© ${this.yearLabel} ${this.footerCopyrightLabel}`;
         this.footerMonoLabel = footerMono();
