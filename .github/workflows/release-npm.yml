@@ -171,7 +171,7 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: 24
           # Do not set registry-url: it writes _authToken into npmrc and blocks OIDC (npm E404 on PUT).
       - name: Ensure npm CLI supports OIDC
         run: |
