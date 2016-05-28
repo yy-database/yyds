@@ -27,8 +27,8 @@ pub fn describe_plan(plan: &SqlExecutionPlan) -> Vec<SqlColumn> {
         SqlExecutionPlan::Read(plan) => describe_projections(plan),
         SqlExecutionPlan::Scan(plan) => describe_projections(plan),
         SqlExecutionPlan::Join(plan) => describe_projections(plan),
-        // 集合运算的结果形状由左操作数定义：右侧已按列数与类型对齐校验过。
-        SqlExecutionPlan::SetOperation(plan) => describe_plan(&plan.left),
+        // 集合运算的结果形状由最左操作数定义：其余操作数已按列数与类型对齐校验过。
+        SqlExecutionPlan::SetOperation(plan) => plan.operands.first().map(describe_plan).unwrap_or_default(),
         SqlExecutionPlan::Scalar(plan) => plan
             .projections
             .iter()

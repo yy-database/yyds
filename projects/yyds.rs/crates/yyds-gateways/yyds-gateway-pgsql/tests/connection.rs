@@ -315,6 +315,38 @@ fn insert_select_reports_affected_rows_as_a_write() {
     server.join().unwrap();
 }
 
+/// 链式集合运算在 wire 上按 SQL 优先级合并：`EXCEPT` / `UNION` 同级左结合，
+/// 整条链的 `ORDER BY` 只作用于合并后的结果。
+#[test]
+fn chained_set_operations_merge_in_sql_precedence_order() {
+    let (mut client, server) = start_server_with_runtime();
+
+    for sql in [
+        "INSERT INTO users VALUES (1, 'alice')",
+        "INSERT INTO users VALUES (2, 'bob')",
+        "INSERT INTO users VALUES (3, 'carol')",
+        "INSERT INTO orders VALUES (1, 1)",
+    ] {
+        send_query(&mut client, sql);
+        assert_eq!(receive_until_ready(&mut client)[0].0, b'C');
+    }
+
+    send_query(&mut client, "SELECT id FROM users EXCEPT SELECT user_id FROM orders UNION SELECT 4 ORDER BY 1");
+    let chained = receive_until_ready(&mut client);
+    assert_eq!(chained[0].0, b'T');
+    let rows: Vec<Vec<Option<Vec<u8>>>> =
+        chained.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    // {1,2,3} 减去 {1} 得 {2,3}，再并上 {4}。
+    assert_eq!(rows, vec![vec![Some(b"2".to_vec())], vec![Some(b"3".to_vec())], vec![Some(b"4".to_vec())],]);
+    assert_eq!(chained.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // 列数不兼容的链必须在协议层报语句错误，而不是返回拼接结果。
+    assert_sqlstate(&mut client, "SELECT id, name FROM users UNION SELECT id FROM users", b"42601");
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 带 SQL runtime 的服务端，用于验证 PostgreSQL 语法下 `@@` 必须被拒绝。
 fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;

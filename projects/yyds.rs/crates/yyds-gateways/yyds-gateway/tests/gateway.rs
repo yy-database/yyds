@@ -2659,12 +2659,8 @@ fn sql_cross_join_is_a_full_cartesian_product() {
     );
 
     // 同表自连接：两侧都出现重复值，每个组合仍然各出现一次。
-    let self_product = run_sql(
-        &executor,
-        None,
-        &catalog,
-        "SELECT a.id, b.id FROM users a CROSS JOIN users b ORDER BY a.id, b.id",
-    );
+    let self_product =
+        run_sql(&executor, None, &catalog, "SELECT a.id, b.id FROM users a CROSS JOIN users b ORDER BY a.id, b.id");
     assert_eq!(
         self_product.rows,
         vec![
@@ -2676,12 +2672,8 @@ fn sql_cross_join_is_a_full_cartesian_product() {
     );
 
     // 三表连续 CROSS JOIN 同样是逐层嵌套循环，没有固定连接数上限。
-    let three_way = run_sql(
-        &executor,
-        None,
-        &catalog,
-        "SELECT users.id, orders.id, c.id FROM users CROSS JOIN orders CROSS JOIN users c",
-    );
+    let three_way =
+        run_sql(&executor, None, &catalog, "SELECT users.id, orders.id, c.id FROM users CROSS JOIN orders CROSS JOIN users c");
     assert_eq!(three_way.rows.len(), 2 * 4 * 2, "every three-way combination must be produced once");
 
     // 分页只裁剪最终组合，不改变笛卡尔积本身。
@@ -2689,8 +2681,8 @@ fn sql_cross_join_is_a_full_cartesian_product() {
     assert_eq!(paged.rows.len(), 3);
 
     // binder 侧：CROSS JOIN 映射为 `Cross`，`ON` 只是恒真占位。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT users.id FROM users CROSS JOIN orders", &catalog, 7)
-        .expect("cross join bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT users.id FROM users CROSS JOIN orders", &catalog, 7).expect("cross join bind");
     let yyds_gateway::SqlCatalogBoundStatement::Select(select) = bound
     else {
         panic!("expected SELECT")
@@ -2743,6 +2735,159 @@ fn sql_cross_join_keeps_both_column_scopes() {
     let qualified = run_sql(&executor, None, &catalog, "SELECT users.name, orders.total FROM users CROSS JOIN orders LIMIT 1");
     assert_eq!(qualified.columns, vec!["name".to_string(), "total".to_string()]);
     assert_eq!(qualified.rows.len(), 1);
+}
+
+// --- 链式集合运算 ---
+
+/// 三张 `value: i64` 表：`a` 含重复行（1,2,2），`b` 为 2,3，`c` 为 2,4，
+/// 外加一张 `name: utf8` 表供类型不匹配用例使用。
+fn set_operation_fixture() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yyds_kv::MemoryShard>) {
+    let catalog =
+        catalog("table a { @@id: i64, value: i64 }\ntable b { @@id: i64, value: i64 }\ntable c { @@id: i64, value: i64 }\ntable s { @@id: i64, name: utf8 }\n");
+    let executor = make_executor_with_tables(&[
+        ("table:1", &[(b"1", &[(1, b"1"), (2, b"1")]), (b"2", &[(1, b"2"), (2, b"2")]), (b"3", &[(1, b"3"), (2, b"2")])]),
+        ("table:2", &[(b"10", &[(3, b"10"), (4, b"2")]), (b"11", &[(3, b"11"), (4, b"3")])]),
+        ("table:3", &[(b"20", &[(5, b"20"), (6, b"2")]), (b"21", &[(5, b"21"), (6, b"4")])]),
+    ]);
+    (catalog, executor)
+}
+
+fn integer_rows(values: &[i64]) -> Vec<Vec<yyds_gateway::SqlValue>> {
+    values.iter().map(|value| vec![yyds_gateway::SqlValue::Integer(*value)]).collect()
+}
+
+/// `INTERSECT` 比 `UNION ALL` 结合更紧：`A UNION ALL B INTERSECT C` 必须是
+/// `A UNION ALL (B INTERSECT C)`，而不是左结合先并再交。
+#[test]
+fn sql_set_operation_intersect_binds_tighter_than_union_all() {
+    let (catalog, executor) = set_operation_fixture();
+
+    let chained = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT value FROM a UNION ALL SELECT value FROM b INTERSECT SELECT value FROM c ORDER BY 1",
+    );
+    // `b INTERSECT c` = {2}，再并上 `a` 的全部行（含重复）。
+    assert_eq!(chained.columns, vec!["value".to_string()]);
+    assert_eq!(chained.rows, integer_rows(&[1, 2, 2, 2]));
+
+    // 左结合读法 `(a UNION ALL b) INTERSECT c` 只会剩一行 2，用来证明折中确有优先级。
+    assert_ne!(chained.rows.len(), 1, "the chain must not be evaluated left-associatively");
+}
+
+/// 同级运算符左结合：`A UNION B EXCEPT C` = `(A UNION B) EXCEPT C`。
+#[test]
+fn sql_set_operation_union_then_except_is_left_associative() {
+    let (catalog, executor) = set_operation_fixture();
+
+    let result = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT value FROM a UNION SELECT value FROM b EXCEPT SELECT value FROM c ORDER BY 1",
+    );
+    // `a UNION b` 去重后为 {1,2,3}，再减去 `c` 的 {2,4} 得 {1,3}。
+    assert_eq!(result.rows, integer_rows(&[1, 3]));
+}
+
+/// 整体 `ORDER BY` / `LIMIT` 只在全部层级合并之后施加一次。
+#[test]
+fn sql_set_operation_applies_order_and_limit_once_after_the_merge() {
+    let (catalog, executor) = set_operation_fixture();
+
+    let result = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT value FROM a UNION ALL SELECT value FROM b UNION ALL SELECT value FROM c ORDER BY 1 DESC LIMIT 2",
+    );
+    // 三个操作数共 8 行全部进入合并，排序后才截断到最大的两行。
+    assert_eq!(result.rows, integer_rows(&[4, 3]));
+}
+
+/// `UNION` 去重、`UNION ALL` 保留重复，且 `INTERSECT` / `EXCEPT` 保持左侧集合语义。
+#[test]
+fn sql_set_operation_deduplicates_unless_all_is_used() {
+    let (catalog, executor) = set_operation_fixture();
+
+    let distinct = run_sql(&executor, None, &catalog, "SELECT value FROM a UNION SELECT value FROM a ORDER BY 1");
+    assert_eq!(distinct.rows, integer_rows(&[1, 2]));
+
+    let all = run_sql(&executor, None, &catalog, "SELECT value FROM a UNION ALL SELECT value FROM a ORDER BY 1");
+    assert_eq!(all.rows, integer_rows(&[1, 1, 2, 2, 2, 2]));
+
+    let intersect = run_sql(&executor, None, &catalog, "SELECT value FROM a INTERSECT SELECT value FROM b ORDER BY 1");
+    assert_eq!(intersect.rows, integer_rows(&[2]), "INTERSECT 取去重后的交集");
+}
+
+/// 集合运算按 SQL 语义把 NULL 视为同一个值：既可比对去重，也可作交集成员。
+#[test]
+fn sql_set_operation_treats_nulls_as_equal() {
+    let catalog = catalog("table na { @@id: i64, value: i64? }\ntable nb { @@id: i64, value: i64? }\n");
+    let executor = empty_executor();
+    for sql in ["INSERT INTO na VALUES (1, NULL)", "INSERT INTO na VALUES (2, 5)", "INSERT INTO nb VALUES (1, NULL)"] {
+        run_sql(&executor, None, &catalog, sql);
+    }
+
+    let union = run_sql(&executor, None, &catalog, "SELECT value FROM na UNION SELECT value FROM nb ORDER BY 1");
+    // PostgreSQL 默认 `ASC` 把 NULL 排在最后；两行 NULL 合并成一行的关键在行数。
+    assert_eq!(
+        union.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(5)], vec![yyds_gateway::SqlValue::Null]],
+        "two NULL rows collapse into one"
+    );
+
+    let intersect = run_sql(&executor, None, &catalog, "SELECT value FROM na INTERSECT SELECT value FROM nb ORDER BY 1");
+    assert_eq!(intersect.rows, vec![vec![yyds_gateway::SqlValue::Null]], "NULL 与 NULL 在集合运算里相等");
+}
+
+/// 交集/差集为空时返回空结果集而不是错误。
+#[test]
+fn sql_set_operation_returns_an_empty_result_when_nothing_matches() {
+    let (catalog, executor) = set_operation_fixture();
+
+    let empty_except = run_sql(&executor, None, &catalog, "SELECT value FROM a EXCEPT SELECT value FROM a");
+    assert!(empty_except.rows.is_empty());
+    assert_eq!(empty_except.columns, vec!["value".to_string()]);
+
+    let empty_intersect =
+        run_sql(&executor, None, &catalog, "SELECT value FROM a INTERSECT SELECT value FROM b WHERE value = 9");
+    assert!(empty_intersect.rows.is_empty());
+}
+
+/// 任意相邻两操作数的列数或类型不兼容都必须显式报错，而不是悄悄对齐。
+#[test]
+fn sql_set_operation_rejects_mismatched_operands_at_any_boundary() {
+    let (catalog, _executor) = set_operation_fixture();
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, value FROM a UNION SELECT value FROM b", &catalog, 7).expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("column count mismatch");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", error.message);
+    assert!(error.message.contains("column count mismatch"), "{}", error.message);
+
+    // 不匹配发生在第三个操作数上：逐对校验要指出 2/3 边界，而不只是最左一对。
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT value FROM a UNION SELECT value FROM b UNION SELECT name FROM s", &catalog, 7)
+            .expect("bind");
+    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("type mismatch");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::TypeMismatch, "{}", error.message);
+    assert!(error.message.contains("operands 2/3"), "{}", error.message);
+}
+
+/// 整条链只有 `INTERSECT` 时折叠出的层级仍要能执行，且共享一次尾部裁剪。
+#[test]
+fn sql_set_operation_executes_a_pure_intersect_chain() {
+    let (catalog, executor) = set_operation_fixture();
+
+    let result = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT value FROM a INTERSECT SELECT value FROM b INTERSECT SELECT value FROM c ORDER BY 1",
+    );
+    // a{1,2} ∩ b{2,3} ∩ c{2,4} = {2}
+    assert_eq!(result.rows, integer_rows(&[2]));
 }
 
 #[test]

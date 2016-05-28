@@ -588,15 +588,29 @@ pub enum SqlBoundSetOperator {
     Except,
 }
 
+/// One operand of a SQL set operation.
+///
+/// Oak publishes a flat operand chain, so the precedence fold may place an
+/// `INTERSECT` group here while leaves stay plain `SELECT` bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlBoundSetOperand {
+    /// One bound `SELECT` operand.
+    Select(Box<SqlBoundSelect>),
+    /// A nested set-operation group produced by the `INTERSECT` precedence fold.
+    SetOperation(Box<SqlBoundSetOperation>),
+}
+
 /// SQL set operation request owned by the compatibility gateway.
+///
+/// `operands` and `operators` describe one precedence level: `operators` holds
+/// `operands.len() - 1` entries, each combining its two neighbours
+/// left-associatively. The output column names come from the leftmost operand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundSetOperation {
-    /// Left operand.
-    pub left: Box<SqlBoundSelect>,
-    /// Operator combining both operands.
-    pub operator: SqlBoundSetOperator,
-    /// Right operand.
-    pub right: Box<SqlBoundSelect>,
+    /// Operands in left-to-right order.
+    pub operands: Vec<SqlBoundSetOperand>,
+    /// Operators between consecutive operands.
+    pub operators: Vec<SqlBoundSetOperator>,
     /// `ORDER BY` applied to the combined result.
     pub order_by: Option<Vec<SqlBoundOrderByItem>>,
     /// Optional `LIMIT` applied to the combined result.
@@ -1198,28 +1212,90 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
 /// Binds one Oak set operation. `ORDER BY` stays in surface form because it
 /// references the combined output columns rather than catalog columns.
 fn bind_set_operation(set: &oak_sql::ast::SetOperationStatement) -> Result<SqlBoundSetOperation, SqlFrontendError> {
-    if set.operands.len() != 2 {
-        return Err(SqlFrontendError::unsupported(
-            "chained set operations (more than two operands) are not yet supported by the YYDS gateway",
-        ));
-    }
-    let left = &set.operands[0];
-    let right = &set.operands[1];
-    let operator = set.operators.first().copied().ok_or_else(|| bind_error("set operation missing operator"))?;
     let (limit, offset) = bind_limit_clause(set.limit.as_ref())?;
-    Ok(SqlBoundSetOperation {
-        left: Box::new(bind_select_statement(left)?),
-        operator: match operator {
-            oak_sql::ast::SetOperator::Union => SqlBoundSetOperator::Union,
-            oak_sql::ast::SetOperator::UnionAll => SqlBoundSetOperator::UnionAll,
-            oak_sql::ast::SetOperator::Intersect => SqlBoundSetOperator::Intersect,
-            oak_sql::ast::SetOperator::Except => SqlBoundSetOperator::Except,
-        },
-        right: Box::new(bind_select_statement(right)?),
-        order_by: bind_order_by_clause(set.order_by.as_ref())?,
-        limit,
-        offset,
-    })
+    let order_by = bind_order_by_clause(set.order_by.as_ref())?;
+    let operands = set
+        .operands
+        .iter()
+        .map(|operand| bind_select_statement(operand).map(|select| SqlBoundSetOperand::Select(Box::new(select))))
+        .collect::<Result<Vec<_>, _>>()?;
+    let operators = set.operators.iter().copied().map(bind_set_operator).collect::<Vec<_>>();
+    fold_set_operation(operands, operators, order_by, limit, offset)
+}
+
+fn bind_set_operator(operator: oak_sql::ast::SetOperator) -> SqlBoundSetOperator {
+    match operator {
+        oak_sql::ast::SetOperator::Union => SqlBoundSetOperator::Union,
+        oak_sql::ast::SetOperator::UnionAll => SqlBoundSetOperator::UnionAll,
+        oak_sql::ast::SetOperator::Intersect => SqlBoundSetOperator::Intersect,
+        oak_sql::ast::SetOperator::Except => SqlBoundSetOperator::Except,
+    }
+}
+
+/// Folds Oak's flat set-operation chain into a precedence tree.
+///
+/// SQL gives `INTERSECT` tighter precedence than `UNION` / `UNION ALL` /
+/// `EXCEPT`, and combines operators of equal precedence left-associatively.
+/// Consecutive `INTERSECT` operands therefore collapse into their own level
+/// first, and the remaining operators chain left-to-right over those levels.
+/// A flat chain of equal precedence produces exactly the same rows as its
+/// left-associative binary tree, so this fold needs no binary nesting.
+fn fold_set_operation(
+    operands: Vec<SqlBoundSetOperand>,
+    operators: Vec<SqlBoundSetOperator>,
+    order_by: Option<Vec<SqlBoundOrderByItem>>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<SqlBoundSetOperation, SqlFrontendError> {
+    if operands.len() < 2 || operators.len() + 1 != operands.len() {
+        return Err(bind_error("set operation operands and operators do not line up"));
+    }
+    let mut rest = operands.into_iter();
+    let first = rest.next().ok_or_else(|| bind_error("set operation requires at least two operands"))?;
+    let mut group = vec![first];
+    let mut groups: Vec<SqlBoundSetOperand> = Vec::new();
+    let mut join_operators: Vec<SqlBoundSetOperator> = Vec::new();
+    for (operator, operand) in operators.into_iter().zip(rest) {
+        if operator == SqlBoundSetOperator::Intersect {
+            group.push(operand);
+            continue;
+        }
+        groups.push(close_intersect_group(std::mem::take(&mut group)));
+        join_operators.push(operator);
+        group.push(operand);
+    }
+    groups.push(close_intersect_group(group));
+
+    if join_operators.is_empty() {
+        // 全部操作数由 `INTERSECT` 连接：折叠出的组本身就是顶层节点。
+        let SqlBoundSetOperand::SetOperation(group) =
+            groups.pop().ok_or_else(|| bind_error("set operation requires at least two operands"))?
+        else {
+            return Err(bind_error("set operation requires at least two operands"));
+        };
+        let mut node = *group;
+        node.order_by = order_by;
+        node.limit = limit;
+        node.offset = offset;
+        return Ok(node);
+    }
+    Ok(SqlBoundSetOperation { operands: groups, operators: join_operators, order_by, limit, offset })
+}
+
+/// One `INTERSECT` precedence level: a single operand stays a leaf, several
+/// operands become a nested node whose operators are all `INTERSECT`.
+fn close_intersect_group(operands: Vec<SqlBoundSetOperand>) -> SqlBoundSetOperand {
+    if operands.len() == 1 {
+        return operands.into_iter().next().expect("single operand");
+    }
+    let operators = vec![SqlBoundSetOperator::Intersect; operands.len() - 1];
+    SqlBoundSetOperand::SetOperation(Box::new(SqlBoundSetOperation {
+        operands,
+        operators,
+        order_by: None,
+        limit: None,
+        offset: None,
+    }))
 }
 
 /// Binds an Oak `LIMIT` clause into a count and an optional offset.

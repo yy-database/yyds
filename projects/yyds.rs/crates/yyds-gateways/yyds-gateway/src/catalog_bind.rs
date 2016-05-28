@@ -3,9 +3,9 @@
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundCte, SqlBoundDelete,
     SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection,
-    SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement,
-    SqlBoundUnaryOperator, SqlBoundUpdate, SqlBoundWindowFrame, SqlBoundWindowSpec, SqlErrorKind, SqlFrontendError,
-    SqlNullsOrder, SqlScalarFunction,
+    SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperand, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource,
+    SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlBoundWindowFrame, SqlBoundWindowSpec, SqlErrorKind,
+    SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
 };
 use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
 
@@ -473,19 +473,33 @@ pub struct SqlCatalogBoundDelete {
     pub predicate: Option<SqlCatalogBoundExpression>,
 }
 
+/// One operand of a catalog-bound SQL set operation.
+///
+/// The binder folds Oak's flat chain into a precedence tree, so an operand is
+/// either a plain `SELECT` binding or an `INTERSECT` group of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlCatalogBoundSetOperand {
+    /// One catalog-bound `SELECT` operand.
+    Select(Box<SqlCatalogBoundSelect>),
+    /// An `INTERSECT` group produced by the precedence fold.
+    SetOperation(Box<SqlCatalogBoundSetOperation>),
+}
+
 /// SQL set operation after catalog binding.
+///
+/// `operands` and `operators` describe one precedence level: `operators` holds
+/// `operands.len() - 1` entries, each combining its two neighbours
+/// left-associatively. The output column names come from the leftmost operand.
 ///
 /// `ORDER BY` on a set operation references the combined output columns rather
 /// than catalog columns, so it stays in surface form until the planner resolves
-/// it against the left operand's result shape.
+/// it against the leftmost operand's result shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlCatalogBoundSetOperation {
-    /// Catalog-bound left operand.
-    pub left: Box<SqlCatalogBoundSelect>,
-    /// Operator combining both operands.
-    pub operator: SqlBoundSetOperator,
-    /// Catalog-bound right operand.
-    pub right: Box<SqlCatalogBoundSelect>,
+    /// Operands in left-to-right order.
+    pub operands: Vec<SqlCatalogBoundSetOperand>,
+    /// Operators between consecutive operands.
+    pub operators: Vec<SqlBoundSetOperator>,
     /// `ORDER BY` applied to the combined result, resolved during planning.
     pub order_by: Option<Vec<SqlBoundOrderByItem>>,
     /// Optional `LIMIT` applied to the combined result.
@@ -821,18 +835,62 @@ fn bind_set_operation(
     catalog: &SqlCatalog,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
 ) -> Result<SqlCatalogBoundSetOperation, SqlFrontendError> {
-    // `WITH` 写在集合运算前面时作用域覆盖整个运算，左右两侧共享同一份定义。
-    let scope = SqlCorrelationScope::root();
-    let mut left_select = *set.left;
-    let inherited = resolve_cte_scope(std::mem::take(&mut left_select.with), &[], catalog, variables, &scope)?;
-    Ok(SqlCatalogBoundSetOperation {
-        left: Box::new(bind_select_in(left_select, catalog, variables, &inherited, &scope)?),
-        operator: set.operator,
-        right: Box::new(bind_select_in(*set.right, catalog, variables, &inherited, &scope)?),
-        order_by: set.order_by,
-        limit: set.limit,
-        offset: set.offset,
-    })
+    bind_set_operation_in(set, &[], &SqlCorrelationScope::root(), catalog, variables)
+}
+
+/// Binds one set-operation level whose operands share the inherited CTE scope.
+///
+/// `WITH` written in front of a set operation covers the whole operation, so
+/// its definitions are lifted off the leftmost leaf and every operand inherits
+/// them.
+fn bind_set_operation_in(
+    set: SqlBoundSetOperation,
+    inherited: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+) -> Result<SqlCatalogBoundSetOperation, SqlFrontendError> {
+    let SqlBoundSetOperation { mut operands, operators, order_by, limit, offset } = set;
+    if operands.len() < 2 || operators.len() + 1 != operands.len() {
+        return Err(SqlFrontendError::new(SqlErrorKind::Syntax, "set operation operands and operators do not line up"));
+    }
+    let own_with = take_leading_with(&mut operands);
+    let ctes = resolve_cte_scope(own_with, inherited, catalog, variables, scope)?;
+    let operands = operands
+        .into_iter()
+        .map(|operand| bind_set_operand(operand, &ctes, scope, catalog, variables))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SqlCatalogBoundSetOperation { operands, operators, order_by, limit, offset })
+}
+
+fn bind_set_operand(
+    operand: SqlBoundSetOperand,
+    ctes: &[SqlCatalogCte],
+    scope: &SqlCorrelationScope,
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+) -> Result<SqlCatalogBoundSetOperand, SqlFrontendError> {
+    match operand {
+        SqlBoundSetOperand::Select(select) => bind_select_in(*select, catalog, variables, ctes, scope)
+            .map(|select| SqlCatalogBoundSetOperand::Select(Box::new(select))),
+        SqlBoundSetOperand::SetOperation(set) => bind_set_operation_in(*set, ctes, scope, catalog, variables)
+            .map(|set| SqlCatalogBoundSetOperand::SetOperation(Box::new(set))),
+    }
+}
+
+/// Removes the leading `WITH` clause from the leftmost operand of a level.
+///
+/// The parser attaches `WITH` to the first written `SELECT`, so the definition
+/// list that scopes the whole set operation is the one on the leftmost leaf.
+fn take_leading_with(operands: &mut [SqlBoundSetOperand]) -> Vec<SqlBoundCte> {
+    let Some(first) = operands.first_mut()
+    else {
+        return Vec::new();
+    };
+    match first {
+        SqlBoundSetOperand::Select(select) => std::mem::take(&mut select.with),
+        SqlBoundSetOperand::SetOperation(set) => take_leading_with(&mut set.operands),
+    }
 }
 
 fn bind_select(

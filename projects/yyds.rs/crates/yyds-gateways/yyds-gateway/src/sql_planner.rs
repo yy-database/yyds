@@ -19,8 +19,8 @@ use crate::{
     catalog_bind::{
         collect_column_ids, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundConflict, SqlCatalogBoundConflictAction,
         SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert, SqlCatalogBoundOrderByItem,
-        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperation, SqlCatalogBoundStatement,
-        SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlCatalogOuterColumn, SqlFieldType,
+        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperand, SqlCatalogBoundSetOperation,
+        SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlCatalogOuterColumn, SqlFieldType,
     },
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundOrderByItem,
@@ -204,51 +204,76 @@ pub fn plan_select_for_dialect(
     }))
 }
 
-/// 计划一个集合运算。两侧各自完整计划，合并语义与结果集 `ORDER BY` / `LIMIT`
-/// 由执行层承担。
+/// 计划一个集合运算。每个操作数各自完整计划，合并语义与结果集
+/// `ORDER BY` / `LIMIT` / `OFFSET` 由执行层在整个层级上施加一次。
 ///
-/// 两侧的列数与列类型必须匹配：列数不符按语句错误拒绝，类型不符按类型错误拒绝，
-/// 都带方言映射后的错误码，不做隐式转换或截断。
+/// 相邻两操作数的列数与列类型必须匹配：列数不符按语句错误拒绝，类型不符按类型错误拒绝，
+/// 都带方言映射后的错误码，不做隐式转换或截断。校验按合并顺序逐对进行，
+/// 因此一条链上任意相邻边界不兼容都会被指出，而不只是最左一对。
 fn plan_set_operation(
     set: SqlCatalogBoundSetOperation,
     catalog: &SqlCatalog,
     dialect: SqlDialect,
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
-    let left = plan_select_for_dialect(*set.left, catalog, dialect)?;
-    let right = plan_select_for_dialect(*set.right, catalog, dialect)?;
-    let left_columns = crate::sql_describe::describe_plan(&left);
-    let right_columns = crate::sql_describe::describe_plan(&right);
-    if left_columns.len() != right_columns.len() {
-        return Err(SqlFrontendError::syntax(format!(
-            "set operation column count mismatch: left side selects {} columns, right side selects {}",
-            left_columns.len(),
-            right_columns.len()
-        )));
+    let SqlCatalogBoundSetOperation { operands, operators, order_by, limit, offset } = set;
+    if operands.len() < 2 || operators.len() + 1 != operands.len() {
+        return Err(SqlFrontendError::syntax("set operation operands and operators do not line up"));
     }
-    for (index, (left_column, right_column)) in left_columns.iter().zip(right_columns.iter()).enumerate() {
-        let left_type = left_column.field_type.inner();
-        let right_type = right_column.field_type.inner();
-        if left_type == SqlFieldType::Unknown || right_type == SqlFieldType::Unknown || left_type == right_type {
-            continue;
+    let mut planned: Vec<SqlExecutionPlan> = Vec::with_capacity(operands.len());
+    for operand in operands {
+        planned.push(plan_set_operand(operand, catalog, dialect)?);
+    }
+    let shapes: Vec<Vec<crate::sql_describe::SqlColumn>> = planned.iter().map(crate::sql_describe::describe_plan).collect();
+    for (index, pair) in shapes.windows(2).enumerate() {
+        let (left_columns, right_columns) = (&pair[0], &pair[1]);
+        if left_columns.len() != right_columns.len() {
+            return Err(SqlFrontendError::syntax(format!(
+                "set operation column count mismatch at operand {}: it selects {} columns, operand {} selects {}",
+                index + 1,
+                left_columns.len(),
+                index + 2,
+                right_columns.len()
+            )));
         }
-        return Err(SqlFrontendError::type_mismatch(format!(
-            "set operation column {} type mismatch: `{}` is {left_type:?}, `{}` is {right_type:?}",
-            index + 1,
-            left_column.name,
-            right_column.name
-        )));
+        for (column, (left_column, right_column)) in left_columns.iter().zip(right_columns.iter()).enumerate() {
+            let left_type = left_column.field_type.inner();
+            let right_type = right_column.field_type.inner();
+            if left_type == SqlFieldType::Unknown || right_type == SqlFieldType::Unknown || left_type == right_type {
+                continue;
+            }
+            return Err(SqlFrontendError::type_mismatch(format!(
+                "set operation column {} type mismatch at operands {}/{}: `{}` is {left_type:?}, `{}` is {right_type:?}",
+                column + 1,
+                index + 1,
+                index + 2,
+                left_column.name,
+                right_column.name
+            )));
+        }
     }
-    let order_by = resolve_set_operation_order_by(set.order_by, &left_columns)?;
+    // 结果列名由最左操作数定义，`ORDER BY` 也按它的形状解析。
+    let order_by = resolve_set_operation_order_by(order_by, &shapes[0])?;
     Ok(SqlExecutionPlan::SetOperation(SetOperationPlan {
-        left: Box::new(left),
-        right: Box::new(right),
-        operator: set.operator,
+        operands: planned,
+        operators,
         order_by,
-        limit_after_sort: set.limit.unwrap_or(0),
-        offset_after_sort: set.offset.unwrap_or(0),
+        limit_after_sort: limit.unwrap_or(0),
+        offset_after_sort: offset.unwrap_or(0),
         nulls_first: dialect.nulls_sort_first(),
-        suppress_rows: set.limit == Some(0),
+        suppress_rows: limit == Some(0),
     }))
+}
+
+/// 计划集合运算的一个操作数：叶子走完整 SELECT 计划，`INTERSECT` 组递归计划。
+fn plan_set_operand(
+    operand: SqlCatalogBoundSetOperand,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    match operand {
+        SqlCatalogBoundSetOperand::Select(select) => plan_select_for_dialect(*select, catalog, dialect),
+        SqlCatalogBoundSetOperand::SetOperation(set) => plan_set_operation(*set, catalog, dialect),
+    }
 }
 
 /// 把集合运算的 `ORDER BY` 解析成合并结果上的列序号。SQL 只允许在这里引用结果列名
@@ -1037,15 +1062,13 @@ pub struct ScalarPlan {
     pub suppress_row: bool,
 }
 
-/// SELECT 集合运算执行计划：两侧结果已完整计划，执行层按运算符合并。
+/// SELECT 集合运算执行计划：每个操作数已完整计划，执行层按运算符左到右折叠。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetOperationPlan {
-    /// 左操作数执行计划。
-    pub left: Box<SqlExecutionPlan>,
-    /// 右操作数执行计划。
-    pub right: Box<SqlExecutionPlan>,
-    /// 合并运算符。
-    pub operator: SqlBoundSetOperator,
+    /// 操作数执行计划，按源码从左到右排列。
+    pub operands: Vec<SqlExecutionPlan>,
+    /// 相邻操作数之间的运算符，长度为 `operands.len() - 1`。
+    pub operators: Vec<SqlBoundSetOperator>,
     /// 合并结果上的 `ORDER BY`，已解析为输出列序号。
     pub order_by: Option<Vec<SqlSetOrderByItem>>,
     /// 排序之后应用的 `LIMIT`。0 = 无上限。
@@ -1634,8 +1657,9 @@ fn visit_plan_outer_columns(plan: &SqlExecutionPlan, visit: &mut impl FnMut(&Sql
             }
         }
         SqlExecutionPlan::SetOperation(set) => {
-            visit_plan_outer_columns(&set.left, &mut *visit);
-            visit_plan_outer_columns(&set.right, &mut *visit);
+            for operand in &set.operands {
+                visit_plan_outer_columns(operand, &mut *visit);
+            }
         }
         SqlExecutionPlan::InsertSelect(insert) => visit_plan_outer_columns(&insert.source, &mut *visit),
         // 写语句计划不接受相关子查询，绑定期已经拒绝，因此没有外层列可读。

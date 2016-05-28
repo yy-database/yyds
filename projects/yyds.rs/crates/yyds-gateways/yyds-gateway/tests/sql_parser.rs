@@ -65,9 +65,10 @@ fn unsupported_upstream_forms_are_rejected_explicitly() {
     }
 }
 
-/// 集合运算两侧分别绑定，合并结果上的 `ORDER BY` / `LIMIT` 挂在集合运算本身。
+/// 集合运算的操作数逐个绑定，`operators` 与操作数一一对齐，
+/// 合并结果上的 `ORDER BY` / `LIMIT` 挂在集合运算本身。
 #[test]
-fn set_operations_bind_both_operands_and_the_combined_tail() {
+fn set_operations_bind_every_operand_and_the_combined_tail() {
     use yyds_gateway::{bind_sql, SqlBoundSetOperator, SqlBoundStatement};
 
     for (sql, expected) in [
@@ -80,17 +81,83 @@ fn set_operations_bind_both_operands_and_the_combined_tail() {
         else {
             panic!("expected set operation for `{sql}`")
         };
-        assert_eq!(set.operator, expected, "{sql}");
-        assert!(set.order_by.is_none() && set.limit.is_none(), "{sql}");
+        assert_eq!(set.operands.len(), 2, "{sql}");
+        assert_eq!(set.operators, vec![expected], "{sql}");
+        assert!(set.order_by.is_none() && set.limit.is_none() && set.offset.is_none(), "{sql}");
     }
 
     let SqlBoundStatement::SetOperation(set) =
-        bind_sql("SELECT id FROM users UNION SELECT id FROM users ORDER BY id DESC LIMIT 2").expect("bind")
+        bind_sql("SELECT id FROM users UNION SELECT id FROM users ORDER BY id DESC LIMIT 2 OFFSET 1").expect("bind")
     else {
         panic!("expected set operation")
     };
     assert!(set.order_by.is_some_and(|items| items.len() == 1));
     assert_eq!(set.limit, Some(2));
+    assert_eq!(set.offset, Some(1));
+}
+
+/// `INTERSECT` 比 `UNION` / `UNION ALL` / `EXCEPT` 结合更紧，同级运算符左结合。
+/// Oak 给出的是扁平链，bind 阶段把它折成固定形状的树，planner 只按树计划。
+#[test]
+fn set_operations_fold_intersect_before_the_rest() {
+    use yyds_gateway::{bind_sql, SqlBoundSetOperand, SqlBoundSetOperator, SqlBoundStatement};
+
+    // 递归展开一层的运算符序列，叶子用 `None` 表示。
+    fn shape(operand: &SqlBoundSetOperand) -> Vec<Option<SqlBoundSetOperator>> {
+        match operand {
+            SqlBoundSetOperand::Select(_) => vec![None],
+            SqlBoundSetOperand::SetOperation(set) => {
+                let mut out = Vec::new();
+                for (index, operand) in set.operands.iter().enumerate() {
+                    if index > 0 {
+                        out.push(Some(set.operators[index - 1]));
+                    }
+                    out.extend(shape(operand));
+                }
+                out
+            }
+        }
+    }
+
+    fn top_level(sql: &str) -> (Vec<SqlBoundSetOperand>, Vec<SqlBoundSetOperator>) {
+        let SqlBoundStatement::SetOperation(set) = bind_sql(sql).expect("bind")
+        else {
+            panic!("expected set operation for `{sql}`")
+        };
+        (set.operands, set.operators)
+    }
+
+    // `A UNION ALL B INTERSECT C` = `A UNION ALL (B INTERSECT C)`
+    let sql = "SELECT id FROM users UNION ALL SELECT id FROM users INTERSECT SELECT id FROM users";
+    let (operands, operators) = top_level(sql);
+    assert_eq!(operands.len(), 2, "{sql}");
+    assert_eq!(operators, vec![SqlBoundSetOperator::UnionAll], "{sql}");
+    assert_eq!(
+        shape(&operands[1]),
+        vec![None, Some(SqlBoundSetOperator::Intersect), None],
+        "`{sql}` must group the INTERSECT segment"
+    );
+
+    // `A UNION B EXCEPT C INTERSECT D` = `(A UNION B) EXCEPT (C INTERSECT D)`，同级左结合
+    let sql = "SELECT id FROM users UNION SELECT id FROM users EXCEPT SELECT id FROM users INTERSECT SELECT id FROM users";
+    let (operands, operators) = top_level(sql);
+    assert_eq!(operands.len(), 3, "{sql}");
+    assert_eq!(operators, vec![SqlBoundSetOperator::Union, SqlBoundSetOperator::Except], "{sql}");
+    assert_eq!(shape(&operands[1]), vec![None], "{sql}");
+    assert_eq!(
+        shape(&operands[2]),
+        vec![None, Some(SqlBoundSetOperator::Intersect), None],
+        "`{sql}` must group the trailing INTERSECT segment"
+    );
+
+    // 整条链只有 `INTERSECT` 时，折叠出的层级直接成为顶层节点。
+    let sql = "SELECT id FROM users INTERSECT SELECT id FROM users INTERSECT SELECT id FROM users";
+    let SqlBoundStatement::SetOperation(set) = bind_sql(sql).expect("bind")
+    else {
+        panic!("expected set operation for `{sql}`")
+    };
+    assert_eq!(set.operands.len(), 3, "{sql}");
+    assert_eq!(set.operators, vec![SqlBoundSetOperator::Intersect, SqlBoundSetOperator::Intersect], "{sql}");
 }
 
 /// Oak 把 `ON CONFLICT` / `RETURNING` / `INSERT ... SELECT` 建模进 AST。网关 bind 层保留
