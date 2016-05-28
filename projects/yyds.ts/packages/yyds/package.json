@@ -1,75 +1,75 @@
 {
-  "name": "@yydb/yyds",
-  "version": "0.0.23",
-  "description": "Node.js facade, CLI, and native bindings for local YYDS nodes.",
-  "license": "MPL-2.0",
-  "type": "module",
-  "sideEffects": false,
-  "exports": {
-    ".": {
-      "types": "./src/node/index.ts",
-      "node": "./src/node/index.ts",
-      "default": "./src/node/unsupported.ts"
+    "name": "@yydb/yyds",
+    "version": "0.0.23",
+    "description": "Node.js facade, CLI, and native bindings for local YYDS nodes.",
+    "license": "MPL-2.0",
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./src/node/index.ts",
+            "node": "./src/node/index.ts",
+            "default": "./src/node/unsupported.ts"
+        },
+        "./node": {
+            "types": "./src/node/index.ts",
+            "node": "./src/node/index.ts",
+            "default": "./src/node/unsupported.ts"
+        },
+        "./node/cluster": {
+            "types": "./src/node/cluster.ts",
+            "node": "./src/node/cluster.ts",
+            "default": "./src/node/unsupported.ts"
+        },
+        "./node/runtime": {
+            "types": "./src/node/runtime.ts",
+            "node": "./src/node/runtime.ts",
+            "default": "./src/node/unsupported.ts"
+        }
     },
-    "./node": {
-      "types": "./src/node/index.ts",
-      "node": "./src/node/index.ts",
-      "default": "./src/node/unsupported.ts"
+    "bin": {
+        "yyds": "bin/yyds.mjs"
     },
-    "./node/cluster": {
-      "types": "./src/node/cluster.ts",
-      "node": "./src/node/cluster.ts",
-      "default": "./src/node/unsupported.ts"
+    "files": [
+        "bin",
+        "src",
+        "webui"
+    ],
+    "scripts": {
+        "build": "node scripts/bundle-webui.mjs",
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\" \"./src/node/**/*.test.ts\""
     },
-    "./node/runtime": {
-      "types": "./src/node/runtime.ts",
-      "node": "./src/node/runtime.ts",
-      "default": "./src/node/unsupported.ts"
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/yyds.ts/packages/yyds"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/yyds#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "keywords": [
+        "yyds",
+        "scripting",
+        "typescript",
+        "napi"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "optionalDependencies": {
+        "@yydb/yyds-win32-x64": "workspace:*",
+        "@yydb/yyds-linux-x64": "workspace:*",
+        "@yydb/yyds-darwin-x64": "workspace:*",
+        "@yydb/yyds-darwin-arm64": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.0",
+        "@yydb/yyds-webui": "workspace:*",
+        "typescript": "^5.9.2"
+    },
+    "engines": {
+        "node": ">=18"
     }
-  },
-  "bin": {
-    "yyds": "bin/yyds.mjs"
-  },
-  "files": [
-    "bin",
-    "src",
-    "webui"
-  ],
-  "scripts": {
-    "build": "node scripts/bundle-webui.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\" \"./src/node/**/*.test.ts\""
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/yy-database/yyds.git",
-    "directory": "projects/yyds.ts/packages/yyds"
-  },
-  "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/yyds#readme",
-  "bugs": {
-    "url": "https://github.com/yy-database/yyds/issues"
-  },
-  "keywords": [
-    "yyds",
-    "scripting",
-    "typescript",
-    "napi"
-  ],
-  "publishConfig": {
-    "access": "public"
-  },
-  "optionalDependencies": {
-    "@yydb/yyds-win32-x64": "workspace:*",
-    "@yydb/yyds-linux-x64": "workspace:*",
-    "@yydb/yyds-darwin-x64": "workspace:*",
-    "@yydb/yyds-darwin-arm64": "workspace:*"
-  },
-  "devDependencies": {
-    "@types/node": "^22.15.0",
-    "@yydb/yyds-webui": "workspace:*",
-    "typescript": "^5.9.2"
-  },
-  "engines": {
-    "node": ">=18"
-  }
 }

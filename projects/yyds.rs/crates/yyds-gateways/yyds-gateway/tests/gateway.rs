@@ -2630,6 +2630,121 @@ fn sql_outer_join_on_and_where_differ_for_unmatched_rows() {
     );
 }
 
+/// `CROSS JOIN` 必须是完整笛卡尔积：binder 左侧的恒真 `ON` 占位不能变成过滤器，
+/// 也不能按某一侧的扫描行数截断另一侧的组合。
+#[test]
+fn sql_cross_join_is_a_full_cartesian_product() {
+    let (catalog, executor) = join_fixture();
+
+    // 2 users × 4 orders = 8 行，排序只改变呈现顺序，不改变组合数量。
+    let product = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT users.id, orders.id FROM users CROSS JOIN orders ORDER BY users.id, orders.id",
+    );
+    assert_eq!(product.columns, vec!["id".to_string(), "id".to_string()]);
+    assert_eq!(
+        product.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(10)],
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(11)],
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(12)],
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(13)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(10)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(11)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(12)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(13)],
+        ]
+    );
+
+    // 同表自连接：两侧都出现重复值，每个组合仍然各出现一次。
+    let self_product = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT a.id, b.id FROM users a CROSS JOIN users b ORDER BY a.id, b.id",
+    );
+    assert_eq!(
+        self_product.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(1)],
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(2)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(1)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(2)],
+        ]
+    );
+
+    // 三表连续 CROSS JOIN 同样是逐层嵌套循环，没有固定连接数上限。
+    let three_way = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT users.id, orders.id, c.id FROM users CROSS JOIN orders CROSS JOIN users c",
+    );
+    assert_eq!(three_way.rows.len(), 2 * 4 * 2, "every three-way combination must be produced once");
+
+    // 分页只裁剪最终组合，不改变笛卡尔积本身。
+    let paged = run_sql(&executor, None, &catalog, "SELECT users.id, orders.id FROM users CROSS JOIN orders LIMIT 3");
+    assert_eq!(paged.rows.len(), 3);
+
+    // binder 侧：CROSS JOIN 映射为 `Cross`，`ON` 只是恒真占位。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT users.id FROM users CROSS JOIN orders", &catalog, 7)
+        .expect("cross join bind");
+    let yyds_gateway::SqlCatalogBoundStatement::Select(select) = bound
+    else {
+        panic!("expected SELECT")
+    };
+    assert_eq!(select.joins.len(), 1);
+    assert!(matches!(select.joins[0].kind, yyds_gateway::SqlBoundJoinKind::Cross));
+}
+
+/// CROSS JOIN 不保留任何一侧：任意一侧为空时笛卡尔积为空集。
+#[test]
+fn sql_cross_join_with_an_empty_side_is_empty() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n");
+    let query = |executor: &dyn yyds_execution::KeyValueExecutor, sql: &str| run_sql(executor, None, &catalog, sql);
+
+    // 右表为空。
+    let users_only = make_executor_with_tables(&[("table:1", &[(b"1", &[(1, b"1"), (2, b"alice")])])]);
+    assert!(
+        query(&users_only, "SELECT users.id, orders.id FROM users CROSS JOIN orders").rows.is_empty(),
+        "an empty right side yields no combinations"
+    );
+    assert!(
+        query(&users_only, "SELECT orders.id, users.id FROM orders CROSS JOIN users").rows.is_empty(),
+        "an empty right side yields no combinations regardless of which side leads"
+    );
+
+    // 左表为空。
+    let orders_only = make_executor_with_tables(&[("table:2", &[(b"10", &[(3, b"10"), (4, b"1"), (5, b"100")])])]);
+    assert!(
+        query(&orders_only, "SELECT users.id, orders.id FROM users CROSS JOIN orders").rows.is_empty(),
+        "an empty left side cannot invent combinations"
+    );
+    assert!(
+        query(&orders_only, "SELECT orders.id, users.id FROM orders CROSS JOIN users").rows.is_empty(),
+        "an empty right side cannot be filled from the visible left rows"
+    );
+}
+
+/// CROSS JOIN 之后列名作用域包含两侧全部表，未限定且重名的列必须报歧义。
+#[test]
+fn sql_cross_join_keeps_both_column_scopes() {
+    let (catalog, executor) = join_fixture();
+
+    // `users.id` 与 `orders.id` 都可见，未限定的 `id` 必须报歧义。
+    let ambiguous = yyds_gateway::bind_sql_catalog("SELECT id FROM users CROSS JOIN orders", &catalog, 7)
+        .expect_err("ambiguous cross join column");
+    assert_eq!(ambiguous.kind, yyds_gateway::SqlErrorKind::AmbiguousColumn, "{}", ambiguous.message);
+    assert!(ambiguous.message.contains("ambiguous SQL column: id"), "{}", ambiguous.message);
+
+    // 限定名可正常读取，证明两侧作用域都保留而非只留基表。
+    let qualified = run_sql(&executor, None, &catalog, "SELECT users.name, orders.total FROM users CROSS JOIN orders LIMIT 1");
+    assert_eq!(qualified.columns, vec!["name".to_string(), "total".to_string()]);
+    assert_eq!(qualified.rows.len(), 1);
+}
+
 #[test]
 fn sql_join_rejects_ambiguous_unqualified_columns() {
     let (catalog, _executor) = join_fixture();
