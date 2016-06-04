@@ -2159,6 +2159,16 @@ fn eval_aggregate(
     }
 }
 
+/// Evaluates a clause expression that has no row context (`LIMIT` / `OFFSET`).
+///
+/// The planner folds these clauses before execution, and it deliberately uses
+/// this same evaluator so the fold cannot disagree with runtime evaluation of
+/// the same expression (arithmetic overflow, division semantics, function
+/// results). The caller only accepts a non-negative integer scalar.
+pub(crate) fn eval_constant(expression: &SqlCatalogBoundExpression, dialect: SqlDialect) -> Result<SqlValue, SqlFrontendError> {
+    eval_expression(expression, &RowFieldValues::new(), &std::collections::BTreeMap::new(), dialect)
+}
+
 fn eval_expression(
     expr: &SqlCatalogBoundExpression,
     row: &RowFieldValues,

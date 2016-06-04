@@ -390,10 +390,10 @@ pub struct SqlBoundSelect {
     pub group_by: Option<Vec<SqlBoundExpression>>,
     /// Optional SQL HAVING expression (applied after GROUP BY aggregation).
     pub having: Option<SqlBoundExpression>,
-    /// Optional SQL LIMIT count (parsed from the LIMIT clause's literal).
-    pub limit: Option<usize>,
-    /// Optional SQL OFFSET count (parsed from the LIMIT ... OFFSET clause).
-    pub offset: Option<usize>,
+    /// Optional SQL `LIMIT` count expression, folded to a row count at plan time.
+    pub limit: Option<SqlBoundExpression>,
+    /// Optional SQL `OFFSET` count expression, folded to a row count at plan time.
+    pub offset: Option<SqlBoundExpression>,
     /// Optional SQL ORDER BY clause — supports multi-column ordering.
     pub order_by: Option<Vec<SqlBoundOrderByItem>>,
     /// Whether the projection list carries the `DISTINCT` modifier.
@@ -613,10 +613,10 @@ pub struct SqlBoundSetOperation {
     pub operators: Vec<SqlBoundSetOperator>,
     /// `ORDER BY` applied to the combined result.
     pub order_by: Option<Vec<SqlBoundOrderByItem>>,
-    /// Optional `LIMIT` applied to the combined result.
-    pub limit: Option<usize>,
-    /// Optional `OFFSET` applied to the combined result.
-    pub offset: Option<usize>,
+    /// Optional `LIMIT` count expression applied to the combined result.
+    pub limit: Option<SqlBoundExpression>,
+    /// Optional `OFFSET` count expression applied to the combined result.
+    pub offset: Option<SqlBoundExpression>,
 }
 
 /// One SQL projection expression.
@@ -1244,8 +1244,8 @@ fn fold_set_operation(
     operands: Vec<SqlBoundSetOperand>,
     operators: Vec<SqlBoundSetOperator>,
     order_by: Option<Vec<SqlBoundOrderByItem>>,
-    limit: Option<usize>,
-    offset: Option<usize>,
+    limit: Option<SqlBoundExpression>,
+    offset: Option<SqlBoundExpression>,
 ) -> Result<SqlBoundSetOperation, SqlFrontendError> {
     if operands.len() < 2 || operators.len() + 1 != operands.len() {
         return Err(bind_error("set operation operands and operators do not line up"));
@@ -1298,18 +1298,84 @@ fn close_intersect_group(operands: Vec<SqlBoundSetOperand>) -> SqlBoundSetOperan
     }))
 }
 
-/// Binds an Oak `LIMIT` clause into a count and an optional offset.
-fn bind_limit_clause(clause: Option<&oak_sql::ast::LimitClause>) -> Result<(Option<usize>, Option<usize>), SqlFrontendError> {
-    Ok(match clause {
-        Some(clause) => {
-            let count = extract_u64(&clause.limit)
-                .ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))?
-                as usize;
-            let offset = clause.offset.as_ref().and_then(extract_u64).map(|value| value as usize);
-            (Some(count), offset)
+/// Binds an Oak `LIMIT` clause into gateway expressions.
+///
+/// Oak publishes `LIMIT` and `OFFSET` as expressions, so the gateway keeps them
+/// in the normal expression system and folds them to a row count while planning.
+/// Only the planner knows the statement dialect, and folding there keeps one
+/// evaluation path instead of a second literal-only parser.
+///
+/// Anything that would need a row — column references, `*`, subqueries or
+/// window functions — is rejected here. Silently dropping the clause is never
+/// an option: `OFFSET` changes the result set, so an unsupported shape fails the
+/// statement.
+fn bind_limit_clause(
+    clause: Option<&oak_sql::ast::LimitClause>,
+) -> Result<(Option<SqlBoundExpression>, Option<SqlBoundExpression>), SqlFrontendError> {
+    let Some(clause) = clause
+    else {
+        return Ok((None, None));
+    };
+    let limit = bind_expression(&clause.limit)?;
+    validate_row_count_expression(&limit, "LIMIT")?;
+    let offset = match clause.offset.as_ref() {
+        Some(offset) => {
+            let bound = bind_expression(offset)?;
+            validate_row_count_expression(&bound, "OFFSET")?;
+            Some(bound)
         }
-        None => (None, None),
-    })
+        None => None,
+    };
+    Ok((Some(limit), offset))
+}
+
+/// Rejects `LIMIT` / `OFFSET` shapes that cannot be evaluated without a row.
+///
+/// The remaining expression still has to fold to a non-negative integer
+/// scalar, but that check needs the dialect's arithmetic semantics and so runs
+/// in the planner.
+fn validate_row_count_expression(expression: &SqlBoundExpression, clause: &str) -> Result<(), SqlFrontendError> {
+    match expression {
+        SqlBoundExpression::Literal(_) => Ok(()),
+        SqlBoundExpression::Identifier(name) => {
+            Err(bind_error(&format!("SQL {clause} must be a constant non-negative integer, `{name}` is not constant")))
+        }
+        SqlBoundExpression::Wildcard => {
+            Err(bind_error(&format!("SQL {clause} must be a constant non-negative integer, `*` is not valid")))
+        }
+        SqlBoundExpression::Binary { left, right, .. } => {
+            validate_row_count_expression(left, clause)?;
+            validate_row_count_expression(right, clause)
+        }
+        SqlBoundExpression::Unary { expression, .. } => validate_row_count_expression(expression, clause),
+        SqlBoundExpression::Function { name, args, window, .. } => {
+            if window.is_some() {
+                return Err(SqlFrontendError::unsupported(format!(
+                    "SQL {clause} must be a constant non-negative integer, window function `{name}` is not constant"
+                )));
+            }
+            for arg in args {
+                validate_row_count_expression(arg, clause)?;
+            }
+            Ok(())
+        }
+        SqlBoundExpression::Case { branches, else_branch } => {
+            for (when, then) in branches {
+                validate_row_count_expression(when, clause)?;
+                validate_row_count_expression(then, clause)?;
+            }
+            match else_branch {
+                Some(else_branch) => validate_row_count_expression(else_branch, clause),
+                None => Ok(()),
+            }
+        }
+        SqlBoundExpression::Cast { expr, .. } => validate_row_count_expression(expr, clause),
+        SqlBoundExpression::ScalarSubquery { .. }
+        | SqlBoundExpression::InSubquery { .. }
+        | SqlBoundExpression::Exists { .. } => {
+            Err(SqlFrontendError::unsupported(format!("SQL {clause} does not accept a subquery")))
+        }
+    }
 }
 
 /// Binds an Oak `ORDER BY` clause into gateway order items.
@@ -1864,15 +1930,6 @@ fn bind_binary_operator(operator: BinaryOperator) -> Result<SqlBoundBinaryOperat
 
 fn bind_error(message: &str) -> SqlFrontendError {
     SqlFrontendError::syntax(message)
-}
-
-/// Extracts a non-negative integer from an Oak SQL expression — only accepts
-/// `Literal::Number` with a valid `u64` spelling.
-fn extract_u64(expr: &Expression) -> Option<u64> {
-    match expr {
-        Expression::Literal(Literal::Number(n, _)) => n.parse::<u64>().ok(),
-        _ => None,
-    }
 }
 
 fn normalize_identifier(name: &str) -> String {

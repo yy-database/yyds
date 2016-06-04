@@ -27,6 +27,7 @@ use crate::{
         SqlBoundOrderDirection, SqlBoundSetOperator, SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError,
         SqlNullsOrder, SqlScalarFunction,
     },
+    sql_execute::{eval_constant, SqlValue},
 };
 
 /// 翻译一份 catalog-bound statement 为可执行计划（PostgreSQL 排序规则）。
@@ -60,14 +61,17 @@ pub fn plan_select_for_dialect(
     catalog: &SqlCatalog,
     dialect: SqlDialect,
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
+    // `LIMIT` / `OFFSET` 是表达式：在计划阶段按方言折叠成行数，后续所有分支只处理 usize。
+    let limit = plan_row_count(select.limit.as_ref(), "LIMIT", dialect)?;
+    let offset = plan_row_count(select.offset.as_ref(), "OFFSET", dialect)?;
     validate_distinct_shape(&select)?;
     if !select.joins.is_empty() {
-        return plan_join_select(select, catalog, dialect);
+        return plan_join_select(select, limit, offset, catalog, dialect);
     }
     // 无 FROM 的 SELECT 只做常量 / 内建函数求值（驱动探测 VERSION()、SELECT 1 等）。
     let Some(source) = select.source.as_ref()
     else {
-        return plan_source_less_select(select);
+        return plan_source_less_select(select, limit, offset);
     };
     let table = find_table(catalog, source.type_id)?;
     let namespace = format!("table:{}", source.type_id);
@@ -162,8 +166,9 @@ pub fn plan_select_for_dialect(
                 projection_fields,
                 projection_expressions,
                 remaining_predicate,
-                // `LIMIT 0` 按 SQL 语义返回空结果集，单点读同样不能绕过。
-                suppress_rows: select.limit == Some(0),
+                // `LIMIT 0` 按 SQL 语义返回空结果集，单点读同样不能绕过；`OFFSET >= 1`
+                // 会跳过这唯一一行，因此也必须在单点读这一层就抑制。
+                suppress_rows: limit == Some(0) || offset.is_some_and(|value| value > 0),
                 field_types: field_types.clone(),
             }));
         }
@@ -172,14 +177,16 @@ pub fn plan_select_for_dialect(
     // Scan 路径：prefix / after / before 都是 bytes。
     // ORDER BY / GROUP BY / 聚合 / remaining_predicate 时 kv-scan 不设 limit
     // —— 先 filter/aggregate/sort/group 才能知道前 N 行是哪些。
-    // 把 LIMIT/OFFSET 推迟给 execute 层应用。
+    // OFFSET 同样不能下推：kv-scan 只能「取前 N 行」，跳过的行仍要真实扫描，
+    // 所以有 OFFSET 时改为扫全量，再由 execute 层先 skip 再 take。
     let has_order_by = select.order_by.is_some();
     let has_group_by = select.group_by.is_some();
     let has_predicate = remaining_predicate.is_some();
-    let needs_post_filter_limit = has_order_by || has_group_by || has_aggregate || has_predicate || has_window;
-    let kv_limit = if needs_post_filter_limit { 0 } else { select.limit.unwrap_or(0) };
-    let limit_after_sort = if needs_post_filter_limit { select.limit.unwrap_or(0) } else { 0 };
-    let offset_after_sort = if needs_post_filter_limit { select.offset.unwrap_or(0) } else { 0 };
+    let has_offset = offset.unwrap_or(0) > 0;
+    let needs_post_filter_limit = has_order_by || has_group_by || has_aggregate || has_predicate || has_window || has_offset;
+    let kv_limit = if needs_post_filter_limit { 0 } else { limit.unwrap_or(0) };
+    let limit_after_sort = if needs_post_filter_limit { limit.unwrap_or(0) } else { 0 };
+    let offset_after_sort = if needs_post_filter_limit { offset.unwrap_or(0) } else { 0 };
 
     Ok(SqlExecutionPlan::Scan(ScanPlan {
         namespace,
@@ -196,12 +203,58 @@ pub fn plan_select_for_dialect(
         limit_after_sort,
         offset_after_sort,
         nulls_first: dialect.nulls_sort_first(),
-        suppress_rows: select.limit == Some(0),
+        suppress_rows: limit == Some(0),
         has_aggregate,
         has_window,
         distinct: select.distinct,
         field_types,
     }))
+}
+
+/// 把 `LIMIT` / `OFFSET` 表达式折叠成计划里的行数。
+///
+/// SQL 要求这里是非负整数标量。子句在 bind 阶段已经是常量表达式，因此用执行层
+/// 同一个求值器按当前方言求值：参数占位符已由参数层渲染成字面量，算术遵循方言
+/// 语义，`1/0` 这类错误保留自己的类别而不是被折成一个错误行数。
+///
+/// NULL、负数和非整数值都显式拒绝。它们不会被改写成「不限行」或「不跳过」，
+/// 因为那种改写会悄悄改变结果集。
+fn plan_row_count(
+    clause: Option<&SqlCatalogBoundExpression>,
+    keyword: &str,
+    dialect: SqlDialect,
+) -> Result<Option<usize>, SqlFrontendError> {
+    let Some(expression) = clause
+    else {
+        return Ok(None);
+    };
+    match eval_constant(expression, dialect)? {
+        SqlValue::Integer(count) if count < 0 => Err(SqlFrontendError::new(
+            SqlErrorKind::NumericOverflow,
+            format!("SQL {keyword} must not be negative, got {count}"),
+        )),
+        SqlValue::Integer(count) => usize::try_from(count).map(Some).map_err(|_| {
+            SqlFrontendError::new(
+                SqlErrorKind::NumericOverflow,
+                format!("SQL {keyword} count {count} exceeds the addressable row range"),
+            )
+        }),
+        SqlValue::Null => Err(SqlFrontendError::type_mismatch(format!(
+            "SQL {keyword} must be a non-negative integer, NULL is not a row count"
+        ))),
+        SqlValue::Number(value) => Err(SqlFrontendError::type_mismatch(format!(
+            "SQL {keyword} must be an exact non-negative integer, got the numeric value `{value}`"
+        ))),
+        SqlValue::String(_) => Err(SqlFrontendError::type_mismatch(format!(
+            "SQL {keyword} must be an exact non-negative integer, got a text value"
+        ))),
+        SqlValue::Bytes(_) => Err(SqlFrontendError::type_mismatch(format!(
+            "SQL {keyword} must be an exact non-negative integer, got a binary value"
+        ))),
+        SqlValue::Boolean(_) => Err(SqlFrontendError::type_mismatch(format!(
+            "SQL {keyword} must be an exact non-negative integer, got a boolean value"
+        ))),
+    }
 }
 
 /// 计划一个集合运算。每个操作数各自完整计划，合并语义与结果集
@@ -219,6 +272,8 @@ fn plan_set_operation(
     if operands.len() < 2 || operators.len() + 1 != operands.len() {
         return Err(SqlFrontendError::syntax("set operation operands and operators do not line up"));
     }
+    let limit = plan_row_count(limit.as_ref(), "LIMIT", dialect)?;
+    let offset = plan_row_count(offset.as_ref(), "OFFSET", dialect)?;
     let mut planned: Vec<SqlExecutionPlan> = Vec::with_capacity(operands.len());
     for operand in operands {
         planned.push(plan_set_operand(operand, catalog, dialect)?);
@@ -316,11 +371,12 @@ fn resolve_set_operation_order_by(
 /// 再套用 WHERE / 投影 / ORDER BY / LIMIT。主键下推、聚合暂不在网关子集内。
 fn plan_join_select(
     select: SqlCatalogBoundSelect,
+    limit: Option<usize>,
+    offset: Option<usize>,
     catalog: &SqlCatalog,
     dialect: SqlDialect,
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
-    let SqlCatalogBoundSelect { source, joins, projections, predicate, group_by, having, limit, offset, order_by, distinct } =
-        select;
+    let SqlCatalogBoundSelect { source, joins, projections, predicate, group_by, having, order_by, distinct, .. } = select;
     let base = source.ok_or_else(|| planner_error("SQL JOIN requires a FROM table"))?;
     if group_by.is_some() || having.is_some() {
         return Err(planner_error("SQL JOIN with GROUP BY / HAVING is not in the gateway subset yet"));
@@ -438,7 +494,11 @@ fn join_source_plan(
 }
 
 /// 计划一个没有 FROM 的 SELECT：只允许常量与内建函数，不访问任何 namespace。
-fn plan_source_less_select(select: SqlCatalogBoundSelect) -> Result<SqlExecutionPlan, SqlFrontendError> {
+fn plan_source_less_select(
+    select: SqlCatalogBoundSelect,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
     if select.predicate.is_some() {
         return Err(planner_error("SQL WHERE requires a FROM source"));
     }
@@ -466,8 +526,8 @@ fn plan_source_less_select(select: SqlCatalogBoundSelect) -> Result<SqlExecution
     if projections.is_empty() {
         return Err(planner_error("SQL SELECT without FROM requires at least one projection"));
     }
-    // `LIMIT 0` 按 SQL 语义返回空结果集。
-    let suppress_row = select.limit == Some(0);
+    // 无 FROM 的 SELECT 最多产出一行：`LIMIT 0` 或非零 `OFFSET` 都意味着空结果集。
+    let suppress_row = limit == Some(0) || offset.is_some_and(|value| value > 0);
     Ok(SqlExecutionPlan::Scalar(ScalarPlan { projections, suppress_row }))
 }
 

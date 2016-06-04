@@ -370,10 +370,10 @@ pub struct SqlCatalogBoundSelect {
     pub group_by: Option<Vec<SqlCatalogBoundExpression>>,
     /// Resolved optional HAVING expression.
     pub having: Option<SqlCatalogBoundExpression>,
-    /// Optional LIMIT count, propagated from the gateway binder.
-    pub limit: Option<usize>,
-    /// Optional OFFSET count, propagated from the gateway binder.
-    pub offset: Option<usize>,
+    /// Optional `LIMIT` count expression, propagated from the gateway binder.
+    pub limit: Option<SqlCatalogBoundExpression>,
+    /// Optional `OFFSET` count expression, propagated from the gateway binder.
+    pub offset: Option<SqlCatalogBoundExpression>,
     /// Optional ORDER BY items, propagated from the gateway binder.
     pub order_by: Option<Vec<SqlCatalogBoundOrderByItem>>,
     /// Whether the projection list carries the `DISTINCT` modifier.
@@ -502,10 +502,10 @@ pub struct SqlCatalogBoundSetOperation {
     pub operators: Vec<SqlBoundSetOperator>,
     /// `ORDER BY` applied to the combined result, resolved during planning.
     pub order_by: Option<Vec<SqlBoundOrderByItem>>,
-    /// Optional `LIMIT` applied to the combined result.
-    pub limit: Option<usize>,
-    /// Optional `OFFSET` applied to the combined result.
-    pub offset: Option<usize>,
+    /// Optional `LIMIT` count expression applied to the combined result.
+    pub limit: Option<SqlCatalogBoundExpression>,
+    /// Optional `OFFSET` count expression applied to the combined result.
+    pub offset: Option<SqlCatalogBoundExpression>,
 }
 
 /// Gateway-owned SQL request after names are bound to a YYDS catalog revision.
@@ -856,6 +856,8 @@ fn bind_set_operation_in(
     }
     let own_with = take_leading_with(&mut operands);
     let ctes = resolve_cte_scope(own_with, inherited, catalog, variables, scope)?;
+    let limit = bind_row_count(limit, &ctes, catalog, variables)?;
+    let offset = bind_row_count(offset, &ctes, catalog, variables)?;
     let operands = operands
         .into_iter()
         .map(|operand| bind_set_operand(operand, &ctes, scope, catalog, variables))
@@ -1031,8 +1033,8 @@ fn bind_select_in(
         predicate,
         group_by,
         having,
-        limit: select.limit,
-        offset: select.offset,
+        limit: bind_row_count(select.limit, &ctes, catalog, variables)?,
+        offset: bind_row_count(select.offset, &ctes, catalog, variables)?,
         order_by,
         distinct: select.distinct,
     })
@@ -1172,6 +1174,23 @@ fn bind_expression(
             target,
         }),
     }
+}
+
+/// Binds a `LIMIT` / `OFFSET` expression, which has no row context.
+///
+/// The gateway binder already rejected column references, `*` and subqueries
+/// for these clauses, so binding runs against an empty scope. Keeping the
+/// clause in the expression system is what lets the planner fold a parameter or
+/// an arithmetic expression instead of a literal-only special case.
+fn bind_row_count(
+    expression: Option<SqlBoundExpression>,
+    ctes: &[SqlCatalogCte],
+    catalog: &SqlCatalog,
+    variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+) -> Result<Option<SqlCatalogBoundExpression>, SqlFrontendError> {
+    expression
+        .map(|expression| bind_expression(expression, &[], ctes, &SqlCorrelationScope::root(), catalog, variables))
+        .transpose()
 }
 
 /// Resolves a column name against the tables of the directly enclosing query.

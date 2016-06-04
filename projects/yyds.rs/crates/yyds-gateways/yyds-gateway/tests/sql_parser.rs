@@ -69,7 +69,7 @@ fn unsupported_upstream_forms_are_rejected_explicitly() {
 /// 合并结果上的 `ORDER BY` / `LIMIT` 挂在集合运算本身。
 #[test]
 fn set_operations_bind_every_operand_and_the_combined_tail() {
-    use yyds_gateway::{bind_sql, SqlBoundSetOperator, SqlBoundStatement};
+    use yyds_gateway::{bind_sql, SqlBoundExpression, SqlBoundLiteral, SqlBoundSetOperator, SqlBoundStatement};
 
     for (sql, expected) in [
         ("SELECT id FROM users UNION SELECT id FROM users", SqlBoundSetOperator::Union),
@@ -92,8 +92,39 @@ fn set_operations_bind_every_operand_and_the_combined_tail() {
         panic!("expected set operation")
     };
     assert!(set.order_by.is_some_and(|items| items.len() == 1));
-    assert_eq!(set.limit, Some(2));
-    assert_eq!(set.offset, Some(1));
+    assert_eq!(set.limit, Some(SqlBoundExpression::Literal(SqlBoundLiteral::Integer(2))));
+    assert_eq!(set.offset, Some(SqlBoundExpression::Literal(SqlBoundLiteral::Integer(1))));
+}
+
+/// `LIMIT` / `OFFSET` 在 Oak 里是表达式：bind 阶段保留成表达式，只拒绝需要行上下文的形状。
+/// 非字面量的 `OFFSET` 不再被静默丢弃。
+#[test]
+fn limit_and_offset_bind_as_constant_expressions() {
+    use yyds_gateway::{
+        bind_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundStatement, SqlErrorKind,
+    };
+
+    let SqlBoundStatement::Select(select) = bind_sql("SELECT id FROM users LIMIT 5 + 5 OFFSET 2").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    let SqlBoundExpression::Binary { operator, .. } = select.limit.expect("LIMIT expression")
+    else {
+        panic!("expected binary LIMIT expression")
+    };
+    assert_eq!(operator, SqlBoundBinaryOperator::Plus);
+    assert_eq!(select.offset, Some(SqlBoundExpression::Literal(SqlBoundLiteral::Integer(2))));
+
+    for (sql, kind, expected) in [
+        ("SELECT id FROM users LIMIT id", SqlErrorKind::Syntax, "is not constant"),
+        ("SELECT id FROM users LIMIT 2 OFFSET id", SqlErrorKind::Syntax, "is not constant"),
+        ("SELECT id FROM users LIMIT (SELECT 1)", SqlErrorKind::Unsupported, "does not accept a subquery"),
+        ("SELECT id FROM users LIMIT 2 OFFSET (SELECT 1)", SqlErrorKind::Unsupported, "does not accept a subquery"),
+    ] {
+        let error = bind_sql(sql).expect_err("clause shape must be rejected");
+        assert_eq!(error.kind, kind, "`{sql}`: got `{}`", error.message);
+        assert!(error.message.contains(expected), "`{sql}`: got `{}`", error.message);
+    }
 }
 
 /// `INTERSECT` 比 `UNION` / `UNION ALL` / `EXCEPT` 结合更紧，同级运算符左结合。

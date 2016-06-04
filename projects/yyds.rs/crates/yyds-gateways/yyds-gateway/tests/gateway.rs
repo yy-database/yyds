@@ -2890,6 +2890,103 @@ fn sql_set_operation_executes_a_pure_intersect_chain() {
     assert_eq!(result.rows, integer_rows(&[2]));
 }
 
+// --- LIMIT / OFFSET 语义 ---
+
+/// 四行 `users`：`id` 与 `value` 都按 1..4 递增，便于验证跳过与截断。
+fn limit_fixture() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yyds_kv::MemoryShard>) {
+    let catalog = catalog("table users { @@id: i64, value: i64 }\n");
+    let rows: &[(&[u8], &[(u64, &[u8])])] = &[
+        (b"1", &[(1, b"1"), (2, b"10")]),
+        (b"2", &[(1, b"2"), (2, b"20")]),
+        (b"3", &[(1, b"3"), (2, b"30")]),
+        (b"4", &[(1, b"4"), (2, b"40")]),
+    ];
+    let executor = make_executor_with_tables(&[("table:1", rows)]);
+    (catalog, executor)
+}
+
+/// `LIMIT` / `OFFSET` 是常量表达式：计划阶段折叠，参数占位符按既有参数机制渲染后同样是常量。
+#[test]
+fn sql_limit_and_offset_fold_constant_expressions() {
+    let (catalog, executor) = limit_fixture();
+
+    let arithmetic = run_sql(&executor, None, &catalog, "SELECT id FROM users LIMIT 2 + 2");
+    assert_eq!(arithmetic.rows, integer_rows(&[1, 2, 3, 4]));
+
+    let expression_offset = run_sql(&executor, None, &catalog, "SELECT id FROM users LIMIT 1 OFFSET 4 / 2");
+    assert_eq!(expression_offset.rows, integer_rows(&[3]), "OFFSET 4/2 = 2 must skip two rows");
+
+    let rendered = yyds_gateway::substitute_sql_parameters(
+        "SELECT id FROM users LIMIT ?",
+        &[yyds_gateway::SqlValue::Integer(2)],
+        yyds_gateway::SqlParameterStyle::QuestionMark,
+    )
+    .expect("render parameter");
+    let bound = run_sql(&executor, None, &catalog, &rendered);
+    assert_eq!(bound.rows, integer_rows(&[1, 2]));
+}
+
+/// `OFFSET` 在无 `ORDER BY` 与主键单点读路径上都不能被丢弃。
+#[test]
+fn sql_offset_skips_rows_without_order_by_or_scan_pushdown() {
+    let (catalog, executor) = limit_fixture();
+
+    let paged = run_sql(&executor, None, &catalog, "SELECT id FROM users LIMIT 2 OFFSET 1");
+    assert_eq!(paged.rows, integer_rows(&[2, 3]), "OFFSET must skip rows even when kv-scan could push LIMIT down");
+
+    // 单点读最多一行，任何正的 OFFSET 都让结果为空集。
+    let read = run_sql(&executor, None, &catalog, "SELECT id FROM users WHERE id = 1 LIMIT 1 OFFSET 1");
+    assert!(read.rows.is_empty(), "OFFSET 1 must drop the only row of a primary-key read");
+
+    // 无 FROM 的常量 SELECT 也遵守同一套分页语义。
+    let source_less = run_sql(&executor, None, &catalog, "SELECT 7 LIMIT 1 OFFSET 1");
+    assert!(source_less.rows.is_empty());
+}
+
+/// `LIMIT` / `OFFSET` 必须是常量非负整数：NULL、负数、非整数、溢出与除零都显式报错。
+#[test]
+fn sql_limit_and_offset_reject_invalid_counts() {
+    let (catalog, _executor) = limit_fixture();
+
+    // 超出 `i64` 字面量在绑定阶段就被拒绝，其余语义在计划阶段拒绝，两者都是稳定错误。
+    let clause_error = |sql: &str| -> yyds_gateway::SqlFrontendError {
+        let bound = match yyds_gateway::bind_sql_catalog(sql, &catalog, 7) {
+            Ok(bound) => bound,
+            Err(error) => return error,
+        };
+        yyds_gateway::plan_statement(bound, &catalog).expect_err("plan must reject the clause")
+    };
+
+    let null = clause_error("SELECT id FROM users LIMIT NULL");
+    assert_eq!(null.kind, yyds_gateway::SqlErrorKind::TypeMismatch, "{}", null.message);
+    assert!(null.message.contains("NULL is not a row count"), "{}", null.message);
+
+    let negative = clause_error("SELECT id FROM users LIMIT -1");
+    assert_eq!(negative.kind, yyds_gateway::SqlErrorKind::NumericOverflow, "{}", negative.message);
+    assert!(negative.message.contains("must not be negative"), "{}", negative.message);
+
+    let negative_offset = clause_error("SELECT id FROM users LIMIT 1 OFFSET -2");
+    assert_eq!(negative_offset.kind, yyds_gateway::SqlErrorKind::NumericOverflow, "{}", negative_offset.message);
+    assert!(negative_offset.message.contains("must not be negative"), "{}", negative_offset.message);
+
+    let fractional = clause_error("SELECT id FROM users LIMIT 1.5");
+    assert_eq!(fractional.kind, yyds_gateway::SqlErrorKind::TypeMismatch, "{}", fractional.message);
+    assert!(fractional.message.contains("exact non-negative integer"), "{}", fractional.message);
+
+    let text = clause_error("SELECT id FROM users LIMIT 'many'");
+    assert_eq!(text.kind, yyds_gateway::SqlErrorKind::TypeMismatch, "{}", text.message);
+    assert!(text.message.contains("got a text value"), "{}", text.message);
+
+    // 超过 `i64` 的字面量在绑定期就被拒绝，不会被折成 0 或某个近似值。
+    let oversized = clause_error("SELECT id FROM users LIMIT 9223372036854775808");
+    assert_eq!(oversized.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", oversized.message);
+    assert!(oversized.message.contains("out of range"), "{}", oversized.message);
+
+    // 折叠走执行层同一个求值器，因此除零保留自己的错误类别。
+    let division = clause_error("SELECT id FROM users LIMIT 1 / 0");
+    assert_eq!(division.kind, yyds_gateway::SqlErrorKind::DivisionByZero, "{}", division.message);
+}
+
 #[test]
 fn sql_join_rejects_ambiguous_unqualified_columns() {
     let (catalog, _executor) = join_fixture();
