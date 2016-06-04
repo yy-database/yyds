@@ -84,6 +84,30 @@ fn project_resolved_type(ty: &ResolvedCanonicalType) -> SqlFieldType {
     }
 }
 
+/// Human-readable VOS type name extracted from a [`ResolvedCanonicalType`].
+///
+/// Used only for diagnostic messages — the caller maps the resolved type to
+/// [`SqlFieldType`] via [`project_resolved_type`] and keeps the display name as
+/// an opaque hint when the field falls back to `Unknown`.
+fn canonical_type_display_name(ty: &ResolvedCanonicalType) -> String {
+    match ty {
+        ResolvedCanonicalType::Scalar(scalar) => format!("scalar({scalar:?})"),
+        ResolvedCanonicalType::User { path, .. } => path.last().cloned().unwrap_or_else(|| "user".to_string()),
+        ResolvedCanonicalType::Generic { path, arguments } => {
+            let base = path.last().cloned().unwrap_or_else(|| "generic".to_string());
+            if arguments.is_empty() {
+                base
+            }
+            else {
+                format!("{base}<{}>", arguments.len())
+            }
+        }
+        ResolvedCanonicalType::List(inner) => format!("list<{}>", canonical_type_display_name(inner)),
+        ResolvedCanonicalType::Reference(inner) => canonical_type_display_name(inner),
+        ResolvedCanonicalType::Optional(inner) => canonical_type_display_name(inner),
+    }
+}
+
 /// Map a schema-projection VOS type to a gateway-facing [`SqlFieldType`].
 fn project_projection_type(ty: &CanonicalType) -> SqlFieldType {
     match ty {
@@ -121,6 +145,9 @@ pub struct SqlCatalogField {
     pub name: String,
     /// Declared field type projected from the VOS contract.
     pub field_type: SqlFieldType,
+    /// Human-readable VOS type name carried for diagnostics, populated only when
+    /// [`Self::field_type`] falls back to [`SqlFieldType::Unknown`].
+    pub vos_type_name: Option<String>,
 }
 
 /// The gateway's immutable view of one published VOS catalog revision.
@@ -168,10 +195,16 @@ impl SqlCatalog {
                         if field.field_id == 0 || !field_ids.insert(field.field_id) {
                             return Err(catalog_error("invalid or duplicate catalog field identity"));
                         }
+                        let field_type = project_resolved_type(&field.canonical_type);
+                        let vos_type_name = match field_type.inner() {
+                            SqlFieldType::Unknown => Some(canonical_type_display_name(&field.canonical_type)),
+                            _ => None,
+                        };
                         Ok(SqlCatalogField {
                             field_id: field.field_id,
                             name: field.canonical_name.clone(),
-                            field_type: project_resolved_type(&field.canonical_type),
+                            field_type,
+                            vos_type_name,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -659,14 +692,17 @@ fn bind_insert(
                 .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
             cat.fields
                 .iter()
-                .map(|f| SqlCatalogBoundColumn {
-                    type_id: table.type_id,
-                    field_id: f.field_id,
-                    row_id: f.field_id,
-                    table_name: table.name.clone(),
-                    field_name: f.name.clone(),
+                .map(|f| {
+                    reject_unknown_field(f)?;
+                    Ok(SqlCatalogBoundColumn {
+                        type_id: table.type_id,
+                        field_id: f.field_id,
+                        row_id: f.field_id,
+                        table_name: table.name.clone(),
+                        field_name: f.name.clone(),
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, _>>()?
         }
     };
     let field_count = bound_fields.len();
@@ -1558,15 +1594,40 @@ fn find_field_in_table(
     let matches = table.fields.iter().filter(|field| field.name == name).collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Ok(None),
-        [field] => Ok(Some(SqlCatalogBoundColumn {
-            type_id: table.type_id,
-            field_id: field.field_id,
-            row_id: source.row_id(field.field_id),
-            table_name: table.name.clone(),
-            field_name: field.name.clone(),
-        })),
+        [field] => {
+            reject_unknown_field(field)?;
+            Ok(Some(SqlCatalogBoundColumn {
+                type_id: table.type_id,
+                field_id: field.field_id,
+                row_id: source.row_id(field.field_id),
+                table_name: table.name.clone(),
+                field_name: field.name.clone(),
+            }))
+        }
         _ => Err(SqlFrontendError::new(SqlErrorKind::AmbiguousColumn, format!("ambiguous SQL column: {name}"))),
     }
+}
+
+/// Returns an `Unsupported` error when the resolved field type has no SQL
+/// equivalent (the inner type fell back to [`SqlFieldType::Unknown`]).
+///
+/// Called from every path that binds a column reference against a catalog —
+/// SELECT projections, WHERE clauses, JOIN conditions, UPDATE assignments,
+/// INSERT column lists, and `ON CONFLICT DO UPDATE` values. Keeping the check
+/// here instead of letting the execution layer crash lets the binder produce
+/// one clear diagnostic with the original VOS type name.
+pub(crate) fn reject_unknown_field(field: &SqlCatalogField) -> Result<(), SqlFrontendError> {
+    if field.field_type.inner() != SqlFieldType::Unknown {
+        return Ok(());
+    }
+    let vos = field.vos_type_name.as_deref().unwrap_or("unknown");
+    Err(SqlFrontendError::new(
+        SqlErrorKind::Unsupported,
+        format!(
+            "SQL cannot project field `{}`: VOS composite type `{vos}` has no SQL equivalent — use VOS operations instead",
+            field.name
+        ),
+    ))
 }
 
 /// Recursively collects the row-value key of every column reference in an expression,
@@ -1625,4 +1686,129 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
 
 fn catalog_error(message: &str) -> SqlFrontendError {
     SqlFrontendError::catalog(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{plan_statement_for_dialect, SqlDialect};
+
+    /// 造一个 catalog：一张表 `t`，三列：
+    /// `body: bytes`（SQL 可表达），`photo: file`（Unknown），`vec: vector<3>`（Unknown）。
+    fn composite_field_catalog() -> SqlCatalog {
+        SqlCatalog {
+            schema_version: 1,
+            tables: vec![SqlCatalogTable {
+                type_id: 1,
+                name: "t".to_string(),
+                fields: vec![
+                    SqlCatalogField {
+                        field_id: 1,
+                        name: "body".to_string(),
+                        field_type: SqlFieldType::Bytes,
+                        vos_type_name: None,
+                    },
+                    SqlCatalogField {
+                        field_id: 2,
+                        name: "photo".to_string(),
+                        field_type: SqlFieldType::Unknown,
+                        vos_type_name: Some("file".to_string()),
+                    },
+                    SqlCatalogField {
+                        field_id: 3,
+                        name: "vec".to_string(),
+                        field_type: SqlFieldType::Unknown,
+                        vos_type_name: Some("vector<1>".to_string()),
+                    },
+                ],
+            }],
+        }
+    }
+
+    #[test]
+    fn sql_select_composite_field_is_rejected_with_vos_hint() {
+        let catalog = composite_field_catalog();
+        // bytes 列正常通过
+        let ok = bind_sql_catalog("SELECT body FROM t", &catalog, 1);
+        assert!(ok.is_ok(), "bytes 列应该可投影: {ok:?}");
+
+        // file 列被拒绝，错误消息带 vos 类型名
+        let err = bind_sql_catalog("SELECT photo FROM t", &catalog, 1).expect_err("file 列应被拒绝");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
+        assert!(err.message.contains("`file`"), "消息应带 VOS 类型名: {}", err.message);
+        assert!(err.message.contains("has no SQL equivalent"), "消息应提示无 SQL 等价: {}", err.message);
+
+        // vector 列同理
+        let err = bind_sql_catalog("SELECT vec FROM t", &catalog, 1).expect_err("vector 列应被拒绝");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`vec`"), "消息应带字段名: {}", err.message);
+        assert!(err.message.contains("vector"), "消息应带 VOS 类型名: {}", err.message);
+    }
+
+    #[test]
+    fn sql_insert_composite_field_explicit_column_is_rejected() {
+        let catalog = composite_field_catalog();
+        let err = bind_sql_catalog("INSERT INTO t (photo) VALUES (NULL)", &catalog, 1)
+            .expect_err("显式列名写 Unknown 字段应被拒绝");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
+        assert!(err.message.contains("`file`"), "消息应带 VOS 类型名: {}", err.message);
+    }
+
+    #[test]
+    fn sql_insert_composite_field_implicit_column_is_rejected() {
+        let catalog = composite_field_catalog();
+        let err = bind_sql_catalog("INSERT INTO t VALUES (NULL, NULL, NULL)", &catalog, 1)
+            .expect_err("默认列顺序里有 Unknown 字段应被拒绝");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`photo`") || err.message.contains("`vec`"),
+            "应报出第一个 Unknown 字段: {}", err.message);
+    }
+
+    #[test]
+    fn sql_update_composite_field_is_rejected() {
+        let catalog = composite_field_catalog();
+        let err = bind_sql_catalog("UPDATE t SET photo = NULL", &catalog, 1)
+            .expect_err("UPDATE 赋值 Unknown 字段应被拒绝");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
+    }
+
+    #[test]
+    fn sql_select_star_expansion_rejects_composite_fields() {
+        let catalog = composite_field_catalog();
+        let bound = bind_sql_catalog("SELECT * FROM t", &catalog, 1).expect("Star 投影应能通过 bind 阶段");
+        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+            let err = plan_statement_for_dialect(bound.clone(), &catalog, dialect)
+                .expect_err("Star 展开时应拒绝 Unknown 字段");
+            assert_eq!(err.kind, SqlErrorKind::Unsupported);
+            assert!(
+                err.message.contains("`photo`") || err.message.contains("`vec`"),
+                "应报 Unknown 字段: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn sql_select_optional_composite_is_still_rejected() {
+        // Optional<file> 的 inner 是 Unknown，也应被拒绝
+        let catalog = SqlCatalog {
+            schema_version: 1,
+            tables: vec![SqlCatalogTable {
+                type_id: 1,
+                name: "t".to_string(),
+                fields: vec![SqlCatalogField {
+                    field_id: 1,
+                    name: "photo".to_string(),
+                    field_type: SqlFieldType::Optional(Box::new(SqlFieldType::Unknown)),
+                    vos_type_name: Some("file".to_string()),
+                }],
+            }],
+        };
+        let err = bind_sql_catalog("SELECT photo FROM t", &catalog, 1).expect_err("Optional<Unknown> 应被拒绝");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`file`"), "消息应剥掉 Optional 外壳报底层类型: {}", err.message);
+    }
 }

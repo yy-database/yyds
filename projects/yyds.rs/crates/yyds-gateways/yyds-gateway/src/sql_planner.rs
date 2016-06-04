@@ -17,10 +17,11 @@
 
 use crate::{
     catalog_bind::{
-        collect_column_ids, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundConflict, SqlCatalogBoundConflictAction,
-        SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert, SqlCatalogBoundOrderByItem,
-        SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperand, SqlCatalogBoundSetOperation,
-        SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogBoundUpdate, SqlCatalogOuterColumn, SqlFieldType,
+        collect_column_ids, reject_unknown_field, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundConflict,
+        SqlCatalogBoundConflictAction, SqlCatalogBoundDelete, SqlCatalogBoundExpression, SqlCatalogBoundInsert,
+        SqlCatalogBoundOrderByItem, SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundSetOperand,
+        SqlCatalogBoundSetOperation, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogBoundUpdate,
+        SqlCatalogOuterColumn, SqlFieldType,
     },
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundOrderByItem,
@@ -89,6 +90,7 @@ pub fn plan_select_for_dialect(
                 has_non_aggregate = true;
                 let star_table = find_table(catalog, star_table.type_id)?;
                 for field in &star_table.fields {
+                    reject_unknown_field(field)?;
                     projection_fields.push((source.row_id(field.field_id), field.name.clone()));
                 }
             }
@@ -399,6 +401,7 @@ fn plan_join_select(
             SqlCatalogBoundProjection::Star(table) => {
                 let catalog_table = find_table(catalog, table.type_id)?;
                 for field in &catalog_table.fields {
+                    reject_unknown_field(field)?;
                     projection_fields.push((table.row_id(field.field_id), field.name.clone()));
                 }
             }
@@ -698,6 +701,7 @@ fn plan_returning(
         match projection {
             SqlCatalogBoundProjection::Star(_) => {
                 for field in &table.fields {
+                    reject_unknown_field(field)?;
                     planned.push((
                         SqlCatalogBoundExpression::Column(SqlCatalogBoundColumn {
                             type_id: table.type_id,
