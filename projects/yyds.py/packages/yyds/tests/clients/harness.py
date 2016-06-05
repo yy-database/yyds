@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
+REPO_ROOT = Path(__file__).resolve().parents[6]  # yyds.py/packages/yyds/tests/clients → repo root
 CLI_PATH = REPO_ROOT / "projects/yyds.ts/packages/yyds/bin/yyds.mjs"
 SCHEMA_PATH = Path(__file__).with_name("schema.vos")
 SCHEMA_VERSION = 7
