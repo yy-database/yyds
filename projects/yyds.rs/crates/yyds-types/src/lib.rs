@@ -24,7 +24,7 @@ pub use crate::{
     errors::{Error, Result},
     identity::{Namespace, ShardId, CATALOG_SUFFIX, SHARD_SUFFIX},
     key_value::{KeyValueAction, KeyValueCommand, KeyValueResult},
-    replication::{FenceToken, LeaderTerm, ReplicaError, ReplicaMember, ReplicaNodeId, ReplicaRole, ReplicaSet},
+    replication::{FenceToken, LeaderTerm, OwnerEntry, ReplicaError, ReplicaMember, ReplicaNodeId, ReplicaRole, ReplicaSet},
     replication_log::{LogIndex, ReplicaLog, ReplicationEntry, ReplicationError},
     routing::{RouteDecision, RoutingError, ShardEpoch, ShardMap},
     schema::{adopt_catalog_schema, validate_document, CatalogSchema, VOS_GIT_DEV},

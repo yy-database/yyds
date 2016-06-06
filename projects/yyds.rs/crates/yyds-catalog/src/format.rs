@@ -2,12 +2,21 @@
 
 use std::io::{Cursor, Read, Write};
 
-use yyds_types::{CatalogSchema, Error, Result, ShardEpoch, ShardId};
+use yyds_types::{CatalogSchema, Error, LeaderTerm, OwnerEntry, ReplicaNodeId, Result, ShardEpoch, ShardId};
 
 /// Catalog file magic (`YYDS` catalog plane, not `.yydb`).
 pub const MAGIC: &[u8] = b"YYDS\x01";
 
-const FORMAT_VERSION: u32 = 5;
+/// Current catalog on-disk format version.
+///
+/// `5` = schema + routing_epoch + shards + resolved_contract
+/// `6` = v5 + owner list (fencing foundation)
+const FORMAT_VERSION: u32 = 6;
+
+/// Minimum supported catalog format version for decode.
+///
+/// Older catalog files below this are rejected and must be regenerated.
+const MIN_SUPPORTED_VERSION: u32 = 5;
 
 /// Serialize catalog state to `.yyds` bytes.
 pub fn encode(
@@ -15,6 +24,7 @@ pub fn encode(
     routing_epoch: Option<ShardEpoch>,
     shards: &[ShardId],
     resolved_contract: Option<&vos::types::ResolvedContract>,
+    owners: &[OwnerEntry],
 ) -> Result<Vec<u8>> {
     if let Some(contract) = resolved_contract {
         crate::catalog::validate_contract(schema, contract)?;
@@ -75,13 +85,40 @@ pub fn encode(
         None => out.write_all(&0u32.to_le_bytes())?,
     }
 
+    // Owners section (format v6+)
+    if owners.len() > u32::MAX as usize {
+        return Err(Error::Unsupported("too many owner registrations"));
+    }
+    out.write_all(&(owners.len() as u32).to_le_bytes())?;
+    for owner in owners {
+        let shard_bytes = owner.shard_id.0.as_bytes();
+        let node_bytes = owner.node_id.0.as_bytes();
+        if shard_bytes.len() > u32::MAX as usize || node_bytes.len() > u32::MAX as usize {
+            return Err(Error::Unsupported("owner identity too long"));
+        }
+        out.write_all(&(shard_bytes.len() as u32).to_le_bytes())?;
+        out.write_all(shard_bytes)?;
+        out.write_all(&(node_bytes.len() as u32).to_le_bytes())?;
+        out.write_all(node_bytes)?;
+        out.write_all(&owner.leader_term.0.to_le_bytes())?;
+    }
+
     Ok(out)
 }
 
 /// Parse catalog bytes previously written by [`encode`].
+///
+/// Returns `(schema, routing_epoch, shards, resolved_contract, owners)`.
+/// Owners will be an empty Vec when loading an older v5 catalog that has no owner section.
 pub fn decode(
     bytes: &[u8],
-) -> Result<(Option<CatalogSchema>, Option<ShardEpoch>, Vec<ShardId>, Option<vos::types::ResolvedContract>)> {
+) -> Result<(
+    Option<CatalogSchema>,
+    Option<ShardEpoch>,
+    Vec<ShardId>,
+    Option<vos::types::ResolvedContract>,
+    Vec<OwnerEntry>,
+)> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0u8; MAGIC.len()];
     read_exact(&mut cursor, &mut magic)?;
@@ -90,7 +127,7 @@ pub fn decode(
     }
 
     let format_version = read_u32(&mut cursor)?;
-    if format_version != FORMAT_VERSION {
+    if format_version < MIN_SUPPORTED_VERSION || format_version > FORMAT_VERSION {
         return Err(Error::Unsupported("catalog format version requires regeneration"));
     }
 
@@ -141,6 +178,36 @@ pub fn decode(
         _ => return Err(Error::Corrupt("invalid resolved contract presence flag")),
     };
 
+    // Owners section (present in v6+). Older v5 catalogs stop here and get an empty owners vec.
+    let owners = if format_version >= 6 {
+        let owner_count = read_u32(&mut cursor)? as usize;
+        let mut owners = Vec::with_capacity(owner_count);
+        for _ in 0..owner_count {
+            let shard_len = read_u32(&mut cursor)? as usize;
+            let mut shard_bytes = vec![0u8; shard_len];
+            read_exact(&mut cursor, &mut shard_bytes)?;
+            let shard_id =
+                String::from_utf8(shard_bytes).map_err(|_| Error::Corrupt("catalog owner shard utf8"))?;
+
+            let node_len = read_u32(&mut cursor)? as usize;
+            let mut node_bytes = vec![0u8; node_len];
+            read_exact(&mut cursor, &mut node_bytes)?;
+            let node_id = String::from_utf8(node_bytes).map_err(|_| Error::Corrupt("catalog owner node utf8"))?;
+
+            let term = read_u64(&mut cursor)?;
+            owners.push(OwnerEntry {
+                shard_id: ShardId(shard_id),
+                node_id: ReplicaNodeId(node_id),
+                leader_term: LeaderTerm(term),
+            });
+        }
+        owners
+    }
+    else {
+        // v5 catalog: no owner section, default to empty.
+        Vec::new()
+    };
+
     if cursor.position() != bytes.len() as u64 {
         return Err(Error::Corrupt("trailing catalog bytes"));
     }
@@ -149,7 +216,7 @@ pub fn decode(
         crate::catalog::validate_contract(schema.as_ref(), contract)?;
     }
 
-    Ok((schema, routing_epoch, shards, resolved_contract))
+    Ok((schema, routing_epoch, shards, resolved_contract, owners))
 }
 
 fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32> {

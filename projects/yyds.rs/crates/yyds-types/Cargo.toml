@@ -13,12 +13,15 @@ exclude = ["package.json", "tests/**"]
 path = "src/lib.rs"
 
 [dependencies]
+serde = { workspace = true, optional = true }
 vos = { workspace = true }
 
 [dev-dependencies]
+serde_json.workspace = true
 
 [features]
 default = []
+serde = ["dep:serde"]
 
 [package.metadata.docs.rs]
 all-features = true

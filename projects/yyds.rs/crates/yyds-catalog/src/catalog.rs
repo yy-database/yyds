@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use yyds_types::{adopt_catalog_schema, CatalogSchema, Error, Result, ShardEpoch, ShardId, ShardMap, CATALOG_SUFFIX};
+use yyds_types::{
+    adopt_catalog_schema, CatalogSchema, Error, LeaderTerm, OwnerEntry, ReplicaNodeId, Result, ShardEpoch, ShardId,
+    ShardMap, CATALOG_SUFFIX,
+};
 
 use crate::format;
 
@@ -12,12 +15,20 @@ pub struct Catalog {
     resolved_contract: Option<vos::types::ResolvedContract>,
     shards: Vec<ShardId>,
     routing_epoch: Option<ShardEpoch>,
+    owners: Vec<OwnerEntry>,
 }
 
 impl Catalog {
     /// Creates an empty in-memory catalog.
     pub fn open_memory() -> Self {
-        Self { path: None, schema: None, resolved_contract: None, shards: Vec::new(), routing_epoch: None }
+        Self {
+            path: None,
+            schema: None,
+            resolved_contract: None,
+            shards: Vec::new(),
+            routing_epoch: None,
+            owners: Vec::new(),
+        }
     }
 
     /// Opens an existing catalog file or starts an empty catalog at `path`.
@@ -25,16 +36,23 @@ impl Catalog {
         let path = path.as_ref().to_path_buf();
         if path.exists() {
             let bytes = std::fs::read(&path)?;
-            let (schema, routing_epoch, shards, mut resolved_contract) = format::decode(&bytes)?;
+            let (schema, routing_epoch, shards, mut resolved_contract, owners) = format::decode(&bytes)?;
             if resolved_contract.is_none() {
                 if let Some(schema) = schema.as_ref() {
                     resolved_contract = Some(resolved_contract_for_schema(schema)?);
                 }
             }
-            Ok(Self { path: Some(path), schema, resolved_contract, shards, routing_epoch })
+            Ok(Self { path: Some(path), schema, resolved_contract, shards, routing_epoch, owners })
         }
         else {
-            Ok(Self { path: Some(path), schema: None, resolved_contract: None, shards: Vec::new(), routing_epoch: None })
+            Ok(Self {
+                path: Some(path),
+                schema: None,
+                resolved_contract: None,
+                shards: Vec::new(),
+                routing_epoch: None,
+                owners: Vec::new(),
+            })
         }
     }
 
@@ -75,6 +93,31 @@ impl Catalog {
         self.routing_epoch
             .map(|epoch| ShardMap::new(epoch, self.shards.clone()).map_err(|_| Error::Corrupt("invalid catalog routing map")))
             .transpose()
+    }
+
+    /// Current published owner records, one per shard.
+    pub fn owners(&self) -> &[OwnerEntry] {
+        &self.owners
+    }
+
+    /// Sets or replaces the owner for one shard.
+    ///
+    /// The catalog accepts any `LeaderTerm` and `ReplicaNodeId` tuple here;
+    /// fencing validation against the runtime replica set happens in the
+    /// execution layer (Track B).
+    pub fn publish_owner(&mut self, shard_id: ShardId, node_id: ReplicaNodeId, leader_term: LeaderTerm) {
+        if let Some(existing) = self.owners.iter_mut().find(|o| o.shard_id == shard_id) {
+            existing.node_id = node_id;
+            existing.leader_term = leader_term;
+        }
+        else {
+            self.owners.push(OwnerEntry { shard_id, node_id, leader_term });
+        }
+    }
+
+    /// Replaces the entire owner list atomically.
+    pub fn publish_owners(&mut self, owners: Vec<OwnerEntry>) {
+        self.owners = owners;
     }
 
     /// Stores catalog schema truth when empty and rejects mismatched versions thereafter.
@@ -138,7 +181,13 @@ impl Catalog {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let bytes = format::encode(self.schema.as_ref(), self.routing_epoch, &self.shards, self.resolved_contract.as_ref())?;
+        let bytes = format::encode(
+            self.schema.as_ref(),
+            self.routing_epoch,
+            &self.shards,
+            self.resolved_contract.as_ref(),
+            &self.owners,
+        )?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
@@ -244,5 +293,99 @@ mod tests {
     fn catalog_path_uses_yyds_suffix() {
         let path = catalog_path("cluster-a");
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some(CATALOG_SUFFIX));
+    }
+
+    #[test]
+    fn empty_catalog_has_no_owners() {
+        let catalog = Catalog::open_memory();
+        assert!(catalog.owners().is_empty());
+    }
+
+    #[test]
+    fn publish_owner_adds_or_updates() {
+        let mut catalog = Catalog::open_memory();
+        catalog.publish_owner(
+            ShardId("shard-0".into()),
+            ReplicaNodeId("node-a".into()),
+            LeaderTerm(1),
+        );
+        assert_eq!(catalog.owners().len(), 1);
+        assert_eq!(catalog.owners()[0].leader_term, LeaderTerm(1));
+
+        // Same shard_id, higher term — should update, not append.
+        catalog.publish_owner(
+            ShardId("shard-0".into()),
+            ReplicaNodeId("node-a".into()),
+            LeaderTerm(2),
+        );
+        assert_eq!(catalog.owners().len(), 1);
+        assert_eq!(catalog.owners()[0].leader_term, LeaderTerm(2));
+    }
+
+    #[test]
+    fn publish_owners_roundtrip_via_flush_and_reopen() {
+        let dir = boost_fs::temp::create_folder().expect("tempdir");
+        let path = catalog_path(dir.path().join("owner-test"));
+
+        {
+            let mut catalog = Catalog::open(&path).expect("open");
+            catalog.publish_owner(
+                ShardId("shard-0".into()),
+                ReplicaNodeId("node-a".into()),
+                LeaderTerm(1),
+            );
+            catalog.publish_owner(
+                ShardId("shard-1".into()),
+                ReplicaNodeId("node-b".into()),
+                LeaderTerm(3),
+            );
+            catalog.flush().expect("flush");
+        }
+
+        let reopened = Catalog::open(&path).expect("reopen");
+        assert_eq!(reopened.owners().len(), 2);
+        let shard0 = reopened
+            .owners()
+            .iter()
+            .find(|o| o.shard_id == ShardId("shard-0".into()))
+            .expect("shard-0");
+        assert_eq!(shard0.node_id, ReplicaNodeId("node-a".into()));
+        assert_eq!(shard0.leader_term, LeaderTerm(1));
+
+        let shard1 = reopened
+            .owners()
+            .iter()
+            .find(|o| o.shard_id == ShardId("shard-1".into()))
+            .expect("shard-1");
+        assert_eq!(shard1.node_id, ReplicaNodeId("node-b".into()));
+        assert_eq!(shard1.leader_term, LeaderTerm(3));
+    }
+
+    #[test]
+    fn legacy_format_v5_loads_with_empty_owners() {
+        // Build a v5 catalog by downgrading the FORMAT_VERSION in-memory.
+        let dir = boost_fs::temp::create_folder().expect("tempdir");
+        let path = catalog_path(dir.path().join("legacy-v5"));
+
+        // Write a v5 file manually (FORMAT_VERSION = 5) with the old layout.
+        let mut bytes = crate::format::MAGIC.to_vec();
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        // No schema
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // No routing epoch
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        // One shard "legacy-shard"
+        let shard = "legacy-shard".as_bytes();
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&(shard.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(shard);
+        // No resolved contract
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        std::fs::write(&path, &bytes).expect("write legacy v5");
+
+        let catalog = Catalog::open(&path).expect("v5 should load");
+        assert_eq!(catalog.shards(), &[ShardId("legacy-shard".into())]);
+        assert!(catalog.owners().is_empty(), "v5 catalogs default to empty owners");
     }
 }

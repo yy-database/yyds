@@ -1,5 +1,7 @@
 use std::{error, fmt, io, result};
 
+use crate::replication::{FenceToken, OwnerEntry};
+
 /// Convenient alias used across YYDS APIs.
 pub type Result<T> = result::Result<T, Error>;
 
@@ -28,6 +30,8 @@ pub enum Error {
     CasConflict { key: String },
     /// VOS-authored UDF could not be lowered into the distributed execution model.
     Udf { name: String, message: String },
+    /// Incoming fence token does not match the catalog's published owner for that shard.
+    FencingRejected { fence: FenceToken, current: OwnerEntry },
 }
 
 impl fmt::Display for Error {
@@ -48,6 +52,13 @@ impl fmt::Display for Error {
             Self::IntegerOverflow => write!(f, "increment or decrement would overflow"),
             Self::CasConflict { key } => write!(f, "cas conflict on key: {key}"),
             Self::Udf { name, message } => write!(f, "UDF {name}: {message}"),
+            Self::FencingRejected { fence, current } => {
+                write!(
+                    f,
+                    "fencing rejected: fence token (epoch={} term={} leader={}) does not match catalog owner {}",
+                    fence.epoch.0, fence.term.0, fence.leader.0, current
+                )
+            }
         }
     }
 }

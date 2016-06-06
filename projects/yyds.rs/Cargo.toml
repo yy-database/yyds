@@ -30,6 +30,7 @@ yyds-control = { path = "crates/yyds-control" }
 yyds-execution = { path = "crates/yyds-execution" }
 yyds-gateway = { path = "crates/yyds-gateways/yyds-gateway" }
 yyds-gateway-conformance = { path = "crates/yyds-gateways/yyds-gateway-conformance" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "8c85395188b882cef129f32cf5e8588bb91f1186", package = "oak-sql" }
 # Overlaid by local path `projects/yyds.rs/.cargo/config.toml` (git ignored).

@@ -30,6 +30,8 @@ pub struct LeaderTerm(pub u64);
 
 /// A token carried by a write or lease renewal to prove current leadership.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase", deny_unknown_fields))]
 pub struct FenceToken {
     /// Routing epoch for the shard placement.
     pub epoch: ShardEpoch,
@@ -37,6 +39,32 @@ pub struct FenceToken {
     pub term: LeaderTerm,
     /// Node that owns the lease.
     pub leader: ReplicaNodeId,
+}
+
+/// Catalog-published owner record for one shard.
+///
+/// The catalog stores one `OwnerEntry` per shard; the execution layer later
+/// matches an incoming `FenceToken` against this record to reject stale leaders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "camelCase", deny_unknown_fields))]
+pub struct OwnerEntry {
+    /// The shard whose owner this record describes.
+    pub shard_id: crate::identity::ShardId,
+    /// Node currently owning the shard lease.
+    pub node_id: ReplicaNodeId,
+    /// Monotonic leader term that advanced the lease to `node_id`.
+    pub leader_term: LeaderTerm,
+}
+
+impl std::fmt::Display for OwnerEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Owner(shard={} node={} term={})",
+            self.shard_id.0, self.node_id.0, self.leader_term.0
+        )
+    }
 }
 
 /// Validated replica placement for one shard and routing epoch.
