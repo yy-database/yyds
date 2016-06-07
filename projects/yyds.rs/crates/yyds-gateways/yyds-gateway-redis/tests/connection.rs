@@ -80,6 +80,7 @@ fn executor_backed_session_runs_binary_set_get_and_delete_pipeline() {
         LocalExecutor::new(
             ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
             HashMap::from([(shard, MemoryShard::new())]),
+            Vec::new(),
         )
         .unwrap(),
     );
@@ -113,11 +114,12 @@ fn executor_backed_mget_returns_ordered_duplicate_and_null_values() {
         LocalExecutor::new(
             ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
             HashMap::from([(shard, MemoryShard::new())]),
+            Vec::new(),
         )
         .unwrap(),
     );
     let namespace = Namespace("redis:0".into());
-    executor.execute(bind(&[b"SET", b"first", b"value"], &namespace).unwrap()).unwrap();
+    executor.execute(None,bind(&[b"SET", b"first", b"value"], &namespace).unwrap()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let worker = std::thread::spawn(move || {
@@ -141,6 +143,7 @@ fn select_changes_the_namespace_for_the_connection() {
         LocalExecutor::new(
             ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
             HashMap::from([(shard, MemoryShard::new())]),
+            Vec::new(),
         )
         .unwrap(),
     );
@@ -170,6 +173,7 @@ fn executor_server() -> (TcpStream, std::thread::JoinHandle<()>) {
         LocalExecutor::new(
             ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
             HashMap::from([(shard, MemoryShard::new())]),
+            Vec::new(),
         )
         .unwrap(),
     );
@@ -482,6 +486,7 @@ fn multi_exec_session_isolation_two_clients_does_not_leak_state() {
         LocalExecutor::new(
             ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
             HashMap::from([(shard, MemoryShard::new())]),
+            Vec::new(),
         )
         .unwrap(),
     );

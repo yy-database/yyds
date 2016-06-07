@@ -751,7 +751,7 @@ fn execute_read(
             .execute_read_batch(&[command.clone()])
             .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
-            .execute_read_batch(&[command])
+            .execute_read_batch(None, &[command])
             .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
     let result = batch_result.into_iter().next().ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
@@ -932,7 +932,7 @@ fn scan_rows(
             .execute_scan(namespace, prefix, after, before, limit)
             .map_err(|e| execute_error(&format!("TransactionHandle.{operation} failed: {e}"))),
         None => executor
-            .execute_scan(namespace, prefix, after, before, limit)
+            .execute_scan(None, namespace, prefix, after, before, limit)
             .map_err(|e| execute_error(&format!("KeyValueExecutor.{operation} failed: {e}"))),
     }
 }
@@ -1404,7 +1404,7 @@ fn upsert_row(
             Some(handle) => handle
                 .write_if_unchanged(command, Some(existing_bytes))
                 .map_err(|e| write_error(format!("TransactionHandle.upsert failed: {e}"), &e))?,
-            None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?,
+            None => executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?,
         };
         return returning_result(&plan.returning, &plan.field_types, vec![row], 1, dialect);
     }
@@ -1428,7 +1428,7 @@ fn put_if_absent(
     };
     let result = match transaction {
         Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
-        None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
+        None => executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
     };
     match result {
         yyds_types::KeyValueResult::PutIfAbsent { revision } => Ok(revision.is_some()),
@@ -1448,7 +1448,7 @@ fn read_row_bytes(
             .execute_read_batch(&[command])
             .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
-            .execute_read_batch(&[command])
+            .execute_read_batch(None, &[command])
             .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
     Ok(match results.into_iter().next() {
@@ -1579,7 +1579,7 @@ fn ensure_insert_targets_absent(
             .execute_read_batch(&commands)
             .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
-            .execute_read_batch(&commands)
+            .execute_read_batch(None, &commands)
             .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
     if results.iter().any(|result| matches!(result, yyds_types::KeyValueResult::Get(Some(_)))) {
@@ -1601,7 +1601,7 @@ fn execute_update(
             .execute_read_batch(&[get_cmd.clone()])
             .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
-            .execute_read_batch(&[get_cmd])
+            .execute_read_batch(None, &[get_cmd])
             .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
     let existing_bytes = match batch_result.into_iter().next() {
@@ -1634,7 +1634,7 @@ fn execute_update(
         Some(handle) => handle
             .write_if_unchanged(put_cmd, Some(existing_bytes))
             .map_err(|e| write_error(format!("TransactionHandle.update failed: {e}"), &e))?,
-        None => executor.execute(put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
+        None => executor.execute(None, put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
     };
     let _ = put_result;
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 1 })
@@ -1657,7 +1657,7 @@ fn execute_delete(
                 .execute_read_batch(&[get_cmd.clone()])
                 .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
             None => executor
-                .execute_read_batch(&[get_cmd])
+                .execute_read_batch(None, &[get_cmd])
                 .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
         };
         let existing_bytes = match batch_result.into_iter().next() {
@@ -1686,7 +1686,7 @@ fn execute_delete(
         Some(handle) => handle
             .write_if_unchanged(command, pre_image)
             .map_err(|e| write_error(format!("TransactionHandle.delete failed: {e}"), &e))?,
-        None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
+        None => executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
     };
     let affected = match delete_result {
         yyds_types::KeyValueResult::Delete { removed: true } => 1,
@@ -1737,7 +1737,7 @@ fn execute_update_scan(
                 .write_if_unchanged(command, Some(pre_image))
                 .map_err(|e| write_error(format!("TransactionHandle.update_scan failed: {e}"), &e))?,
             None => {
-                executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.update_scan failed: {e}")))?
+                executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.update_scan failed: {e}")))?
             }
         };
         affected += 1;
@@ -1779,7 +1779,7 @@ fn execute_delete_scan(
                 .write_if_unchanged(command, Some(pre_image))
                 .map_err(|e| write_error(format!("TransactionHandle.delete_scan failed: {e}"), &e))?,
             None => {
-                executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete_scan failed: {e}")))?
+                executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete_scan failed: {e}")))?
             }
         };
         if matches!(result, yyds_types::KeyValueResult::Delete { removed: true }) {

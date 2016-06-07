@@ -182,7 +182,7 @@ fn purge_if_expired(state: &mut ConnectionState, executor: Option<&dyn KeyValueE
         if Instant::now() >= *due {
             state.expiries.remove(&ns_key);
             if let Some(executor) = executor {
-                let _ = executor.execute(yyds_types::KeyValueCommand {
+                let _ = executor.execute(None,yyds_types::KeyValueCommand {
                     namespace: Namespace(namespace.to_owned()),
                     key: key.to_vec(),
                     action: yyds_types::KeyValueAction::Delete,
@@ -325,7 +325,7 @@ fn respond(
         // Check the key actually exists (and hasn't just been purged by an expiry).
         let exists = purge_if_expired(state, Some(executor), &namespace.0, key)
             || matches!(
-                executor.execute(yyds_types::KeyValueCommand {
+                executor.execute(None,yyds_types::KeyValueCommand {
                     namespace: namespace.clone(),
                     key: key_owned.clone(),
                     action: yyds_types::KeyValueAction::Exists,
@@ -341,7 +341,7 @@ fn respond(
         if seconds <= 0 {
             // Redis: EXPIRE key 0 behaves like DEL. Remove expiry + key.
             state.expiries.remove(&ns_key);
-            let _ = executor.execute(yyds_types::KeyValueCommand {
+            let _ = executor.execute(None,yyds_types::KeyValueCommand {
                 namespace: namespace.clone(),
                 key: key_owned,
                 action: yyds_types::KeyValueAction::Delete,
@@ -371,7 +371,7 @@ fn respond(
                 for cmd in &commands {
                     let _ = purge_if_expired(state, Some(executor), &cmd.namespace.0, &cmd.key);
                 }
-                match executor.execute_read_batch(&commands) {
+                match executor.execute_read_batch(None,&commands) {
                     Ok(results) => {
                         if results.len() != commands.len()
                             || results.iter().any(|result| !matches!(result, KeyValueResult::Get(_)))
@@ -410,7 +410,7 @@ fn respond(
         let mut present: i64 = 0;
         for key in &request.arguments[1..] {
             let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
-            let result = executor.execute(yyds_types::KeyValueCommand {
+            let result = executor.execute(None,yyds_types::KeyValueCommand {
                 namespace: namespace.clone(),
                 key: (*key).to_vec(),
                 action: yyds_types::KeyValueAction::Exists,
@@ -449,7 +449,7 @@ fn respond(
             return Ok(true);
         }
         let exists = matches!(
-            executor.execute(yyds_types::KeyValueCommand {
+            executor.execute(None,yyds_types::KeyValueCommand {
                 namespace: namespace.clone(),
                 key: key_owned.clone(),
                 action: yyds_types::KeyValueAction::Exists,
@@ -488,7 +488,7 @@ fn respond(
         let key = request.arguments[1];
         let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
         let exists = matches!(
-            executor.execute(yyds_types::KeyValueCommand {
+            executor.execute(None,yyds_types::KeyValueCommand {
                 namespace: namespace.clone(),
                 key: key.to_vec(),
                 action: yyds_types::KeyValueAction::Exists,
@@ -514,7 +514,7 @@ fn respond(
         }
         let key = request.arguments[1];
         let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
-        let value = match executor.execute(yyds_types::KeyValueCommand {
+        let value = match executor.execute(None,yyds_types::KeyValueCommand {
             namespace: namespace.clone(),
             key: key.to_vec(),
             action: yyds_types::KeyValueAction::Get,
@@ -545,7 +545,7 @@ fn respond(
         let key = request.arguments[1];
         let append = request.arguments[2];
         let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
-        let current = match executor.execute(yyds_types::KeyValueCommand {
+        let current = match executor.execute(None,yyds_types::KeyValueCommand {
             namespace: namespace.clone(),
             key: key.to_vec(),
             action: yyds_types::KeyValueAction::Get,
@@ -564,7 +564,7 @@ fn respond(
         let mut merged = current;
         merged.extend_from_slice(append);
         let new_len = merged.len() as i64;
-        match executor.execute(yyds_types::KeyValueCommand {
+        match executor.execute(None,yyds_types::KeyValueCommand {
             namespace: namespace.clone(),
             key: key.to_vec(),
             action: yyds_types::KeyValueAction::Put(merged),
@@ -588,7 +588,7 @@ fn respond(
             let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
         }
         match bind(&request.arguments, &namespace) {
-            Ok(command) => match executor.execute(command) {
+            Ok(command) => match executor.execute(None,command) {
                 Ok(KeyValueResult::Get(Some(value))) => write_bulk(stream, &value)?,
                 Ok(KeyValueResult::Get(None)) => stream.write_all(b"$-1\r\n")?,
                 Ok(KeyValueResult::Exists(exists)) => stream.write_all(if exists { b":1\r\n" } else { b":0\r\n" })?,

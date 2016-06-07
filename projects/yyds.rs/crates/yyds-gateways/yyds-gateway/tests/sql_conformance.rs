@@ -36,7 +36,7 @@ impl Fixture {
         let routing = yyds_types::ShardMap::new(yyds_types::ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
         let mut shards = std::collections::HashMap::new();
         shards.insert(shard_id, MemoryShard::new());
-        let executor = LocalExecutor::new(routing, shards).expect("executor");
+        let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
         Self { catalog, executor: Arc::new(executor), dialect }
     }
 

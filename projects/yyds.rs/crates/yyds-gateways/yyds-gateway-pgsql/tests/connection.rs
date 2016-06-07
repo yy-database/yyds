@@ -401,7 +401,7 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
     let mut shards = std::collections::HashMap::new();
     shards.insert(shard_id, shard);
-    let executor = LocalExecutor::new(routing, shards).expect("executor");
+    let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
     let runtime = Arc::new(PgsqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

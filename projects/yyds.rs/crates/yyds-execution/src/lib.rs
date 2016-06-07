@@ -9,16 +9,26 @@ use std::{
 };
 
 use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
-use yyds_types::{Error, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, ShardId, ShardMap};
+use yyds_types::{Error, FenceToken, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, OwnerEntry, ShardId, ShardMap};
 
 /// Execution surface consumed by protocol adapters.
 pub trait KeyValueExecutor: Debug + Send + Sync {
     /// Routes and applies one namespace-scoped command.
-    fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult>;
+    ///
+    /// `fence` is an optional ownership token that a coordinator passes down to prove it
+    /// still holds the lease for the target shard. When `Some(token)` is supplied, the
+    /// executor must reject the request if its catalog-published owner record no longer
+    /// matches the token's leader and term. `None` skips fencing (single-node gateways).
+    fn execute(&self, fence: Option<&FenceToken>, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult>;
 
     /// Reads an ordered batch atomically, preserving duplicate keys.
     /// Executors without an atomic read contract must reject the request.
-    fn execute_read_batch(&self, _commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
+    fn execute_read_batch(
+        &self,
+        fence: Option<&FenceToken>,
+        _commands: &[KeyValueCommand],
+    ) -> yyds_types::Result<Vec<KeyValueResult>> {
+        let _ = fence;
         Err(Error::Unsupported("atomic batch reads are not implemented by this executor"))
     }
 
@@ -29,12 +39,14 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// by key bytes ascending.
     fn execute_scan(
         &self,
+        fence: Option<&FenceToken>,
         _namespace: &Namespace,
         _prefix: &[u8],
         _after: Option<&[u8]>,
         _before: Option<&[u8]>,
         _limit: usize,
     ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let _ = fence;
         Err(Error::Unsupported("scan is not implemented by this executor"))
     }
 
@@ -42,8 +54,12 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     ///
     /// The default implementation folds over [`KeyValueExecutor::execute`] sequentially.
     /// Executors that can guarantee atomicity across the batch should override this method.
-    fn execute_batch(&self, commands: Vec<KeyValueCommand>) -> yyds_types::Result<Vec<KeyValueResult>> {
-        commands.into_iter().map(|command| self.execute(command)).collect()
+    fn execute_batch(
+        &self,
+        fence: Option<&FenceToken>,
+        commands: Vec<KeyValueCommand>,
+    ) -> yyds_types::Result<Vec<KeyValueResult>> {
+        commands.into_iter().map(|command| self.execute(fence, command)).collect()
     }
 
     /// Commits a buffered transaction with OCC validation.
@@ -56,7 +72,7 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// The default implementation applies all commands directly without OCC re-check.
     fn commit_batch(&self, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
         for entry in batch {
-            self.execute(entry.command)?;
+            self.execute(None, entry.command)?;
         }
         Ok(())
     }
@@ -174,6 +190,8 @@ static EXECUTOR_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 pub struct LocalExecutor<S = FileShard> {
     routing: ShardMap,
     shards: HashMap<ShardId, Mutex<S>>,
+    /// Snapshot of catalog-published owner records used for fencing validation.
+    owners: Vec<OwnerEntry>,
 }
 
 impl<S> LocalExecutor<S>
@@ -181,16 +199,66 @@ where
     S: KvStore + Send + Debug,
 {
     /// Creates a local executor and requires an exact mounted-shard match.
-    pub fn new(routing: ShardMap, shards: HashMap<ShardId, S>) -> yyds_types::Result<Self> {
+    ///
+    /// `owners` is a snapshot of catalog-published shard owners used for fencing
+    /// validation. When the catalog has not yet published any owner, pass an
+    /// empty `Vec` — fencing checks will simply fail closed in that case (no
+    /// request with `Some(fence)` can succeed until owners are published).
+    pub fn new(
+        routing: ShardMap,
+        shards: HashMap<ShardId, S>,
+        owners: Vec<OwnerEntry>,
+    ) -> yyds_types::Result<Self> {
         if shards.len() != routing.shards().len() || routing.shards().iter().any(|shard| !shards.contains_key(shard)) {
             return Err(Error::Unsupported("mounted shards must exactly match the published routing map"));
         }
-        Ok(Self { routing, shards: shards.into_iter().map(|(id, shard)| (id, Mutex::new(shard))).collect() })
+        Ok(Self {
+            routing,
+            shards: shards.into_iter().map(|(id, shard)| (id, Mutex::new(shard))).collect(),
+            owners,
+        })
     }
 
     /// Returns the immutable routing map used by this executor.
     pub fn routing(&self) -> &ShardMap {
         &self.routing
+    }
+
+    /// Returns the current owner snapshot used for fencing validation.
+    pub fn owners(&self) -> &[OwnerEntry] {
+        &self.owners
+    }
+
+    /// Updates the owner snapshot used for fencing validation (e.g. after a catalog reload).
+    pub fn set_owners(&mut self, owners: Vec<OwnerEntry>) {
+        self.owners = owners;
+    }
+
+    /// Checks the optional `fence` token against the catalog-published owner of `shard_id`.
+    ///
+    /// - `None` fence → skip (single-node gateway path).
+    /// - `Some(fence)` → find owner entry for `shard_id`; if missing, or leader/term mismatch,
+    ///   reject with `Error::FencingRejected`.
+    fn check_fence(&self, fence: Option<&FenceToken>, shard_id: &ShardId) -> yyds_types::Result<()> {
+        let Some(fence) = fence else {
+            return Ok(());
+        };
+        let owner = self
+            .owners
+            .iter()
+            .find(|o| o.shard_id == *shard_id)
+            .ok_or_else(|| Error::FencingRejected {
+                fence: fence.clone(),
+                current: OwnerEntry {
+                    shard_id: shard_id.clone(),
+                    node_id: yyds_types::ReplicaNodeId("<unpublished>".to_owned()),
+                    leader_term: yyds_types::LeaderTerm(0),
+                },
+            })?;
+        if fence.leader != owner.node_id || fence.term != owner.leader_term {
+            return Err(Error::FencingRejected { fence: fence.clone(), current: owner.clone() });
+        }
+        Ok(())
     }
 
     /// Runs `f` while holding the executor-wide write lock.
@@ -349,7 +417,7 @@ impl LocalTransactionHandle {
             });
         }
         Ok(
-            match self.executor.execute(KeyValueCommand {
+            match self.executor.execute(None, KeyValueCommand {
                 namespace: Namespace(namespace.to_owned()),
                 key: key.to_vec(),
                 action: KeyValueAction::Get,
@@ -455,7 +523,7 @@ impl TransactionHandle for LocalTransactionHandle {
         // The base scan is requested without a limit so that buffered inserts can still be
         // merged into the ordered result before the caller's limit is applied.
         let mut merged: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> = std::collections::BTreeMap::new();
-        for (key, value) in self.executor.execute_scan(namespace, prefix, after, before, 0)? {
+        for (key, value) in self.executor.execute_scan(None, namespace, prefix, after, before, 0)? {
             merged.insert(key, Some(value));
         }
         let buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
@@ -572,12 +640,20 @@ impl<S> KeyValueExecutor for LocalExecutor<S>
 where
     S: KvStore + Send + Debug,
 {
-    fn execute_read_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
+    fn execute_read_batch(
+        &self,
+        fence: Option<&FenceToken>,
+        commands: &[KeyValueCommand],
+    ) -> yyds_types::Result<Vec<KeyValueResult>> {
         if commands.iter().any(|command| command.action != KeyValueAction::Get) {
             return Err(Error::Unsupported("read batches accept only read actions"));
         }
         let decisions =
             commands.iter().map(|command| self.routing.route(&command.namespace.0, &command.key)).collect::<Vec<_>>();
+        // Fence check: every shard touched by the batch must pass.
+        for decision in &decisions {
+            self.check_fence(fence, &decision.shard)?;
+        }
         let mut guards = HashMap::new();
         for shard_id in self.routing.shards() {
             if decisions.iter().any(|decision| &decision.shard == shard_id) {
@@ -607,6 +683,7 @@ where
 
     fn execute_scan(
         &self,
+        _fence: Option<&FenceToken>,
         namespace: &Namespace,
         prefix: &[u8],
         after: Option<&[u8]>,
@@ -637,11 +714,22 @@ where
         Ok(merge_sorted(&shard_results, limit))
     }
 
-    fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
+    fn execute(&self, fence: Option<&FenceToken>, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
+        let decision = self.routing.route(&command.namespace.0, &command.key);
+        self.check_fence(fence, &decision.shard)?;
         Self::with_global_lock(|| self.execute_single_locked(command))
     }
 
-    fn execute_batch(&self, commands: Vec<KeyValueCommand>) -> yyds_types::Result<Vec<KeyValueResult>> {
+    fn execute_batch(
+        &self,
+        fence: Option<&FenceToken>,
+        commands: Vec<KeyValueCommand>,
+    ) -> yyds_types::Result<Vec<KeyValueResult>> {
+        // Fence check every command against its routed shard up-front.
+        for command in &commands {
+            let decision = self.routing.route(&command.namespace.0, &command.key);
+            self.check_fence(fence, &decision.shard)?;
+        }
         Self::with_global_lock(|| commands.into_iter().map(|command| self.execute_single_locked(command)).collect())
     }
 

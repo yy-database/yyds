@@ -161,7 +161,7 @@ fn handle_insert(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) ->
                 };
                 let key = value_to_key(&id_val);
                 let payload = encode_bson(&doc_with_id);
-                let result = executor.execute(yyds_types::KeyValueCommand {
+                let result = executor.execute(None,yyds_types::KeyValueCommand {
                     namespace: ns.clone(),
                     key,
                     action: yyds_types::KeyValueAction::Put(payload),
@@ -223,7 +223,7 @@ fn handle_find(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> V
 
     let first_batch = if let Some(id_val) = filter.get("_id") {
         let key = value_to_key(id_val);
-        match executor.execute(yyds_types::KeyValueCommand {
+        match executor.execute(None,yyds_types::KeyValueCommand {
             namespace: ns.clone(),
             key,
             action: yyds_types::KeyValueAction::Get,
@@ -251,7 +251,7 @@ fn handle_find(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) -> V
 }
 
 fn scan_all(executor: &dyn KeyValueExecutor, ns: &yyds_types::Namespace, limit: usize) -> Vec<BsonValue> {
-    let results = executor.execute_scan(ns, b"", None, None, 0).unwrap_or_default();
+    let results = executor.execute_scan(None,ns, b"", None, None, 0).unwrap_or_default();
     let mut docs = Vec::new();
     for (_k, value_bytes) in results {
         if let Ok(bson) = parse_bson(&value_bytes) {
@@ -310,7 +310,7 @@ fn handle_delete(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) ->
 
         if let Some(id_value) = filter.get("_id") {
             let key = value_to_key(id_value);
-            if let Ok(yyds_types::KeyValueResult::Delete { removed: true }) = executor.execute(yyds_types::KeyValueCommand {
+            if let Ok(yyds_types::KeyValueResult::Delete { removed: true }) = executor.execute(None,yyds_types::KeyValueCommand {
                 namespace: ns.clone(),
                 key,
                 action: yyds_types::KeyValueAction::Delete,
@@ -319,14 +319,14 @@ fn handle_delete(doc: &BsonDocument, executor: Option<&dyn KeyValueExecutor>) ->
             }
         }
         else {
-            let results = executor.execute_scan(&ns, b"", None, None, 0).unwrap_or_default();
+            let results = executor.execute_scan(None,&ns, b"", None, None, 0).unwrap_or_default();
             let mut removed_so_far = 0;
             for (k, _v) in results {
                 if limit > 0 && removed_so_far >= limit {
                     break;
                 }
                 if let Ok(yyds_types::KeyValueResult::Delete { removed: true }) =
-                    executor.execute(yyds_types::KeyValueCommand {
+                    executor.execute(None,yyds_types::KeyValueCommand {
                         namespace: ns.clone(),
                         key: k,
                         action: yyds_types::KeyValueAction::Delete,

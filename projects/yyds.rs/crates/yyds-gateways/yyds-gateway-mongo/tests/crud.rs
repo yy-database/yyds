@@ -24,6 +24,7 @@ fn executor_server() -> (TcpStream, thread::JoinHandle<()>) {
         LocalExecutor::new(
             ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
             HashMap::from([(shard, MemoryShard::new())]),
+            Vec::new(),
         )
         .unwrap(),
     );

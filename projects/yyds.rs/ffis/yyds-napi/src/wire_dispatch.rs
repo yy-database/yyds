@@ -139,7 +139,7 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                 key: key.into_bytes(),
                 action: KeyValueAction::Get,
             };
-            match ctx.executor.execute(command) {
+            match ctx.executor.execute(None,command) {
                 Ok(yyds_types::KeyValueResult::Get(value)) => Frame::new(MessageType::KvGetOk, id, encode_kv_get_ok(value)),
                 Ok(_) => error_frame(id, KERNEL_CODE, "executor returned unexpected result for Get"),
                 Err(error) => error_frame(id, KERNEL_CODE, error.to_string()),
@@ -155,7 +155,7 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                 key: key.into_bytes(),
                 action: KeyValueAction::Put(value),
             };
-            match ctx.executor.execute(command) {
+            match ctx.executor.execute(None,command) {
                 Ok(yyds_types::KeyValueResult::Put { revision }) => {
                     let _ = revision; // revision not exposed on wire in Phase-1
                     Frame::new(MessageType::KvPutOk, id, Vec::new())
@@ -192,7 +192,7 @@ mod tests {
         let shard = MemoryShard::new();
         let mut shards = HashMap::new();
         shards.insert(shard_id, shard);
-        let executor = LocalExecutor::new(routing, shards).unwrap();
+        let executor = LocalExecutor::new(routing, shards, Vec::new()).unwrap();
         WireContext::new(Arc::new(executor))
     }
 

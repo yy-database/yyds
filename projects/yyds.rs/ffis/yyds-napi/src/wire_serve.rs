@@ -531,7 +531,7 @@ mod tests {
         let shard = MemoryShard::new();
         let mut shards = HashMap::new();
         shards.insert(shard_id, shard);
-        let executor = LocalExecutor::new(routing, shards).unwrap();
+        let executor = LocalExecutor::new(routing, shards, Vec::new()).unwrap();
         WireContext::new(Arc::new(executor)).with_bootstrap_tokens(vec!["t-secret".to_owned(), "t-fallback".to_owned()])
     }
 

@@ -195,7 +195,7 @@ fn make_executor_with_row(
 
     let mut shards = std::collections::HashMap::new();
     shards.insert(shard_id, shard);
-    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+    yyds_execution::LocalExecutor::new(routing, shards, Vec::new()).expect("executor")
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn empty_executor() -> yyds_execution::LocalExecutor<yyds_kv::MemoryShard> {
     let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
     let mut shards = std::collections::HashMap::new();
     shards.insert(shard_id, MemoryShard::new());
-    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+    yyds_execution::LocalExecutor::new(routing, shards, Vec::new()).expect("executor")
 }
 
 /// 三行可空数据：id=1 全 NULL，id=2 空串与 0，id=3 正常字符串与 10。
@@ -383,7 +383,7 @@ fn make_executor_with_rows(
 
     let mut shards = std::collections::HashMap::new();
     shards.insert(shard_id, shard);
-    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+    yyds_execution::LocalExecutor::new(routing, shards, Vec::new()).expect("executor")
 }
 
 #[test]
@@ -2399,7 +2399,7 @@ fn make_executor_with_tables(
 
     let mut shards = std::collections::HashMap::new();
     shards.insert(shard_id, shard);
-    yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
+    yyds_execution::LocalExecutor::new(routing, shards, Vec::new()).expect("executor")
 }
 
 /// `users`(type 1: id=1, name=2) 与 `orders`(type 2: id=3, user_id=4, total=5)。

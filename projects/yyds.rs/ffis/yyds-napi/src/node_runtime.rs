@@ -162,7 +162,7 @@ pub fn open_executor(directory: &Path, catalog_path: Option<&Path>) -> Result<Ar
             .map_err(|error| format!("failed to open shard {} at {}: {error}", shard_id.0, shard_path.display()))?;
         shards.insert(shard_id.clone(), shard);
     }
-    let executor = LocalExecutor::new(routing, shards).map_err(|error| error.to_string())?;
+    let executor = LocalExecutor::new(routing, shards, Vec::new()).map_err(|error| error.to_string())?;
     Ok(Arc::new(executor))
 }
 
