@@ -9,7 +9,9 @@ use std::{
 };
 
 use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
-use yyds_types::{Error, FenceToken, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, OwnerEntry, ShardId, ShardMap};
+use yyds_types::{
+    Error, FenceToken, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, OwnerEntry, ShardId, ShardMap,
+};
 
 /// Execution surface consumed by protocol adapters.
 pub trait KeyValueExecutor: Debug + Send + Sync {
@@ -204,19 +206,11 @@ where
     /// validation. When the catalog has not yet published any owner, pass an
     /// empty `Vec` — fencing checks will simply fail closed in that case (no
     /// request with `Some(fence)` can succeed until owners are published).
-    pub fn new(
-        routing: ShardMap,
-        shards: HashMap<ShardId, S>,
-        owners: Vec<OwnerEntry>,
-    ) -> yyds_types::Result<Self> {
+    pub fn new(routing: ShardMap, shards: HashMap<ShardId, S>, owners: Vec<OwnerEntry>) -> yyds_types::Result<Self> {
         if shards.len() != routing.shards().len() || routing.shards().iter().any(|shard| !shards.contains_key(shard)) {
             return Err(Error::Unsupported("mounted shards must exactly match the published routing map"));
         }
-        Ok(Self {
-            routing,
-            shards: shards.into_iter().map(|(id, shard)| (id, Mutex::new(shard))).collect(),
-            owners,
-        })
+        Ok(Self { routing, shards: shards.into_iter().map(|(id, shard)| (id, Mutex::new(shard))).collect(), owners })
     }
 
     /// Returns the immutable routing map used by this executor.
@@ -240,21 +234,18 @@ where
     /// - `Some(fence)` → find owner entry for `shard_id`; if missing, or leader/term mismatch,
     ///   reject with `Error::FencingRejected`.
     fn check_fence(&self, fence: Option<&FenceToken>, shard_id: &ShardId) -> yyds_types::Result<()> {
-        let Some(fence) = fence else {
+        let Some(fence) = fence
+        else {
             return Ok(());
         };
-        let owner = self
-            .owners
-            .iter()
-            .find(|o| o.shard_id == *shard_id)
-            .ok_or_else(|| Error::FencingRejected {
-                fence: fence.clone(),
-                current: OwnerEntry {
-                    shard_id: shard_id.clone(),
-                    node_id: yyds_types::ReplicaNodeId("<unpublished>".to_owned()),
-                    leader_term: yyds_types::LeaderTerm(0),
-                },
-            })?;
+        let owner = self.owners.iter().find(|o| o.shard_id == *shard_id).ok_or_else(|| Error::FencingRejected {
+            fence: fence.clone(),
+            current: OwnerEntry {
+                shard_id: shard_id.clone(),
+                node_id: yyds_types::ReplicaNodeId("<unpublished>".to_owned()),
+                leader_term: yyds_types::LeaderTerm(0),
+            },
+        })?;
         if fence.leader != owner.node_id || fence.term != owner.leader_term {
             return Err(Error::FencingRejected { fence: fence.clone(), current: owner.clone() });
         }
@@ -417,11 +408,10 @@ impl LocalTransactionHandle {
             });
         }
         Ok(
-            match self.executor.execute(None, KeyValueCommand {
-                namespace: Namespace(namespace.to_owned()),
-                key: key.to_vec(),
-                action: KeyValueAction::Get,
-            })? {
+            match self.executor.execute(
+                None,
+                KeyValueCommand { namespace: Namespace(namespace.to_owned()), key: key.to_vec(), action: KeyValueAction::Get },
+            )? {
                 KeyValueResult::Get(value) => value,
                 _ => unreachable!("Get action always yields Get result"),
             },

@@ -17,71 +17,74 @@ fn redis_binding_executes_binary_values_and_isolates_namespaces() {
     let namespace = Namespace("redis:0".into());
     let key = b"\0\xffkey";
     let value = b"\0\xfevalue";
-    let result = executor.execute(None,bind(&[b"sEt", key, value], &namespace).unwrap()).unwrap();
+    let result = executor.execute(None, bind(&[b"sEt", key, value], &namespace).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Put { revision: 1 });
-    assert_eq!(executor.execute(None,bind(&[b"EXISTS", key], &namespace).unwrap()).unwrap(), KeyValueResult::Exists(true));
-    assert_eq!(executor.execute(None,bind(&[b"EXISTS", b"missing"], &namespace).unwrap()).unwrap(), KeyValueResult::Exists(false));
+    assert_eq!(executor.execute(None, bind(&[b"EXISTS", key], &namespace).unwrap()).unwrap(), KeyValueResult::Exists(true));
     assert_eq!(
-        executor.execute(None,bind(&[b"SET", b"getdel-key", value], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"EXISTS", b"missing"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::Exists(false)
+    );
+    assert_eq!(
+        executor.execute(None, bind(&[b"SET", b"getdel-key", value], &namespace).unwrap()).unwrap(),
         KeyValueResult::Put { revision: 2 },
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"GETDEL", b"getdel-key"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"GETDEL", b"getdel-key"], &namespace).unwrap()).unwrap(),
         KeyValueResult::GetDelete(Some(value.to_vec()))
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"GETDEL", b"getdel-key"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"GETDEL", b"getdel-key"], &namespace).unwrap()).unwrap(),
         KeyValueResult::GetDelete(None)
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"GETSET", b"getset-key", b"new"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"GETSET", b"getset-key", b"new"], &namespace).unwrap()).unwrap(),
         KeyValueResult::GetSet(None),
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"GETSET", b"getset-key", b"replacement"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"GETSET", b"getset-key", b"replacement"], &namespace).unwrap()).unwrap(),
         KeyValueResult::GetSet(Some(b"new".to_vec())),
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"SET", key, b"replacement", b"nx"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"SET", key, b"replacement", b"nx"], &namespace).unwrap()).unwrap(),
         KeyValueResult::PutIfAbsent { revision: None },
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"SET", b"new-key", value, b"NX"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"SET", b"new-key", value, b"NX"], &namespace).unwrap()).unwrap(),
         KeyValueResult::PutIfAbsent { revision: Some(5) },
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"SET", b"new-key", b"updated", b"XX"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"SET", b"new-key", b"updated", b"XX"], &namespace).unwrap()).unwrap(),
         KeyValueResult::PutIfPresent { revision: Some(6) },
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"SET", b"absent", b"updated", b"XX"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"SET", b"absent", b"updated", b"XX"], &namespace).unwrap()).unwrap(),
         KeyValueResult::PutIfPresent { revision: None },
     );
-    let result = executor.execute(None,bind(&[b"GET", key], &namespace).unwrap()).unwrap();
+    let result = executor.execute(None, bind(&[b"GET", key], &namespace).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Get(Some(value.to_vec())));
-    let result = executor.execute(None,bind(&[b"GET", key], &Namespace("redis:1".into())).unwrap()).unwrap();
+    let result = executor.execute(None, bind(&[b"GET", key], &Namespace("redis:1".into())).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Get(None));
     assert_eq!(
-        executor.execute(None,bind(&[b"DECR", b"counter"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"DECR", b"counter"], &namespace).unwrap()).unwrap(),
         KeyValueResult::Increment { value: -1 },
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"DECRBY", b"counter", b"2"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"DECRBY", b"counter", b"2"], &namespace).unwrap()).unwrap(),
         KeyValueResult::Increment { value: -3 },
     );
     assert_eq!(
-        executor.execute(None,bind(&[b"decrby", b"counter", b"-3"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"decrby", b"counter", b"-3"], &namespace).unwrap()).unwrap(),
         KeyValueResult::Increment { value: 0 },
     );
-    executor.execute(None,bind(&[b"SET", b"minimum", b"-9223372036854775808"], &namespace).unwrap()).unwrap();
-    assert!(executor.execute(None,bind(&[b"DECR", b"minimum"], &namespace).unwrap()).is_err());
+    executor.execute(None, bind(&[b"SET", b"minimum", b"-9223372036854775808"], &namespace).unwrap()).unwrap();
+    assert!(executor.execute(None, bind(&[b"DECR", b"minimum"], &namespace).unwrap()).is_err());
     assert_eq!(
-        executor.execute(None,bind(&[b"GET", b"minimum"], &namespace).unwrap()).unwrap(),
+        executor.execute(None, bind(&[b"GET", b"minimum"], &namespace).unwrap()).unwrap(),
         KeyValueResult::Get(Some(b"-9223372036854775808".to_vec())),
     );
-    let result = executor.execute(None,bind(&[b"DEL", key], &namespace).unwrap()).unwrap();
+    let result = executor.execute(None, bind(&[b"DEL", key], &namespace).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Delete { removed: true });
-    let result = executor.execute(None,bind(&[b"DEL", key], &namespace).unwrap()).unwrap();
+    let result = executor.execute(None, bind(&[b"DEL", key], &namespace).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Delete { removed: false });
 }
 

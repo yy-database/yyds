@@ -1749,8 +1749,8 @@ mod tests {
     #[test]
     fn sql_insert_composite_field_explicit_column_is_rejected() {
         let catalog = composite_field_catalog();
-        let err = bind_sql_catalog("INSERT INTO t (photo) VALUES (NULL)", &catalog, 1)
-            .expect_err("显式列名写 Unknown 字段应被拒绝");
+        let err =
+            bind_sql_catalog("INSERT INTO t (photo) VALUES (NULL)", &catalog, 1).expect_err("显式列名写 Unknown 字段应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
         assert!(err.message.contains("`file`"), "消息应带 VOS 类型名: {}", err.message);
@@ -1762,15 +1762,13 @@ mod tests {
         let err = bind_sql_catalog("INSERT INTO t VALUES (NULL, NULL, NULL)", &catalog, 1)
             .expect_err("默认列顺序里有 Unknown 字段应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
-        assert!(err.message.contains("`photo`") || err.message.contains("`vec`"),
-            "应报出第一个 Unknown 字段: {}", err.message);
+        assert!(err.message.contains("`photo`") || err.message.contains("`vec`"), "应报出第一个 Unknown 字段: {}", err.message);
     }
 
     #[test]
     fn sql_update_composite_field_is_rejected() {
         let catalog = composite_field_catalog();
-        let err = bind_sql_catalog("UPDATE t SET photo = NULL", &catalog, 1)
-            .expect_err("UPDATE 赋值 Unknown 字段应被拒绝");
+        let err = bind_sql_catalog("UPDATE t SET photo = NULL", &catalog, 1).expect_err("UPDATE 赋值 Unknown 字段应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
     }
@@ -1780,14 +1778,9 @@ mod tests {
         let catalog = composite_field_catalog();
         let bound = bind_sql_catalog("SELECT * FROM t", &catalog, 1).expect("Star 投影应能通过 bind 阶段");
         for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
-            let err = plan_statement_for_dialect(bound.clone(), &catalog, dialect)
-                .expect_err("Star 展开时应拒绝 Unknown 字段");
+            let err = plan_statement_for_dialect(bound.clone(), &catalog, dialect).expect_err("Star 展开时应拒绝 Unknown 字段");
             assert_eq!(err.kind, SqlErrorKind::Unsupported);
-            assert!(
-                err.message.contains("`photo`") || err.message.contains("`vec`"),
-                "应报 Unknown 字段: {}",
-                err.message
-            );
+            assert!(err.message.contains("`photo`") || err.message.contains("`vec`"), "应报 Unknown 字段: {}", err.message);
         }
     }
 

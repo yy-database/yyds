@@ -19,13 +19,16 @@ fn batch_execution_preserves_order_and_duplicates() {
         Vec::new(),
     )
     .unwrap();
-    executor.execute(None,command(KeyValueAction::Put(b"two".to_vec()), b"second")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"two".to_vec()), b"second")).unwrap();
     let results = executor
-        .execute_read_batch(None, &[
-            command(KeyValueAction::Get, b"second"),
-            command(KeyValueAction::Get, b"missing"),
-            command(KeyValueAction::Get, b"second"),
-        ])
+        .execute_read_batch(
+            None,
+            &[
+                command(KeyValueAction::Get, b"second"),
+                command(KeyValueAction::Get, b"missing"),
+                command(KeyValueAction::Get, b"second"),
+            ],
+        )
         .unwrap();
     assert_eq!(
         results,
@@ -50,17 +53,26 @@ fn local_executor_routes_and_persists_binary_commands() {
         .find(|key| executor.routing().route("redis:0", key).shard == second_shard_id)
         .unwrap();
 
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, &key)).unwrap(), KeyValueResult::Get(None));
-    assert_eq!(executor.execute(None,command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(false));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key)).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(false));
     assert_eq!(
-        executor.execute(None,command(KeyValueAction::Put(vec![0, 0xff, 0x80]), &key)).unwrap(),
+        executor.execute(None, command(KeyValueAction::Put(vec![0, 0xff, 0x80]), &key)).unwrap(),
         KeyValueResult::Put { revision: 1 },
     );
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, &key)).unwrap(), KeyValueResult::Get(Some(vec![0, 0xff, 0x80])),);
-    assert_eq!(executor.execute(None,command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(true));
-    assert_eq!(executor.execute(None,command(KeyValueAction::Delete, &key)).unwrap(), KeyValueResult::Delete { removed: true });
-    assert_eq!(executor.execute(None,command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(false));
-    assert_eq!(executor.execute(None,command(KeyValueAction::Delete, &key)).unwrap(), KeyValueResult::Delete { removed: false });
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, &key)).unwrap(),
+        KeyValueResult::Get(Some(vec![0, 0xff, 0x80])),
+    );
+    assert_eq!(executor.execute(None, command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(true));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Delete, &key)).unwrap(),
+        KeyValueResult::Delete { removed: true }
+    );
+    assert_eq!(executor.execute(None, command(KeyValueAction::Exists, &key)).unwrap(), KeyValueResult::Exists(false));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Delete, &key)).unwrap(),
+        KeyValueResult::Delete { removed: false }
+    );
     assert_eq!(executor.routing().epoch(), ShardEpoch(3));
 
     drop(executor);
@@ -69,10 +81,13 @@ fn local_executor_routes_and_persists_binary_commands() {
     let mut shards = HashMap::new();
     shards.insert(ShardId("shard-a".into()), reopened);
     shards.insert(second_shard_id.clone(), reopened_second);
-    let executor =
-        LocalExecutor::new(ShardMap::new(ShardEpoch(3), vec![ShardId("shard-a".into()), second_shard_id]).unwrap(), shards, Vec::new())
-            .unwrap();
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, &key)).unwrap(), KeyValueResult::Get(None));
+    let executor = LocalExecutor::new(
+        ShardMap::new(ShardEpoch(3), vec![ShardId("shard-a".into()), second_shard_id]).unwrap(),
+        shards,
+        Vec::new(),
+    )
+    .unwrap();
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key)).unwrap(), KeyValueResult::Get(None));
 }
 
 #[test]
@@ -87,28 +102,32 @@ fn increments_are_atomic_persisted_and_errors_do_not_write() {
     let path = directory.path().join("counter.yykv");
     let id = ShardId("counter".into());
     let routing = ShardMap::new(ShardEpoch(1), vec![id.clone()]).unwrap();
-    let executor =
-        std::sync::Arc::new(LocalExecutor::new(routing, HashMap::from([(id, FileShard::open(&path).unwrap())]), Vec::new()).unwrap());
+    let executor = std::sync::Arc::new(
+        LocalExecutor::new(routing, HashMap::from([(id, FileShard::open(&path).unwrap())]), Vec::new()).unwrap(),
+    );
     let mut workers = Vec::new();
     for _ in 0..4 {
         let executor = std::sync::Arc::clone(&executor);
         workers.push(std::thread::spawn(move || {
             for _ in 0..10 {
-                executor.execute(None,command(KeyValueAction::IncrementBy(1), b"counter")).unwrap();
+                executor.execute(None, command(KeyValueAction::IncrementBy(1), b"counter")).unwrap();
             }
         }));
     }
     for worker in workers {
         worker.join().unwrap();
     }
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"counter")).unwrap(), KeyValueResult::Get(Some(b"40".to_vec())));
-    executor.execute(None,command(KeyValueAction::Put(i64::MAX.to_string().into_bytes()), b"max")).unwrap();
-    assert!(executor.execute(None,command(KeyValueAction::IncrementBy(1), b"max")).is_err());
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"counter")).unwrap(),
+        KeyValueResult::Get(Some(b"40".to_vec()))
+    );
+    executor.execute(None, command(KeyValueAction::Put(i64::MAX.to_string().into_bytes()), b"max")).unwrap();
+    assert!(executor.execute(None, command(KeyValueAction::IncrementBy(1), b"max")).is_err());
     for value in [b"01".as_slice(), b"+1", b"-0", b"abc", b""] {
-        executor.execute(None,command(KeyValueAction::Put(value.to_vec()), b"invalid")).unwrap();
-        assert!(executor.execute(None,command(KeyValueAction::IncrementBy(1), b"invalid")).is_err());
+        executor.execute(None, command(KeyValueAction::Put(value.to_vec()), b"invalid")).unwrap();
+        assert!(executor.execute(None, command(KeyValueAction::IncrementBy(1), b"invalid")).is_err());
         assert_eq!(
-            executor.execute(None,command(KeyValueAction::Get, b"invalid")).unwrap(),
+            executor.execute(None, command(KeyValueAction::Get, b"invalid")).unwrap(),
             KeyValueResult::Get(Some(value.to_vec()))
         );
     }
@@ -140,19 +159,19 @@ fn put_if_absent_is_atomic_and_does_not_replace_existing_values() {
     for index in 0..8 {
         let executor = std::sync::Arc::clone(&executor);
         workers.push(std::thread::spawn(move || {
-            executor.execute(None,command(KeyValueAction::PutIfAbsent(vec![index]), b"winner")).unwrap()
+            executor.execute(None, command(KeyValueAction::PutIfAbsent(vec![index]), b"winner")).unwrap()
         }));
     }
     let results = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
     assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::PutIfAbsent { revision: Some(_) })).count(), 1);
     assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::PutIfAbsent { revision: None })).count(), 7);
-    let original = executor.execute(None,command(KeyValueAction::Get, b"winner")).unwrap();
+    let original = executor.execute(None, command(KeyValueAction::Get, b"winner")).unwrap();
     assert!(matches!(original, KeyValueResult::Get(Some(ref value)) if value.len() == 1 && value[0] < 8));
     assert_eq!(
-        executor.execute(None,command(KeyValueAction::PutIfAbsent(b"second".to_vec()), b"winner")).unwrap(),
+        executor.execute(None, command(KeyValueAction::PutIfAbsent(b"second".to_vec()), b"winner")).unwrap(),
         KeyValueResult::PutIfAbsent { revision: None },
     );
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"winner")).unwrap(), original);
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"winner")).unwrap(), original);
 }
 
 #[test]
@@ -166,11 +185,11 @@ fn get_delete_is_atomic_under_competing_readers() {
         )
         .unwrap(),
     );
-    executor.execute(None,command(KeyValueAction::Put(b"payload".to_vec()), b"once")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"payload".to_vec()), b"once")).unwrap();
     let mut workers = Vec::new();
     for _ in 0..8 {
         let executor = std::sync::Arc::clone(&executor);
-        workers.push(std::thread::spawn(move || executor.execute(None,command(KeyValueAction::GetDelete, b"once")).unwrap()));
+        workers.push(std::thread::spawn(move || executor.execute(None, command(KeyValueAction::GetDelete, b"once")).unwrap()));
     }
     let results = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
     assert_eq!(
@@ -181,7 +200,7 @@ fn get_delete_is_atomic_under_competing_readers() {
         1
     );
     assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::GetDelete(None))).count(), 7);
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"once")).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"once")).unwrap(), KeyValueResult::Get(None));
 }
 
 #[test]
@@ -203,7 +222,7 @@ fn scan_merges_multiple_shards_into_globally_sorted_order() {
     let shards = HashMap::from([(shard_a_id, shard_a), (shard_b_id, shard_b)]);
     let executor = LocalExecutor::new(routing, shards, Vec::new()).unwrap();
 
-    let results = executor.execute_scan(None,&Namespace("n".into()), b"", None, None, 0).unwrap();
+    let results = executor.execute_scan(None, &Namespace("n".into()), b"", None, None, 0).unwrap();
     let keys: Vec<&[u8]> = results.iter().map(|(k, _)| k.as_slice()).collect();
     // K-way merge should produce globally sorted order regardless of which shard holds which key
     assert_eq!(keys, vec![b"1", b"3", b"m", b"z"]);
@@ -228,18 +247,18 @@ fn scan_applies_prefix_after_and_limit_globally() {
     let executor = LocalExecutor::new(routing, shards, Vec::new()).unwrap();
 
     // prefix "a-" should merge a-10, a-11, a-20, a-30
-    let r = executor.execute_scan(None,&Namespace("t".into()), b"a-", None, None, 0).unwrap();
+    let r = executor.execute_scan(None, &Namespace("t".into()), b"a-", None, None, 0).unwrap();
     assert_eq!(r.len(), 4);
     let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
     assert_eq!(keys, vec![b"a-10", b"a-11", b"a-20", b"a-30"]);
 
     // after "a-11" exclusive: a-20, a-30 only
-    let r = executor.execute_scan(None,&Namespace("t".into()), b"a-", Some(b"a-11"), None, 0).unwrap();
+    let r = executor.execute_scan(None, &Namespace("t".into()), b"a-", Some(b"a-11"), None, 0).unwrap();
     let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
     assert_eq!(keys, vec![b"a-20", b"a-30"]);
 
     // limit 2 on full scan: first two globally
-    let r = executor.execute_scan(None,&Namespace("t".into()), b"", None, None, 2).unwrap();
+    let r = executor.execute_scan(None, &Namespace("t".into()), b"", None, None, 2).unwrap();
     let keys: Vec<&[u8]> = r.iter().map(|(k, _)| k.as_slice()).collect();
     assert_eq!(keys, vec![b"a-10", b"a-11"]);
 }
@@ -261,9 +280,9 @@ fn transaction_handle_exposes_begin_commit_and_rollback_contract() {
     );
 
     // Pre-populate one key so we know the plain executor round-trips correctly.
-    executor.execute(None,command(KeyValueAction::Put(b"initial".to_vec()), b"seed")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"initial".to_vec()), b"seed")).unwrap();
     assert_eq!(
-        executor.execute(None,command(KeyValueAction::Get, b"seed")).unwrap(),
+        executor.execute(None, command(KeyValueAction::Get, b"seed")).unwrap(),
         KeyValueResult::Get(Some(b"initial".to_vec()))
     );
 
@@ -272,14 +291,14 @@ fn transaction_handle_exposes_begin_commit_and_rollback_contract() {
     typed_handle.execute(command(KeyValueAction::Put(b"hello".to_vec()), b"val")).unwrap();
     typed_handle.commit().unwrap();
 
-    let result = executor.execute(None,command(KeyValueAction::Get, b"val")).unwrap();
+    let result = executor.execute(None, command(KeyValueAction::Get, b"val")).unwrap();
     assert_eq!(result, KeyValueResult::Get(Some(b"hello".to_vec())));
 
     // Second handle proves multiple transactions can be opened from the same executor.
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.execute(command(KeyValueAction::IncrementBy(41), b"counter")).unwrap();
     handle.commit().unwrap();
-    let counter = executor.execute(None,command(KeyValueAction::IncrementBy(1), b"counter")).unwrap();
+    let counter = executor.execute(None, command(KeyValueAction::IncrementBy(1), b"counter")).unwrap();
     assert_eq!(counter, KeyValueResult::Increment { value: 42 });
 
     // Rollback is a valid terminal action.
@@ -305,13 +324,13 @@ fn rollback_discards_insert() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Get, b"foo")).unwrap();
+    executor.execute(None, command(KeyValueAction::Get, b"foo")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.execute(command(KeyValueAction::Put(b"bar".to_vec()), b"foo")).unwrap();
     handle.rollback();
 
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"foo")).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"foo")).unwrap(), KeyValueResult::Get(None));
 }
 
 #[test]
@@ -319,14 +338,14 @@ fn rollback_discards_update_keeping_original() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"original".to_vec()), b"key")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"original".to_vec()), b"key")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"key")).unwrap();
     handle.rollback();
 
     assert_eq!(
-        executor.execute(None,command(KeyValueAction::Get, b"key")).unwrap(),
+        executor.execute(None, command(KeyValueAction::Get, b"key")).unwrap(),
         KeyValueResult::Get(Some(b"original".to_vec()))
     );
 }
@@ -341,7 +360,10 @@ fn commit_persists_insert() {
     handle.execute(command(KeyValueAction::Put(b"hello".to_vec()), b"foo")).unwrap();
     handle.commit().unwrap();
 
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"foo")).unwrap(), KeyValueResult::Get(Some(b"hello".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"foo")).unwrap(),
+        KeyValueResult::Get(Some(b"hello".to_vec()))
+    );
 }
 
 #[test]
@@ -349,13 +371,16 @@ fn commit_persists_update() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"old".to_vec()), b"key")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"old".to_vec()), b"key")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"key")).unwrap();
     handle.commit().unwrap();
 
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"key")).unwrap(), KeyValueResult::Get(Some(b"new".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"key")).unwrap(),
+        KeyValueResult::Get(Some(b"new".to_vec()))
+    );
 }
 
 #[test]
@@ -371,7 +396,7 @@ fn transaction_sees_own_writes_before_commit() {
     assert_eq!(handle.execute(command(KeyValueAction::Get, b"temp")).unwrap(), KeyValueResult::Get(Some(b"pending".to_vec())));
 
     // Outside, the plain executor still sees nothing.
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"temp")).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"temp")).unwrap(), KeyValueResult::Get(None));
 
     handle.rollback();
 }
@@ -381,7 +406,7 @@ fn transaction_read_batch_merges_snapshot_view() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"original".to_vec()), b"k1")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"original".to_vec()), b"k1")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.execute(command(KeyValueAction::Put(b"txn-v".to_vec()), b"k1")).unwrap();
@@ -399,7 +424,7 @@ fn transaction_delete_is_undone_by_rollback() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"alive".to_vec()), b"k")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"alive".to_vec()), b"k")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     assert_eq!(handle.execute(command(KeyValueAction::Delete, b"k")).unwrap(), KeyValueResult::Delete { removed: true });
@@ -410,7 +435,10 @@ fn transaction_delete_is_undone_by_rollback() {
     handle.rollback();
 
     // After rollback the plain executor sees the original.
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"alive".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(),
+        KeyValueResult::Get(Some(b"alive".to_vec()))
+    );
 }
 
 #[test]
@@ -418,8 +446,8 @@ fn transaction_scan_merges_buffered_writes_over_base() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"base".to_vec()), b"a")).unwrap();
-    executor.execute(None,command(KeyValueAction::Put(b"base".to_vec()), b"c")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"base".to_vec()), b"a")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"base".to_vec()), b"c")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.execute(command(KeyValueAction::Put(b"txn".to_vec()), b"b")).unwrap();
@@ -430,7 +458,7 @@ fn transaction_scan_merges_buffered_writes_over_base() {
     assert_eq!(rows, vec![(b"a".to_vec(), b"txn".to_vec()), (b"b".to_vec(), b"txn".to_vec())]);
 
     // Base store is untouched until commit.
-    let base_rows = executor.execute_scan(None,&Namespace("redis:0".into()), b"", None, None, 0).unwrap();
+    let base_rows = executor.execute_scan(None, &Namespace("redis:0".into()), b"", None, None, 0).unwrap();
     assert_eq!(base_rows, vec![(b"a".to_vec(), b"base".to_vec()), (b"c".to_vec(), b"base".to_vec())]);
 
     handle.rollback();
@@ -466,7 +494,7 @@ fn write_if_unchanged_occ_rejects_stale_pre_image_at_commit() {
     use yyds_types::Error;
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
 
     // Both transactions read the same pre-image, then both try a read-modify-write Put.
     let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
@@ -478,7 +506,7 @@ fn write_if_unchanged_occ_rejects_stale_pre_image_at_commit() {
     let err = t2.commit().unwrap_err();
     assert!(matches!(err, Error::CasConflict { .. }), "expected CasConflict, got: {err:?}");
 
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"t1".to_vec())));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"t1".to_vec())));
 }
 
 #[test]
@@ -487,17 +515,17 @@ fn write_if_unchanged_delete_rejects_recreated_key_at_commit() {
     use yyds_types::Error;
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.write_if_unchanged(command(KeyValueAction::Delete, b"k"), Some(b"pre".to_vec())).unwrap();
 
     // Concurrent writer replaces the pre-image before the delete commits.
-    executor.execute(None,command(KeyValueAction::Put(b"new".to_vec()), b"k")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"new".to_vec()), b"k")).unwrap();
 
     let err = handle.commit().unwrap_err();
     assert!(matches!(err, Error::CasConflict { .. }), "expected CasConflict, got: {err:?}");
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"new".to_vec())));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"new".to_vec())));
 }
 
 #[test]
@@ -505,13 +533,16 @@ fn transaction_increment_rollback_leaves_base_untouched() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    executor.execute(None,command(KeyValueAction::Put(b"10".to_vec()), b"counter")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"10".to_vec()), b"counter")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
     handle.execute(command(KeyValueAction::IncrementBy(5), b"counter")).unwrap();
     handle.rollback();
 
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"counter")).unwrap(), KeyValueResult::Get(Some(b"10".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"counter")).unwrap(),
+        KeyValueResult::Get(Some(b"10".to_vec()))
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -543,7 +574,7 @@ fn concurrent_put_if_absent_occ_rejects_late_commit() {
 
     // base 里最终值只能是 t1 的写入（"first"），不能是 "second"
     assert_eq!(
-        executor.execute(None,command(KeyValueAction::Get, b"race-key")).unwrap(),
+        executor.execute(None, command(KeyValueAction::Get, b"race-key")).unwrap(),
         KeyValueResult::Get(Some(b"first".to_vec()))
     );
 }
@@ -561,14 +592,17 @@ fn put_if_absent_vs_external_put_occ() {
     handle.execute(command(KeyValueAction::PutIfAbsent(b"txn-val".to_vec()), b"k")).unwrap();
 
     // 外部在事务 commit 之前先无条件 Put 同一个 key
-    executor.execute(None,command(KeyValueAction::Put(b"external".to_vec()), b"k")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"external".to_vec()), b"k")).unwrap();
 
     // 事务 commit → OCC check base → key 已存在 → CasConflict
     let err = handle.commit().unwrap_err();
     assert!(matches!(err, Error::CasConflict { .. }));
 
     // 外部写入不受影响
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"external".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(),
+        KeyValueResult::Get(Some(b"external".to_vec()))
+    );
 }
 
 /// OCC re-check 使用纯 base store，不会被自己 transaction buffer 里的写入误导。
@@ -593,7 +627,7 @@ fn unconditional_put_overrides_prior_conditional_in_buffer() {
     handle.commit().unwrap();
 
     assert_eq!(
-        executor.execute(None,command(KeyValueAction::Get, b"k")).unwrap(),
+        executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(),
         KeyValueResult::Get(Some(b"unconditional".to_vec()))
     );
 }
@@ -617,15 +651,18 @@ fn single_occ_failure_aborts_entire_batch() {
     txn.execute(command(KeyValueAction::PutIfAbsent(b"t1-b".to_vec()), b"b")).unwrap();
 
     // 外部先写 "b"
-    executor.execute(None,command(KeyValueAction::Put(b"ext-b".to_vec()), b"b")).unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"ext-b".to_vec()), b"b")).unwrap();
 
     let err = txn.commit().unwrap_err();
     assert!(matches!(err, Error::CasConflict { .. }), "expected CasConflict, got {err:?}");
 
     // "a" 也不应该被写入（整个 batch 被 abort）
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"a")).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"a")).unwrap(), KeyValueResult::Get(None));
     // "b" 保持外部写入
-    assert_eq!(executor.execute(None,command(KeyValueAction::Get, b"b")).unwrap(), KeyValueResult::Get(Some(b"ext-b".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"b")).unwrap(),
+        KeyValueResult::Get(Some(b"ext-b".to_vec()))
+    );
 }
 
 /// 全局锁保证并发 PutIfAbsent 同一 key 只有一个事务能成功 commit。
@@ -663,7 +700,7 @@ fn global_lock_serialises_concurrent_commits() {
 
     // 验证 base 里确实有值
     assert_eq!(
-        executor.execute(None,command(KeyValueAction::Get, b"shared")).unwrap(),
+        executor.execute(None, command(KeyValueAction::Get, b"shared")).unwrap(),
         KeyValueResult::Get(Some(b"winner".to_vec()))
     );
 }
@@ -691,9 +728,7 @@ fn fencing_pass_when_token_matches_catalog_owner() {
     let executor = make_fence_test_executor(owners);
 
     let fence = Some(FenceToken { epoch: ShardEpoch(1), term, leader: node_a });
-    let result = executor
-        .execute(fence.as_ref(), command(KeyValueAction::Put(b"hello".to_vec()), b"k"))
-        .unwrap();
+    let result = executor.execute(fence.as_ref(), command(KeyValueAction::Put(b"hello".to_vec()), b"k")).unwrap();
     assert!(matches!(result, KeyValueResult::Put { .. }));
 
     // 读也应该通过
@@ -714,9 +749,7 @@ fn fencing_rejects_when_node_id_has_switched() {
 
     // 旧 leader（node-a / term=3）携带过期 fence 发起请求
     let stale_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: node_a });
-    let err = executor
-        .execute(stale_fence.as_ref(), command(KeyValueAction::Put(b"stale".to_vec()), b"k"))
-        .unwrap_err();
+    let err = executor.execute(stale_fence.as_ref(), command(KeyValueAction::Put(b"stale".to_vec()), b"k")).unwrap_err();
 
     match err {
         yyds_types::Error::FencingRejected { fence, current } => {
@@ -738,9 +771,7 @@ fn fencing_rejects_when_term_only_mismatches() {
 
     // 同一个 node，但是 term 过期了
     let stale_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(5), leader: node_a });
-    let err = executor
-        .execute(stale_fence.as_ref(), command(KeyValueAction::Put(b"x".to_vec()), b"k"))
-        .unwrap_err();
+    let err = executor.execute(stale_fence.as_ref(), command(KeyValueAction::Put(b"x".to_vec()), b"k")).unwrap_err();
 
     assert!(matches!(err, yyds_types::Error::FencingRejected { .. }));
 }
@@ -750,11 +781,7 @@ fn fencing_rejects_when_shard_has_no_published_owner() {
     // 空 owners 快照 — coordinator 过早调用 fence
     let executor = make_fence_test_executor(Vec::new());
 
-    let fence = Some(FenceToken {
-        epoch: ShardEpoch(1),
-        term: LeaderTerm(1),
-        leader: ReplicaNodeId("node-a".to_owned()),
-    });
+    let fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(1), leader: ReplicaNodeId("node-a".to_owned()) });
     let err = executor.execute(fence.as_ref(), command(KeyValueAction::Put(b"x".to_vec()), b"k")).unwrap_err();
     assert!(matches!(err, yyds_types::Error::FencingRejected { .. }));
 }
@@ -784,11 +811,9 @@ fn fencing_guards_execute_read_batch() {
     // 先通过 fence=None 写入一些数据
     executor.execute(None, command(KeyValueAction::Put(b"v1".to_vec()), b"k")).unwrap();
 
-    let stale_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
-    let batch = vec![
-        command(KeyValueAction::Get, b"k"),
-        command(KeyValueAction::Get, b"k"),
-    ];
+    let stale_fence =
+        Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
+    let batch = vec![command(KeyValueAction::Get, b"k"), command(KeyValueAction::Get, b"k")];
     let err = executor.execute_read_batch(stale_fence.as_ref(), &batch).unwrap_err();
     assert!(matches!(err, yyds_types::Error::FencingRejected { .. }));
 
@@ -804,17 +829,12 @@ fn fencing_guards_execute_batch() {
     let owners = vec![OwnerEntry { shard_id, node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
     let executor = make_fence_test_executor(owners);
 
-    let stale_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
-    let batch = vec![
-        command(KeyValueAction::Put(b"x1".to_vec()), b"k1"),
-        command(KeyValueAction::Put(b"x2".to_vec()), b"k2"),
-    ];
+    let stale_fence =
+        Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
+    let batch = vec![command(KeyValueAction::Put(b"x1".to_vec()), b"k1"), command(KeyValueAction::Put(b"x2".to_vec()), b"k2")];
     let err = executor.execute_batch(stale_fence.as_ref(), batch).unwrap_err();
     assert!(matches!(err, yyds_types::Error::FencingRejected { .. }));
 
     // 确保没有东西被写入（fence 在 batch 执行前被拒绝）
-    assert_eq!(
-        executor.execute(None, command(KeyValueAction::Get, b"k1")).unwrap(),
-        KeyValueResult::Get(None)
-    );
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k1")).unwrap(), KeyValueResult::Get(None));
 }

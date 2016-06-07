@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use yyds_types::{
-    adopt_catalog_schema, CatalogSchema, Error, LeaderTerm, OwnerEntry, ReplicaNodeId, Result, ShardEpoch, ShardId,
-    ShardMap, CATALOG_SUFFIX,
+    adopt_catalog_schema, CatalogSchema, Error, LeaderTerm, OwnerEntry, ReplicaNodeId, Result, ShardEpoch, ShardId, ShardMap,
+    CATALOG_SUFFIX,
 };
 
 use crate::format;
@@ -21,14 +21,7 @@ pub struct Catalog {
 impl Catalog {
     /// Creates an empty in-memory catalog.
     pub fn open_memory() -> Self {
-        Self {
-            path: None,
-            schema: None,
-            resolved_contract: None,
-            shards: Vec::new(),
-            routing_epoch: None,
-            owners: Vec::new(),
-        }
+        Self { path: None, schema: None, resolved_contract: None, shards: Vec::new(), routing_epoch: None, owners: Vec::new() }
     }
 
     /// Opens an existing catalog file or starts an empty catalog at `path`.
@@ -304,20 +297,12 @@ mod tests {
     #[test]
     fn publish_owner_adds_or_updates() {
         let mut catalog = Catalog::open_memory();
-        catalog.publish_owner(
-            ShardId("shard-0".into()),
-            ReplicaNodeId("node-a".into()),
-            LeaderTerm(1),
-        );
+        catalog.publish_owner(ShardId("shard-0".into()), ReplicaNodeId("node-a".into()), LeaderTerm(1));
         assert_eq!(catalog.owners().len(), 1);
         assert_eq!(catalog.owners()[0].leader_term, LeaderTerm(1));
 
         // Same shard_id, higher term — should update, not append.
-        catalog.publish_owner(
-            ShardId("shard-0".into()),
-            ReplicaNodeId("node-a".into()),
-            LeaderTerm(2),
-        );
+        catalog.publish_owner(ShardId("shard-0".into()), ReplicaNodeId("node-a".into()), LeaderTerm(2));
         assert_eq!(catalog.owners().len(), 1);
         assert_eq!(catalog.owners()[0].leader_term, LeaderTerm(2));
     }
@@ -329,34 +314,18 @@ mod tests {
 
         {
             let mut catalog = Catalog::open(&path).expect("open");
-            catalog.publish_owner(
-                ShardId("shard-0".into()),
-                ReplicaNodeId("node-a".into()),
-                LeaderTerm(1),
-            );
-            catalog.publish_owner(
-                ShardId("shard-1".into()),
-                ReplicaNodeId("node-b".into()),
-                LeaderTerm(3),
-            );
+            catalog.publish_owner(ShardId("shard-0".into()), ReplicaNodeId("node-a".into()), LeaderTerm(1));
+            catalog.publish_owner(ShardId("shard-1".into()), ReplicaNodeId("node-b".into()), LeaderTerm(3));
             catalog.flush().expect("flush");
         }
 
         let reopened = Catalog::open(&path).expect("reopen");
         assert_eq!(reopened.owners().len(), 2);
-        let shard0 = reopened
-            .owners()
-            .iter()
-            .find(|o| o.shard_id == ShardId("shard-0".into()))
-            .expect("shard-0");
+        let shard0 = reopened.owners().iter().find(|o| o.shard_id == ShardId("shard-0".into())).expect("shard-0");
         assert_eq!(shard0.node_id, ReplicaNodeId("node-a".into()));
         assert_eq!(shard0.leader_term, LeaderTerm(1));
 
-        let shard1 = reopened
-            .owners()
-            .iter()
-            .find(|o| o.shard_id == ShardId("shard-1".into()))
-            .expect("shard-1");
+        let shard1 = reopened.owners().iter().find(|o| o.shard_id == ShardId("shard-1".into())).expect("shard-1");
         assert_eq!(shard1.node_id, ReplicaNodeId("node-b".into()));
         assert_eq!(shard1.leader_term, LeaderTerm(3));
     }

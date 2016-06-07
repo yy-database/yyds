@@ -139,7 +139,7 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                 key: key.into_bytes(),
                 action: KeyValueAction::Get,
             };
-            match ctx.executor.execute(None,command) {
+            match ctx.executor.execute(None, command) {
                 Ok(yyds_types::KeyValueResult::Get(value)) => Frame::new(MessageType::KvGetOk, id, encode_kv_get_ok(value)),
                 Ok(_) => error_frame(id, KERNEL_CODE, "executor returned unexpected result for Get"),
                 Err(error) => error_frame(id, KERNEL_CODE, error.to_string()),
@@ -155,7 +155,7 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                 key: key.into_bytes(),
                 action: KeyValueAction::Put(value),
             };
-            match ctx.executor.execute(None,command) {
+            match ctx.executor.execute(None, command) {
                 Ok(yyds_types::KeyValueResult::Put { revision }) => {
                     let _ = revision; // revision not exposed on wire in Phase-1
                     Frame::new(MessageType::KvPutOk, id, Vec::new())

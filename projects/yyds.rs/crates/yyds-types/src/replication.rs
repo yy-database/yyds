@@ -59,11 +59,7 @@ pub struct OwnerEntry {
 
 impl std::fmt::Display for OwnerEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Owner(shard={} node={} term={})",
-            self.shard_id.0, self.node_id.0, self.leader_term.0
-        )
+        write!(f, "Owner(shard={} node={} term={})", self.shard_id.0, self.node_id.0, self.leader_term.0)
     }
 }
 

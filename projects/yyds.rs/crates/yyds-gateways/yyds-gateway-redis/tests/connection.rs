@@ -119,7 +119,7 @@ fn executor_backed_mget_returns_ordered_duplicate_and_null_values() {
         .unwrap(),
     );
     let namespace = Namespace("redis:0".into());
-    executor.execute(None,bind(&[b"SET", b"first", b"value"], &namespace).unwrap()).unwrap();
+    executor.execute(None, bind(&[b"SET", b"first", b"value"], &namespace).unwrap()).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let worker = std::thread::spawn(move || {

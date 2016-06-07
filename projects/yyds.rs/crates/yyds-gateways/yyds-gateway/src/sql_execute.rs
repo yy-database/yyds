@@ -1404,7 +1404,9 @@ fn upsert_row(
             Some(handle) => handle
                 .write_if_unchanged(command, Some(existing_bytes))
                 .map_err(|e| write_error(format!("TransactionHandle.upsert failed: {e}"), &e))?,
-            None => executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?,
+            None => {
+                executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?
+            }
         };
         return returning_result(&plan.returning, &plan.field_types, vec![row], 1, dialect);
     }
@@ -1736,9 +1738,9 @@ fn execute_update_scan(
             Some(handle) => handle
                 .write_if_unchanged(command, Some(pre_image))
                 .map_err(|e| write_error(format!("TransactionHandle.update_scan failed: {e}"), &e))?,
-            None => {
-                executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.update_scan failed: {e}")))?
-            }
+            None => executor
+                .execute(None, command)
+                .map_err(|e| execute_error(&format!("KeyValueExecutor.update_scan failed: {e}")))?,
         };
         affected += 1;
     }
@@ -1778,9 +1780,9 @@ fn execute_delete_scan(
             Some(handle) => handle
                 .write_if_unchanged(command, Some(pre_image))
                 .map_err(|e| write_error(format!("TransactionHandle.delete_scan failed: {e}"), &e))?,
-            None => {
-                executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete_scan failed: {e}")))?
-            }
+            None => executor
+                .execute(None, command)
+                .map_err(|e| execute_error(&format!("KeyValueExecutor.delete_scan failed: {e}")))?,
         };
         if matches!(result, yyds_types::KeyValueResult::Delete { removed: true }) {
             affected += 1;

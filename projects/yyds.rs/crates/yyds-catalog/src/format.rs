@@ -112,13 +112,7 @@ pub fn encode(
 /// Owners will be an empty Vec when loading an older v5 catalog that has no owner section.
 pub fn decode(
     bytes: &[u8],
-) -> Result<(
-    Option<CatalogSchema>,
-    Option<ShardEpoch>,
-    Vec<ShardId>,
-    Option<vos::types::ResolvedContract>,
-    Vec<OwnerEntry>,
-)> {
+) -> Result<(Option<CatalogSchema>, Option<ShardEpoch>, Vec<ShardId>, Option<vos::types::ResolvedContract>, Vec<OwnerEntry>)> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0u8; MAGIC.len()];
     read_exact(&mut cursor, &mut magic)?;
@@ -186,8 +180,7 @@ pub fn decode(
             let shard_len = read_u32(&mut cursor)? as usize;
             let mut shard_bytes = vec![0u8; shard_len];
             read_exact(&mut cursor, &mut shard_bytes)?;
-            let shard_id =
-                String::from_utf8(shard_bytes).map_err(|_| Error::Corrupt("catalog owner shard utf8"))?;
+            let shard_id = String::from_utf8(shard_bytes).map_err(|_| Error::Corrupt("catalog owner shard utf8"))?;
 
             let node_len = read_u32(&mut cursor)? as usize;
             let mut node_bytes = vec![0u8; node_len];
