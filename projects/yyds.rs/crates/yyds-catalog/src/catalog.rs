@@ -329,5 +329,4 @@ mod tests {
         assert_eq!(shard1.node_id, ReplicaNodeId("node-b".into()));
         assert_eq!(shard1.leader_term, LeaderTerm(3));
     }
-
 }

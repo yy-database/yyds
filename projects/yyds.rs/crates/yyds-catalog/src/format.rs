@@ -179,11 +179,7 @@ pub fn decode(
         let node_id = String::from_utf8(node_bytes).map_err(|_| Error::Corrupt("catalog owner node utf8"))?;
 
         let term = read_u64(&mut cursor)?;
-        owners.push(OwnerEntry {
-            shard_id: ShardId(shard_id),
-            node_id: ReplicaNodeId(node_id),
-            leader_term: LeaderTerm(term),
-        });
+        owners.push(OwnerEntry { shard_id: ShardId(shard_id), node_id: ReplicaNodeId(node_id), leader_term: LeaderTerm(term) });
     }
 
     if cursor.position() != bytes.len() as u64 {
