@@ -21,3 +21,7 @@ module-name = "yyds_pyo3"
 python-source = "src"
 python-packages = ["yyds"]
 exclude = ["**/__pycache__/**", "**/*.pyc", "dist/**"]
+
+[tool.pytest.ini_options]
+python_files = ["test_*.py", "harness_*.py"]
+testpaths = ["tests"]
