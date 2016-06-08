@@ -330,31 +330,4 @@ mod tests {
         assert_eq!(shard1.leader_term, LeaderTerm(3));
     }
 
-    #[test]
-    fn legacy_format_v5_loads_with_empty_owners() {
-        // Build a v5 catalog by downgrading the FORMAT_VERSION in-memory.
-        let dir = boost_fs::temp::create_folder().expect("tempdir");
-        let path = catalog_path(dir.path().join("legacy-v5"));
-
-        // Write a v5 file manually (FORMAT_VERSION = 5) with the old layout.
-        let mut bytes = crate::format::MAGIC.to_vec();
-        bytes.extend_from_slice(&5u32.to_le_bytes());
-        // No schema
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        // No routing epoch
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        // One shard "legacy-shard"
-        let shard = "legacy-shard".as_bytes();
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&(shard.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(shard);
-        // No resolved contract
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-
-        std::fs::write(&path, &bytes).expect("write legacy v5");
-
-        let catalog = Catalog::open(&path).expect("v5 should load");
-        assert_eq!(catalog.shards(), &[ShardId("legacy-shard".into())]);
-        assert!(catalog.owners().is_empty(), "v5 catalogs default to empty owners");
-    }
 }

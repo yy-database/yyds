@@ -102,7 +102,7 @@ fn older_catalog_bytes_are_rejected_instead_of_silently_reinterpreted() {
     let dir = create_folder().expect("tempdir");
     let path = catalog_path(dir.path().join("legacy"));
     let mut bytes = yyds_catalog::MAGIC.to_vec();
-    bytes.extend_from_slice(&4u32.to_le_bytes());
+    bytes.extend_from_slice(&7u32.to_le_bytes());
     fs::write(&path, &bytes).expect("legacy file");
     let error = Catalog::open(&path).expect_err("legacy catalog must not load");
     assert!(error.to_string().contains("requires regeneration"), "{error}");
