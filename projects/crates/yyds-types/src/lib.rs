@@ -11,10 +11,12 @@ mod schema;
 
 pub use crate::errors::{Error, Result};
 pub use crate::execution::{
-    EvalError, FileRef, LayoutField, Node, Program, RecordLayout, RecordLayoutError,
+    Approximation, Consistency, DistributedPlan, EvalError, Exchange, FileRef, Fragment,
+    FragmentId, FragmentRole, LayoutField, Node, PlanValidationError, Program, RecordLayout,
+    RecordLayoutError,
     RecordValue, RecordValueError, Type, Udf, UdfEffect, UdfPlacement, UdfValidationError,
-    ValidatedProgram, ValidatedUdf, ValidationError, Value, VectorMetric, VectorValue,
-    VectorValueError,
+    ValidatedDistributedPlan, ValidatedProgram, ValidatedUdf, ValidationError, Value,
+    VectorMetric, VectorValue, VectorValueError, RetryPolicy,
 };
 pub use crate::identity::{CATALOG_SUFFIX, Namespace, SHARD_SUFFIX, ShardId};
 pub use crate::schema::{CatalogSchema, VOS_GIT_DEV, adopt_catalog_schema, validate_document};
