@@ -1,5 +1,6 @@
 use yyds_types::{
-    FileRef, Node, Program, RecordValue, Type, ValidatedProgram, Value, VectorMetric, VectorValue,
+    FileRef, LayoutField, Node, Program, RecordLayout, RecordValue, Type, ValidatedProgram, Value,
+    VectorMetric, VectorValue,
 };
 
 #[test]
@@ -44,4 +45,19 @@ fn yyds_preserves_schema_identified_records() {
     assert_eq!(record.schema_id(), 11);
     assert_eq!(record.fields().len(), 2);
     assert_eq!(Value::Record(record).ty(), Type::Record { schema_id: 11, field_count: 2 });
+}
+
+#[test]
+fn yyds_preserves_published_record_layouts() {
+    let layout = RecordLayout::new(
+        11,
+        vec![LayoutField {
+            field_id: 101,
+            index: 0,
+            ty: Type::I64,
+        }],
+    )
+    .expect("record layout is valid");
+    assert_eq!(layout.schema_id(), 11);
+    assert_eq!(layout.fields()[0].field_id, 101);
 }
