@@ -13,7 +13,11 @@ mod sql;
 
 pub use crate::config::GatewayConfig;
 pub use crate::kind::{GatewayKind, ALL_GATEWAY_KINDS};
-pub use crate::sql::{parse_sql, SqlFrontendError};
+pub use crate::sql::{
+    bind_sql, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral,
+    SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
+    SqlFrontendError,
+};
 
 /// Legacy surfaces that must never be revived as YYDS product paths.
 pub const FORBIDDEN_LEGACY_SURFACES: &[&str] = &[
