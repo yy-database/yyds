@@ -10,6 +10,7 @@ repository = "https://github.com/yy-database/yyds"
 
 [workspace.dependencies]
 yyds-types = { path = "projects/crates/yyds-types" }
+yyds-kv = { path = "projects/crates/yyds-kv" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 napi-build = "2"
