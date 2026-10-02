@@ -13,6 +13,7 @@ exclude = ["package.json", "tests/**"]
 path = "src/lib.rs"
 
 [dependencies]
+yy-execution = { workspace = true }
 vos = { workspace = true }
 
 [dev-dependencies]

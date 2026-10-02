@@ -9,8 +9,9 @@ mod identity;
 mod schema;
 
 pub use crate::errors::{Error, Result};
-pub use crate::identity::{Namespace, ShardId, CATALOG_SUFFIX, SHARD_SUFFIX};
-pub use crate::schema::{adopt_catalog_schema, validate_document, CatalogSchema, VOS_GIT_DEV};
+pub use crate::identity::{CATALOG_SUFFIX, Namespace, SHARD_SUFFIX, ShardId};
+pub use crate::schema::{CatalogSchema, VOS_GIT_DEV, adopt_catalog_schema, validate_document};
+pub use yy_execution::{EvalError, Node, Program, Type, ValidatedProgram, ValidationError, Value};
 
 /// Returns the `yyds-types` crate version.
 pub fn version() -> &'static str {
