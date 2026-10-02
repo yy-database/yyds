@@ -5,9 +5,10 @@
 #![doc(html_favicon_url = "https://raw.githubusercontent.com/oovm/shape-rs/dev/projects/images/Trapezohedron.svg")]
 
 mod errors;
-mod type_system;
+mod identity;
 
-pub use crate::errors::{Result, ScriptErrorKind};
+pub use crate::errors::{Error, Result};
+pub use crate::identity::{Namespace, ShardId, CATALOG_SUFFIX, SHARD_SUFFIX};
 
 /// Returns the `yyds-types` crate version.
 pub fn version() -> &'static str {
