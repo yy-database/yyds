@@ -13,6 +13,9 @@ Rust monorepo for the YYDS scripting runtime.
 | `projects/packages/yyds` | TypeScript facade (`@yyds/yyds`) |
 | `projects/packages/yyds-unknown-wasm32` | WASM artifacts for browsers |
 | `projects/packages/yyds-*` | Platform Node-API binaries |
+| `projects/packages/redis` | Redis disguise (`@yyds/redis`) |
+| `projects/packages/mysql` | MySQL disguise (`@yyds/mysql`) |
+| `projects/packages/postgresql` | PostgreSQL disguise (`@yyds/postgresql`) |
 | `scripts/` | Workspace tooling (`format`, `build:napi`, `build:wasm`) |
 
 ## Change the initial commit

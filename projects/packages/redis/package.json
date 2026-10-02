@@ -1,0 +1,61 @@
+{
+    "name": "@yyds/redis",
+    "version": "0.1.0",
+    "description": "Pretend you installed Redis. YYDS scripting runtime underneath.",
+    "license": "MPL-2.0",
+    "private": true,
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./src/index.ts",
+            "import": "./src/index.ts",
+            "default": "./src/index.ts"
+        },
+        "./node": {
+            "types": "./src/node.ts",
+            "import": "./src/node.ts",
+            "default": "./src/node.ts"
+        }
+    },
+    "bin": {
+        "redis-server": "./bin/redis-server.mjs",
+        "redis-cli": "./bin/redis-cli.mjs"
+    },
+    "files": [
+        "bin",
+        "src",
+        "readme.md"
+    ],
+    "scripts": {
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\""
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/packages/redis"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/packages/redis#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "keywords": [
+        "yyds",
+        "redis",
+        "disguise"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "dependencies": {
+        "@yyds/yyds": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.0",
+        "typescript": "^5.9.2"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}
