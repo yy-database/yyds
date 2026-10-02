@@ -1,7 +1,7 @@
 use yyds_types::{Node, Program, Type, Udf, UdfEffect, UdfPlacement, Value};
 
 #[test]
-fn yyds_evaluates_a_manually_constructed_shared_udf() {
+fn yyds_evaluates_a_manually_constructed_distributed_udf() {
     let udf = Udf {
         id: "score.add".into(),
         version: 1,
@@ -21,7 +21,7 @@ fn yyds_evaluates_a_manually_constructed_shared_udf() {
         },
     }
     .validate()
-    .expect("shared UDF program is valid");
+    .expect("distributed UDF program is valid");
 
     assert_eq!(udf.id(), "score.add");
     assert_eq!(udf.evaluate(&[], &[Value::I64(4), Value::I64(6)]), Ok(Value::I64(10)));
