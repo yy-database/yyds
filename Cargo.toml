@@ -25,7 +25,7 @@ yyds-catalog = { path = "projects/crates/yyds-catalog" }
 yyds-sqlite = { path = "projects/crates/sqlite" }
 yy-execution = { git = "https://github.com/yy-database/yydb.git", rev = "30e4c2f20c3d2a12127117b6de934f9ec1a003d5", package = "yy-execution" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
-oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "bae6a23507545ba922910424ec6c85b80aa52d23", package = "oak-sql" }
+oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "424dd544c57f2d9e40b248056ab12a1725ae932f", package = "oak-sql" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 napi-build = "2"
