@@ -1,7 +1,15 @@
-Rust Template Project
-=====================
+YYDS
+====
 
-Rust template project for monorepo
+Rust monorepo for the YYDS scripting runtime.
+
+## Layout
+
+| Path | Role |
+|------|------|
+| `projects/crates/*` | Rust workspace crates |
+| `projects/packages/*` | pnpm workspace packages |
+| `scripts/` | Workspace tooling |
 
 ## Change the initial commit
 
