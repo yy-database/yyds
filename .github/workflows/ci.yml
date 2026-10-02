@@ -35,6 +35,7 @@ jobs:
       - run: cargo build -p yyds-napi --release
       - run: cargo build -p yyds-wasm --release
       - run: cargo build -p yyds-catalog --release
+      - run: cargo build -p yyds-gateway --release
 
   ts:
     name: pnpm packages
