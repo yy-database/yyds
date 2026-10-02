@@ -6,11 +6,14 @@
         "fmt": "node scripts/format.mjs",
         "fmt:check": "node scripts/format.mjs --check",
         "test": "cargo test --release --workspace",
+        "build:napi": "node scripts/build-napi.mjs",
+        "build:wasm": "node scripts/build-wasm.mjs",
         "p": "git push && git push --tags --prune",
         "u": "cargo upgrade --pinned"
     },
     "packageManager": "pnpm@10.18.3",
     "devDependencies": {
-        "@biomejs/biome": "^2.4.8"
+        "@biomejs/biome": "^2.4.8",
+        "@napi-rs/cli": "^2.18.4"
     }
 }
