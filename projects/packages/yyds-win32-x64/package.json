@@ -1,0 +1,24 @@
+{
+    "name": "@yyds/yyds-win32-x64",
+    "version": "0.1.0",
+    "description": "YYDS Node-API binary for Windows x64",
+    "license": "MPL-2.0",
+    "private": true,
+    "type": "module",
+    "main": "./index.js",
+    "files": ["index.js", "lib", "readme.md"],
+    "os": ["win32"],
+    "cpu": ["x64"],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/packages/yyds-win32-x64"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/packages/yyds-win32-x64#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "publishConfig": {
+        "access": "public"
+    }
+}

@@ -1,0 +1,68 @@
+{
+    "name": "@yyds/yyds",
+    "version": "0.1.0",
+    "description": "YYDS scripting runtime for TypeScript and Node.js",
+    "license": "MPL-2.0",
+    "private": true,
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": {
+            "types": "./src/browser/index.ts",
+            "browser": "./src/browser/index.ts",
+            "default": "./src/browser/index.ts"
+        },
+        "./node": {
+            "types": "./src/node/index.ts",
+            "node": "./src/node/index.ts",
+            "default": "./src/node/unsupported.ts"
+        },
+        "./wasm": {
+            "types": "./src/wasm/index.ts",
+            "browser": "./src/wasm/index.ts",
+            "default": "./src/wasm/index.ts"
+        }
+    },
+    "files": [
+        "src"
+    ],
+    "scripts": {
+        "typecheck": "tsc --noEmit -p tsconfig.json",
+        "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\""
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/yy-database/yyds.git",
+        "directory": "projects/packages/yyds"
+    },
+    "homepage": "https://github.com/yy-database/yyds/tree/dev/projects/packages/yyds#readme",
+    "bugs": {
+        "url": "https://github.com/yy-database/yyds/issues"
+    },
+    "keywords": [
+        "yyds",
+        "scripting",
+        "typescript",
+        "wasm",
+        "napi"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "dependencies": {
+        "@yyds/yyds-unknown-wasm32": "workspace:*"
+    },
+    "optionalDependencies": {
+        "@yyds/yyds-win32-x64": "workspace:*",
+        "@yyds/yyds-linux-x64": "workspace:*",
+        "@yyds/yyds-darwin-x64": "workspace:*",
+        "@yyds/yyds-darwin-arm64": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^22.15.0",
+        "typescript": "^5.9.2"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}
