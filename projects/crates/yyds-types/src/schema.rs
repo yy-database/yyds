@@ -21,23 +21,16 @@ pub struct CatalogSchema {
 
 /// Validate a schema document before it becomes catalog truth.
 ///
-/// Today `vos-parser` on `dev` is still scaffolding, so this performs host-side
-/// checks and keeps the git-backed `vos` crate linked as the language authority.
-/// When `vos::parser` exposes a stable check/parse API, this function will call
-/// into it and map diagnostics to [`Error::Schema`].
+/// Uses the Oak-backed VOS parser and semantic checker before catalog publication.
 pub fn validate_document(document: &str) -> Result<()> {
-    let _span = vos::ast::Span {
-        start: 0,
-        end: document.len(),
-    };
-    let _ = core::any::type_name::<vos::ast::Span>();
-
     if document.contains('\0') {
         return Err(Error::Schema {
             message: "VOS schema document must not contain NUL bytes".into(),
         });
     }
-    Ok(())
+    vos::parser::parse_document(document)
+        .map(|_| ())
+        .map_err(|diagnostics| Error::Schema { message: diagnostics.to_string() })
 }
 
 /// Validate and adopt a catalog schema revision.
