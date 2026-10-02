@@ -14,6 +14,7 @@ repository = "https://github.com/yy-database/yyds"
 vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", branch = "dev" }
 yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
+yyds-catalog = { path = "projects/crates/yyds-catalog" }
 napi = { version = "2", default-features = false, features = ["napi4"] }
 napi-derive = "2"
 napi-build = "2"

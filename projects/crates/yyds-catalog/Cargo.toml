@@ -1,0 +1,17 @@
+[package]
+name = "yyds-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Distributed `.yyds` catalog lifecycle for YYDS"
+publish = false
+readme = "readme.md"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+yyds-types = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
