@@ -4,6 +4,8 @@ target/
 # Node
 node_modules/
 dist/
+.env.placeholder.local
+.cache/
 
 # IDEs
 .idea/
