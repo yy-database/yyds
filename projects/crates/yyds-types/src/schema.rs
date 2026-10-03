@@ -21,16 +21,14 @@ pub struct CatalogSchema {
 
 /// Validate a schema document before it becomes catalog truth.
 ///
-/// Uses the Oak-backed VOS parser and semantic checker before catalog publication.
+/// Uses Oak parsing and VOS semantic projection before catalog publication.
 pub fn validate_document(document: &str) -> Result<()> {
     if document.contains('\0') {
         return Err(Error::Schema {
             message: "VOS schema document must not contain NUL bytes".into(),
         });
     }
-    vos::parser::parse_document(document)
-        .map(|_| ())
-        .map_err(|diagnostics| Error::Schema { message: diagnostics.to_string() })
+    vos::validate_schema(document).map(|_| ()).map_err(|message| Error::Schema { message })
 }
 
 /// Validate and adopt a catalog schema revision.
