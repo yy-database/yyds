@@ -55,7 +55,8 @@ impl SqlCatalog {
         if schema_version == 0 {
             return Err(catalog_error("catalog schema version must be nonzero"));
         }
-        contract.validate().map_err(|error| {
+        let artifact = contract.to_json().map_err(|_| catalog_error("resolved contract encode failed"))?;
+        vos::ResolvedContract::from_json(&artifact).map_err(|error| {
             catalog_error(&format!("invalid resolved VOS contract {}: {}", error.code, error.message))
         })?;
         let mut type_ids = std::collections::BTreeSet::new();

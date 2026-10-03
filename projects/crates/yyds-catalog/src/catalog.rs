@@ -35,7 +35,12 @@ impl Catalog {
         let path = path.as_ref().to_path_buf();
         if path.exists() {
             let bytes = std::fs::read(&path)?;
-            let (schema, identity, routing_epoch, shards, resolved_contract) = format::decode(&bytes)?;
+            let (schema, identity, routing_epoch, shards, mut resolved_contract) = format::decode(&bytes)?;
+            if resolved_contract.is_none() {
+                if let (Some(schema), Some(identity)) = (schema.as_ref(), identity.as_ref()) {
+                    resolved_contract = Some(resolved_contract_for_schema(schema, Some(identity))?);
+                }
+            }
             Ok(Self {
                 path: Some(path),
                 schema,
@@ -66,7 +71,7 @@ impl Catalog {
         self.schema.as_ref()
     }
 
-    /// Published VOS identity snapshot used by gateways and distributed planners.
+    /// Legacy identity ledger retained only for migration of older catalog files.
     pub fn identity(&self) -> Option<&vos::ast::CatalogSnapshot> {
         self.identity.as_ref()
     }
@@ -111,33 +116,35 @@ impl Catalog {
                 expected: version,
                 found: schema.version,
             }),
-            Some(_) => Ok(()),
+            Some(_) => {
+                if self.resolved_contract.is_none() {
+                    self.resolved_contract = Some(resolved_contract_for_schema(
+                        self.schema.as_ref().expect("schema exists"),
+                        self.identity.as_ref(),
+                    )?);
+                }
+                Ok(())
+            }
             None => {
-                self.schema = Some(adopt_catalog_schema(version, document)?);
-                let parsed = vos::parser::parse_document(document)
-                    .map_err(|diagnostics| Error::Schema { message: diagnostics.to_string() })?;
-                self.identity = Some(vos::catalog_from_document(&parsed).map_err(|message| {
-                    Error::Schema { message }
-                })?);
+                let schema = adopt_catalog_schema(version, document)?;
+                let contract = resolved_contract_for_schema(&schema, None)?;
+                self.schema = Some(schema);
+                self.resolved_contract = Some(contract);
                 Ok(())
             }
         }
     }
 
-    /// Explicitly publishes an identity snapshot for a legacy catalog that lacks one.
+    /// Initializes a resolved contract for a schema-only legacy catalog.
     pub fn initialize_identity(&mut self) -> Result<()> {
-        if self.identity.is_some() {
+        if self.resolved_contract.is_some() {
             return Ok(());
         }
         let schema = self
             .schema
             .as_ref()
             .ok_or(Error::Unsupported("catalog schema must be published before identity"))?;
-        let parsed = vos::parser::parse_document(&schema.document)
-            .map_err(|diagnostics| Error::Schema { message: diagnostics.to_string() })?;
-        self.identity = Some(
-            vos::catalog_from_document(&parsed).map_err(|message| Error::Schema { message })?,
-        );
+        self.resolved_contract = Some(resolved_contract_for_schema(schema, self.identity.as_ref())?);
         Ok(())
     }
 
@@ -188,12 +195,122 @@ impl Catalog {
     }
 }
 
+fn resolved_contract_for_schema(
+    schema: &CatalogSchema,
+    identity: Option<&vos::ast::CatalogSnapshot>,
+) -> Result<vos::ResolvedContract> {
+    let projection = vos::parse_oak(&schema.document)
+        .map_err(|message| Error::Schema { message })?
+        .project_schema()
+        .map_err(|diagnostics| Error::Schema {
+            message: format!("VOS semantic projection failed: {diagnostics:?}"),
+        })?;
+    let mut used_type_ids = std::collections::BTreeSet::new();
+    let mut used_field_ids = std::collections::BTreeSet::new();
+    if let Some(identity) = identity {
+        used_type_ids.extend(identity.types.iter().map(|entry| entry.type_id.0));
+        used_field_ids.extend(
+            identity
+                .types
+                .iter()
+                .flat_map(|entry| entry.fields.iter().map(|field| field.field_id.0)),
+        );
+    }
+    let mut next_type_id = 1u64;
+    let mut next_field_id = 1u64;
+    let types = projection
+        .types
+        .iter()
+        .map(|projected| {
+            let name = projected
+                .canonical_path
+                .last()
+                .cloned()
+                .ok_or(Error::Corrupt("VOS type has an empty canonical path"))?;
+            let legacy = identity.and_then(|catalog| {
+                catalog.types.iter().find(|entry| {
+                    entry.name == name
+                        && matches!(
+                            (entry.kind, projected.kind),
+                            (vos::ast::TypeKind::Table, vos::contract::TypeContractKind::Table)
+                                | (vos::ast::TypeKind::Class, vos::contract::TypeContractKind::Class)
+                        )
+                })
+            });
+            if identity.is_some() && legacy.is_none() {
+                return Err(Error::Corrupt("legacy catalog is missing a schema type"));
+            }
+            let type_id = if let Some(entry) = legacy {
+                entry.type_id.0
+            } else {
+                while used_type_ids.contains(&next_type_id) {
+                    next_type_id += 1;
+                }
+                let id = next_type_id;
+                used_type_ids.insert(id);
+                next_type_id += 1;
+                id
+            };
+            let fields = projected
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(field_index, field)| {
+                    let legacy_field = legacy.and_then(|entry| {
+                        entry.fields.iter().find(|candidate| {
+                            candidate.current_name == field.canonical_name
+                        })
+                    });
+                    if legacy.is_some() && legacy_field.is_none() {
+                        return Err(Error::Corrupt("legacy catalog is missing a schema field"));
+                    }
+                    let field_id = if let Some(field) = legacy_field {
+                        field.field_id.0
+                    } else {
+                        while used_field_ids.contains(&next_field_id) {
+                            next_field_id += 1;
+                        }
+                        let id = next_field_id;
+                        used_field_ids.insert(id);
+                        next_field_id += 1;
+                        id
+                    };
+                    let virtual_field_index = legacy_field
+                        .map(|field| field.virtual_field)
+                        .unwrap_or(field_index as u32);
+                    Ok(vos::contract::FieldIdentity {
+                        canonical_name: field.canonical_name.clone(),
+                        field_id,
+                        virtual_field_index,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(vos::contract::TypeIdentity {
+                canonical_path: projected.canonical_path.clone(),
+                type_id,
+                kind: projected.kind,
+                fields,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.to_owned(),
+        types,
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).map_err(|diagnostics| Error::Schema {
+        message: format!("VOS resolved contract failed: {diagnostics:?}"),
+    })?;
+    validate_contract(Some(schema), identity, &contract)?;
+    Ok(contract)
+}
+
 pub(crate) fn validate_contract(
     schema: Option<&CatalogSchema>,
     identity: Option<&vos::ast::CatalogSnapshot>,
     contract: &vos::ResolvedContract,
 ) -> Result<()> {
-    contract.validate().map_err(|error| Error::Schema {
+    let artifact = contract.to_json().map_err(|_| Error::Corrupt("resolved contract encode"))?;
+    vos::ResolvedContract::from_json(&artifact).map_err(|error| Error::Schema {
         message: format!("invalid resolved VOS contract {}: {}", error.code, error.message),
     })?;
     let schema = schema.ok_or(Error::Unsupported("publish schema before resolved contract"))?;
@@ -218,6 +335,18 @@ pub(crate) fn validate_contract(
         return Err(Error::Corrupt("resolved contract does not match schema"));
     }
     if let Some(identity) = identity {
+        let mut type_ids = std::collections::BTreeSet::new();
+        let mut field_ids = std::collections::BTreeSet::new();
+        for entry in &identity.types {
+            if entry.type_id.0 == 0 || !type_ids.insert(entry.type_id.0) {
+                return Err(Error::Corrupt("invalid legacy type identity"));
+            }
+            for field in &entry.fields {
+                if field.field_id.0 == 0 || !field_ids.insert(field.field_id.0) {
+                    return Err(Error::Corrupt("invalid legacy field identity"));
+                }
+            }
+        }
         if identity.types.len() != contract.types.len() {
             return Err(Error::Corrupt("resolved contract does not match identity ledger"));
         }
