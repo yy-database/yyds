@@ -9,6 +9,7 @@ mod execution;
 mod identity;
 mod routing;
 mod replication;
+mod replication_log;
 mod schema;
 mod vos_udf;
 
@@ -26,6 +27,7 @@ pub use crate::routing::{RouteDecision, RoutingError, ShardEpoch, ShardMap};
 pub use crate::replication::{
     FenceToken, LeaderTerm, ReplicaError, ReplicaMember, ReplicaNodeId, ReplicaRole, ReplicaSet,
 };
+pub use crate::replication_log::{LogIndex, ReplicaLog, ReplicationEntry, ReplicationError};
 pub use crate::schema::{CatalogSchema, VOS_GIT_DEV, adopt_catalog_schema, validate_document};
 pub use crate::vos_udf::lower_vos_udf;
 /// Returns the `yyds-types` crate version.
