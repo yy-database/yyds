@@ -12,6 +12,7 @@ pub struct Catalog {
     path: Option<PathBuf>,
     schema: Option<CatalogSchema>,
     identity: Option<vos::ast::CatalogSnapshot>,
+    resolved_contract: Option<vos::ResolvedContract>,
     shards: Vec<ShardId>,
     routing_epoch: Option<ShardEpoch>,
 }
@@ -23,6 +24,7 @@ impl Catalog {
             path: None,
             schema: None,
             identity: None,
+            resolved_contract: None,
             shards: Vec::new(),
             routing_epoch: None,
         }
@@ -33,11 +35,12 @@ impl Catalog {
         let path = path.as_ref().to_path_buf();
         if path.exists() {
             let bytes = std::fs::read(&path)?;
-            let (schema, identity, routing_epoch, shards) = format::decode(&bytes)?;
+            let (schema, identity, routing_epoch, shards, resolved_contract) = format::decode(&bytes)?;
             Ok(Self {
                 path: Some(path),
                 schema,
                 identity,
+                resolved_contract,
                 shards,
                 routing_epoch,
             })
@@ -46,6 +49,7 @@ impl Catalog {
                 path: Some(path),
                 schema: None,
                 identity: None,
+                resolved_contract: None,
                 shards: Vec::new(),
                 routing_epoch: None,
             })
@@ -65,6 +69,25 @@ impl Catalog {
     /// Published VOS identity snapshot used by gateways and distributed planners.
     pub fn identity(&self) -> Option<&vos::ast::CatalogSnapshot> {
         self.identity.as_ref()
+    }
+
+    /// Returns the strict resolved VOS contract published for this catalog.
+    pub fn resolved_contract(&self) -> Option<&vos::ResolvedContract> {
+        self.resolved_contract.as_ref()
+    }
+
+    /// Publishes a validated resolved VOS contract for downstream consumers.
+    pub fn publish_resolved_contract(&mut self, contract: vos::ResolvedContract) -> Result<()> {
+        contract.validate().map_err(|error| Error::Schema {
+            message: format!("invalid resolved VOS contract {}: {}", error.code, error.message),
+        })?;
+        if let Some(current) = &self.resolved_contract {
+            if current != &contract {
+                return Err(Error::SchemaConflict { expected: 1, found: 2 });
+            }
+        }
+        self.resolved_contract = Some(contract);
+        Ok(())
     }
 
     /// Registered shard ids in catalog order.
@@ -160,6 +183,7 @@ impl Catalog {
             self.identity.as_ref(),
             self.routing_epoch,
             &self.shards,
+            self.resolved_contract.as_ref(),
         )?;
         std::fs::write(path, bytes)?;
         Ok(())
