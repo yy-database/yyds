@@ -4,9 +4,38 @@ use yyds_gateway::{
 };
 
 fn catalog(source: &str) -> yyds_gateway::SqlCatalog {
-    let document = vos::parser::parse_document(source).expect("VOS document");
-    let snapshot = vos::catalog_from_document(&document).expect("VOS catalog");
-    yyds_gateway::SqlCatalog::from_snapshot(7, &snapshot).expect("gateway catalog")
+    let projection = vos::parse_oak(source).expect("Oak VOS source").project_schema().expect("projection");
+    let mut next_field_id = 1u64;
+    let types = projection
+        .types
+        .iter()
+        .enumerate()
+        .map(|(type_index, entry)| vos::contract::TypeIdentity {
+            canonical_path: entry.canonical_path.clone(),
+            type_id: type_index as u64 + 1,
+            kind: entry.kind,
+            fields: entry
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(field_index, field)| {
+                    let field_id = next_field_id;
+                    next_field_id += 1;
+                    vos::contract::FieldIdentity {
+                    canonical_name: field.canonical_name.clone(),
+                    field_id,
+                    virtual_field_index: field_index as u32,
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+        types,
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    yyds_gateway::SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog")
 }
 
 #[test]
@@ -148,10 +177,16 @@ fn sql_catalog_binding_rejects_unknown_names_and_schema_versions() {
 
 #[test]
 fn sql_catalog_binding_rejects_ambiguous_unqualified_columns() {
-    let document = vos::parser::parse_document("table users { @@id: i64, name: i64 }\n")
-        .expect("VOS document");
-    let mut snapshot = vos::catalog_from_document(&document).expect("VOS catalog");
-    snapshot.types[0].fields[1].current_name = "id".into();
+    let snapshot: vos::ast::CatalogSnapshot = serde_json::from_value(serde_json::json!({
+        "revisions": { "ddl": 1, "semantic": 1, "layout_epoch": 0 },
+        "types": [{
+            "type_id": 1, "name": "users", "kind": "table",
+            "fields": [
+                { "field_id": 1, "virtual_field": 0, "current_name": "id", "source_order": 0, "ty": { "Builtin": "I64" }, "attrs": [] },
+                { "field_id": 2, "virtual_field": 1, "current_name": "id", "source_order": 1, "ty": { "Builtin": "I64" }, "attrs": [] }
+            ]
+        }]
+    })).expect("legacy snapshot");
     let catalog = yyds_gateway::SqlCatalog::from_snapshot(7, &snapshot).expect("gateway catalog");
     let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7)
         .expect_err("ambiguous column");
