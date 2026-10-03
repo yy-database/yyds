@@ -5,7 +5,7 @@
 #![doc(html_favicon_url = "https://raw.githubusercontent.com/oovm/shape-rs/dev/projects/images/Trapezohedron.svg")]
 
 mod errors;
-mod execution;
+mod distributed_execution;
 mod identity;
 mod routing;
 mod replication;
@@ -14,7 +14,7 @@ mod schema;
 mod vos_udf;
 
 pub use crate::errors::{Error, Result};
-pub use crate::execution::{
+pub use crate::distributed_execution::{
     Approximation, Consistency, DistributedPlan, EvalError, Exchange, FileRef, Fragment,
     FragmentId, FragmentRole, LayoutField, Node, PlanValidationError, Program, RecordLayout,
     RecordLayoutError,
