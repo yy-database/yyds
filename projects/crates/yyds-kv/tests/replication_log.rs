@@ -34,6 +34,8 @@ fn durable_log_round_trips_entries_and_commit() {
     assert_eq!(log.entries()[0].payload, b"put-a");
     assert_eq!(log.entries()[1].payload, b"put-b");
     assert_eq!(log.committed(), LogIndex(1));
+    let committed = log.committed_entries().map(|entry| entry.payload.as_slice()).collect::<Vec<_>>();
+    assert_eq!(committed, vec![b"put-a".as_slice()]);
     cleanup(&path);
 }
 
