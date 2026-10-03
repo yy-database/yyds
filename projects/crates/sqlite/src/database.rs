@@ -1,14 +1,15 @@
-//! File-backed and in-memory SQLite databases via the YYDS engine.
+//! Read-only SQLite main-file snapshots and blank database materialization.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
 use yyds_types::{Error, Result};
 
 use crate::format::{
-    blank_database, validate_database, ENGINE_LIBRARY_VERSION, ENGINE_LIBRARY_VERSION_NUMBER,
-    stamp_library_version,
+    ENGINE_LIBRARY_VERSION, ENGINE_LIBRARY_VERSION_NUMBER, blank_database, stamp_library_version, validate_database,
 };
 
 /// Storage mode for [`SqliteDatabase`].
@@ -18,7 +19,7 @@ enum Storage {
     File(PathBuf),
 }
 
-/// SQLite database opened by the YYDS pure-Rust engine.
+/// A SQLite main-file snapshot, not a transactional database engine.
 pub struct SqliteDatabase {
     storage: Storage,
     page_size: usize,
@@ -30,24 +31,17 @@ impl SqliteDatabase {
     pub fn open_in_memory() -> Result<Self> {
         let pages = blank_database()?;
         let page_size = validate_database(&pages)?;
-        Ok(Self {
-            storage: Storage::Memory,
-            page_size,
-            pages,
-        })
+        Ok(Self { storage: Storage::Memory, page_size, pages })
     }
 
-    /// Opens or creates a file-backed SQLite database.
+    /// Reads an existing snapshot or exclusively creates a blank file.
+    /// This does not recover journals or produce a consistent live WAL snapshot.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if path.exists() {
             let bytes = fs::read(&path).map_err(Error::Io)?;
             let page_size = validate_database(&bytes)?;
-            return Ok(Self {
-                storage: Storage::File(path),
-                page_size,
-                pages: bytes,
-            });
+            return Ok(Self { storage: Storage::File(path), page_size, pages: bytes });
         }
 
         if let Some(parent) = path.parent() {
@@ -58,13 +52,10 @@ impl SqliteDatabase {
 
         let pages = blank_database()?;
         let page_size = validate_database(&pages)?;
-        let db = Self {
-            storage: Storage::File(path),
-            page_size,
-            pages,
-        };
-        db.flush()?;
-        Ok(db)
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&path).map_err(Error::Io)?;
+        file.write_all(&pages).map_err(Error::Io)?;
+        file.sync_all().map_err(Error::Io)?;
+        Ok(Self { storage: Storage::File(path), page_size, pages })
     }
 
     /// Returns the configured database path for file-backed databases.
@@ -97,22 +88,12 @@ impl SqliteDatabase {
         Ok(ENGINE_LIBRARY_VERSION.to_string())
     }
 
-    /// Persists file-backed databases. In-memory databases are a no-op.
+    /// Rejects file writes until a transactional pager is available.
     pub fn flush(&self) -> Result<()> {
-        let path = match &self.storage {
-            Storage::Memory => return Ok(()),
-            Storage::File(path) => path,
-        };
-
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .map_err(Error::Io)?;
-        file.write_all(&self.pages).map_err(Error::Io)?;
-        file.flush().map_err(Error::Io)?;
-        Ok(())
+        match &self.storage {
+            Storage::Memory => Ok(()),
+            Storage::File(_) => Err(Error::Unsupported("sqlite snapshot writes require a transactional pager")),
+        }
     }
 
     /// Re-stamps the format-3 library version field with the YYDS engine version.
@@ -120,14 +101,6 @@ impl SqliteDatabase {
         validate_database(&self.pages)?;
         stamp_library_version(&mut self.pages, ENGINE_LIBRARY_VERSION_NUMBER);
         Ok(())
-    }
-}
-
-impl Drop for SqliteDatabase {
-    fn drop(&mut self) {
-        if matches!(self.storage, Storage::File(_)) {
-            let _ = self.flush();
-        }
     }
 }
 
