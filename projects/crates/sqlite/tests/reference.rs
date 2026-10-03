@@ -1,6 +1,10 @@
-use std::process::Command;
+use std::{
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 use yyds_sqlite::{
-    RecordLimits, RecordValue, SqliteDatabase, TextEncoding, decode_record, decode_varint, read_existing, validate_database,
+    RecordLimits, RecordValue, SqliteDatabase, TableLimits, TextEncoding, decode_record, decode_varint, read_existing,
+    read_table, validate_database,
 };
 
 #[test]
@@ -21,7 +25,8 @@ for page_size, encoding in [(512, 'UTF-8'), (4096, 'UTF-16le'), (65536, 'UTF-16b
         db.execute(f'pragma page_size={page_size}')
         db.execute(f"pragma encoding='{encoding}'")
         db.execute('create table samples (id integer primary key, payload blob, name text)')
-        db.execute('insert into samples values (?, ?, ?)', (1, bytes(range(256)) * 40, 'SQLite binary oracle'))
+        ids = [-9223372036854775808, *range(-100, 100), 9223372036854775807]
+        db.executemany('insert into samples values (?, ?, ?)', [(rowid, bytes(range(256)) * (300 if abs(rowid) > 100 else 40), '您好🌸') for rowid in ids])
         db.execute('create table record_probe (negative integer, huge integer, fraction real, name text, data blob, absent)')
         values = (-8388608, -9223372036854775808, 1.5, '您好🌸', b'\x00\xff', None)
         db.execute('insert into record_probe values (?, ?, ?, ?, ?, ?)', values)
@@ -30,11 +35,36 @@ for page_size, encoding in [(512, 'UTF-8'), (4096, 'UTF-16le'), (65536, 'UTF-16b
         assert db.execute('select * from record_probe').fetchone() == values
         root_page = db.execute("select rootpage from sqlite_schema where name='record_probe'").fetchone()[0]
         print('probe', page_size, root_page)
+        root_page = db.execute("select rootpage from sqlite_schema where name='samples'").fetchone()[0]
+        assert [row[0] for row in db.execute('select id from samples order by id')] == ids
+        print('samples', page_size, root_page)
 print(sqlite3.sqlite_version)
 "#;
-    let output = Command::new(python).arg("-c").arg(script).arg(dir.path()).output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let metadata = String::from_utf8(output.stdout).unwrap();
+    let stdout = dir.path().join("reference.stdout");
+    let stderr = dir.path().join("reference.stderr");
+    let mut child = Command::new(python)
+        .arg("-c")
+        .arg(script)
+        .arg(dir.path())
+        .stdin(Stdio::null())
+        .stdout(std::fs::File::create(&stdout).unwrap())
+        .stderr(std::fs::File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("SQLite reference deadline exceeded: {}", std::fs::read_to_string(&stderr).unwrap());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "{}", std::fs::read_to_string(&stderr).unwrap());
+    let metadata = std::fs::read_to_string(stdout).unwrap();
     for page_size in [512, 4096, 65536] {
         let path = dir.path().join(format!("{page_size}.sqlite"));
         let original = std::fs::read(&path).unwrap();
@@ -66,6 +96,25 @@ print(sqlite3.sqlite_version)
                 RecordValue::Null,
             ]
         );
+        let prefix = format!("samples {page_size} ");
+        let root: u32 = metadata.lines().find_map(|line| line.strip_prefix(&prefix)).unwrap().parse().unwrap();
+        assert_eq!(original[(root as usize - 1) * page_size], 5);
+        let rows = read_table(&original, root, TableLimits::default()).unwrap();
+        let expected_ids: Vec<i64> = std::iter::once(i64::MIN).chain(-100..100).chain(std::iter::once(i64::MAX)).collect();
+        assert_eq!(rows.iter().map(|row| row.rowid).collect::<Vec<_>>(), expected_ids);
+        for row in rows {
+            let repetitions = if row.rowid == i64::MIN || row.rowid == i64::MAX { 300 } else { 40 };
+            let expected_blob: Vec<u8> = (0..repetitions).flat_map(|_| 0u8..=255).collect();
+            assert_eq!(
+                decode_record(&row.payload, encoding, RecordLimits::default()).unwrap(),
+                vec![RecordValue::Null, RecordValue::Blob(&expected_blob), RecordValue::Text("您好🌸".into())]
+            );
+        }
+        let schema = read_table(&original, 1, TableLimits::default()).unwrap();
+        assert_eq!(schema.len(), 2);
+        for row in schema {
+            assert_eq!(decode_record(&row.payload, encoding, RecordLimits::default()).unwrap().len(), 5);
+        }
         let snapshot = SqliteDatabase::open(&path).unwrap();
         assert_eq!(snapshot.pages(), original);
         drop(snapshot);

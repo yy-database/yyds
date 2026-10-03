@@ -8,10 +8,12 @@
 mod database;
 mod format;
 mod record;
+mod table;
 
 use yyds_types::{Error, Result};
 
 pub use crate::database::{read_existing, SqliteDatabase};
+pub use crate::table::{read_table, TableLimits, TableRow};
 pub use crate::record::{decode_record, decode_varint, RecordLimits, RecordValue, TextEncoding};
 pub use crate::format::{
     blank_database, decode_library_version, validate_database, validate_header,
