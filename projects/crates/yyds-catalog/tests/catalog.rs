@@ -17,6 +17,7 @@ fn ensure_schema_and_register_shard_in_memory() {
     let schema = catalog.schema().expect("schema");
     assert_eq!(schema.version, 1);
     assert_eq!(schema.document, VOS);
+    assert!(catalog.identity().is_some());
     assert_eq!(catalog.shards().len(), 1);
 }
 
@@ -38,6 +39,7 @@ fn file_catalog_round_trip() {
     let schema = catalog.schema().expect("schema");
     assert_eq!(schema.version, 1);
     assert_eq!(schema.document, VOS);
+    assert!(catalog.identity().is_some());
     assert_eq!(catalog.shards(), &[ShardId("shard-a".into())]);
     assert!(path.is_file());
 

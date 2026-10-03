@@ -12,6 +12,8 @@ path = "src/lib.rs"
 
 [dependencies]
 oak-sql = { workspace = true }
+vos = { workspace = true }
+yyds-catalog = { workspace = true }
 yyds-types = { workspace = true }
 
 [dev-dependencies]
