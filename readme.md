@@ -64,3 +64,9 @@ git commit --amend --message "🎂 Project initialized!" --date "2012-12-12"
 | 📈     | Add analytics or branch code |
 | 🤖     | Automation fix               |
 | 📦     | Update dependencies          |
+
+## Learn more
+
+- [Agent skills (`@yyds/yyds-skills`)](./projects/packages/yyds-skills)
+- [Embedded sibling YYDB](https://github.com/yy-database/yydb.rs)
+- [Repository and issue tracker](https://github.com/yy-database/yyds)

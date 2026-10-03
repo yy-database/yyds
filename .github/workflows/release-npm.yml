@@ -4,7 +4,7 @@ name: Release
 #   git tag v0.0.2 && git push origin v0.0.2
 # Publishes @yyds/* (OIDC) and GitHub Release native-binding zips.
 # Trusted Publisher workflow filename must stay: release-npm.yml
-# Setup: documentation/ci-secrets.md
+# Release setup: AGENTS.md
 
 on:
   push:
