@@ -22,6 +22,7 @@ vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", rev
 yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
+yyds-control = { path = "projects/crates/yyds-control" }
 yyds-sqlite = { path = "projects/crates/sqlite" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 serde_json = "1"

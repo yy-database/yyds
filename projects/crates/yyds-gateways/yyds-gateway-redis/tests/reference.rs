@@ -1,30 +1,25 @@
 use std::{
-    net::TcpListener,
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use yyds_gateway_redis::{connection::serve_connection, resp::RequestLimits};
+use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
+use yyds_gateway_redis::{resp::RequestLimits, service::RedisService};
 
 #[test]
 #[ignore = "requires YYDS_REDIS_REFERENCE_PYTHON and the original redis Python client"]
 fn original_redis_client_probes_and_pipeline() {
     let python = std::env::var_os("YYDS_REDIS_REFERENCE_PYTHON").expect("reference Python executable");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    listener.set_nonblocking(true).unwrap();
-    let worker = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => return serve_connection(stream, RequestLimits::default()),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    });
+    let directory = std::env::temp_dir().join(format!(
+        "yyds-redis-reference-node-{}-{}",
+        std::process::id(),
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    let owner =
+        Arc::new(NodeLease::acquire(&directory, NodeIdentity::new("reference-cluster", "reference-node").unwrap()).unwrap());
+    let service = RedisService::start(owner, "127.0.0.1:0".parse().unwrap(), RequestLimits::default()).unwrap();
+    let port = service.address().port();
     let script = r#"
 import redis, sys
 print('reference: imported client', file=sys.stderr, flush=True)
@@ -69,5 +64,6 @@ print(redis.__version__)
     }
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    worker.join().unwrap().unwrap();
+    service.stop().unwrap();
+    assert_eq!(NodeLease::inspect(directory).unwrap().ownership, LocalOwnership::Available);
 }
