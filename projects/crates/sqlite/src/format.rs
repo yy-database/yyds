@@ -43,15 +43,44 @@ pub fn validate_header(bytes: &[u8]) -> Result<()> {
         return Err(Error::Corrupt("sqlite page size invalid"));
     }
 
+    if !matches!(bytes[18], 1 | 2) || !matches!(bytes[19], 1 | 2) {
+        return Err(Error::Unsupported("sqlite file read/write format version"));
+    }
+    if page_size - usize::from(bytes[20]) < 480 {
+        return Err(Error::Corrupt("sqlite usable page size too small"));
+    }
+    if bytes[21..24] != [64, 32, 32] {
+        return Err(Error::Corrupt("sqlite payload fractions invalid"));
+    }
+    if read_u32(bytes, 44) > 4 {
+        return Err(Error::Unsupported("sqlite schema format version"));
+    }
+    if read_u32(bytes, 56) > 3 {
+        return Err(Error::Corrupt("sqlite text encoding invalid"));
+    }
+    if bytes[72..92].iter().any(|byte| *byte != 0) {
+        return Err(Error::Corrupt("sqlite reserved header bytes are nonzero"));
+    }
+
     Ok(())
 }
 
 /// Validates an on-disk SQLite payload and returns its page size.
 pub fn validate_database(bytes: &[u8]) -> Result<usize> {
+    if bytes.is_empty() {
+        return Ok(DEFAULT_PAGE_SIZE);
+    }
     validate_header(bytes)?;
     let page_size = decode_page_size(bytes)?;
     if !bytes.len().is_multiple_of(page_size) {
         return Err(Error::Corrupt("sqlite payload is not page-aligned"));
+    }
+    let declared_pages = read_u32(bytes, 28);
+    if declared_pages != 0
+        && read_u32(bytes, 24) == read_u32(bytes, 92)
+        && u64::from(declared_pages) > (bytes.len() / page_size) as u64
+    {
+        return Err(Error::Corrupt("sqlite declared page count exceeds file size"));
     }
     Ok(page_size)
 }
@@ -71,16 +100,16 @@ pub fn stamp_library_version(bytes: &mut [u8], version_number: u32) {
 
 fn decode_page_size(bytes: &[u8]) -> Result<usize> {
     let raw = u16::from_be_bytes([bytes[16], bytes[17]]);
-    let page_size = if raw == 1 {
-        65_536
-    } else {
-        raw as usize
-    };
+    let page_size = if raw == 1 { 65_536 } else { raw as usize };
     Ok(page_size)
 }
 
 fn read_library_version_number(bytes: &[u8]) -> u32 {
     u32::from_be_bytes([bytes[96], bytes[97], bytes[98], bytes[99]])
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes(bytes[offset..offset + 4].try_into().expect("validated header offset"))
 }
 
 fn format_library_version(raw: u32) -> String {
