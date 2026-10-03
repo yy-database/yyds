@@ -5,6 +5,8 @@
 use napi_derive::napi;
 use yyds_types::version;
 
+mod sqlite;
+
 /// Library version (matches `yyds-types::version()`).
 #[napi]
 pub fn yyds_version() -> String {

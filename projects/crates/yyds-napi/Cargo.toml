@@ -11,7 +11,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 yyds-types = { workspace = true }
-napi = { workspace = true }
+yyds-sqlite = { workspace = true }
+napi = { workspace = true, features = ["napi6"] }
 napi-derive = { workspace = true }
 
 [build-dependencies]
