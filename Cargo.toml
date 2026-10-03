@@ -18,7 +18,7 @@ repository = "https://github.com/yy-database/yyds"
 [workspace.dependencies]
 # Shared VOS schema contract. Keep the revision explicit so Oak-backed syntax
 # changes are reproducible in CI and never become a forked dialect.
-vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", rev = "fa2505a" }
+vos = { version = "0.1.0", git = "https://github.com/voml/vos-language.git", rev = "cbfd5daab8fda9f88c2ef9f8799ad7bd0f815740" }
 yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
