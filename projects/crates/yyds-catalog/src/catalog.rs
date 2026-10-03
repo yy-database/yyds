@@ -90,6 +90,23 @@ impl Catalog {
         }
     }
 
+    /// Explicitly publishes an identity snapshot for a legacy catalog that lacks one.
+    pub fn initialize_identity(&mut self) -> Result<()> {
+        if self.identity.is_some() {
+            return Ok(());
+        }
+        let schema = self
+            .schema
+            .as_ref()
+            .ok_or(Error::Unsupported("catalog schema must be published before identity"))?;
+        let parsed = vos::parser::parse_document(&schema.document)
+            .map_err(|diagnostics| Error::Schema { message: diagnostics.to_string() })?;
+        self.identity = Some(
+            vos::catalog_from_document(&parsed).map_err(|message| Error::Schema { message })?,
+        );
+        Ok(())
+    }
+
     /// Registers a shard id exactly once.
     pub fn register_shard(&mut self, shard: ShardId) -> Result<()> {
         if self.shards.iter().any(|existing| existing == &shard) {
