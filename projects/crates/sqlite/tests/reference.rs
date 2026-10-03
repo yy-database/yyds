@@ -3,8 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 use yyds_sqlite::{
-    RecordLimits, RecordValue, SqliteDatabase, TableLimits, TextEncoding, decode_record, decode_varint, read_existing,
-    read_table, validate_database,
+    RecordLimits, RecordValue, SchemaObjectKind, SqliteDatabase, TableLimits, TextEncoding, decode_record, decode_varint,
+    read_existing, read_named_table, read_schema, read_table, validate_database,
 };
 
 #[test]
@@ -30,6 +30,11 @@ for page_size, encoding in [(512, 'UTF-8'), (4096, 'UTF-16le'), (65536, 'UTF-16b
         db.execute('create table record_probe (negative integer, huge integer, fraction real, name text, data blob, absent)')
         values = (-8388608, -9223372036854775808, 1.5, '您好🌸', b'\x00\xff', None)
         db.execute('insert into record_probe values (?, ?, ?, ?, ?, ?)', values)
+        db.execute('create index sample_names on samples(name)')
+        db.execute('create view sample_view as select id from samples')
+        db.execute('create trigger sample_touch after update on samples begin select 1; end')
+        db.execute('create table keyed (key text primary key, value integer) without rowid')
+        db.execute('create table unique_probe (value text unique)')
         db.commit()
         assert db.execute('pragma integrity_check').fetchone() == ('ok',)
         assert db.execute('select * from record_probe').fetchone() == values
@@ -38,6 +43,10 @@ for page_size, encoding in [(512, 'UTF-8'), (4096, 'UTF-16le'), (65536, 'UTF-16b
         root_page = db.execute("select rootpage from sqlite_schema where name='samples'").fetchone()[0]
         assert [row[0] for row in db.execute('select id from samples order by id')] == ids
         print('samples', page_size, root_page)
+        for kind, name, table_name, root_page, sql in db.execute('select type, name, tbl_name, rootpage, sql from sqlite_schema order by rowid'):
+            encoded_sql = '-' if sql is None else sql.encode().hex()
+            encoded_root = '-' if root_page is None else str(root_page)
+            print('schema', page_size, kind, name.encode().hex(), table_name.encode().hex(), encoded_root, encoded_sql)
 print(sqlite3.sqlite_version)
 "#;
     let stdout = dir.path().join("reference.stdout");
@@ -110,12 +119,33 @@ print(sqlite3.sqlite_version)
                 vec![RecordValue::Null, RecordValue::Blob(&expected_blob), RecordValue::Text("您好🌸".into())]
             );
         }
-        let schema = read_table(&original, 1, TableLimits::default()).unwrap();
-        assert_eq!(schema.len(), 2);
-        for row in schema {
-            assert_eq!(decode_record(&row.payload, encoding, RecordLimits::default()).unwrap().len(), 5);
+        let schema = read_schema(&original, TableLimits::default()).unwrap();
+        let expected: Vec<_> = metadata.lines().filter(|line| line.starts_with(&format!("schema {page_size} "))).collect();
+        assert_eq!(schema.len(), expected.len());
+        for (object, expected) in schema.iter().zip(expected) {
+            let kind = match object.kind {
+                SchemaObjectKind::Table => "table",
+                SchemaObjectKind::Index => "index",
+                SchemaObjectKind::View => "view",
+                SchemaObjectKind::Trigger => "trigger",
+            };
+            let hex = |value: &str| value.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            let root = object.root_page.map_or_else(|| "-".into(), |root| root.to_string());
+            let sql = object.sql.as_deref().map_or_else(|| "-".into(), hex);
+            assert_eq!(
+                format!("schema {page_size} {kind} {} {} {root} {sql}", hex(&object.name), hex(&object.table_name)),
+                expected
+            );
         }
+        assert_eq!(
+            read_named_table(&original, "SAMPLES", TableLimits::default()).unwrap(),
+            read_table(&original, root, TableLimits::default()).unwrap()
+        );
+        assert!(read_named_table(&original, "keyed", TableLimits::default()).is_err());
+        assert!(read_named_table(&original, "sample_view", TableLimits::default()).is_err());
         let snapshot = SqliteDatabase::open(&path).unwrap();
+        assert_eq!(snapshot.schema(TableLimits::default()).unwrap(), schema);
+        assert_eq!(snapshot.table("samples", TableLimits::default()).unwrap().len(), 202);
         assert_eq!(snapshot.pages(), original);
         drop(snapshot);
         assert_eq!(std::fs::read(path).unwrap(), original);

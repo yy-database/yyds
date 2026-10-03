@@ -11,6 +11,7 @@ use yyds_types::{Error, Result};
 use crate::format::{
     ENGINE_LIBRARY_VERSION, ENGINE_LIBRARY_VERSION_NUMBER, blank_database, stamp_library_version, validate_database,
 };
+use crate::{read_named_table, read_schema, SchemaObject, TableLimits, TableRow};
 
 /// Storage mode for [`SqliteDatabase`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +75,16 @@ impl SqliteDatabase {
     /// Returns the raw database bytes owned by this handle.
     pub fn pages(&self) -> &[u8] {
         &self.pages
+    }
+
+    /// Reads the main-file schema without parsing or executing SQL definitions.
+    pub fn schema(&self, limits: TableLimits) -> Result<Vec<SchemaObject>> {
+        read_schema(&self.pages, limits)
+    }
+
+    /// Reads raw records from an ordinary rowid table by its stored name.
+    pub fn table(&self, name: &str, limits: TableLimits) -> Result<Vec<TableRow>> {
+        read_named_table(&self.pages, name, limits)
     }
 
     /// Health probe for disguise tooling and connector smoke tests.
