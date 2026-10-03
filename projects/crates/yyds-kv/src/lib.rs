@@ -4,10 +4,14 @@
 
 mod key;
 mod record;
+mod replication_log;
 mod store;
 mod value;
 
-pub use crate::key::Key;
-pub use crate::record::Record;
-pub use crate::store::{compare_and_put, FileShard, KvStore, MemoryShard};
-pub use crate::value::{InlineValue, ObjectRef, StoredValue};
+pub use crate::{
+    key::Key,
+    record::Record,
+    replication_log::DurableReplicationLog,
+    store::{FileShard, KvStore, MemoryShard, compare_and_put},
+    value::{InlineValue, ObjectRef, StoredValue},
+};
