@@ -2,7 +2,7 @@ use std::fs;
 
 use tempfile::tempdir;
 use yyds_catalog::{catalog_path, Catalog};
-use yyds_types::ShardId;
+use yyds_types::{ShardEpoch, ShardId};
 
 const VOS: &str = "table User {\n    @@id: uuid,\n}\n";
 
@@ -62,4 +62,22 @@ fn identity_initialization_requires_explicit_call_for_empty_state() {
     catalog.ensure_schema(1, VOS).expect("ensure");
     assert!(catalog.identity().is_some());
     catalog.initialize_identity().expect("idempotent");
+}
+
+#[test]
+fn routing_epoch_round_trips_and_requires_monotonic_publish() {
+    let dir = tempdir().expect("tempdir");
+    let path = catalog_path(dir.path().join("routing"));
+    let mut catalog = Catalog::open(&path).expect("open");
+    catalog
+        .publish_routing(ShardEpoch(1), vec![ShardId("a".into()), ShardId("b".into())])
+        .expect("publish");
+    assert_eq!(catalog.routing().expect("routing").expect("map").epoch(), ShardEpoch(1));
+    assert!(catalog.publish_routing(ShardEpoch(1), vec![ShardId("a".into())]).is_err());
+    catalog.flush().expect("flush");
+
+    let reopened = Catalog::open(&path).expect("reopen");
+    let map = reopened.routing().expect("routing").expect("map");
+    assert_eq!(map.epoch(), ShardEpoch(1));
+    assert_eq!(map.shards(), &[ShardId("a".into()), ShardId("b".into())]);
 }
