@@ -40,6 +40,49 @@ fn yyds_validates_a_shard_to_coordinator_plan() {
 }
 
 #[test]
+fn yyds_rejects_an_unreachable_fragment() {
+    let program = Program {
+        parameters: vec![],
+        inputs: vec![Type::I64],
+        nodes: vec![Node::Input { index: 0, ty: Type::I64 }],
+        output: 0,
+        output_type: Type::I64,
+    };
+    let plan = DistributedPlan {
+        fragments: vec![
+            Fragment {
+                id: FragmentId(1),
+                role: FragmentRole::Shard,
+                inputs: vec![],
+                exchange: None,
+                program: program.clone(),
+                retry: RetryPolicy { max_attempts: 1, idempotent: false },
+            },
+            Fragment {
+                id: FragmentId(2),
+                role: FragmentRole::Coordinator,
+                inputs: vec![],
+                exchange: None,
+                program: program.clone(),
+                retry: RetryPolicy { max_attempts: 1, idempotent: false },
+            },
+            Fragment {
+                id: FragmentId(3),
+                role: FragmentRole::Shard,
+                inputs: vec![],
+                exchange: None,
+                program,
+                retry: RetryPolicy { max_attempts: 1, idempotent: false },
+            },
+        ],
+        root: FragmentId(2),
+        consistency: Consistency::Snapshot,
+        approximation: Approximation { allowed: false, error_bound: None, confidence: None },
+    };
+    assert_eq!(plan.validate(), Err(yyds_types::PlanValidationError::UnreachableFragment));
+}
+
+#[test]
 fn yyds_evaluates_its_distributed_execution_model() {
     let program = ValidatedProgram::validate(Program {
         parameters: vec![Type::I64],
