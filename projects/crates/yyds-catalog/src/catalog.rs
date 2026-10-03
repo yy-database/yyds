@@ -78,12 +78,10 @@ impl Catalog {
 
     /// Publishes a validated resolved VOS contract for downstream consumers.
     pub fn publish_resolved_contract(&mut self, contract: vos::ResolvedContract) -> Result<()> {
-        contract.validate().map_err(|error| Error::Schema {
-            message: format!("invalid resolved VOS contract {}: {}", error.code, error.message),
-        })?;
+        validate_contract(self.schema.as_ref(), self.identity.as_ref(), &contract)?;
         if let Some(current) = &self.resolved_contract {
             if current != &contract {
-                return Err(Error::SchemaConflict { expected: 1, found: 2 });
+                return Err(Error::Unsupported("resolved contract evolution requires an explicit identity migration"));
             }
         }
         self.resolved_contract = Some(contract);
@@ -188,6 +186,62 @@ impl Catalog {
         std::fs::write(path, bytes)?;
         Ok(())
     }
+}
+
+pub(crate) fn validate_contract(
+    schema: Option<&CatalogSchema>,
+    identity: Option<&vos::ast::CatalogSnapshot>,
+    contract: &vos::ResolvedContract,
+) -> Result<()> {
+    contract.validate().map_err(|error| Error::Schema {
+        message: format!("invalid resolved VOS contract {}: {}", error.code, error.message),
+    })?;
+    let schema = schema.ok_or(Error::Unsupported("publish schema before resolved contract"))?;
+    let projection = vos::validate_schema(&schema.document).map_err(|message| Error::Schema { message })?;
+    let manifest = vos::contract::IdentityManifest {
+        format_version: contract.identity_manifest_version.clone(),
+        types: contract.types.iter().map(|entry| vos::contract::TypeIdentity {
+            canonical_path: entry.canonical_path.clone(),
+            type_id: entry.type_id,
+            kind: entry.kind,
+            fields: entry.fields.iter().map(|field| vos::contract::FieldIdentity {
+                canonical_name: field.canonical_name.clone(),
+                field_id: field.field_id,
+                virtual_field_index: field.virtual_field_index,
+            }).collect(),
+        }).collect(),
+    };
+    let expected = vos::resolve_contract(&projection, &manifest).map_err(|diagnostics| Error::Schema {
+        message: format!("resolved contract does not match schema: {diagnostics:?}"),
+    })?;
+    if &expected != contract {
+        return Err(Error::Corrupt("resolved contract does not match schema"));
+    }
+    if let Some(identity) = identity {
+        if identity.types.len() != contract.types.len() {
+            return Err(Error::Corrupt("resolved contract does not match identity ledger"));
+        }
+        for entry in &identity.types {
+            let resolved = contract.types.iter().find(|item| item.type_id == entry.type_id.0)
+                .ok_or(Error::Corrupt("resolved contract type identity mismatch"))?;
+            let kind = match entry.kind {
+                vos::ast::TypeKind::Table => vos::contract::TypeContractKind::Table,
+                vos::ast::TypeKind::Class => vos::contract::TypeContractKind::Class,
+            };
+            if resolved.canonical_path.last() != Some(&entry.name) || resolved.kind != kind
+                || resolved.fields.len() != entry.fields.len() {
+                return Err(Error::Corrupt("resolved contract type does not match identity ledger"));
+            }
+            for field in &entry.fields {
+                if !resolved.fields.iter().any(|item| item.field_id == field.field_id.0
+                    && item.canonical_name == field.current_name
+                    && item.virtual_field_index == field.virtual_field) {
+                    return Err(Error::Corrupt("resolved contract field identity mismatch"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Returns true when `path` uses the `.yyds` catalog suffix.

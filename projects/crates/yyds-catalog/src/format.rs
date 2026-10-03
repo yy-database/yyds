@@ -17,6 +17,9 @@ pub fn encode(
     shards: &[ShardId],
     resolved_contract: Option<&vos::ResolvedContract>,
 ) -> Result<Vec<u8>> {
+    if let Some(contract) = resolved_contract {
+        crate::catalog::validate_contract(schema, identity, contract)?;
+    }
     let mut out = Vec::new();
     out.write_all(MAGIC)?;
     out.write_all(&FORMAT_VERSION.to_le_bytes())?;
@@ -188,6 +191,10 @@ pub fn decode(
 
     if cursor.position() != bytes.len() as u64 {
         return Err(Error::Corrupt("trailing catalog bytes"));
+    }
+
+    if let Some(contract) = &resolved_contract {
+        crate::catalog::validate_contract(schema.as_ref(), identity.as_ref(), contract)?;
     }
 
     Ok((schema, identity, routing_epoch, shards, resolved_contract))
