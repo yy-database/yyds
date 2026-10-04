@@ -19,7 +19,7 @@ fn batch_execution_preserves_order_and_duplicates() {
     .unwrap();
     executor.execute(command(KeyValueAction::Put(b"two".to_vec()), b"second")).unwrap();
     let results = executor
-        .execute_batch(&[
+        .execute_read_batch(&[
             command(KeyValueAction::Get, b"second"),
             command(KeyValueAction::Get, b"missing"),
             command(KeyValueAction::Get, b"second"),
