@@ -96,3 +96,32 @@ fn increments_are_atomic_persisted_and_errors_do_not_write() {
         yyds_kv::StoredValue::Inline(yyds_kv::InlineValue(i64::MAX.to_string().into_bytes()))
     );
 }
+
+#[test]
+fn put_if_absent_is_atomic_and_does_not_replace_existing_values() {
+    let shard_id = ShardId("conditional".into());
+    let executor = std::sync::Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+            HashMap::from([(shard_id, yyds_kv::MemoryShard::new())]),
+        )
+        .unwrap(),
+    );
+    let mut workers = Vec::new();
+    for index in 0..8 {
+        let executor = std::sync::Arc::clone(&executor);
+        workers.push(std::thread::spawn(move || {
+            executor.execute(command(KeyValueAction::PutIfAbsent(vec![index]), b"winner")).unwrap()
+        }));
+    }
+    let results = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::PutIfAbsent { revision: Some(_) })).count(), 1);
+    assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::PutIfAbsent { revision: None })).count(), 7);
+    let original = executor.execute(command(KeyValueAction::Get, b"winner")).unwrap();
+    assert!(matches!(original, KeyValueResult::Get(Some(ref value)) if value.len() == 1 && value[0] < 8));
+    assert_eq!(
+        executor.execute(command(KeyValueAction::PutIfAbsent(b"second".to_vec()), b"winner")).unwrap(),
+        KeyValueResult::PutIfAbsent { revision: None },
+    );
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"winner")).unwrap(), original);
+}
