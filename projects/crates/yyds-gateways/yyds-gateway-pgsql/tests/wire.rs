@@ -1,4 +1,6 @@
-use yyds_gateway_pgsql::wire::{FrameError, decode_message, decode_startup, encode_message};
+use yyds_gateway_pgsql::wire::{
+    FrameError, StartupParameterError, StartupParameters, decode_message, decode_startup, encode_message,
+};
 
 #[test]
 fn startup_length_includes_code_and_preserves_pipeline() {
@@ -44,4 +46,30 @@ fn invalid_and_advertised_oversized_lengths_are_rejected_early() {
     assert_eq!(decode_message(&[b'Q', 0, 0, 4, 0], 1024), Err(FrameError::FrameTooLarge));
     assert_eq!(decode_message(&[b'Q', 255, 255, 255, 255], 1024), Err(FrameError::FrameTooLarge));
     assert_eq!(encode_message(b'Q', b"", 4), Err(FrameError::FrameTooLarge));
+}
+
+#[test]
+fn startup_parameters_require_user_and_preserve_supported_session_values() {
+    let parameters =
+        StartupParameters::parse(b"user\0alice\0database\0app\0application_name\0psql\0client_encoding\0UTF8\0\0").unwrap();
+    assert_eq!(parameters.user(), "alice");
+    assert_eq!(parameters.database(), "app");
+    assert_eq!(parameters.get("application_name"), Some("psql"));
+    assert_eq!(parameters.get("client_encoding"), Some("UTF8"));
+    let defaults = StartupParameters::parse(b"user\0alice\0\0").unwrap();
+    assert_eq!(defaults.database(), "alice");
+}
+
+#[test]
+fn startup_parameter_parser_rejects_ambiguous_or_malformed_payloads() {
+    for (payload, expected) in [
+        (b"user\0alice\0".as_slice(), StartupParameterError::MissingTerminator),
+        (b"user\0\0\0".as_slice(), StartupParameterError::MissingUser),
+        (b"user\0alice\0user\0bob\0\0".as_slice(), StartupParameterError::DuplicateKey),
+        (b"user\0alice\0database\0".as_slice(), StartupParameterError::MissingValue),
+        (b"user\0alice\0\xff\0x\0\0".as_slice(), StartupParameterError::InvalidUtf8),
+        (b"user\0alice\0\0extra".as_slice(), StartupParameterError::MissingTerminator),
+    ] {
+        assert_eq!(StartupParameters::parse(payload), Err(expected));
+    }
 }

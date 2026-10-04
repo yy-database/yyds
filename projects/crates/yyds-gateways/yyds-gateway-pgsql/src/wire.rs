@@ -1,5 +1,83 @@
 //! PostgreSQL startup and typed message framing, without SQL interpretation.
 
+use std::collections::BTreeMap;
+
+/// Parsed connection settings from a protocol-v3 startup packet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupParameters {
+    values: BTreeMap<String, String>,
+}
+
+/// Invalid startup parameter payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupParameterError {
+    /// Payload omitted its final empty-key terminator.
+    MissingTerminator,
+    /// A key had no following value.
+    MissingValue,
+    /// A key or value was not UTF-8.
+    InvalidUtf8,
+    /// A parameter appeared more than once.
+    DuplicateKey,
+    /// The required user parameter was absent or empty.
+    MissingUser,
+}
+
+impl StartupParameters {
+    /// Parses NUL-separated key/value pairs terminated by an empty key.
+    pub fn parse(payload: &[u8]) -> Result<Self, StartupParameterError> {
+        let mut values = BTreeMap::new();
+        let mut offset = 0;
+        loop {
+            let key_end = payload[offset..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|relative| offset + relative)
+                .ok_or(StartupParameterError::MissingTerminator)?;
+            if key_end == offset {
+                if key_end + 1 != payload.len() {
+                    return Err(StartupParameterError::MissingTerminator);
+                }
+                break;
+            }
+            let key = std::str::from_utf8(&payload[offset..key_end]).map_err(|_| StartupParameterError::InvalidUtf8)?;
+            offset = key_end + 1;
+            if offset >= payload.len() {
+                return Err(StartupParameterError::MissingValue);
+            }
+            let value_end = payload[offset..]
+                .iter()
+                .position(|byte| *byte == 0)
+                .map(|relative| offset + relative)
+                .ok_or(StartupParameterError::MissingTerminator)?;
+            let value = std::str::from_utf8(&payload[offset..value_end]).map_err(|_| StartupParameterError::InvalidUtf8)?;
+            if values.insert(key.to_owned(), value.to_owned()).is_some() {
+                return Err(StartupParameterError::DuplicateKey);
+            }
+            offset = value_end + 1;
+        }
+        if values.get("user").is_none_or(String::is_empty) {
+            return Err(StartupParameterError::MissingUser);
+        }
+        Ok(Self { values })
+    }
+
+    /// Returns a startup parameter value.
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
+    /// Returns the authenticated session user requested by the client.
+    pub fn user(&self) -> &str {
+        self.get("user").expect("startup parser requires a nonempty user")
+    }
+
+    /// Returns the requested database, defaulting to the requested user.
+    pub fn database(&self) -> &str {
+        self.get("database").filter(|database| !database.is_empty()).unwrap_or_else(|| self.user())
+    }
+}
+
 /// One startup packet. Its code identifies a protocol version or special request.
 #[derive(Debug, PartialEq, Eq)]
 pub struct StartupPacket<'input> {
