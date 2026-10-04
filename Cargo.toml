@@ -6,6 +6,7 @@ members = [
     "projects/crates/yyds-gateways/yyds-gateway-redis",
     "projects/crates/yyds-gateways/yyds-gateway-mysql",
     "projects/crates/yyds-gateways/yyds-gateway-pgsql",
+    "projects/crates/yyds-cli",
 ]
 exclude = ["projects/crates/yyds-gateways"]
 
