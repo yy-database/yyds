@@ -79,6 +79,22 @@ function takePacket(buffer: Buffer) {
     return { sequence: buffer[3], payload: buffer.subarray(4, length + 4), consumed: length + 4 };
 }
 
+function lengthEncoded(value: Buffer | string | null) {
+    if (value === null) return Buffer.from([251]);
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    if (bytes.length < 251) return Buffer.concat([Buffer.from([bytes.length]), bytes]);
+    throw new Error("fixture value is too long");
+}
+
+function column(name: string) {
+    const values = ["def", "", "", "", name, name].map((value) => lengthEncoded(value));
+    return Buffer.concat([...values, Buffer.from([12, 45, 0, 0, 0, 252, 1, 0, 0, 0, 253, 0, 0])]);
+}
+
+function eof() {
+    return Buffer.from([254, 0, 0, 2, 0]);
+}
+
 test("@yyds/mysql re-exports @yyds/yyds", async () => {
     const mysql = await import("../src/index.ts");
     assert.equal(typeof mysql.initWasm, "function");
@@ -175,4 +191,45 @@ test("mysql client reports a truncated handshake when the server closes", async 
     const result = await runCli(["-P", String(address.port), "-e", "SELECT 1"]);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /closed before a complete packet/);
+});
+
+test("mysql client decodes protocol-4.1 text result sets", async (context) => {
+    const server = createServer((socket) => {
+        let pending = Buffer.alloc(0);
+        let authenticated = false;
+        socket.write(handshake());
+        socket.on("data", (chunk) => {
+            pending = Buffer.concat([pending, chunk]);
+            while (true) {
+                const parsed = takePacket(pending);
+                if (parsed === null) return;
+                pending = pending.subarray(parsed.consumed);
+                if (!authenticated) {
+                    authenticated = true;
+                    socket.write(packet(2, Buffer.from([0, 0, 0, 2, 0, 0, 0])));
+                    continue;
+                }
+                assert.equal(parsed.payload[0], 3);
+                socket.write(packet(1, Buffer.from([2])));
+                socket.write(packet(2, column("id")));
+                socket.write(packet(3, column("message")));
+                socket.write(packet(4, eof()));
+                socket.write(packet(5, Buffer.concat([lengthEncoded("7"), lengthEncoded("line\n\\path")])));
+                socket.write(packet(6, Buffer.concat([lengthEncoded(null), lengthEncoded(Buffer.from([0, 255]))])));
+                socket.write(packet(7, eof()));
+            }
+        });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    context.after(
+        () =>
+            new Promise<void>((resolve, reject) =>
+                server.close((error) => (error ? reject(error) : resolve())),
+            ),
+    );
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const result = await runCli(["-P", String(address.port), "-e", "SELECT id, message"]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stdout, "id\tmessage\n7\tline\\n\\\\path\nNULL\t\\0�\n");
 });
