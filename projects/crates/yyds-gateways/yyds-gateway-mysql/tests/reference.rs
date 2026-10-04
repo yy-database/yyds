@@ -46,6 +46,13 @@ except pymysql.err.NotSupportedError as error:
     assert error.args[0] == 1235, error.args
 else:
     raise AssertionError('unsupported SQL unexpectedly returned a result')
+try:
+    with connection.cursor() as cursor:
+        cursor.execute('select (')
+except pymysql.err.ProgrammingError as error:
+    assert error.args[0] == 1064, error.args
+else:
+    raise AssertionError('malformed SQL unexpectedly passed Oak parsing')
 connection.close()
 print('PyMySQL protocol-v10 startup and explicit unsupported-query response passed')
 "#;

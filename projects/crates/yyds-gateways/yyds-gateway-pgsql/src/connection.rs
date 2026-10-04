@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::wire::{FrameError, StartupParameterError, StartupParameters, decode_message, decode_startup, encode_message};
+use yyds_gateway::parse_sql;
 
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
@@ -91,8 +92,25 @@ fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
         };
         match message.tag {
             b'X' if message.payload.is_empty() => return Ok(()),
-            b'Q' if message.payload.last() == Some(&0) => {
-                write_error_response(&mut stream, "0A000", "PostgreSQL query execution is not implemented")?;
+            b'Q' => {
+                let Some(sql_bytes) = message.payload.strip_suffix(&[0])
+                else {
+                    write_error_response(&mut stream, "08P01", "malformed PostgreSQL simple-query message")?;
+                    send_ready(&mut stream)?;
+                    continue;
+                };
+                if sql_bytes.contains(&0) {
+                    write_error_response(&mut stream, "08P01", "embedded NUL in PostgreSQL query")?;
+                }
+                else if let Ok(sql) = std::str::from_utf8(sql_bytes) {
+                    match parse_sql(sql) {
+                        Err(_) => write_error_response(&mut stream, "42601", "Oak could not parse the SQL statement")?,
+                        Ok(_) => write_error_response(&mut stream, "0A000", "PostgreSQL query execution is not implemented")?,
+                    }
+                }
+                else {
+                    write_error_response(&mut stream, "22021", "query is not valid UTF-8")?;
+                }
                 send_ready(&mut stream)?;
             }
             _ => {
