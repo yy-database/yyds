@@ -28,6 +28,8 @@ test("SQLite CLI reports the bundled engine and rejects incomplete arguments", {
     assert.equal(run(":memory:").status, 1);
     assert.equal(run(":memory:", "SELECT FROM").status, 1);
     assert.equal(run(":memory:", ".not-supported").status, 1);
+    const missingDirectory = mkdtempSync(join(tmpdir(), "yyds-sqlite-readonly-missing-"));
+    assert.equal(run("-readonly", join(missingDirectory, "missing.sqlite"), "SELECT 1").status, 1);
     assert.equal(run("--unknown", "SELECT 1").status, 1);
 });
 
@@ -45,6 +47,10 @@ test("SQLite CLI executes SQL, dot commands, and writes standard SQLite files", 
     assert.equal(query.status, 0, query.stderr);
     assert.equal(query.stdout, "1|hello|X'00ff'|\n");
     assert.equal(run(path, ".tables").stdout, "samples\n");
+    const readonly = run("-readonly", path, "SELECT value FROM samples");
+    assert.equal(readonly.status, 0, readonly.stderr);
+    assert.equal(readonly.stdout, "hello\n");
+    assert.equal(run("-readonly", path, "INSERT INTO samples VALUES (2, 'blocked', X'')").status, 1);
     assert.equal(
         run(path, ".schema").stdout,
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, value TEXT, payload BLOB);\n",

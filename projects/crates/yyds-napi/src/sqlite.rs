@@ -115,11 +115,18 @@ pub struct SqliteConnection {
 
 #[napi]
 impl SqliteConnection {
-    /// Opens or creates a SQLite database file. Use `:memory:` for a private memory database.
+    /// Opens or creates a SQLite file, or opens an existing file read-only when requested.
     #[napi(constructor)]
-    pub fn new(path: String) -> napi::Result<Self> {
-        let engine = if path == ":memory:" { SqliteEngine::open_in_memory() } else { SqliteEngine::open(&path) }
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    pub fn new(path: String, read_only: Option<bool>) -> napi::Result<Self> {
+        let engine = match (path.as_str(), read_only.unwrap_or(false)) {
+            (":memory:", false) => SqliteEngine::open_in_memory(),
+            (":memory:", true) => {
+                return Err(napi::Error::from_reason("SQLite in-memory databases cannot be opened read-only"));
+            }
+            (_, true) => SqliteEngine::open_read_only(&path),
+            (_, false) => SqliteEngine::open(&path),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(Self { engine })
     }
 

@@ -88,6 +88,12 @@ impl SqliteEngine {
         Ok(Self { connection })
     }
 
+    /// Opens an existing SQLite file without write access or implicit creation.
+    pub fn open_read_only(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Ok(Self { connection })
+    }
+
     /// Executes exactly one statement and preserves native SQLite value types.
     pub fn execute(&self, sql: &str) -> rusqlite::Result<SqliteQueryResult> {
         self.execute_with_parameters(sql, &[])

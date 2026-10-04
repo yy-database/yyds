@@ -36,12 +36,15 @@ export interface SqliteQueryResult {
 export class SqliteConnection {
     readonly #native: SqliteConnectionBinding;
 
-    constructor(path: string) {
+    constructor(path: string, options: { readOnly?: boolean } = {}) {
         if (typeof path !== "string" || path.length === 0) {
             throw new TypeError("SQLite database path must be a non-empty string");
         }
+        if (typeof options !== "object" || options === null || Object.keys(options).some((key) => key !== "readOnly") || options.readOnly !== undefined && typeof options.readOnly !== "boolean") {
+            throw new TypeError("SQLite connection options must contain an optional boolean readOnly");
+        }
         const native = loadYydsSqliteNative();
-        this.#native = new native.SqliteConnection(path);
+        this.#native = new native.SqliteConnection(path, options.readOnly ?? false);
     }
 
     execute(sql: string): SqliteQueryResult {
