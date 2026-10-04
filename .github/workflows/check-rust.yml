@@ -1,10 +1,12 @@
-name: CI
+name: Check Rust
 
+# Rust fmt/test only. TypeScript checks: check-typescript.yml
+# Publish: release-npm.yml on v*.*.* tags.
 on:
   push:
-    branches: [ master, dev ]
+    branches: [master, dev]
   pull_request:
-    branches: [ master, dev ]
+    branches: [master, dev]
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,8 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly-2026-07-20
+      - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-07-20
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -26,10 +29,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly-2026-07-20
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-20
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo build -p yyds-napi --release
@@ -40,21 +45,3 @@ jobs:
       - run: cargo build -p yyds-gateway-redis --release
       - run: cargo build -p yyds-gateway-mysql --release
       - run: cargo build -p yyds-gateway-pgsql --release
-
-  ts:
-    name: pnpm packages
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly-2026-07-20
-      - uses: jetli/wasm-pack-action@v0.4.0
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build:wasm
-      - run: pnpm typecheck
-      - run: pnpm build:napi
-      - run: pnpm test:ts

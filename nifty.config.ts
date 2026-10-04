@@ -3,9 +3,11 @@ import { defineConfig } from '@doki-land/nifty';
 
 export default defineConfig({
     trust: {
-        repo: 'yy-database/yyds',
-        file: 'release-npm.yml',
-        environment: 'NPM_PUBLISH',
+        npm: {
+            repo: 'yy-database/yyds',
+            file: 'release-npm.yml',
+            environment: 'NPM_PUBLISH',
+        },
     },
     publish: {
         packages: [
