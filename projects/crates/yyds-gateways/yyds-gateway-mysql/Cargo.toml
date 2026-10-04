@@ -12,6 +12,6 @@ path = "src/lib.rs"
 
 [dependencies]
 yyds-gateway = { workspace = true }
-yyds-types = { workspace = true }
+yyds-control = { workspace = true }
 
 [dev-dependencies]
