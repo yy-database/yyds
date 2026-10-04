@@ -180,14 +180,18 @@ fn respond(
             return Ok(true);
         };
         match bind_mget(&request.arguments, namespace) {
-            Ok(commands) => match executor.execute_batch(&commands) {
+            Ok(commands) => match executor.execute_read_batch(&commands) {
                 Ok(results) => {
+                    if results.len() != commands.len() || results.iter().any(|result| !matches!(result, KeyValueResult::Get(_))) {
+                        write_error(stream, "MGET executor returned an invalid read batch")?;
+                        return Ok(true);
+                    }
                     write!(stream, "*{}\r\n", results.len())?;
                     for result in results {
                         match result {
                             KeyValueResult::Get(Some(value)) => write_bulk(stream, &value)?,
                             KeyValueResult::Get(None) => stream.write_all(b"$-1\r\n")?,
-                            _ => write_error(stream, "MGET executor returned a non-read result")?,
+                            _ => unreachable!(),
                         }
                     }
                 }

@@ -12,13 +12,10 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// Routes and applies one namespace-scoped command.
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult>;
 
-    /// Applies an ordered batch without promising cross-command atomicity.
-    ///
-    /// A distributed implementation may override this method to route and
-    /// schedule the batch explicitly. The default preserves compatibility for
-    /// executors that only expose single-command execution.
-    fn execute_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
-        commands.iter().cloned().map(|command| self.execute(command)).collect()
+    /// Reads an ordered batch atomically, preserving duplicate keys.
+    /// Executors without an atomic read contract must reject the request.
+    fn execute_read_batch(&self, _commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
+        Err(Error::Unsupported("atomic batch reads are not implemented by this executor"))
     }
 }
 
@@ -51,6 +48,29 @@ impl<S> KeyValueExecutor for LocalExecutor<S>
 where
     S: KvStore + Send + Debug,
 {
+    fn execute_read_batch(&self, commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
+        if commands.iter().any(|command| command.action != KeyValueAction::Get) {
+            return Err(Error::Unsupported("read batches accept only read actions"));
+        }
+        let decisions = commands.iter().map(|command| self.routing.route(&command.namespace.0, &command.key)).collect::<Vec<_>>();
+        let mut guards = HashMap::new();
+        for shard_id in self.routing.shards() {
+            if decisions.iter().any(|decision| &decision.shard == shard_id) {
+                let shard = self.shards.get(shard_id).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
+                guards.insert(shard_id.clone(), shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?);
+            }
+        }
+        commands.iter().zip(decisions).map(|(command, decision)| {
+            let shard = guards.get_mut(&decision.shard).ok_or(Error::Unsupported("batch shard is not locked"))?;
+            let key = Key::new(command.namespace.0.clone(), command.key.clone());
+            let value = shard.get(&key)?.map(|record| match record.value {
+                StoredValue::Inline(value) => Ok(value.0),
+                StoredValue::Object(_) => Err(Error::Unsupported("object values are not available through the local KV executor")),
+            }).transpose()?;
+            Ok(KeyValueResult::Get(value))
+        }).collect()
+    }
+
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
         let decision = self.routing.route(&command.namespace.0, &command.key);
         let shard = self.shards.get(&decision.shard).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
