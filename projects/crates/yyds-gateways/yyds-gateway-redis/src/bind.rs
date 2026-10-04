@@ -13,6 +13,8 @@ pub enum BindError {
     WrongArity,
     /// SET options require semantics that are not implemented yet.
     UnsupportedOptions,
+    /// Increment delta is not a canonical signed 64-bit integer.
+    InvalidInteger,
 }
 
 /// Binds one binary Redis request into a protocol-neutral YYDS command.
@@ -38,6 +40,24 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
             return Err(BindError::WrongArity);
         }
         KeyValueAction::Delete
+    }
+    else if command.eq_ignore_ascii_case(b"INCR") || command.eq_ignore_ascii_case(b"INCRBY") {
+        let increment = command.eq_ignore_ascii_case(b"INCR");
+        if arguments.len() != if increment { 2 } else { 3 } {
+            return Err(BindError::WrongArity);
+        }
+        let delta = if increment {
+            1
+        }
+        else {
+            let text = std::str::from_utf8(arguments[2]).map_err(|_| BindError::InvalidInteger)?;
+            let value = text.parse::<i64>().map_err(|_| BindError::InvalidInteger)?;
+            if value.to_string() != text {
+                return Err(BindError::InvalidInteger);
+            }
+            value
+        };
+        KeyValueAction::IncrementBy(delta)
     }
     else {
         return Err(BindError::UnsupportedCommand);

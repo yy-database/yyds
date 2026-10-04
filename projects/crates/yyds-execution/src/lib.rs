@@ -69,6 +69,27 @@ where
                 let removed = shard.delete(&key)?;
                 Ok(KeyValueResult::Delete { removed })
             }
+            KeyValueAction::IncrementBy(delta) => {
+                let current = match shard.get(&key)? {
+                    None => 0,
+                    Some(record) => match record.value {
+                        StoredValue::Inline(value) => parse_integer(&value.0)?,
+                        StoredValue::Object(_) => return Err(Error::Unsupported("object values cannot be incremented")),
+                    },
+                };
+                let value = current.checked_add(delta).ok_or(Error::IntegerOverflow)?;
+                shard.put(key, StoredValue::Inline(InlineValue(value.to_string().into_bytes())))?;
+                Ok(KeyValueResult::Increment { value })
+            }
         }
     }
+}
+
+fn parse_integer(bytes: &[u8]) -> yyds_types::Result<i64> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::InvalidIntegerValue)?;
+    let value = text.parse::<i64>().map_err(|_| Error::InvalidIntegerValue)?;
+    if value.to_string() != text {
+        return Err(Error::InvalidIntegerValue);
+    }
+    Ok(value)
 }

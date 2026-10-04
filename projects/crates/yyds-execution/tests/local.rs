@@ -52,3 +52,47 @@ fn executor_rejects_incomplete_shard_mounts() {
     let routing = ShardMap::new(ShardEpoch(1), vec![ShardId("required".into())]).unwrap();
     assert!(LocalExecutor::<FileShard>::new(routing, HashMap::new()).is_err());
 }
+
+#[test]
+fn increments_are_atomic_persisted_and_errors_do_not_write() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("counter.yykv");
+    let id = ShardId("counter".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![id.clone()]).unwrap();
+    let executor =
+        std::sync::Arc::new(LocalExecutor::new(routing, HashMap::from([(id, FileShard::open(&path).unwrap())])).unwrap());
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let executor = std::sync::Arc::clone(&executor);
+        workers.push(std::thread::spawn(move || {
+            for _ in 0..10 {
+                executor.execute(command(KeyValueAction::IncrementBy(1), b"counter")).unwrap();
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"counter")).unwrap(), KeyValueResult::Get(Some(b"40".to_vec())));
+    executor.execute(command(KeyValueAction::Put(i64::MAX.to_string().into_bytes()), b"max")).unwrap();
+    assert!(executor.execute(command(KeyValueAction::IncrementBy(1), b"max")).is_err());
+    for value in [b"01".as_slice(), b"+1", b"-0", b"abc", b""] {
+        executor.execute(command(KeyValueAction::Put(value.to_vec()), b"invalid")).unwrap();
+        assert!(executor.execute(command(KeyValueAction::IncrementBy(1), b"invalid")).is_err());
+        assert_eq!(
+            executor.execute(command(KeyValueAction::Get, b"invalid")).unwrap(),
+            KeyValueResult::Get(Some(value.to_vec()))
+        );
+    }
+    drop(executor);
+    use yyds_kv::KvStore;
+    let shard = FileShard::open(&path).unwrap();
+    assert_eq!(
+        shard.get(&yyds_kv::Key::new("redis:0", b"counter")).unwrap().unwrap().value,
+        yyds_kv::StoredValue::Inline(yyds_kv::InlineValue(b"40".to_vec()))
+    );
+    assert_eq!(
+        shard.get(&yyds_kv::Key::new("redis:0", b"max")).unwrap().unwrap().value,
+        yyds_kv::StoredValue::Inline(yyds_kv::InlineValue(i64::MAX.to_string().into_bytes()))
+    );
+}

@@ -22,6 +22,8 @@ pub enum KeyValueAction {
     Put(Vec<u8>),
     /// Remove the current value if it exists.
     Delete,
+    /// Atomically add a signed delta to a decimal integer value, treating an absent key as zero.
+    IncrementBy(i64),
 }
 
 /// Result of applying one [`KeyValueCommand`].
@@ -33,4 +35,6 @@ pub enum KeyValueResult {
     Put { revision: u64 },
     /// Whether a delete found and removed a value.
     Delete { removed: bool },
+    /// Result of an atomic signed integer increment.
+    Increment { value: i64 },
 }
