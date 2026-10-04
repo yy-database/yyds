@@ -71,13 +71,17 @@ fn start_status_stop_and_restart_are_one_node_lifecycle() {
     let pgsql_address: SocketAddr = body["runtime"]["pgsqlAddress"].as_str().unwrap().parse().unwrap();
     let mut pgsql = pgsql_connect(pgsql_address);
     pgsql.write_all(b"Q\0\0").unwrap();
+    let mysql_address: SocketAddr = body["runtime"]["mysqlAddress"].as_str().unwrap().parse().unwrap();
+    let mut mysql = mysql_connect(mysql_address);
     assert_eq!(redis_exchange(address, &[b"SET", b"persisted", b"\0\xff"]), b"+OK\r\n");
     let stopped = command(&directory, "stop");
     assert!(stopped.status.success(), "{}", String::from_utf8_lossy(&stopped.stderr));
     assert!(child.wait_with_output().unwrap().status.success());
     assert!(TcpStream::connect_timeout(&pgsql_address, Duration::from_secs(1)).is_err());
+    assert!(TcpStream::connect_timeout(&mysql_address, Duration::from_secs(1)).is_err());
     let mut probe = [0];
     assert!(!matches!(pgsql.read(&mut probe), Ok(count) if count > 0));
+    assert!(!matches!(mysql.read(&mut probe), Ok(count) if count > 0));
     wait_for(&directory, |body| body.contains("\"available\"") && body.contains("\"runtime\":null"));
 
     let child = spawn_start(&directory);
@@ -110,6 +114,25 @@ fn pgsql_bind_failure_rolls_back_node_start() {
     assert_eq!(body["ownership"], "available");
     assert!(body["runtime"].is_null());
     assert!(!directory.join("node.status.json").exists());
+}
+
+#[test]
+fn mysql_bind_failure_rolls_back_node_start() {
+    let directory = directory();
+    assert!(command(&directory, "init").status.success());
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_yyds"))
+        .args(["start", "--data-dir"])
+        .arg(&directory)
+        .args(["--cluster-id", "cluster-a", "--node-id", "node-a", "--redis-port", "0", "--mysql-port", &port])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let status = command(&directory, "status");
+    let body: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(body["ownership"], "available");
+    assert!(body["runtime"].is_null());
 }
 
 fn redis_exchange(address: SocketAddr, arguments: &[&[u8]]) -> Vec<u8> {
@@ -151,11 +174,57 @@ fn pgsql_connect(address: SocketAddr) -> TcpStream {
     }
 }
 
+fn mysql_connect(address: SocketAddr) -> TcpStream {
+    let mut client = TcpStream::connect_timeout(&address, Duration::from_secs(3)).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let (sequence, greeting) = read_mysql_packet(&mut client);
+    assert_eq!(sequence, 0);
+    assert_eq!(greeting[0], 10);
+    let mut response = Vec::new();
+    response.extend_from_slice(&((0x0200_u32) | (0x8000_u32) | (0x80000_u32)).to_le_bytes());
+    response.extend_from_slice(&1_048_576_u32.to_le_bytes());
+    response.push(45);
+    response.extend_from_slice(&[0; 23]);
+    response.extend_from_slice(b"yyds\0\0mysql_native_password\0");
+    client.write_all(&encode_mysql_packet(1, &response)).unwrap();
+    let (sequence, ok) = read_mysql_packet(&mut client);
+    assert_eq!(sequence, 2);
+    assert_eq!(ok[0], 0);
+    client
+}
+
+fn read_mysql_packet(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut header = [0; 4];
+    stream.read_exact(&mut header).unwrap();
+    let length = usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+    let mut payload = vec![0; length];
+    stream.read_exact(&mut payload).unwrap();
+    (header[3], payload)
+}
+
+fn encode_mysql_packet(sequence: u8, payload: &[u8]) -> Vec<u8> {
+    let length = payload.len();
+    let mut packet = vec![length as u8, (length >> 8) as u8, (length >> 16) as u8, sequence];
+    packet.extend_from_slice(payload);
+    packet
+}
+
 fn spawn_start(directory: &std::path::Path) -> Child {
     let mut child = Command::new(env!("CARGO_BIN_EXE_yyds"))
         .args(["start", "--data-dir"])
         .arg(directory)
-        .args(["--cluster-id", "cluster-a", "--node-id", "node-a", "--redis-port", "0", "--pgsql-port", "0"])
+        .args([
+            "--cluster-id",
+            "cluster-a",
+            "--node-id",
+            "node-a",
+            "--redis-port",
+            "0",
+            "--pgsql-port",
+            "0",
+            "--mysql-port",
+            "0",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
