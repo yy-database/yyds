@@ -18,6 +18,8 @@ fn redis_binding_executes_binary_values_and_isolates_namespaces() {
     let value = b"\0\xfevalue";
     let result = executor.execute(bind(&[b"sEt", key, value], &namespace).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Put { revision: 1 });
+    assert_eq!(executor.execute(bind(&[b"EXISTS", key], &namespace).unwrap()).unwrap(), KeyValueResult::Exists(true));
+    assert_eq!(executor.execute(bind(&[b"EXISTS", b"missing"], &namespace).unwrap()).unwrap(), KeyValueResult::Exists(false));
     assert_eq!(
         executor.execute(bind(&[b"SET", key, b"replacement", b"nx"], &namespace).unwrap()).unwrap(),
         KeyValueResult::PutIfAbsent { revision: None },
@@ -42,6 +44,8 @@ fn unsupported_shapes_are_rejected_before_execution() {
     for (arguments, expected) in [
         (vec![], BindError::EmptyCommand),
         (vec![b"GET".as_slice()], BindError::WrongArity),
+        (vec![b"EXISTS".as_slice()], BindError::WrongArity),
+        (vec![b"EXISTS".as_slice(), b"one", b"two"], BindError::WrongArity),
         (vec![b"SET".as_slice(), b"key"], BindError::WrongArity),
         (vec![b"SET".as_slice(), b"key", b"value", b"XX"], BindError::UnsupportedOptions),
         (vec![b"SET".as_slice(), b"key", b"value", b"NX", b"GET"], BindError::UnsupportedOptions),
