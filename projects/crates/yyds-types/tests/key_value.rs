@@ -13,8 +13,10 @@ fn key_value_contract_preserves_namespace_and_opaque_bytes() {
     assert_eq!(command.action, KeyValueAction::Put(vec![0, 0xfe, b'v']));
     assert_eq!(KeyValueAction::Exists, KeyValueAction::Exists);
     assert_eq!(KeyValueAction::GetDelete, KeyValueAction::GetDelete);
+    assert_eq!(KeyValueAction::GetSet(vec![1]), KeyValueAction::GetSet(vec![1]));
     assert_eq!(KeyValueResult::Exists(true), KeyValueResult::Exists(true));
     assert_eq!(KeyValueResult::GetDelete(None), KeyValueResult::GetDelete(None));
+    assert_eq!(KeyValueResult::GetSet(None), KeyValueResult::GetSet(None));
     match KeyValueResult::Get(Some(vec![0, 0xfe, b'v'])) {
         KeyValueResult::Get(Some(value)) => assert_eq!(value, [0, 0xfe, b'v']),
         result => panic!("unexpected result: {result:?}"),
