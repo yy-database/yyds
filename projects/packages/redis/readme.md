@@ -15,6 +15,7 @@ redis-cli -h 127.0.0.1 -p 6379 GETSET key replacement
 redis-cli -h 127.0.0.1 -p 6379 INCR visits
 redis-cli -h 127.0.0.1 -p 6379 INCRBY visits -2
 redis-cli -h 127.0.0.1 -p 6379 DECRBY visits 2
+redis-cli -h 127.0.0.1 -p 6379 MGET key missing key
 redis-cli -n 1 GET key
 ```
 
