@@ -49,7 +49,7 @@ fn start_server() -> (TcpStream, thread::JoinHandle<()>) {
 }
 
 #[test]
-fn protocol_v10_handshake_accepts_empty_password_then_rejects_sql_explicitly() {
+fn protocol_v10_handshake_accepts_charset_setup_then_rejects_sql_explicitly() {
     let (mut client, server) = start_server();
     let (sequence, handshake) = read_packet(&mut client);
     assert_eq!(sequence, 0);
@@ -58,6 +58,19 @@ fn protocol_v10_handshake_accepts_empty_password_then_rejects_sql_explicitly() {
 
     client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
     assert_eq!(read_packet(&mut client), (2, vec![0, 0, 0, 2, 0, 0, 0]));
+
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4").unwrap()).unwrap();
+    assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
+
+    client.write_all(&encode_packet(0, b"\x03SET NAMES latin1").unwrap()).unwrap();
+    let (sequence, error) = read_packet(&mut client);
+    assert_eq!(sequence, 1);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1115);
+
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4 COLLATE utf8mb4_bin").unwrap()).unwrap();
+    let (sequence, error) = read_packet(&mut client);
+    assert_eq!(sequence, 1);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1273);
 
     client.write_all(&encode_packet(0, b"\x03select 1").unwrap()).unwrap();
     let (sequence, error) = read_packet(&mut client);

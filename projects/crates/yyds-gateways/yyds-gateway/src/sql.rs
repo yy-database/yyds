@@ -12,6 +12,26 @@ pub struct SqlFrontendError {
     pub message: String,
 }
 
+/// A session statement lowered from Oak's SQL syntax tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SqlSessionCommand {
+    /// `SET NAMES` character-set negotiation.
+    SetNames { character_set: String, collation: Option<String> },
+    /// Transaction boundary used by SQL protocol sessions.
+    Transaction(SqlTransactionAction),
+}
+
+/// Transaction operation recognized by Oak and projected for protocol adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlTransactionAction {
+    /// Start a transaction.
+    Begin,
+    /// Commit a transaction.
+    Commit,
+    /// Roll back a transaction.
+    Rollback,
+}
+
 /// Parses one SQL surface statement through the official Oak SQL frontend.
 pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError> {
     let root = oak_sql::parse(source).map_err(|message| SqlFrontendError { message })?;
@@ -26,6 +46,26 @@ pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError
         return Err(bind_error("Oak produced no SQL statements"));
     }
     Ok(root)
+}
+
+/// Projects the small set of protocol session commands from Oak's SQL AST.
+pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, SqlFrontendError> {
+    let root = parse_sql(source)?;
+    if root.statements.len() != 1 {
+        return Ok(None);
+    }
+    Ok(match &root.statements[0] {
+        SqlStatement::SetNames(statement) => Some(SqlSessionCommand::SetNames {
+            character_set: statement.character_set.to_string(),
+            collation: statement.collation.as_deref().map(str::to_string),
+        }),
+        SqlStatement::Transaction(statement) => Some(SqlSessionCommand::Transaction(match statement.action {
+            oak_sql::ast::TransactionAction::Begin => SqlTransactionAction::Begin,
+            oak_sql::ast::TransactionAction::Commit => SqlTransactionAction::Commit,
+            oak_sql::ast::TransactionAction::Rollback => SqlTransactionAction::Rollback,
+        })),
+        _ => None,
+    })
 }
 
 /// Gateway-owned statement after Oak parsing and SQL-surface binding.
