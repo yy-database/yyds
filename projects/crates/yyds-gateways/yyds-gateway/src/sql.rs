@@ -14,7 +14,18 @@ pub struct SqlFrontendError {
 
 /// Parses one SQL surface statement through the official Oak SQL frontend.
 pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError> {
-    oak_sql::parse(source).map_err(|message| SqlFrontendError { message })
+    let root = oak_sql::parse(source).map_err(|message| SqlFrontendError { message })?;
+    for statement in &root.statements {
+        match statement {
+            SqlStatement::Error { message, .. } => return Err(SqlFrontendError { message: message.to_string() }),
+            SqlStatement::Unknown { .. } => {}
+            _ => {}
+        }
+    }
+    if root.statements.is_empty() {
+        return Err(bind_error("Oak produced no SQL statements"));
+    }
+    Ok(root)
 }
 
 /// Gateway-owned statement after Oak parsing and SQL-surface binding.
