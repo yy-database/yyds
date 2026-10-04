@@ -128,3 +128,32 @@ fn put_if_absent_is_atomic_and_does_not_replace_existing_values() {
     );
     assert_eq!(executor.execute(command(KeyValueAction::Get, b"winner")).unwrap(), original);
 }
+
+#[test]
+fn get_delete_is_atomic_under_competing_readers() {
+    let shard_id = ShardId("get-delete".into());
+    let executor = std::sync::Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+            HashMap::from([(shard_id, yyds_kv::MemoryShard::new())]),
+        )
+        .unwrap(),
+    );
+    executor
+        .execute(command(KeyValueAction::Put(b"payload".to_vec()), b"once"))
+        .unwrap();
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let executor = std::sync::Arc::clone(&executor);
+        workers.push(std::thread::spawn(move || {
+            executor.execute(command(KeyValueAction::GetDelete, b"once")).unwrap()
+        }));
+    }
+    let results = workers.into_iter().map(|worker| worker.join().unwrap()).collect::<Vec<_>>();
+    assert_eq!(
+        results.iter().filter(|result| matches!(result, KeyValueResult::GetDelete(Some(value)) if value == b"payload" )).count(),
+        1
+    );
+    assert_eq!(results.iter().filter(|result| matches!(result, KeyValueResult::GetDelete(None))).count(), 7);
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"once")).unwrap(), KeyValueResult::Get(None));
+}
