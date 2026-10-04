@@ -34,6 +34,10 @@ function createReader(socket) {
         failure = error;
         wake?.();
     });
+    socket.on("end", () => {
+        failure = new Error("MySQL closed before a complete packet");
+        wake?.();
+    });
     return async function read(expectedSequence) {
         while (pending.length < 4) {
             if (failure) throw failure;
@@ -76,6 +80,9 @@ function parseHandshake(payload) {
     offset += 1 + 2;
     if (offset + 2 > payload.length) throw new Error("truncated MySQL extended capabilities");
     capabilities |= payload.readUInt16LE(offset) << 16;
+    if (!(capabilities & CLIENT_PROTOCOL_41) || !(capabilities & CLIENT_SECURE_CONNECTION)) {
+        throw new Error("MySQL protocol 4.1 with secure-connection framing is required");
+    }
     offset += 2;
     if (offset + 11 > payload.length) throw new Error("truncated MySQL authentication metadata");
     const authLength = payload[offset++];
