@@ -20,11 +20,25 @@ function argumentsFor(args) {
         database: "yyds",
         sql: "",
         headers: true,
+        separator: "|",
+        nullValue: "",
     };
     for (let index = 0; index < args.length; index += 1) {
         const option = args[index];
         if (option === "-t" || option === "--tuples-only") {
             options.headers = false;
+            continue;
+        }
+        if (option === "-F" || option === "--field-separator") {
+            const value = args[++index];
+            if (value === undefined || value.includes("\0")) throw new Error(`invalid value for ${option}`);
+            options.separator = value;
+            continue;
+        }
+        if (option === "-P" || option === "--pset") {
+            const value = args[++index];
+            if (value === undefined || !value.startsWith("null=")) throw new Error("only psql null output is configurable");
+            options.nullValue = value.slice(5);
             continue;
         }
         const key = {
@@ -192,13 +206,13 @@ async function main(args) {
         return;
     }
     if (args.length === 1 && args[0] === "--help") {
-        console.log("Usage: psql [-h HOST] [-p PORT] [-U USER] [-d DATABASE] [-t] -c SQL");
+        console.log("Usage: psql [-h HOST] [-p PORT] [-U USER] [-d DATABASE] [-t] [-F SEP] [-P null=TEXT] -c SQL");
         return;
     }
     const options = argumentsFor(args);
     const result = await query(options);
-    if (options.headers && result.columns.length) console.log(result.columns.join("|"));
-    for (const row of result.rows) console.log(row.map((value) => value ?? "").join("|"));
+    if (options.headers && result.columns.length) console.log(result.columns.join(options.separator));
+    for (const row of result.rows) console.log(row.map((value) => value ?? options.nullValue).join(options.separator));
     if (result.columns.length === 0) for (const tag of result.tags) console.log(tag);
 }
 
