@@ -7,6 +7,7 @@ use yyds_gateway::{GatewayConfig, GatewayKind, version_label};
 use yyds_types::{Error, Result};
 
 pub mod resp;
+pub mod bind;
 pub mod connection;
 pub mod service;
 

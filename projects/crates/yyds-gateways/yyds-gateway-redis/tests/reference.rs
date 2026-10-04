@@ -1,11 +1,15 @@
 use std::{
+    collections::HashMap,
     process::{Command, Stdio},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
+use yyds_execution::LocalExecutor;
 use yyds_gateway_redis::{resp::RequestLimits, service::RedisService};
+use yyds_kv::MemoryShard;
+use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
 #[test]
 #[ignore = "requires YYDS_REDIS_REFERENCE_PYTHON and the original redis Python client"]
@@ -18,7 +22,16 @@ fn original_redis_client_probes_and_pipeline() {
     ));
     let owner =
         Arc::new(NodeLease::acquire(&directory, NodeIdentity::new("reference-cluster", "reference-node").unwrap()).unwrap());
-    let service = RedisService::start(owner, "127.0.0.1:0".parse().unwrap(), RequestLimits::default()).unwrap();
+    let shard_id = ShardId("reference-shard".into());
+    let executor = Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+            HashMap::from([(shard_id, MemoryShard::new())]),
+        )
+        .unwrap(),
+    );
+    let service =
+        RedisService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), RequestLimits::default(), executor).unwrap();
     let port = service.address().port();
     let script = r#"
 import redis, sys
@@ -36,12 +49,18 @@ with redis.Redis(host='127.0.0.1', port=int(sys.argv[1]), protocol=2,
         pipeline.echo(payload)
         assert pipeline.execute() == [True, b'', payload]
     print('reference: pipeline', file=sys.stderr, flush=True)
-    try:
-        client.get('unsupported-storage-operation')
-    except redis.ResponseError as error:
-        assert 'unsupported command' in str(error)
-    else:
-        raise AssertionError('storage command was incorrectly accepted')
+    key = b'\x00\xffredis-key'
+    assert client.set(key, payload) is True
+    assert client.get(key) == payload
+    print('reference: binary set/get', file=sys.stderr, flush=True)
+    with client.pipeline(transaction=False) as pipeline:
+        pipeline.set(b'pipeline-key', b'pipeline-value')
+        pipeline.get(b'pipeline-key')
+        pipeline.delete(b'pipeline-key')
+        assert pipeline.execute() == [True, b'pipeline-value', 1]
+    assert client.delete(key) == 1
+    assert client.get(key) is None
+    print('reference: storage pipeline', file=sys.stderr, flush=True)
     assert client.ping() is True
 print(redis.__version__)
 "#;

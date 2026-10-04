@@ -10,10 +10,14 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
+use yyds_execution::{KeyValueExecutor, LocalExecutor};
 use yyds_gateway_redis::{DEFAULT_PORT, resp::RequestLimits, service::RedisService};
+use yyds_kv::FileShard;
+use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
 const STATUS_FILE: &str = "node.status.json";
 const CONTROL_VERSION: u32 = 1;
+const LOCAL_SHARD_ID: &str = "local-0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Command {
@@ -114,16 +118,18 @@ fn identity(arguments: &Arguments) -> Result<NodeIdentity, String> {
 
 fn init(arguments: &Arguments) -> Result<(), String> {
     let lease = NodeLease::acquire(&arguments.data_dir, identity(arguments)?).map_err(|error| error.to_string())?;
+    open_executor(&arguments.data_dir)?;
     println!("initialized {}", lease.directory().display());
     Ok(())
 }
 
 fn start(arguments: &Arguments) -> Result<(), String> {
     let lease = Arc::new(NodeLease::acquire(&arguments.data_dir, identity(arguments)?).map_err(|error| error.to_string())?);
+    let executor = open_executor(&arguments.data_dir)?;
     remove_if_present(&arguments.data_dir.join(STATUS_FILE))?;
     let address = SocketAddr::from(([127, 0, 0, 1], arguments.redis_port));
-    let service =
-        RedisService::start(Arc::clone(&lease), address, RequestLimits::default()).map_err(|error| error.to_string())?;
+    let service = RedisService::start_with_executor(Arc::clone(&lease), address, RequestLimits::default(), executor)
+        .map_err(|error| error.to_string())?;
     let runtime = RuntimeStatus {
         version: CONTROL_VERSION,
         generation: uuid::Uuid::new_v4(),
@@ -141,6 +147,15 @@ fn start(arguments: &Arguments) -> Result<(), String> {
     let _ = fs::remove_file(arguments.data_dir.join(STATUS_FILE));
     let _ = fs::remove_file(stop_path);
     result
+}
+
+fn open_executor(directory: &Path) -> Result<Arc<dyn KeyValueExecutor>, String> {
+    let shard_id = ShardId(LOCAL_SHARD_ID.into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).map_err(|error| format!("routing: {error:?}"))?;
+    let shard = FileShard::open(directory.join(format!("{LOCAL_SHARD_ID}.yykv"))).map_err(|error| error.to_string())?;
+    let executor =
+        LocalExecutor::new(routing, std::collections::HashMap::from([(shard_id, shard)])).map_err(|error| error.to_string())?;
+    Ok(Arc::new(executor))
 }
 
 fn status(arguments: &Arguments) -> Result<(), String> {
