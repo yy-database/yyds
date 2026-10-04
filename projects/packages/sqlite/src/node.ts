@@ -74,6 +74,13 @@ export class SqliteConnection {
         };
     }
 
+    executeBatch(sql: string): void {
+        if (typeof sql !== "string" || sql.length === 0) {
+            throw new TypeError("SQLite SQL batch must be a non-empty string");
+        }
+        this.#native.executeBatch(sql);
+    }
+
     sourceId(): string {
         return this.#native.sourceId();
     }

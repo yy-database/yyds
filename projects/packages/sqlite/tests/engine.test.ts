@@ -92,6 +92,29 @@ test("native SQLite engine binds parameters without changing their storage class
     ]), /parameter/i);
 });
 
+test("native SQLite engine executes batches with SQLite transaction semantics", {
+    skip: !isYydsNativeInstalled(),
+}, () => {
+    const database = new SqliteConnection(":memory:");
+    database.executeBatch(`
+        CREATE TABLE sample (value INTEGER);
+        INSERT INTO sample VALUES (1);
+        INSERT INTO sample VALUES (2);
+    `);
+    assert.deepEqual(database.execute("SELECT value FROM sample ORDER BY value").rows, [
+        [{ kind: "integer", value: 1n }],
+        [{ kind: "integer", value: 2n }],
+    ]);
+    database.executeBatch("BEGIN; INSERT INTO sample VALUES (3); ROLLBACK;");
+    assert.deepEqual(database.execute("SELECT value FROM sample ORDER BY value").rows, [
+        [{ kind: "integer", value: 1n }],
+        [{ kind: "integer", value: 2n }],
+    ]);
+    assert.throws(() => database.executeBatch("INSERT INTO sample VALUES (4); INVALID SQL;"));
+    assert.deepEqual(database.execute("SELECT count(*) FROM sample").rows[0][0], { kind: "integer", value: 3n });
+    assert.deepEqual(database.execute("SELECT max(value) FROM sample").rows[0][0], { kind: "integer", value: 4n });
+});
+
 test("native SQLite engine reads and writes files through SQLite's pager", {
     skip: !isYydsNativeInstalled(),
 }, () => {

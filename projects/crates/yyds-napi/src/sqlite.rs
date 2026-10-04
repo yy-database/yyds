@@ -151,6 +151,12 @@ impl SqliteConnection {
         })
     }
 
+    /// Executes a multi-statement SQLite batch and discards result rows.
+    #[napi(js_name = "executeBatch")]
+    pub fn execute_batch(&self, sql: String) -> napi::Result<()> {
+        self.engine.execute_batch(&sql).map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
     /// Returns SQLite's native engine source id.
     #[napi]
     pub fn source_id(&self) -> napi::Result<String> {

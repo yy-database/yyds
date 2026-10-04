@@ -125,6 +125,11 @@ impl SqliteEngine {
         })
     }
 
+    /// Executes a SQLite batch, discarding any result rows as `sqlite3_exec` does without a callback.
+    pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
+        self.connection.execute_batch(sql)
+    }
+
     /// Returns the SQLite engine's native source id.
     pub fn source_id(&self) -> rusqlite::Result<String> {
         self.connection.query_row("SELECT sqlite_source_id()", [], |row| row.get(0))
