@@ -28,14 +28,25 @@ fn redis_binding_executes_binary_values_and_isolates_namespaces() {
         executor.execute(bind(&[b"GETDEL", b"getdel-key"], &namespace).unwrap()).unwrap(),
         KeyValueResult::GetDelete(Some(value.to_vec()))
     );
-    assert_eq!(executor.execute(bind(&[b"GETDEL", b"getdel-key"], &namespace).unwrap()).unwrap(), KeyValueResult::GetDelete(None));
+    assert_eq!(
+        executor.execute(bind(&[b"GETDEL", b"getdel-key"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::GetDelete(None)
+    );
+    assert_eq!(
+        executor.execute(bind(&[b"GETSET", b"getset-key", b"new"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::GetSet(None),
+    );
+    assert_eq!(
+        executor.execute(bind(&[b"GETSET", b"getset-key", b"replacement"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::GetSet(Some(b"new".to_vec())),
+    );
     assert_eq!(
         executor.execute(bind(&[b"SET", key, b"replacement", b"nx"], &namespace).unwrap()).unwrap(),
         KeyValueResult::PutIfAbsent { revision: None },
     );
     assert_eq!(
         executor.execute(bind(&[b"SET", b"new-key", value, b"NX"], &namespace).unwrap()).unwrap(),
-        KeyValueResult::PutIfAbsent { revision: Some(3) },
+        KeyValueResult::PutIfAbsent { revision: Some(5) },
     );
     let result = executor.execute(bind(&[b"GET", key], &namespace).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Get(Some(value.to_vec())));
@@ -56,6 +67,7 @@ fn unsupported_shapes_are_rejected_before_execution() {
         (vec![b"EXISTS".as_slice()], BindError::WrongArity),
         (vec![b"EXISTS".as_slice(), b"one", b"two"], BindError::WrongArity),
         (vec![b"GETDEL".as_slice()], BindError::WrongArity),
+        (vec![b"GETSET".as_slice(), b"key"], BindError::WrongArity),
         (vec![b"SET".as_slice(), b"key"], BindError::WrongArity),
         (vec![b"SET".as_slice(), b"key", b"value", b"XX"], BindError::UnsupportedOptions),
         (vec![b"SET".as_slice(), b"key", b"value", b"NX", b"GET"], BindError::UnsupportedOptions),

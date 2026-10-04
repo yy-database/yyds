@@ -38,6 +38,12 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
         }
         KeyValueAction::GetDelete
     }
+    else if command.eq_ignore_ascii_case(b"GETSET") {
+        if arguments.len() != 3 {
+            return Err(BindError::WrongArity);
+        }
+        KeyValueAction::GetSet(arguments[2].to_vec())
+    }
     else if command.eq_ignore_ascii_case(b"SET") {
         if arguments.len() < 3 {
             return Err(BindError::WrongArity);
