@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { isYydsNativeInstalled } from "@yyds/yyds/node";
 
@@ -50,7 +50,30 @@ test("SQLite CLI executes SQL, dot commands, and writes standard SQLite files", 
     const readonly = run("-readonly", path, "SELECT value FROM samples");
     assert.equal(readonly.status, 0, readonly.stderr);
     assert.equal(readonly.stdout, "hello\n");
-    assert.equal(run("-readonly", path, "INSERT INTO samples VALUES (2, 'blocked', X'')").status, 1);
+    assert.equal(
+        run("-readonly", path, "INSERT INTO samples VALUES (2, 'blocked', X'')").status,
+        1,
+    );
+    assert.equal(
+        run(
+            "-header",
+            "-separator",
+            ",",
+            "-nullvalue",
+            "NULL",
+            path,
+            "SELECT id, value, NULL FROM samples",
+        ).stdout,
+        "id,value,NULL\n1,hello,NULL\n",
+    );
+    assert.equal(
+        run("-csv", path, "SELECT 'comma,value', 'say \"hi\"' ").stdout,
+        '"comma,value","say ""hi"""\n',
+    );
+    assert.equal(
+        run("-column", "-header", path, "SELECT id, value FROM samples").stdout,
+        "id  value\n 1  hello\n",
+    );
     assert.equal(
         run(path, ".schema").stdout,
         "CREATE TABLE samples (id INTEGER PRIMARY KEY, value TEXT, payload BLOB);\n",
