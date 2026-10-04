@@ -1,13 +1,12 @@
 # @yyds/mysql
 
-Disguise package: installs like MySQL, runs on `@yyds/yyds`.
+`mysql` is a MySQL classic-protocol client for a running YYDS MySQL listener. The listener is started and maintained by the `yyds` tool.
 
 ```bash
-mysql -e "SELECT 1"
-# 1
+mysql -h 127.0.0.1 -P 3306 -u yyds -e "SET NAMES utf8mb4"
 
-mysqld
-# [disguise] mysqld 0.1.0 ready on port 3306 (YYDS)
 ```
 
-API re-exports `@yyds/yyds` unchanged.
+The client supports protocol-v10 startup, empty-password loopback sessions, optional database selection, `SET NAMES` acknowledgement and server error reporting for one command per invocation. Result-set rows, TLS, password authentication, interactive mode and full mysql-client compatibility are not implemented. Unsupported SQL returns the server's actual error instead of a fabricated result.
+
+The package API re-exports `@yyds/yyds` unchanged.
