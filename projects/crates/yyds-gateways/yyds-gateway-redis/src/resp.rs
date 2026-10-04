@@ -45,6 +45,30 @@ pub enum FrameError {
     BulkTooLarge,
 }
 
+/// Encodes one RESP2 command as a bulk-string array.
+pub fn encode_request(arguments: &[&[u8]], limits: RequestLimits) -> Result<Vec<u8>, FrameError> {
+    if arguments.is_empty() {
+        return Err(FrameError::EmptyCommand);
+    }
+    if arguments.len() > limits.max_arguments {
+        return Err(FrameError::TooManyArguments);
+    }
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(format!("*{}\r\n", arguments.len()).as_bytes());
+    for argument in arguments {
+        if argument.len() > limits.max_bulk_bytes {
+            return Err(FrameError::BulkTooLarge);
+        }
+        encoded.extend_from_slice(format!("${}\r\n", argument.len()).as_bytes());
+        encoded.extend_from_slice(argument);
+        encoded.extend_from_slice(b"\r\n");
+    }
+    if encoded.len() > limits.max_frame_bytes {
+        return Err(FrameError::FrameTooLarge);
+    }
+    Ok(encoded)
+}
+
 /// Decodes the first RESP2 command or returns `None` for an incomplete frame.
 /// This is wire framing, not a language syntax frontend or command binder.
 pub fn decode_request(input: &[u8], limits: RequestLimits) -> Result<Option<Request<'_>>, FrameError> {
