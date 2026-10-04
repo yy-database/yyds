@@ -160,3 +160,19 @@ test("mysql client handshakes with the server and reports actual SQL errors", as
     assert.match(failure.stderr, /1235 \(42000\): YYDS MySQL SQL execution is not implemented/);
     assert.deepEqual(statements, ["SET NAMES utf8mb4", "SELECT 1"]);
 });
+
+test("mysql client reports a truncated handshake when the server closes", async (context) => {
+    const server = createServer((socket) => socket.end(Buffer.from([20, 0])));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    context.after(
+        () =>
+            new Promise<void>((resolve, reject) =>
+                server.close((error) => (error ? reject(error) : resolve())),
+            ),
+    );
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const result = await runCli(["-P", String(address.port), "-e", "SELECT 1"]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /closed before a complete packet/);
+});
