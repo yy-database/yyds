@@ -92,6 +92,21 @@ pub struct SqliteQueryResult {
     pub last_insert_rowid: String,
 }
 
+/// One SQLite bind parameter preserving its storage class and raw bytes.
+#[napi(object)]
+pub struct SqliteParameter {
+    /// SQLite storage class: null, integer, real, text, or blob.
+    pub kind: String,
+    /// Signed 64-bit integer as decimal text.
+    pub integer: Option<String>,
+    /// Floating-point value.
+    pub real: Option<f64>,
+    /// Exact TEXT bytes, including non-UTF-8 data.
+    pub text: Option<Buffer>,
+    /// Exact BLOB bytes.
+    pub blob: Option<Buffer>,
+}
+
 /// A real SQLite connection backed by upstream SQLite, independent of YYDS storage.
 #[napi]
 pub struct SqliteConnection {
@@ -120,10 +135,47 @@ impl SqliteConnection {
         })
     }
 
+    /// Executes one statement with SQLite-native positional bind parameters.
+    #[napi(js_name = "executeWithParameters")]
+    pub fn execute_with_parameters(&self, sql: String, parameters: Vec<SqliteParameter>) -> napi::Result<SqliteQueryResult> {
+        let parameters = parameters.into_iter().map(parameter_value).collect::<napi::Result<Vec<_>>>()?;
+        let result = self
+            .engine
+            .execute_with_parameters(&sql, &parameters)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(SqliteQueryResult {
+            columns: result.columns,
+            rows: result.rows.into_iter().map(|row| row.into_iter().map(result_value).collect()).collect(),
+            changes: result.changes.to_string(),
+            last_insert_rowid: result.last_insert_rowid.to_string(),
+        })
+    }
+
     /// Returns SQLite's native engine source id.
     #[napi]
     pub fn source_id(&self) -> napi::Result<String> {
         self.engine.source_id().map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+}
+
+fn parameter_value(parameter: SqliteParameter) -> napi::Result<SqliteValue> {
+    let populated = usize::from(parameter.integer.is_some())
+        + usize::from(parameter.real.is_some())
+        + usize::from(parameter.text.is_some())
+        + usize::from(parameter.blob.is_some());
+    let invalid = || napi::Error::from_reason("SQLite parameter fields do not match its storage class");
+    match parameter.kind.as_str() {
+        "null" if populated == 0 => Ok(SqliteValue::Null),
+        "integer" if populated == 1 => parameter
+            .integer
+            .ok_or_else(invalid)?
+            .parse::<i64>()
+            .map(SqliteValue::Integer)
+            .map_err(|_| napi::Error::from_reason("SQLite integer parameter is outside signed 64-bit range")),
+        "real" if populated == 1 => parameter.real.map(SqliteValue::Real).ok_or_else(invalid),
+        "text" if populated == 1 => parameter.text.map(|value| SqliteValue::Text(value.to_vec())).ok_or_else(invalid),
+        "blob" if populated == 1 => parameter.blob.map(|value| SqliteValue::Blob(value.to_vec())).ok_or_else(invalid),
+        _ => Err(invalid()),
     }
 }
 
