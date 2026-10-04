@@ -37,7 +37,8 @@ fn unsupported_shapes_are_rejected_before_execution() {
         (vec![b"SET".as_slice(), b"key"], BindError::WrongArity),
         (vec![b"SET".as_slice(), b"key", b"value", b"NX"], BindError::UnsupportedOptions),
         (vec![b"DEL".as_slice(), b"one", b"two"], BindError::WrongArity),
-        (vec![b"INCR".as_slice(), b"key"], BindError::UnsupportedCommand),
+        (vec![b"INCR".as_slice()], BindError::WrongArity),
+        (vec![b"INCRBY".as_slice(), b"key", b"01"], BindError::InvalidInteger),
     ] {
         assert_eq!(bind(&arguments, &namespace), Err(expected));
     }

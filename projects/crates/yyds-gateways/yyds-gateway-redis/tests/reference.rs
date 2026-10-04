@@ -39,6 +39,9 @@ print('reference: imported client', file=sys.stderr, flush=True)
 with redis.Redis(host='127.0.0.1', port=int(sys.argv[1]), protocol=2,
                  socket_timeout=3, socket_connect_timeout=3, decode_responses=False) as client:
     assert client.ping() is True
+    assert client.incr(b'counter') == 1
+    assert client.incrby(b'counter', -2) == -1
+    assert client.get(b'counter') == b'-1'
     print('reference: ping', file=sys.stderr, flush=True)
     payload = bytes(range(256))
     assert client.echo(payload) == payload

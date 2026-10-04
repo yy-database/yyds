@@ -179,11 +179,13 @@ fn respond(
                 Ok(KeyValueResult::Get(Some(value))) => write_bulk(stream, &value)?,
                 Ok(KeyValueResult::Get(None)) => stream.write_all(b"$-1\r\n")?,
                 Ok(KeyValueResult::Put { .. }) => stream.write_all(b"+OK\r\n")?,
+                Ok(KeyValueResult::Increment { value }) => write!(stream, ":{value}\r\n")?,
                 Ok(KeyValueResult::Delete { removed }) => stream.write_all(if removed { b":1\r\n" } else { b":0\r\n" })?,
                 Err(error) => write_error(stream, &error.to_string())?,
             },
             Err(BindError::WrongArity) => stream.write_all(b"-ERR wrong number of arguments\r\n")?,
             Err(BindError::UnsupportedOptions) => stream.write_all(b"-ERR unsupported SET options\r\n")?,
+            Err(BindError::InvalidInteger) => stream.write_all(b"-ERR value is not an integer or out of range\r\n")?,
             Err(BindError::EmptyCommand) => stream.write_all(b"-ERR empty command\r\n")?,
             Err(BindError::UnsupportedCommand) => stream.write_all(b"-ERR unsupported command\r\n")?,
         }

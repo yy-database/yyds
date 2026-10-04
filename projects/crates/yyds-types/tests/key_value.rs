@@ -17,4 +17,6 @@ fn key_value_contract_preserves_namespace_and_opaque_bytes() {
     }
     assert_eq!(KeyValueResult::Put { revision: 9 }, KeyValueResult::Put { revision: 9 });
     assert_eq!(KeyValueResult::Delete { removed: true }, KeyValueResult::Delete { removed: true });
+    assert_eq!(KeyValueAction::IncrementBy(-2), KeyValueAction::IncrementBy(-2));
+    assert_eq!(KeyValueResult::Increment { value: -2 }, KeyValueResult::Increment { value: -2 });
 }
