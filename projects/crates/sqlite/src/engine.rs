@@ -2,55 +2,8 @@
 
 use std::path::Path;
 
-use rusqlite::{
-    Connection, OpenFlags, params_from_iter,
-    types::{ToSql, ToSqlOutput, ValueRef},
-};
-
-/// One SQL result cell preserving SQLite's runtime storage class.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SqliteValue {
-    /// SQL NULL.
-    Null,
-    /// Signed SQLite INTEGER.
-    Integer(i64),
-    /// SQLite REAL.
-    Real(f64),
-    /// SQLite TEXT.
-    Text(Vec<u8>),
-    /// SQLite BLOB.
-    Blob(Vec<u8>),
-}
-
-impl ToSql for SqliteValue {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::Borrowed(match self {
-            Self::Null => ValueRef::Null,
-            Self::Integer(value) => ValueRef::Integer(*value),
-            Self::Real(value) => ValueRef::Real(*value),
-            Self::Text(value) => ValueRef::Text(value),
-            Self::Blob(value) => ValueRef::Blob(value),
-        }))
-    }
-}
-
-impl std::fmt::Display for SqliteValue {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Null => Ok(()),
-            Self::Integer(value) => write!(formatter, "{value}"),
-            Self::Real(value) => write!(formatter, "{value}"),
-            Self::Text(value) => formatter.write_str(&String::from_utf8_lossy(value)),
-            Self::Blob(value) => {
-                formatter.write_str("x'")?;
-                for byte in value {
-                    write!(formatter, "{byte:02x}")?;
-                }
-                formatter.write_str("'")
-            }
-        }
-    }
-}
+use sqlite_provider::{OpenOptions, SqliteError, SqliteProvider, SqliteValue, StatementResult};
+use sqlite_provider_rusqlite::RusqliteProvider;
 
 /// Column labels and rows returned by one SQLite statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -65,33 +18,44 @@ pub struct SqliteQueryResult {
     pub last_insert_rowid: i64,
 }
 
+impl From<StatementResult> for SqliteQueryResult {
+    fn from(value: StatementResult) -> Self {
+        Self {
+            columns: value.columns,
+            rows: value.rows,
+            changes: value.changes,
+            last_insert_rowid: value.last_insert_rowid,
+        }
+    }
+}
+
 /// A real SQLite connection with upstream locking, pager, journal, and SQL behavior.
 #[derive(Debug)]
 pub struct SqliteEngine {
-    connection: Connection,
+    provider: RusqliteProvider,
 }
 
 impl SqliteEngine {
     /// Opens a private in-memory SQLite database.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
-        Ok(Self { connection: Connection::open_in_memory()? })
+        Ok(Self { provider: RusqliteProvider::open_in_memory().map_err(map_provider)? })
     }
 
     /// Opens or creates a SQLite file using standard SQLite locking and recovery.
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        Ok(Self { connection: Connection::open(path)? })
+        Ok(Self { provider: RusqliteProvider::open(path).map_err(map_provider)? })
     }
 
     /// Opens only an existing SQLite file without creating a missing path.
     pub fn open_existing(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        Ok(Self { connection })
+        Self::open(path)
     }
 
     /// Opens an existing SQLite file without write access or implicit creation.
     pub fn open_read_only(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        Ok(Self { connection })
+        Ok(Self {
+            provider: RusqliteProvider::open_with_options(path, OpenOptions { read_only: true }).map_err(map_provider)?,
+        })
     }
 
     /// Executes exactly one statement and preserves native SQLite value types.
@@ -101,43 +65,63 @@ impl SqliteEngine {
 
     /// Executes exactly one statement with all SQLite parameter slots bound in index order.
     pub fn execute_with_parameters(&self, sql: &str, parameters: &[SqliteValue]) -> rusqlite::Result<SqliteQueryResult> {
-        let mut statement = self.connection.prepare(sql)?;
-        let columns = statement.column_names().iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
-        let mut rows = Vec::new();
-        if columns.is_empty() {
-            statement.execute(params_from_iter(parameters))?;
-        }
-        else {
-            let mut cursor = statement.query(params_from_iter(parameters))?;
-            while let Some(row) = cursor.next()? {
-                let mut values = Vec::with_capacity(columns.len());
-                for index in 0..columns.len() {
-                    values.push(match row.get_ref(index)? {
-                        ValueRef::Null => SqliteValue::Null,
-                        ValueRef::Integer(value) => SqliteValue::Integer(value),
-                        ValueRef::Real(value) => SqliteValue::Real(value),
-                        ValueRef::Text(value) => SqliteValue::Text(value.to_vec()),
-                        ValueRef::Blob(value) => SqliteValue::Blob(value.to_vec()),
-                    });
-                }
-                rows.push(values);
-            }
-        }
-        Ok(SqliteQueryResult {
-            columns,
-            rows,
-            changes: self.connection.changes(),
-            last_insert_rowid: self.connection.last_insert_rowid(),
-        })
+        self.provider.execute_one(sql, parameters).map_err(map_provider).map(SqliteQueryResult::from)
     }
 
     /// Executes a SQLite batch, discarding any result rows as `sqlite3_exec` does without a callback.
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
-        self.connection.execute_batch(sql)
+        self.provider.execute_batch(sql).map_err(map_provider)
     }
 
     /// Returns the SQLite engine's native source id.
     pub fn source_id(&self) -> rusqlite::Result<String> {
-        self.connection.query_row("SELECT sqlite_source_id()", [], |row| row.get(0))
+        self.provider.source_id().map_err(map_provider)
     }
+
+    /// Exposes the versioned provider surface used by Iris and `@yyds/sqlite/node`.
+    pub fn provider(&self) -> &RusqliteProvider {
+        &self.provider
+    }
+}
+
+impl SqliteProvider for SqliteEngine {
+    fn capabilities(&self) -> &sqlite_provider::SqliteCapabilities {
+        self.provider.capabilities()
+    }
+
+    fn sqlite_version(&self) -> Result<String, SqliteError> {
+        self.provider.sqlite_version()
+    }
+
+    fn source_id(&self) -> Result<String, SqliteError> {
+        self.provider.source_id()
+    }
+
+    fn execute_one(&self, sql: &str, params: &[SqliteValue]) -> Result<StatementResult, SqliteError> {
+        self.provider.execute_one(sql, params)
+    }
+
+    fn execute_batch(&self, sql: &str) -> Result<(), SqliteError> {
+        self.provider.execute_batch(sql)
+    }
+
+    fn begin_immediate(&self) -> Result<(), SqliteError> {
+        self.provider.begin_immediate()
+    }
+
+    fn commit(&self) -> Result<(), SqliteError> {
+        self.provider.commit()
+    }
+
+    fn rollback(&self) -> Result<(), SqliteError> {
+        self.provider.rollback()
+    }
+
+    fn inspect_catalog(&self) -> Result<sqlite_provider::CatalogSnapshot, SqliteError> {
+        self.provider.inspect_catalog()
+    }
+}
+
+fn map_provider(error: SqliteError) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1), Some(error.message))
 }

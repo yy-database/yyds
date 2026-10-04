@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::path::Path;
+use std::{cell::RefCell, path::Path};
 
 use rusqlite::{
     Connection, OpenFlags, params_from_iter,
@@ -17,7 +17,7 @@ use sqlite_provider::{
 /// Bundled upstream SQLite provider backed by `rusqlite`.
 #[derive(Debug)]
 pub struct RusqliteProvider {
-    connection: Connection,
+    connection: RefCell<Connection>,
     capabilities: SqliteCapabilities,
 }
 
@@ -25,7 +25,7 @@ impl RusqliteProvider {
     /// Opens a private in-memory database.
     pub fn open_in_memory() -> Result<Self, SqliteError> {
         let connection = Connection::open_in_memory().map_err(map_sqlite)?;
-        Ok(Self { connection, capabilities: SqliteCapabilities::read_write() })
+        Ok(Self { connection: RefCell::new(connection), capabilities: SqliteCapabilities::read_write() })
     }
 
     /// Opens or creates a file-backed database.
@@ -50,7 +50,7 @@ impl RusqliteProvider {
             Connection::open(path).map_err(map_sqlite)?
         };
         let capabilities = if options.read_only { SqliteCapabilities::read_only() } else { SqliteCapabilities::read_write() };
-        Ok(Self { connection, capabilities })
+        Ok(Self { connection: RefCell::new(connection), capabilities })
     }
 
     fn map_value(value: ValueRef<'_>) -> SqliteValue {
@@ -71,22 +71,25 @@ impl SqliteProvider for RusqliteProvider {
 
     fn sqlite_version(&self) -> Result<String, SqliteError> {
         self.connection
+            .borrow()
             .query_row("SELECT sqlite_version()", [], |row| row.get(0))
             .map_err(map_sqlite)
     }
 
     fn source_id(&self) -> Result<String, SqliteError> {
         self.connection
+            .borrow()
             .query_row("SELECT sqlite_source_id()", [], |row| row.get(0))
             .map_err(map_sqlite)
     }
 
-    fn execute_one(&mut self, sql: &str, params: &[SqliteValue]) -> Result<StatementResult, SqliteError> {
+    fn execute_one(&self, sql: &str, params: &[SqliteValue]) -> Result<StatementResult, SqliteError> {
         if self.capabilities.read_only && !sql.trim_start().to_ascii_uppercase().starts_with("SELECT") {
             return Err(SqliteError::unsupported("read-only SQLite provider rejected a mutating statement"));
         }
 
-        let mut statement = self.connection.prepare(sql).map_err(|error| map_sqlite_stmt(error, sql))?;
+        let connection = self.connection.borrow();
+        let mut statement = connection.prepare(sql).map_err(|error| map_sqlite_stmt(error, sql))?;
         let columns = statement.column_names().iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
         let bind = params.iter().cloned().map(BindValue).collect::<Vec<_>>();
         let mut rows = Vec::new();
@@ -107,37 +110,37 @@ impl SqliteProvider for RusqliteProvider {
         Ok(StatementResult {
             columns,
             rows,
-            changes: self.connection.changes(),
-            last_insert_rowid: self.connection.last_insert_rowid(),
+            changes: connection.changes(),
+            last_insert_rowid: connection.last_insert_rowid(),
         })
     }
 
-    fn execute_batch(&mut self, sql: &str) -> Result<(), SqliteError> {
+    fn execute_batch(&self, sql: &str) -> Result<(), SqliteError> {
         if self.capabilities.read_only {
             return Err(SqliteError::unsupported("read-only SQLite provider rejected execute_batch"));
         }
-        self.connection.execute_batch(sql).map_err(|error| map_sqlite_stmt(error, sql))
+        self.connection.borrow().execute_batch(sql).map_err(|error| map_sqlite_stmt(error, sql))
     }
 
-    fn begin_immediate(&mut self) -> Result<(), SqliteError> {
+    fn begin_immediate(&self) -> Result<(), SqliteError> {
         if self.capabilities.read_only {
             return Err(SqliteError::unsupported("read-only SQLite provider rejected begin_immediate"));
         }
-        self.connection.execute_batch("BEGIN IMMEDIATE").map_err(map_sqlite)
+        self.connection.borrow().execute_batch("BEGIN IMMEDIATE").map_err(map_sqlite)
     }
 
-    fn commit(&mut self) -> Result<(), SqliteError> {
-        self.connection.execute_batch("COMMIT").map_err(map_sqlite)
+    fn commit(&self) -> Result<(), SqliteError> {
+        self.connection.borrow().execute_batch("COMMIT").map_err(map_sqlite)
     }
 
-    fn rollback(&mut self) -> Result<(), SqliteError> {
-        self.connection.execute_batch("ROLLBACK").map_err(map_sqlite)
+    fn rollback(&self) -> Result<(), SqliteError> {
+        self.connection.borrow().execute_batch("ROLLBACK").map_err(map_sqlite)
     }
 
     fn inspect_catalog(&self) -> Result<CatalogSnapshot, SqliteError> {
+        let connection = self.connection.borrow();
         let mut tables = Vec::new();
-        let mut stmt = self
-            .connection
+        let mut stmt = connection
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
             .map_err(map_sqlite)?;
         let names = stmt
@@ -148,7 +151,7 @@ impl SqliteProvider for RusqliteProvider {
         for name in names {
             let escaped = name.replace('"', "\"\"");
             let pragma = format!("PRAGMA table_info(\"{escaped}\")");
-            let mut info = self.connection.prepare(&pragma).map_err(map_sqlite)?;
+            let mut info = connection.prepare(&pragma).map_err(map_sqlite)?;
             let columns = info
                 .query_map([], |row| {
                     Ok(CatalogColumn {

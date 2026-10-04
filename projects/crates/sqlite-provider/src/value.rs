@@ -27,3 +27,21 @@ impl SqliteValue {
         }
     }
 }
+
+impl std::fmt::Display for SqliteValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Null => Ok(()),
+            Self::Integer(value) => write!(formatter, "{value}"),
+            Self::Real(value) => write!(formatter, "{value}"),
+            Self::Text(value) => formatter.write_str(&String::from_utf8_lossy(value)),
+            Self::Blob(value) => {
+                formatter.write_str("x'")?;
+                for byte in value {
+                    write!(formatter, "{byte:02x}")?;
+                }
+                formatter.write_str("'")
+            }
+        }
+    }
+}

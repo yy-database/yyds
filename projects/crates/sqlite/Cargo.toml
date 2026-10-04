@@ -12,6 +12,8 @@ path = "src/lib.rs"
 
 [dependencies]
 yyds-types = { workspace = true }
+sqlite-provider = { workspace = true }
+sqlite-provider-rusqlite = { workspace = true }
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 [dev-dependencies]
