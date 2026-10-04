@@ -166,13 +166,14 @@ function eofPacket(payload) {
     if (payload.readUInt16LE(3) & 8) throw new Error("multiple MySQL result sets are not supported");
 }
 
-function displayField(value) {
+function displayField(value, raw) {
     if (value === null) return "NULL";
+    if (raw) return value.toString("utf8");
     return value.toString("utf8").replaceAll("\\", "\\\\").replaceAll("\0", "\\0")
         .replaceAll("\t", "\\t").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
 }
 
-async function resultSet(response, read) {
+async function resultSet(response, read, options) {
     const count = lengthEncoded(response, 0);
     if (count.next !== response.length || count.length === null || count.length < 1 || count.length > 1024)
         throw new Error("invalid MySQL result column count");
@@ -201,20 +202,38 @@ async function resultSet(response, read) {
         let offset = 0;
         for (let index = 0; index < count.length; index += 1) {
             const field = lengthEncodedString(payload, offset);
-            row.push(displayField(field.value));
+            row.push(displayField(field.value, options.raw));
             offset = field.next;
         }
         if (offset !== payload.length) throw new Error("MySQL row does not match column count");
         rows.push(row);
     }
-    console.log(columns.map((name) => displayField(Buffer.from(name))).join("\t"));
+    if (!options.skipColumnNames)
+        console.log(columns.map((name) => displayField(Buffer.from(name), options.raw)).join("\t"));
     for (const row of rows) console.log(row.join("\t"));
 }
 
 function optionsFrom(args) {
-    const options = { host: "127.0.0.1", port: 3306, user: "yyds", database: "", sql: "" };
+    const options = {
+        host: "127.0.0.1",
+        port: 3306,
+        user: "yyds",
+        database: "",
+        sql: "",
+        raw: false,
+        skipColumnNames: false,
+    };
     for (let index = 0; index < args.length; index += 1) {
         const option = args[index];
+        if (option === "-B" || option === "--batch") continue;
+        if (option === "-N" || option === "--skip-column-names") {
+            options.skipColumnNames = true;
+            continue;
+        }
+        if (option === "-r" || option === "--raw") {
+            options.raw = true;
+            continue;
+        }
         const key = {
             "-h": "host",
             "--host": "host",
@@ -263,7 +282,7 @@ async function run(options) {
         const response = await read(1);
         if (response[0] === 0xff) throw serverError(response);
         if (response[0] === 0x00) console.log("Query OK");
-        else await resultSet(response, read);
+        else await resultSet(response, read, options);
     } finally {
         socket.destroy();
     }
@@ -275,7 +294,7 @@ async function main(args) {
         return;
     }
     if (args.length === 1 && args[0] === "--help") {
-        console.log("Usage: mysql [-h HOST] [-P PORT] [-u USER] [-D DATABASE] -e SQL");
+        console.log("Usage: mysql [-B] [-N] [-r] [-h HOST] [-P PORT] [-u USER] [-D DATABASE] -e SQL");
         return;
     }
     await run(optionsFrom(args));
