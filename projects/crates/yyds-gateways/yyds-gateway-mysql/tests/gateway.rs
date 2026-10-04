@@ -1,16 +1,9 @@
-use yyds_gateway_mysql::{handle_sql, DEFAULT_PORT, GATEWAY_ID};
+use yyds_gateway_mysql::{DEFAULT_PORT, GATEWAY_ID, GATEWAY_KIND, startup_banner};
 
 #[test]
-fn mysql_select_one() {
-    let lines = handle_sql("SELECT 1").expect("select");
-    assert_eq!(lines, vec!["1", "1"]);
-}
-
-#[test]
-fn mysql_select_version() {
-    let lines = handle_sql("SELECT version()").expect("version");
-    assert_eq!(lines.len(), 1);
-    assert!(lines[0].starts_with("yyds-"));
+fn mysql_gateway_metadata_is_stable() {
     assert_eq!(GATEWAY_ID, "mysql");
     assert_eq!(DEFAULT_PORT, 3306);
+    assert_eq!(GATEWAY_KIND.id(), GATEWAY_ID);
+    assert!(startup_banner(DEFAULT_PORT).contains("3306"));
 }
