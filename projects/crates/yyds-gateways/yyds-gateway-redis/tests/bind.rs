@@ -52,6 +52,24 @@ fn redis_binding_executes_binary_values_and_isolates_namespaces() {
     assert_eq!(result, KeyValueResult::Get(Some(value.to_vec())));
     let result = executor.execute(bind(&[b"GET", key], &Namespace("redis:1".into())).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Get(None));
+    assert_eq!(
+        executor.execute(bind(&[b"DECR", b"counter"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::Increment { value: -1 },
+    );
+    assert_eq!(
+        executor.execute(bind(&[b"DECRBY", b"counter", b"2"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::Increment { value: -3 },
+    );
+    assert_eq!(
+        executor.execute(bind(&[b"decrby", b"counter", b"-3"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::Increment { value: 0 },
+    );
+    executor.execute(bind(&[b"SET", b"minimum", b"-9223372036854775808"], &namespace).unwrap()).unwrap();
+    assert!(executor.execute(bind(&[b"DECR", b"minimum"], &namespace).unwrap()).is_err());
+    assert_eq!(
+        executor.execute(bind(&[b"GET", b"minimum"], &namespace).unwrap()).unwrap(),
+        KeyValueResult::Get(Some(b"-9223372036854775808".to_vec())),
+    );
     let result = executor.execute(bind(&[b"DEL", key], &namespace).unwrap()).unwrap();
     assert_eq!(result, KeyValueResult::Delete { removed: true });
     let result = executor.execute(bind(&[b"DEL", key], &namespace).unwrap()).unwrap();
@@ -74,6 +92,9 @@ fn unsupported_shapes_are_rejected_before_execution() {
         (vec![b"DEL".as_slice(), b"one", b"two"], BindError::WrongArity),
         (vec![b"INCR".as_slice()], BindError::WrongArity),
         (vec![b"INCRBY".as_slice(), b"key", b"01"], BindError::InvalidInteger),
+        (vec![b"DECRBY".as_slice(), b"key", b"-9223372036854775808"], BindError::InvalidInteger),
+        (vec![b"DECR".as_slice()], BindError::WrongArity),
+        (vec![b"DECRBY".as_slice(), b"key"], BindError::WrongArity),
     ] {
         assert_eq!(bind(&arguments, &namespace), Err(expected));
     }
