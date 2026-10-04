@@ -34,6 +34,32 @@ export interface SqliteTableRow {
   /** Record bytes after overflow assembly. */
   payload: Buffer
 }
+/** A SQLite query result value with its native storage class. */
+export interface SqliteResultValue {
+  /** SQLite storage class: null, integer, real, text, or blob. */
+  kind: string
+  /** Decimal signed integer when `kind` is integer. */
+  integer?: string
+  /** Floating point value when `kind` is real. */
+  real?: number
+  /** Text value when `kind` is text. */
+  text?: string
+  /** Lossless SQLite text bytes when the value is not valid UTF-8. */
+  textBytes?: Buffer
+  /** Binary value when `kind` is blob. */
+  blob?: Buffer
+}
+/** Result of executing one SQLite statement. */
+export interface SqliteQueryResult {
+  /** Column labels in result order. */
+  columns: Array<string>
+  /** Rows with lossless integer and binary values. */
+  rows: Array<Array<SqliteResultValue>>
+  /** Changed row count. */
+  changes: string
+  /** Last insert rowid as exact signed decimal text. */
+  lastInsertRowid: string
+}
 /** Library version (matches `yyds-types::version()`). */
 export declare function yydsVersion(): string
 /** Lightweight health probe for native binding smoke tests. */
@@ -46,4 +72,13 @@ export declare class SqliteSnapshot {
   schema(limits?: SqliteReadLimits | undefined | null): Array<SqliteSchemaObject>
   /** Reads raw records from an ordinary rowid table, not a SQL projection. */
   table(name: string, limits?: SqliteReadLimits | undefined | null): Array<SqliteTableRow>
+}
+/** A real SQLite connection backed by upstream SQLite, independent of YYDS storage. */
+export declare class SqliteConnection {
+  /** Opens or creates a SQLite database file. Use `:memory:` for a private memory database. */
+  constructor(path: string)
+  /** Executes one statement through the SQLite engine. */
+  execute(sql: string): SqliteQueryResult
+  /** Returns SQLite's native engine source id. */
+  sourceId(): string
 }

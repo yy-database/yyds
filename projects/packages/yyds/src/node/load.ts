@@ -24,12 +24,18 @@ export function loadYydsNative(): YydsBindings {
 export function loadYydsSqliteNative(): YydsSqliteBindings {
     const module = require(resolvePlatformPackage()) as Record<string, unknown>;
     const binding = (module.default ?? module) as Record<string, unknown>;
-    if (typeof binding.SqliteSnapshot !== "function") {
+    if (
+        typeof binding.SqliteSnapshot !== "function" ||
+        typeof binding.SqliteConnection !== "function"
+    ) {
         throw new Error(
             "Native addon lacks the SQLite snapshot reader. Rebuild the native package.",
         );
     }
-    return { SqliteSnapshot: binding.SqliteSnapshot as YydsSqliteBindings["SqliteSnapshot"] };
+    return {
+        SqliteSnapshot: binding.SqliteSnapshot as YydsSqliteBindings["SqliteSnapshot"],
+        SqliteConnection: binding.SqliteConnection as YydsSqliteBindings["SqliteConnection"],
+    };
 }
 
 /** Whether the current platform optional dependency is installed. */

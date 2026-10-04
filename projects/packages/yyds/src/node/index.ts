@@ -7,7 +7,10 @@
 export type { YydsBindings } from "../bindings.ts";
 export { isYydsNativeInstalled, loadYydsNative, loadYydsSqliteNative } from "./load.ts";
 export type {
+    SqliteConnectionBinding,
+    SqliteQueryResultBinding,
     SqliteReadLimits,
+    SqliteResultValueBinding,
     SqliteSchemaObject,
     SqliteSnapshotBinding,
     SqliteTableRow,

@@ -1,12 +1,89 @@
 import { loadYydsSqliteNative } from "@yyds/yyds/node";
 import type {
+    SqliteConnectionBinding,
     SqliteReadLimits,
     SqliteSchemaObject,
     SqliteSnapshotBinding,
     SqliteTableRow,
+    SqliteQueryResultBinding,
 } from "@yyds/yyds/node";
 
-export type { SqliteReadLimits, SqliteSchemaObject, SqliteTableRow } from "@yyds/yyds/node";
+export type {
+    SqliteQueryResultBinding,
+    SqliteReadLimits,
+    SqliteResultValueBinding,
+    SqliteSchemaObject,
+    SqliteTableRow,
+} from "@yyds/yyds/node";
+
+export type SqliteCell =
+    | { kind: "null" }
+    | { kind: "integer"; value: bigint }
+    | { kind: "real"; value: number }
+    | { kind: "text"; value: string | Buffer }
+    | { kind: "blob"; value: Buffer };
+
+export interface SqliteQueryResult {
+    columns: string[];
+    rows: SqliteCell[][];
+    changes: bigint;
+    lastInsertRowid: bigint;
+}
+
+/** A real SQLite connection, backed by upstream SQLite's pager and SQL engine. */
+export class SqliteConnection {
+    readonly #native: SqliteConnectionBinding;
+
+    constructor(path: string) {
+        if (typeof path !== "string" || path.length === 0) {
+            throw new TypeError("SQLite database path must be a non-empty string");
+        }
+        const native = loadYydsSqliteNative();
+        this.#native = new native.SqliteConnection(path);
+    }
+
+    execute(sql: string): SqliteQueryResult {
+        if (typeof sql !== "string" || sql.length === 0) {
+            throw new TypeError("SQLite SQL must be a non-empty string");
+        }
+        const result = this.#native.execute(sql);
+        return {
+            columns: result.columns,
+            rows: result.rows.map((row) => row.map(decodeCell)),
+            changes: BigInt(result.changes),
+            lastInsertRowid: BigInt(result.lastInsertRowid),
+        };
+    }
+
+    sourceId(): string {
+        return this.#native.sourceId();
+    }
+}
+
+function decodeCell(
+    value: NonNullable<SqliteQueryResultBinding["rows"][number][number]>,
+): SqliteCell {
+    switch (value.kind) {
+        case "null":
+            return { kind: "null" };
+        case "integer":
+            if (value.integer === undefined)
+                throw new Error("native SQLite integer result omitted its value");
+            return { kind: "integer", value: BigInt(value.integer) };
+        case "real":
+            if (value.real === undefined)
+                throw new Error("native SQLite real result omitted its value");
+            return { kind: "real", value: value.real };
+        case "text":
+            if (value.text !== undefined) return { kind: "text", value: value.text };
+            if (value.textBytes !== undefined) return { kind: "text", value: value.textBytes };
+            throw new Error("native SQLite text result omitted its value");
+        case "blob":
+            if (value.blob === undefined)
+                throw new Error("native SQLite blob result omitted its value");
+            return { kind: "blob", value: value.blob };
+    }
+}
 
 /** Read-only, copied main-file bytes. WAL/journal recovery is not performed. */
 export class SqliteSnapshot {
