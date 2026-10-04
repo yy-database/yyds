@@ -62,6 +62,21 @@ where
                 Ok(KeyValueResult::Get(value))
             }
             KeyValueAction::Exists => Ok(KeyValueResult::Exists(shard.get(&key)?.is_some())),
+            KeyValueAction::GetDelete => {
+                let value = match shard.get(&key)? {
+                    None => None,
+                    Some(record) => match record.value {
+                        StoredValue::Inline(value) => Some(value.0),
+                        StoredValue::Object(_) => {
+                            return Err(Error::Unsupported("object values are not available through the local KV executor"));
+                        }
+                    },
+                };
+                if value.is_some() {
+                    shard.delete(&key)?;
+                }
+                Ok(KeyValueResult::GetDelete(value))
+            }
             KeyValueAction::Put(value) => {
                 let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
                 Ok(KeyValueResult::Put { revision })
