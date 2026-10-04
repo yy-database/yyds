@@ -7,7 +7,8 @@ const maxRequestBytes = 1024 * 1024;
 const maxReplyBytes = 8 * 1024 * 1024;
 
 function parseValue(buffer, offset = 0, depth = 0) {
-    if (depth > 32 || offset >= buffer.length) return null;
+    if (depth > 32) throw new Error("RESP response exceeds nesting limit");
+    if (offset >= buffer.length) return null;
     const marker = buffer[offset];
     const lineEnd = buffer.indexOf("\r\n", offset + 1);
     if (lineEnd < 0) return null;
@@ -17,9 +18,13 @@ function parseValue(buffer, offset = 0, depth = 0) {
         return { value: { kind: marker === 43 ? "string" : "error", value: line }, next };
     if (marker === 58) {
         if (!/^-?\d+$/.test(line)) throw new Error("invalid RESP integer response");
-        return { value: { kind: "integer", value: Number(line) }, next };
+        const integer = BigInt(line);
+        if (integer < -(1n << 63n) || integer >= 1n << 63n)
+            throw new Error("RESP integer outside signed 64-bit range");
+        return { value: { kind: "integer", value: line }, next };
     }
     if (marker === 36) {
+        if (!/^(?:-1|\d+)$/.test(line)) throw new Error("invalid RESP bulk length");
         const length = Number(line);
         if (!Number.isSafeInteger(length) || length < -1)
             throw new Error("invalid RESP bulk length");
@@ -32,6 +37,7 @@ function parseValue(buffer, offset = 0, depth = 0) {
         return { value: { kind: "bulk", value: buffer.subarray(next, end) }, next: end + 2 };
     }
     if (marker === 42) {
+        if (!/^(?:-1|\d+)$/.test(line)) throw new Error("invalid RESP array length");
         const count = Number(line);
         if (!Number.isSafeInteger(count) || count < -1 || count > 1024)
             throw new Error("invalid RESP array length");
@@ -86,6 +92,10 @@ function parseArguments(args) {
     const command = [];
     for (let index = 0; index < args.length; index += 1) {
         const arg = args[index];
+        if (command.length > 0) {
+            command.push(arg);
+            continue;
+        }
         if (arg === "--raw") options.raw = true;
         else if (["-h", "--host", "-p", "--port", "-n", "--db"].includes(arg)) {
             const value = args[++index];
@@ -116,17 +126,26 @@ function exchange(options, commands) {
         const socket = createConnection({ host: options.host, port: options.port });
         let pending = Buffer.alloc(0);
         let commandIndex = 0;
+        let settled = false;
         let timer;
         const allCommands =
             options.database === 0 ? [commands] : [["SELECT", String(options.database)], commands];
         const finish = (error, value) => {
+            if (settled) return;
+            settled = true;
             clearTimeout(timer);
             socket.destroy();
             if (error) reject(error);
             else resolve(value);
         };
         timer = setTimeout(() => finish(new Error("Redis connection timed out")), 5000);
-        socket.on("connect", () => socket.write(encodeCommand(allCommands[commandIndex])));
+        socket.on("connect", () => {
+            try {
+                socket.write(encodeCommand(allCommands[commandIndex]));
+            } catch (error) {
+                finish(error);
+            }
+        });
         socket.on("data", (chunk) => {
             try {
                 pending = Buffer.concat([pending, chunk]);
@@ -150,6 +169,7 @@ function exchange(options, commands) {
             }
         });
         socket.on("error", (error) => finish(error));
+        socket.on("end", () => finish(new Error("Redis closed before a complete reply")));
     });
 }
 

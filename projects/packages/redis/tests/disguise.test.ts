@@ -73,6 +73,8 @@ test("redis-cli sends RESP2 commands and prints binary replies", async (context)
                 } else if (parsed.args[0].equals(Buffer.from("GET"))) {
                     socket.write(Buffer.from([36, 50, 13, 10, 0]));
                     setTimeout(() => socket.write(Buffer.from([255, 13, 10])), 5);
+                } else if (parsed.args[0].equals(Buffer.from("INCRBY"))) {
+                    socket.write(":9223372036854775807\r\n");
                 } else {
                     socket.write("+OK\r\n");
                 }
@@ -118,5 +120,13 @@ test("redis-cli sends RESP2 commands and prints binary replies", async (context)
     assert.deepEqual(requests.slice(1), [
         [Buffer.from("SELECT"), Buffer.from("1")],
         [Buffer.from("GET"), Buffer.from("key")],
+    ]);
+    const integer = await runCli(["-p", String(address.port), "INCRBY", "key", "-1"]);
+    assert.equal(integer.code, 0, integer.stderr.toString());
+    assert.equal(integer.stdout.toString(), "9223372036854775807\n");
+    assert.deepEqual(requests.at(-1), [
+        Buffer.from("INCRBY"),
+        Buffer.from("key"),
+        Buffer.from("-1"),
     ]);
 });
