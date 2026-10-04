@@ -1,6 +1,6 @@
 # yyds
 
-The YYDS-owned node and cluster lifecycle command. `yyds` owns node startup, shutdown, and attached protocol services. Its current Redis execution path is a process-local, single-shard `.yykv` executor. It supports binary `GET`, `SET` with optional `NX`, single-key `DEL`, signed 64-bit `INCR`/`INCRBY`, and connection-local `SELECT` for databases 0 through 15. It does not provide replication, elections, remote shard execution, or cluster health.
+The YYDS-owned node and cluster lifecycle command. `yyds` owns node startup, shutdown, and attached protocol services. Its current Redis execution path is a process-local, single-shard `.yykv` executor. It supports binary `GET`, single-key `EXISTS`, `SET` with optional `NX`, single-key `DEL`, signed 64-bit `INCR`/`INCRBY`, and connection-local `SELECT` for databases 0 through 15. It does not provide replication, elections, remote shard execution, or cluster health.
 
 Commands:
 
