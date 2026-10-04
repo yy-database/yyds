@@ -1,7 +1,17 @@
 #!/usr/bin/env node
-import { loadDisguiseRuntime } from "../src/disguise.ts";
+import { launchYydsServer } from "@yyds/yyds/node/cluster";
 
-const runtime = loadDisguiseRuntime("postgresql");
-
-console.log(`[disguise] postgres ${runtime.yydsVersion} ready on port 5432 (YYDS)`);
-console.log(`[disguise] backend ping: ${runtime.ping}`);
+const args = process.argv.slice(2);
+if (args.length === 1 && args[0] === "--help") {
+    console.log("Usage: postgres --data-dir DIR --cluster-id ID --node-id ID [--port PORT]");
+    console.log("Starts the YYDS node and its protocol listener through the yyds cluster tool.");
+} else {
+    launchYydsServer("postgresql", args)
+        .then((code) => {
+            process.exitCode = code;
+        })
+        .catch((error) => {
+            console.error("@yyds/postgresql: " + error.message);
+            process.exitCode = 127;
+        });
+}

@@ -17,6 +17,11 @@
             "node": "./src/node/index.ts",
             "default": "./src/node/unsupported.ts"
         },
+        "./node/cluster": {
+            "types": "./src/node/cluster.ts",
+            "node": "./src/node/cluster.ts",
+            "default": "./src/node/unsupported.ts"
+        },
         "./wasm": {
             "types": "./src/wasm/index.ts",
             "browser": "./src/wasm/index.ts",

@@ -12,4 +12,6 @@ redis-cli -n 1 GET key
 
 The client currently supports one RESP2 command per invocation, host/port/database selection, simple strings, errors, integers, bulk values and arrays. It does not provide authentication, TLS, RESP3, interactive mode or full `redis-cli` compatibility. Server lifecycle is provided by `yyds`, not a second `redis-server` manager.
 
+`redis-server` delegates to the `yyds` executable and holds the node lifecycle. Pass `--data-dir`, `--cluster-id`, and `--node-id`; set `YYDS_CLI_PATH` when the executable is not on `PATH`. The alias does not create a Redis-only supervisor.
+
 The package API re-exports `@yyds/yyds` unchanged.
