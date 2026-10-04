@@ -124,6 +124,93 @@ function serverError(payload) {
     return new Error(`${code}${state ? ` (${state})` : ""}: ${payload.toString("utf8", offset)}`);
 }
 
+function lengthEncoded(payload, offset) {
+    if (offset >= payload.length) throw new Error("truncated MySQL length-encoded value");
+    const marker = payload[offset++];
+    if (marker < 251) return { length: marker, next: offset };
+    if (marker === 251) return { length: null, next: offset };
+    const width = { 252: 2, 253: 3, 254: 8 }[marker];
+    if (!width || offset + width > payload.length)
+        throw new Error("invalid MySQL length-encoded value");
+    const length = width === 8 ? payload.readBigUInt64LE(offset) : BigInt(payload.readUIntLE(offset, width));
+    if (length > BigInt(maxPacketBytes)) throw new Error("MySQL value exceeds byte limit");
+    return { length: Number(length), next: offset + width };
+}
+
+function lengthEncodedString(payload, offset) {
+    const value = lengthEncoded(payload, offset);
+    if (value.length === null) return { value: null, next: value.next };
+    const end = value.next + value.length;
+    if (end > payload.length) throw new Error("truncated MySQL string");
+    return { value: payload.subarray(value.next, end), next: end };
+}
+
+function columnName(payload) {
+    let offset = 0;
+    let name;
+    for (let index = 0; index < 6; index += 1) {
+        const field = lengthEncodedString(payload, offset);
+        if (field.value === null) throw new Error("invalid MySQL column definition");
+        if (index === 4) name = field.value;
+        offset = field.next;
+    }
+    const fixed = lengthEncoded(payload, offset);
+    if (fixed.length !== 12 || fixed.next + 12 !== payload.length)
+        throw new Error("malformed MySQL column metadata");
+    return name.toString("utf8");
+}
+
+function eofPacket(payload) {
+    if (payload.length !== 5 || payload[0] !== 0xfe)
+        throw new Error("expected MySQL EOF packet");
+    if (payload.readUInt16LE(3) & 8) throw new Error("multiple MySQL result sets are not supported");
+}
+
+function displayField(value) {
+    if (value === null) return "NULL";
+    return value.toString("utf8").replaceAll("\\", "\\\\").replaceAll("\0", "\\0")
+        .replaceAll("\t", "\\t").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
+}
+
+async function resultSet(response, read) {
+    const count = lengthEncoded(response, 0);
+    if (count.next !== response.length || count.length === null || count.length < 1 || count.length > 1024)
+        throw new Error("invalid MySQL result column count");
+    let sequence = 2;
+    let totalBytes = response.length;
+    const next = async () => {
+        const payload = await read(sequence);
+        sequence = (sequence + 1) & 255;
+        totalBytes += payload.length;
+        if (totalBytes > 8 * maxPacketBytes) throw new Error("MySQL result exceeds byte limit");
+        if (payload[0] === 0xff) throw serverError(payload);
+        return payload;
+    };
+    const columns = [];
+    for (let index = 0; index < count.length; index += 1) columns.push(columnName(await next()));
+    eofPacket(await next());
+    const rows = [];
+    while (true) {
+        const payload = await next();
+        if (payload[0] === 0xfe && payload.length < 9) {
+            eofPacket(payload);
+            break;
+        }
+        if (rows.length >= 100_000) throw new Error("MySQL result exceeds row limit");
+        const row = [];
+        let offset = 0;
+        for (let index = 0; index < count.length; index += 1) {
+            const field = lengthEncodedString(payload, offset);
+            row.push(displayField(field.value));
+            offset = field.next;
+        }
+        if (offset !== payload.length) throw new Error("MySQL row does not match column count");
+        rows.push(row);
+    }
+    console.log(columns.map((name) => displayField(Buffer.from(name))).join("\t"));
+    for (const row of rows) console.log(row.join("\t"));
+}
+
 function optionsFrom(args) {
     const options = { host: "127.0.0.1", port: 3306, user: "yyds", database: "", sql: "" };
     for (let index = 0; index < args.length; index += 1) {
@@ -175,9 +262,8 @@ async function run(options) {
         socket.write(packet(0, query));
         const response = await read(1);
         if (response[0] === 0xff) throw serverError(response);
-        if (response[0] !== 0x00)
-            throw new Error("MySQL result sets are not supported by this client build");
-        console.log("Query OK");
+        if (response[0] === 0x00) console.log("Query OK");
+        else await resultSet(response, read);
     } finally {
         socket.destroy();
     }
