@@ -102,6 +102,8 @@ test("psql sends protocol-v3 queries and displays server rows and errors", async
                         backendMessage("T", second), backendMessage("D", row("2")), backendMessage("C", Buffer.from("SELECT 1\0")),
                         backendMessage("Z", Buffer.from("I")),
                     ]));
+                } else if (sql === "UPDATE samples SET value = 1") {
+                    socket.write(Buffer.concat([backendMessage("C", Buffer.from("UPDATE 1\0")), backendMessage("Z", Buffer.from("I"))]));
                 } else {
                     const error = Buffer.from("SERROR\0C42601\0Mserver syntax error\0\0");
                     socket.write(
@@ -138,6 +140,10 @@ test("psql sends protocol-v3 queries and displays server rows and errors", async
     const multiple = await runCli([...args, "-c", "SELECT 1; SELECT 2"]);
     assert.equal(multiple.code, 0, multiple.stderr);
     assert.equal(multiple.stdout, "one\n1\ntwo\n2\n");
+
+    const tuplesOnly = await runCli([...args, "-t", "-c", "UPDATE samples SET value = 1"]);
+    assert.equal(tuplesOnly.code, 0, tuplesOnly.stderr);
+    assert.equal(tuplesOnly.stdout, "");
 });
 
 test("psql applies field and NULL output settings to text rows", async (context) => {
