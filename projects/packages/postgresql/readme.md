@@ -1,16 +1,11 @@
 # @yyds/postgresql
 
-Disguise package: installs like PostgreSQL, runs on `@yyds/yyds`.
+`psql` is a PostgreSQL protocol-v3 client for a running YYDS PostgreSQL listener. The listener is started and maintained by the `yyds` tool.
 
 ```bash
-psql -c "SELECT 1"
-#  ?column?
-# ----------
-#         1
-# (1 row)
-
-postgres
-# [disguise] postgres 0.1.0 ready on port 5432 (YYDS)
+psql -h 127.0.0.1 -p 5432 -U yyds -d yyds -c "BEGIN"
 ```
 
-API re-exports `@yyds/yyds` unchanged.
+The client supports unauthenticated protocol-v3 startup, text-format simple-query results and server errors for one command per invocation. It does not implement TLS, password authentication, binary results, interactive sessions or full psql compatibility. SQL execution is limited to the session commands implemented by the server. Unsupported queries return the server's actual SQLSTATE rather than a fabricated result.
+
+The package API re-exports `@yyds/yyds` unchanged.
