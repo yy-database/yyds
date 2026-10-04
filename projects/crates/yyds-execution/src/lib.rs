@@ -65,6 +65,15 @@ where
                 let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
                 Ok(KeyValueResult::Put { revision })
             }
+            KeyValueAction::PutIfAbsent(value) => {
+                if shard.get(&key)?.is_some() {
+                    Ok(KeyValueResult::PutIfAbsent { revision: None })
+                }
+                else {
+                    let revision = shard.put(key, StoredValue::Inline(InlineValue(value)))?;
+                    Ok(KeyValueResult::PutIfAbsent { revision: Some(revision) })
+                }
+            }
             KeyValueAction::Delete => {
                 let removed = shard.delete(&key)?;
                 Ok(KeyValueResult::Delete { removed })

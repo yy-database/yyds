@@ -42,6 +42,9 @@ with redis.Redis(host='127.0.0.1', port=int(sys.argv[1]), protocol=2,
     assert client.incr(b'counter') == 1
     assert client.incrby(b'counter', -2) == -1
     assert client.get(b'counter') == b'-1'
+    assert client.set(b'conditional', b'first', nx=True) is True
+    assert client.set(b'conditional', b'second', nx=True) is None
+    assert client.get(b'conditional') == b'first'
     print('reference: ping', file=sys.stderr, flush=True)
     payload = bytes(range(256))
     assert client.echo(payload) == payload

@@ -179,6 +179,8 @@ fn respond(
                 Ok(KeyValueResult::Get(Some(value))) => write_bulk(stream, &value)?,
                 Ok(KeyValueResult::Get(None)) => stream.write_all(b"$-1\r\n")?,
                 Ok(KeyValueResult::Put { .. }) => stream.write_all(b"+OK\r\n")?,
+                Ok(KeyValueResult::PutIfAbsent { revision: Some(_) }) => stream.write_all(b"+OK\r\n")?,
+                Ok(KeyValueResult::PutIfAbsent { revision: None }) => stream.write_all(b"$-1\r\n")?,
                 Ok(KeyValueResult::Increment { value }) => write!(stream, ":{value}\r\n")?,
                 Ok(KeyValueResult::Delete { removed }) => stream.write_all(if removed { b":1\r\n" } else { b":0\r\n" })?,
                 Err(error) => write_error(stream, &error.to_string())?,

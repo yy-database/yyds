@@ -30,10 +30,15 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
         if arguments.len() < 3 {
             return Err(BindError::WrongArity);
         }
-        if arguments.len() > 3 {
+        if arguments.len() == 4 && arguments[3].eq_ignore_ascii_case(b"NX") {
+            KeyValueAction::PutIfAbsent(arguments[2].to_vec())
+        }
+        else if arguments.len() > 3 {
             return Err(BindError::UnsupportedOptions);
         }
-        KeyValueAction::Put(arguments[2].to_vec())
+        else {
+            KeyValueAction::Put(arguments[2].to_vec())
+        }
     }
     else if command.eq_ignore_ascii_case(b"DEL") {
         if arguments.len() != 2 {
