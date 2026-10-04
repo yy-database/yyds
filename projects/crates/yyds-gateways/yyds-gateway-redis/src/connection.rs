@@ -14,7 +14,7 @@ use yyds_execution::KeyValueExecutor;
 use yyds_types::{KeyValueResult, Namespace};
 
 use crate::{
-    bind::{BindError, bind},
+    bind::{BindError, bind, bind_mget},
     resp::{Request, RequestLimits, decode_request},
 };
 
@@ -171,6 +171,32 @@ fn respond(
         }
         else {
             stream.write_all(b"-ERR DB index is out of range\r\n")?;
+        }
+    }
+    else if command.eq_ignore_ascii_case(b"MGET") {
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        match bind_mget(&request.arguments, namespace) {
+            Ok(commands) => match executor.execute_batch(&commands) {
+                Ok(results) => {
+                    write!(stream, "*{}\r\n", results.len())?;
+                    for result in results {
+                        match result {
+                            KeyValueResult::Get(Some(value)) => write_bulk(stream, &value)?,
+                            KeyValueResult::Get(None) => stream.write_all(b"$-1\r\n")?,
+                            _ => write_error(stream, "MGET executor returned a non-read result")?,
+                        }
+                    }
+                }
+                Err(error) => write_error(stream, &error.to_string())?,
+            },
+            Err(BindError::WrongArity) => stream.write_all(b"-ERR wrong number of arguments\r\n")?,
+            Err(BindError::EmptyCommand) => stream.write_all(b"-ERR empty command\r\n")?,
+            Err(BindError::UnsupportedCommand) => stream.write_all(b"-ERR unsupported command\r\n")?,
+            _ => stream.write_all(b"-ERR invalid MGET command\r\n")?,
         }
     }
     else if let Some(executor) = executor {
