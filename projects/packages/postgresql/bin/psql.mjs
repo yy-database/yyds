@@ -126,11 +126,10 @@ function query(options) {
         let pending = Buffer.alloc(0);
         let started = false;
         let authenticated = false;
-        let columns = [];
+        let currentResult = null;
         let settled = false;
         let received = 0;
-        const rows = [];
-        const tags = [];
+        const results = [];
         const timer = setTimeout(() => finish(new Error("PostgreSQL connection timed out")), 5000);
         function finish(error) {
             if (settled) return;
@@ -138,7 +137,7 @@ function query(options) {
             clearTimeout(timer);
             socket.destroy();
             if (error) reject(error);
-            else resolve({ columns, rows, tags });
+            else resolve(results);
         }
         socket.on("connect", () => {
             const parameters = Buffer.from(
@@ -175,6 +174,7 @@ function query(options) {
                         )
                             throw new Error("invalid ReadyForQuery");
                         if (started) {
+                            if (currentResult !== null) throw new Error("PostgreSQL result ended before CommandComplete");
                             finish();
                             return;
                         }
@@ -183,12 +183,24 @@ function query(options) {
                         if (sql.length + 4 > maximum)
                             throw new Error("PostgreSQL query exceeds byte limit");
                         socket.write(message("Q", sql));
-                    } else if (tag === "T") columns = columnsFrom(payload);
-                    else if (tag === "D") rows.push(rowFrom(payload, columns.length));
+                    } else if (tag === "T") {
+                        if (!started || currentResult !== null) throw new Error("unexpected PostgreSQL RowDescription");
+                        currentResult = { columns: columnsFrom(payload), rows: [], tag: "" };
+                    } else if (tag === "D") {
+                        if (!started || currentResult === null) throw new Error("DataRow without RowDescription");
+                        currentResult.rows.push(rowFrom(payload, currentResult.columns.length));
+                    }
                     else if (tag === "C") {
-                        if (payload.at(-1) !== 0) throw new Error("invalid CommandComplete");
-                        tags.push(payload.toString("utf8", 0, payload.length - 1));
-                    } else if (!["S", "K", "N", "I"].includes(tag))
+                        if (!started || payload.length < 2 || payload.indexOf(0) !== payload.length - 1)
+                            throw new Error("invalid CommandComplete");
+                        const result = currentResult ?? { columns: [], rows: [], tag: "" };
+                        result.tag = payload.toString("utf8", 0, payload.length - 1);
+                        results.push(result);
+                        currentResult = null;
+                    } else if (tag === "I") {
+                        if (!started || payload.length !== 0 || currentResult !== null)
+                            throw new Error("invalid EmptyQueryResponse");
+                    } else if (!["S", "K", "N"].includes(tag))
                         throw new Error(`unsupported PostgreSQL response '${tag}'`);
                 }
             } catch (error) {
@@ -210,10 +222,12 @@ async function main(args) {
         return;
     }
     const options = argumentsFor(args);
-    const result = await query(options);
-    if (options.headers && result.columns.length) console.log(result.columns.join(options.separator));
-    for (const row of result.rows) console.log(row.map((value) => value ?? options.nullValue).join(options.separator));
-    if (result.columns.length === 0) for (const tag of result.tags) console.log(tag);
+    const results = await query(options);
+    for (const result of results) {
+        if (options.headers && result.columns.length) console.log(result.columns.join(options.separator));
+        for (const row of result.rows) console.log(row.map((value) => value ?? options.nullValue).join(options.separator));
+        if (result.columns.length === 0) console.log(result.tag);
+    }
 }
 
 main(process.argv.slice(2)).catch((error) => {
