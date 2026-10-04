@@ -24,6 +24,7 @@ yyds-types = { path = "projects/crates/yyds-types" }
 yyds-kv = { path = "projects/crates/yyds-kv" }
 yyds-catalog = { path = "projects/crates/yyds-catalog" }
 yyds-control = { path = "projects/crates/yyds-control" }
+yyds-execution = { path = "projects/crates/yyds-execution" }
 yyds-sqlite = { path = "projects/crates/sqlite" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 serde_json = "1"

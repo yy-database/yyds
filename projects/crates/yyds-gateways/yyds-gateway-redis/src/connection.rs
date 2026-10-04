@@ -10,7 +10,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::resp::{Request, RequestLimits, decode_request};
+use yyds_execution::KeyValueExecutor;
+use yyds_types::{KeyValueResult, Namespace};
+
+use crate::{
+    bind::{BindError, bind},
+    resp::{Request, RequestLimits, decode_request},
+};
 
 /// Serves one bounded RESP2 connection with a 30-second I/O timeout.
 /// Only PING, ECHO and QUIT are supported. Database commands require a binder.
@@ -18,13 +24,24 @@ pub fn serve_connection(stream: TcpStream, limits: RequestLimits) -> io::Result<
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    serve_io(stream, limits)
+    serve_io(stream, limits, None)
 }
 
 /// Serves a node-owned connection with cooperative cancellation of all socket I/O.
 pub fn serve_cancellable(stream: TcpStream, limits: RequestLimits, stopping: Arc<AtomicBool>) -> io::Result<()> {
     stream.set_nonblocking(true)?;
-    serve_io(CancellableSocket { stream, stopping }, limits)
+    serve_io(CancellableSocket { stream, stopping }, limits, None)
+}
+
+/// Serves a node-owned RESP2 connection using the YYDS key/value execution contract.
+pub fn serve_cancellable_with_executor(
+    stream: TcpStream,
+    limits: RequestLimits,
+    stopping: Arc<AtomicBool>,
+    executor: Arc<dyn KeyValueExecutor>,
+) -> io::Result<()> {
+    stream.set_nonblocking(true)?;
+    serve_io(CancellableSocket { stream, stopping }, limits, Some(executor))
 }
 
 struct CancellableSocket {
@@ -69,7 +86,11 @@ impl Write for CancellableSocket {
     }
 }
 
-fn serve_io(mut stream: impl Read + Write, limits: RequestLimits) -> io::Result<()> {
+fn serve_io(
+    mut stream: impl Read + Write,
+    limits: RequestLimits,
+    executor: Option<Arc<dyn KeyValueExecutor>>,
+) -> io::Result<()> {
     let mut pending = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -77,7 +98,7 @@ fn serve_io(mut stream: impl Read + Write, limits: RequestLimits) -> io::Result<
             match decode_request(&pending, limits) {
                 Ok(Some(request)) => {
                     let consumed = request.consumed;
-                    if !respond(&mut stream, &request)? {
+                    if !respond(&mut stream, &request, executor.as_deref())? {
                         return Ok(());
                     }
                     pending.drain(..consumed);
@@ -109,7 +130,7 @@ fn serve_io(mut stream: impl Read + Write, limits: RequestLimits) -> io::Result<
     }
 }
 
-fn respond(stream: &mut impl Write, request: &Request<'_>) -> io::Result<bool> {
+fn respond(stream: &mut impl Write, request: &Request<'_>, executor: Option<&dyn KeyValueExecutor>) -> io::Result<bool> {
     let command = request.arguments[0];
     let count = request.arguments.len();
     if command.eq_ignore_ascii_case(b"PING") {
@@ -134,10 +155,35 @@ fn respond(stream: &mut impl Write, request: &Request<'_>) -> io::Result<bool> {
         }
         stream.write_all(b"-ERR wrong number of arguments for 'quit' command\r\n")?;
     }
+    else if let Some(executor) = executor {
+        let namespace = Namespace("redis:0".into());
+        match bind(&request.arguments, &namespace) {
+            Ok(command) => match executor.execute(command) {
+                Ok(KeyValueResult::Get(Some(value))) => write_bulk(stream, &value)?,
+                Ok(KeyValueResult::Get(None)) => stream.write_all(b"$-1\r\n")?,
+                Ok(KeyValueResult::Put { .. }) => stream.write_all(b"+OK\r\n")?,
+                Ok(KeyValueResult::Delete { removed }) => stream.write_all(if removed { b":1\r\n" } else { b":0\r\n" })?,
+                Err(error) => write_error(stream, &error.to_string())?,
+            },
+            Err(BindError::WrongArity) => stream.write_all(b"-ERR wrong number of arguments\r\n")?,
+            Err(BindError::UnsupportedOptions) => stream.write_all(b"-ERR unsupported SET options\r\n")?,
+            Err(BindError::EmptyCommand) => stream.write_all(b"-ERR empty command\r\n")?,
+            Err(BindError::UnsupportedCommand) => stream.write_all(b"-ERR unsupported command\r\n")?,
+        }
+    }
     else {
         stream.write_all(b"-ERR unsupported command\r\n")?;
     }
     Ok(true)
+}
+
+fn write_error(stream: &mut impl Write, message: &str) -> io::Result<()> {
+    let sanitized = message
+        .chars()
+        .map(|character| if matches!(character, '\r' | '\n') { ' ' } else { character })
+        .take(512)
+        .collect::<String>();
+    write!(stream, "-ERR {sanitized}\r\n")
 }
 
 fn write_bulk(stream: &mut impl Write, bytes: &[u8]) -> io::Result<()> {

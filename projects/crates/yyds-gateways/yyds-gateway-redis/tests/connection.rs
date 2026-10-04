@@ -1,7 +1,17 @@
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::time::Duration;
-use yyds_gateway_redis::{connection::serve_connection, resp::RequestLimits};
+use std::{
+    collections::HashMap,
+    io::{Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
+use yyds_execution::{KeyValueExecutor, LocalExecutor};
+use yyds_gateway_redis::{
+    connection::{serve_cancellable_with_executor, serve_connection},
+    resp::RequestLimits,
+};
+use yyds_kv::MemoryShard;
+use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
 fn exchange(chunks: &[&[u8]], limits: RequestLimits) -> Vec<u8> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -60,4 +70,34 @@ fn frame_limit_applies_per_command_even_when_read_contains_pipeline() {
         exchange(&[frame, frame], RequestLimits { max_frame_bytes: frame.len(), ..RequestLimits::default() }),
         b"+PONG\r\n+PONG\r\n"
     );
+}
+
+#[test]
+fn executor_backed_session_runs_binary_set_get_and_delete_pipeline() {
+    let shard = ShardId("local".into());
+    let executor = Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
+            HashMap::from([(shard, MemoryShard::new())]),
+        )
+        .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client
+        .write_all(
+            b"*3\r\n$3\r\nSET\r\n$4\r\n\0key\r\n$3\r\n\0\xff!\r\n*2\r\n$3\r\nGET\r\n$4\r\n\0key\r\n*2\r\n$3\r\nDEL\r\n$4\r\n\0key\r\n*2\r\n$3\r\nGET\r\n$4\r\n\0key\r\n",
+        )
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    worker.join().unwrap();
+    assert_eq!(response, b"+OK\r\n$3\r\n\0\xff!\r\n:1\r\n$-1\r\n");
 }

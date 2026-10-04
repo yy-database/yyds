@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 yyds-control = { workspace = true }
+yyds-execution = { workspace = true }
+yyds-kv = { workspace = true }
+yyds-types = { workspace = true }
 yyds-gateway-redis = { path = "../yyds-gateways/yyds-gateway-redis" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
