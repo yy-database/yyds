@@ -37,19 +37,28 @@ connection = psycopg2.connect(host='127.0.0.1', port=int(sys.argv[1]), user='yyd
                               dbname='yyds', application_name='yyds-reference',
                               connect_timeout=4, sslmode='prefer')
 assert connection.server_version >= 160000
-connection.autocommit = True
 try:
     connection.cursor().execute('select 1')
 except psycopg2.Error as error:
     assert error.pgcode == '0A000', (error.pgcode, str(error))
 else:
     raise AssertionError('unsupported SQL unexpectedly returned a result')
+assert connection.get_transaction_status() == psycopg2.extensions.TRANSACTION_STATUS_INERROR
+try:
+    connection.cursor().execute('select 2')
+except psycopg2.Error as error:
+    assert error.pgcode == '25P02', (error.pgcode, str(error))
+else:
+    raise AssertionError('aborted transaction unexpectedly accepted a query')
+connection.rollback()
+assert connection.get_transaction_status() == psycopg2.extensions.TRANSACTION_STATUS_IDLE
 try:
     connection.cursor().execute('select (')
 except psycopg2.Error as error:
     assert error.pgcode == '42601', (error.pgcode, str(error))
 else:
     raise AssertionError('malformed SQL unexpectedly passed Oak parsing')
+connection.rollback()
 connection.close()
 print('psycopg2 protocol-v3 startup and explicit unsupported-query response passed')
 "#;
