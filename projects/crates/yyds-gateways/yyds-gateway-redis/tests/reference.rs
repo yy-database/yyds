@@ -53,6 +53,15 @@ with redis.Redis(host='127.0.0.1', port=int(sys.argv[1]), protocol=2,
     assert client.set(key, payload) is True
     assert client.get(key) == payload
     print('reference: binary set/get', file=sys.stderr, flush=True)
+    assert client.select(1) is True
+    assert client.get(key) is None
+    assert client.set(key, b'database-one') is True
+    assert client.select(0) is True
+    assert client.get(key) == payload
+    assert client.select(1) is True
+    assert client.get(key) == b'database-one'
+    assert client.select(0) is True
+    print('reference: database selection', file=sys.stderr, flush=True)
     with client.pipeline(transaction=False) as pipeline:
         pipeline.set(b'pipeline-key', b'pipeline-value')
         pipeline.get(b'pipeline-key')

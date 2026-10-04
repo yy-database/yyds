@@ -93,12 +93,13 @@ fn serve_io(
 ) -> io::Result<()> {
     let mut pending = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut namespace = Namespace("redis:0".into());
     loop {
         loop {
             match decode_request(&pending, limits) {
                 Ok(Some(request)) => {
                     let consumed = request.consumed;
-                    if !respond(&mut stream, &request, executor.as_deref())? {
+                    if !respond(&mut stream, &request, executor.as_deref(), &mut namespace)? {
                         return Ok(());
                     }
                     pending.drain(..consumed);
@@ -130,7 +131,12 @@ fn serve_io(
     }
 }
 
-fn respond(stream: &mut impl Write, request: &Request<'_>, executor: Option<&dyn KeyValueExecutor>) -> io::Result<bool> {
+fn respond(
+    stream: &mut impl Write,
+    request: &Request<'_>,
+    executor: Option<&dyn KeyValueExecutor>,
+    namespace: &mut Namespace,
+) -> io::Result<bool> {
     let command = request.arguments[0];
     let count = request.arguments.len();
     if command.eq_ignore_ascii_case(b"PING") {
@@ -155,8 +161,19 @@ fn respond(stream: &mut impl Write, request: &Request<'_>, executor: Option<&dyn
         }
         stream.write_all(b"-ERR wrong number of arguments for 'quit' command\r\n")?;
     }
+    else if command.eq_ignore_ascii_case(b"SELECT") && executor.is_some() {
+        if count != 2 {
+            stream.write_all(b"-ERR wrong number of arguments for 'select' command\r\n")?;
+        }
+        else if let Some(database) = parse_database(request.arguments[1]) {
+            *namespace = Namespace(format!("redis:{database}"));
+            stream.write_all(b"+OK\r\n")?;
+        }
+        else {
+            stream.write_all(b"-ERR DB index is out of range\r\n")?;
+        }
+    }
     else if let Some(executor) = executor {
-        let namespace = Namespace("redis:0".into());
         match bind(&request.arguments, &namespace) {
             Ok(command) => match executor.execute(command) {
                 Ok(KeyValueResult::Get(Some(value))) => write_bulk(stream, &value)?,
@@ -175,6 +192,14 @@ fn respond(stream: &mut impl Write, request: &Request<'_>, executor: Option<&dyn
         stream.write_all(b"-ERR unsupported command\r\n")?;
     }
     Ok(true)
+}
+
+fn parse_database(bytes: &[u8]) -> Option<u8> {
+    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let database = bytes.iter().try_fold(0_u8, |value, digit| value.checked_mul(10)?.checked_add(digit - b'0'))?;
+    (database < 16).then_some(database)
 }
 
 fn write_error(stream: &mut impl Write, message: &str) -> io::Result<()> {

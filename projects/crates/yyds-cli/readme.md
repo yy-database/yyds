@@ -1,6 +1,6 @@
 # yyds
 
-The YYDS-owned node and cluster lifecycle command. `yyds` owns the node data-directory lease and starts protocol services attached to that node. Its first Redis execution path is a process-local, single-shard `.yykv` executor. It supports binary `GET`, option-free `SET`, and single-key `DEL`, but does not provide replication, elections, remote shard execution, or cluster health.
+The YYDS-owned node and cluster lifecycle command. `yyds` owns the node data-directory lease and starts protocol services attached to that node. Its first Redis execution path is a process-local, single-shard `.yykv` executor. It supports binary `GET`, option-free `SET`, single-key `DEL`, and connection-local `SELECT` for databases 0 through 15, but does not provide replication, elections, remote shard execution, or cluster health.
 
 Commands:
 
