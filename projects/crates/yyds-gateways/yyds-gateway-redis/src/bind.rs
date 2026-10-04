@@ -96,3 +96,18 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
     };
     Ok(KeyValueCommand { namespace: namespace.clone(), key: arguments[1].to_vec(), action })
 }
+
+/// Binds a Redis `MGET` request into ordered, non-atomic YYDS reads.
+pub fn bind_mget(arguments: &[&[u8]], namespace: &Namespace) -> Result<Vec<KeyValueCommand>, BindError> {
+    let command = arguments.first().ok_or(BindError::EmptyCommand)?;
+    if !command.eq_ignore_ascii_case(b"MGET") {
+        return Err(BindError::UnsupportedCommand);
+    }
+    if arguments.len() < 2 {
+        return Err(BindError::WrongArity);
+    }
+    Ok(arguments[1..]
+        .iter()
+        .map(|key| KeyValueCommand { namespace: namespace.clone(), key: (*key).to_vec(), action: KeyValueAction::Get })
+        .collect())
+}

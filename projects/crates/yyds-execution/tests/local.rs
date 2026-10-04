@@ -9,6 +9,29 @@ fn command(action: KeyValueAction, key: &[u8]) -> KeyValueCommand {
 }
 
 #[test]
+fn batch_execution_preserves_order_and_duplicates() {
+    let directory = tempfile::tempdir().unwrap();
+    let shard_id = ShardId("shard-a".into());
+    let executor = LocalExecutor::new(
+        ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+        HashMap::from([(shard_id, FileShard::open(directory.path().join("shard-a.yykv")).unwrap())]),
+    )
+    .unwrap();
+    executor.execute(command(KeyValueAction::Put(b"two".to_vec()), b"second")).unwrap();
+    let results = executor
+        .execute_batch(&[
+            command(KeyValueAction::Get, b"second"),
+            command(KeyValueAction::Get, b"missing"),
+            command(KeyValueAction::Get, b"second"),
+        ])
+        .unwrap();
+    assert_eq!(
+        results,
+        vec![KeyValueResult::Get(Some(b"two".to_vec())), KeyValueResult::Get(None), KeyValueResult::Get(Some(b"two".to_vec())),]
+    );
+}
+
+#[test]
 fn local_executor_routes_and_persists_binary_commands() {
     let directory = tempfile::tempdir().unwrap();
     let shard_id = ShardId("shard-a".into());

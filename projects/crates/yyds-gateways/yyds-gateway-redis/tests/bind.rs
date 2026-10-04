@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
-use yyds_gateway_redis::bind::{BindError, bind};
+use yyds_gateway_redis::bind::{BindError, bind, bind_mget};
 use yyds_kv::MemoryShard;
 use yyds_types::{KeyValueResult, Namespace, ShardEpoch, ShardId, ShardMap};
 
@@ -106,4 +106,16 @@ fn unsupported_shapes_are_rejected_before_execution() {
     ] {
         assert_eq!(bind(&arguments, &namespace), Err(expected));
     }
+}
+
+#[test]
+fn mget_binding_preserves_order_and_duplicate_keys() {
+    let namespace = Namespace("redis:0".into());
+    let commands = bind_mget(&[b"MGET", b"first", b"second", b"first"], &namespace).unwrap();
+    assert_eq!(commands.len(), 3);
+    assert_eq!(commands[0].key, b"first");
+    assert_eq!(commands[1].key, b"second");
+    assert_eq!(commands[2].key, b"first");
+    assert!(matches!(commands[0].action, yyds_types::KeyValueAction::Get));
+    assert_eq!(bind_mget(&[b"MGET"], &namespace), Err(BindError::WrongArity));
 }

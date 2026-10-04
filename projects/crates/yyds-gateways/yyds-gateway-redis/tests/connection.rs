@@ -5,13 +5,14 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
-use yyds_execution::LocalExecutor;
+use yyds_execution::{KeyValueExecutor, LocalExecutor};
 use yyds_gateway_redis::{
+    bind::bind,
     connection::{serve_cancellable_with_executor, serve_connection},
     resp::RequestLimits,
 };
 use yyds_kv::MemoryShard;
-use yyds_types::{ShardEpoch, ShardId, ShardMap};
+use yyds_types::{Namespace, ShardEpoch, ShardId, ShardMap};
 
 fn exchange(chunks: &[&[u8]], limits: RequestLimits) -> Vec<u8> {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -103,6 +104,38 @@ fn executor_backed_session_runs_binary_set_get_and_delete_pipeline() {
         response,
         b"+OK\r\n:1\r\n:0\r\n$-1\r\n$3\r\n\0\xff!\r\n:1\r\n$-1\r\n:1\r\n$1\r\n1\r\n+OK\r\n-ERR value is not an integer or out of range\r\n"
     );
+}
+
+#[test]
+fn executor_backed_mget_returns_ordered_duplicate_and_null_values() {
+    let shard = ShardId("local".into());
+    let executor = Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
+            HashMap::from([(shard, MemoryShard::new())]),
+        )
+        .unwrap(),
+    );
+    let namespace = Namespace("redis:0".into());
+    executor
+        .execute(bind(&[b"SET", b"first", b"value"], &namespace).unwrap())
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let worker = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client
+        .write_all(b"*4\r\n$4\r\nMGET\r\n$5\r\nfirst\r\n$7\r\nmissing\r\n$5\r\nfirst\r\n")
+        .unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    worker.join().unwrap();
+    assert_eq!(response, b"*3\r\n$5\r\nvalue\r\n$-1\r\n$5\r\nvalue\r\n");
 }
 
 #[test]
