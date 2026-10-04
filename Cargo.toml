@@ -26,6 +26,8 @@ yyds-catalog = { path = "projects/crates/yyds-catalog" }
 yyds-control = { path = "projects/crates/yyds-control" }
 yyds-execution = { path = "projects/crates/yyds-execution" }
 yyds-sqlite = { path = "projects/crates/sqlite" }
+sqlite-provider = { path = "projects/crates/sqlite-provider" }
+sqlite-provider-rusqlite = { path = "projects/crates/sqlite-provider-rusqlite" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 serde_json = "1"
 oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "49eaa0bc07f0562c06d2a19fbf5fdd235184a3bb", package = "oak-sql" }

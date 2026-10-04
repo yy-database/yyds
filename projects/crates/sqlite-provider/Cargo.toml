@@ -1,0 +1,11 @@
+[package]
+name = "sqlite-provider"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned SQLite execution provider contract for Iris and YYDS"
+publish = false
+
+[dependencies]
+thiserror = "2"
