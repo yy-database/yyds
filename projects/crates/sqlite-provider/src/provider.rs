@@ -32,19 +32,19 @@ pub trait SqliteProvider {
     fn source_id(&self) -> Result<String, SqliteError>;
 
     /// Executes exactly one statement with positional bind parameters.
-    fn execute_one(&mut self, sql: &str, params: &[SqliteValue]) -> Result<StatementResult, SqliteError>;
+    fn execute_one(&self, sql: &str, params: &[SqliteValue]) -> Result<StatementResult, SqliteError>;
 
     /// Executes a multi-statement batch and discards result rows.
-    fn execute_batch(&mut self, sql: &str) -> Result<(), SqliteError>;
+    fn execute_batch(&self, sql: &str) -> Result<(), SqliteError>;
 
     /// Starts an immediate write transaction.
-    fn begin_immediate(&mut self) -> Result<(), SqliteError>;
+    fn begin_immediate(&self) -> Result<(), SqliteError>;
 
     /// Commits the active transaction.
-    fn commit(&mut self) -> Result<(), SqliteError>;
+    fn commit(&self) -> Result<(), SqliteError>;
 
     /// Rolls back the active transaction.
-    fn rollback(&mut self) -> Result<(), SqliteError>;
+    fn rollback(&self) -> Result<(), SqliteError>;
 
     /// Inspects live catalog metadata through SQL metadata queries.
     fn inspect_catalog(&self) -> Result<CatalogSnapshot, SqliteError>;

@@ -13,12 +13,14 @@ mod table;
 
 pub use crate::{
     database::{SqliteDatabase, read_existing},
-    engine::{SqliteEngine, SqliteQueryResult, SqliteValue},
+    engine::{SqliteEngine, SqliteQueryResult},
     format::{MAGIC, blank_database, decode_library_version, validate_database, validate_header},
     record::{RecordLimits, RecordValue, TextEncoding, decode_record, decode_varint},
     schema::{SchemaObject, SchemaObjectKind, read_named_table, read_schema},
     table::{TableLimits, TableRow, read_table},
 };
+
+pub use sqlite_provider::{CONTRACT_VERSION, SqliteProvider, SqliteValue};
 
 /// Adapter identifier used in logs and diagnostics.
 pub const BACKEND_ID: &str = "sqlite";
