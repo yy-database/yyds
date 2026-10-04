@@ -13,7 +13,8 @@ Maintainer skill. Integrators use `@yyds/yyds-skills`, not this file.
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
-| CI | `.github/workflows/ci.yml` | push/PR `dev` / `master` | `rustfmt`, `cargo test`, pnpm build/test |
+| Check Rust | `.github/workflows/check-rust.yml` | push/PR `dev` / `master` | `rustfmt`, `cargo test` |
+| Check TypeScript | `.github/workflows/check-typescript.yml` | push/PR `dev` / `master` | wasm, pnpm typecheck, napi, tests |
 | Release | `.github/workflows/release-npm.yml` | push tag `v*.*.*` | npm OIDC for `publish.packages` |
 
 Release does **not** gate on CI. Tag `vX.Y.Z` → npm version `X.Y.Z`.
@@ -22,9 +23,9 @@ Release does **not** gate on CI. Tag `vX.Y.Z` → npm version `X.Y.Z`.
 
 | Key | Purpose |
 |-----|---------|
-| `trust.repo` | `yy-database/yyds` |
-| `trust.file` | `release-npm.yml` |
-| `trust.environment` | `NPM_PUBLISH` |
+| `trust.npm.repo` | `yy-database/yyds` |
+| `trust.npm.file` | `release-npm.yml` |
+| `trust.npm.environment` | `NPM_PUBLISH` |
 | `publish.packages` | Engine + gateways for tag release and **`pnpm placeholder:trust`** |
 
 Integrator skills: **`projects/packages/yyds-skills`** (`@yyds/yyds-skills`). Use **`pnpm placeholder:trust:skills`** (`nifty trust --only @yyds/yyds-skills`).
