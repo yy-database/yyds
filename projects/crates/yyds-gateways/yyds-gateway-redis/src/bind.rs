@@ -32,6 +32,12 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
         }
         KeyValueAction::Exists
     }
+    else if command.eq_ignore_ascii_case(b"GETDEL") {
+        if arguments.len() != 2 {
+            return Err(BindError::WrongArity);
+        }
+        KeyValueAction::GetDelete
+    }
     else if command.eq_ignore_ascii_case(b"SET") {
         if arguments.len() < 3 {
             return Err(BindError::WrongArity);
