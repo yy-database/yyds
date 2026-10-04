@@ -8,16 +8,10 @@ pub const MAGIC: &[u8] = b"SQLite format 3\0";
 /// Default page size for newly created YYDS SQLite files.
 pub const DEFAULT_PAGE_SIZE: usize = 4096;
 
-/// YYDS SQLite engine library version reported by `sqlite_version()`.
-pub const ENGINE_LIBRARY_VERSION: &str = "3.45.0";
-
-/// SQLite library version integer (`MMmmpppp`) stamped into new files.
-pub const ENGINE_LIBRARY_VERSION_NUMBER: u32 = 3_045_000;
-
 /// Canonical blank database bytes (one 4096-byte page, validated by tests).
 const BLANK_DATABASE: &[u8] = include_bytes!("assets/blank.sqlite");
 
-/// Returns validated blank database bytes with the YYDS engine version stamped in.
+/// Returns validated blank database bytes with the linked SQLite library version stamped in.
 pub fn blank_database() -> Result<Vec<u8>> {
     if BLANK_DATABASE.len() != DEFAULT_PAGE_SIZE {
         return Err(Error::Corrupt("blank sqlite asset has unexpected size"));
@@ -25,7 +19,7 @@ pub fn blank_database() -> Result<Vec<u8>> {
     validate_header(BLANK_DATABASE)?;
 
     let mut pages = BLANK_DATABASE.to_vec();
-    stamp_library_version(&mut pages, ENGINE_LIBRARY_VERSION_NUMBER);
+    stamp_library_version(&mut pages, rusqlite::version_number() as u32);
     Ok(pages)
 }
 

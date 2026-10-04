@@ -1,7 +1,7 @@
 {
     "name": "@yyds/sqlite",
     "version": "0.1.0",
-    "description": "SQLite disguise with pure-Rust format-3 passthrough. YYDS cannot optimize this path through yyds-kv.",
+    "description": "SQLite-compatible engine and bounded format-3 snapshot reader, independent of YYDS storage.",
     "license": "MPL-2.0",
     "private": true,
     "type": "module",

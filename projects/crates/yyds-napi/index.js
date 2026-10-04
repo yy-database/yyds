@@ -310,8 +310,9 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { SqliteSnapshot, yydsVersion, ping } = nativeBinding
+const { SqliteSnapshot, SqliteConnection, yydsVersion, ping } = nativeBinding
 
 module.exports.SqliteSnapshot = SqliteSnapshot
+module.exports.SqliteConnection = SqliteConnection
 module.exports.yydsVersion = yydsVersion
 module.exports.ping = ping
