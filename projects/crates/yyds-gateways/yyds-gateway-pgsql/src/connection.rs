@@ -3,7 +3,11 @@
 use std::{
     io::{self, Read, Write},
     net::TcpStream,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use crate::wire::{FrameError, StartupParameterError, StartupParameters, decode_message, decode_startup, encode_message};
@@ -19,15 +23,31 @@ static NEXT_SECRET: AtomicU32 = AtomicU32::new(1);
 /// Establishes an unauthenticated protocol-v3 session, then rejects unsupported SQL explicitly.
 ///
 /// The caller must restrict the peer to loopback until authentication and TLS are implemented.
-pub fn serve_connection(mut stream: TcpStream) -> io::Result<()> {
+pub fn serve_connection(stream: TcpStream) -> io::Result<()> {
     if !stream.peer_addr()?.ip().is_loopback() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "PostgreSQL requires loopback until authentication and TLS are implemented",
         ));
     }
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    serve_session(stream)
+}
+
+/// Serves a loopback session with cooperative service-stop cancellation.
+pub fn serve_cancellable(stream: TcpStream, stopping: Arc<AtomicBool>) -> io::Result<()> {
+    if !stream.peer_addr()?.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "PostgreSQL requires loopback until authentication and TLS are implemented",
+        ));
+    }
+    stream.set_nonblocking(true)?;
+    serve_session(CancellableSocket { stream, stopping })
+}
+
+fn serve_session(mut stream: impl Read + Write) -> io::Result<()> {
     let mut pending = Vec::new();
     let parameters = loop {
         let packet = read_startup(&mut stream, &mut pending)?;
@@ -93,7 +113,7 @@ struct OwnedMessage {
     payload: Vec<u8>,
 }
 
-fn read_startup(stream: &mut TcpStream, pending: &mut Vec<u8>) -> io::Result<OwnedStartup> {
+fn read_startup(stream: &mut impl Read, pending: &mut Vec<u8>) -> io::Result<OwnedStartup> {
     loop {
         match decode_startup(pending, MAX_STARTUP_FRAME) {
             Ok(Some(packet)) => {
@@ -107,7 +127,7 @@ fn read_startup(stream: &mut TcpStream, pending: &mut Vec<u8>) -> io::Result<Own
     }
 }
 
-fn read_message(stream: &mut TcpStream, pending: &mut Vec<u8>) -> io::Result<Option<OwnedMessage>> {
+fn read_message(stream: &mut impl Read, pending: &mut Vec<u8>) -> io::Result<Option<OwnedMessage>> {
     loop {
         match decode_message(pending, MAX_MESSAGE_FRAME) {
             Ok(Some(message)) => {
@@ -133,7 +153,7 @@ fn read_message(stream: &mut TcpStream, pending: &mut Vec<u8>) -> io::Result<Opt
     }
 }
 
-fn read_more(stream: &mut TcpStream, pending: &mut Vec<u8>) -> io::Result<()> {
+fn read_more(stream: &mut impl Read, pending: &mut Vec<u8>) -> io::Result<()> {
     let mut chunk = [0; 8192];
     let read = stream.read(&mut chunk)?;
     if read == 0 {
@@ -143,11 +163,11 @@ fn read_more(stream: &mut TcpStream, pending: &mut Vec<u8>) -> io::Result<()> {
     Ok(())
 }
 
-fn send_authentication_ok(stream: &mut TcpStream) -> io::Result<()> {
+fn send_authentication_ok(stream: &mut impl Write) -> io::Result<()> {
     write_message(stream, b'R', &0_u32.to_be_bytes())
 }
 
-fn send_parameter(stream: &mut TcpStream, key: &str, value: &str) -> io::Result<()> {
+fn send_parameter(stream: &mut impl Write, key: &str, value: &str) -> io::Result<()> {
     let mut payload = Vec::with_capacity(key.len() + value.len() + 2);
     payload.extend_from_slice(key.as_bytes());
     payload.push(0);
@@ -156,18 +176,18 @@ fn send_parameter(stream: &mut TcpStream, key: &str, value: &str) -> io::Result<
     write_message(stream, b'S', &payload)
 }
 
-fn send_backend_key(stream: &mut TcpStream) -> io::Result<()> {
+fn send_backend_key(stream: &mut impl Write) -> io::Result<()> {
     let mut payload = Vec::with_capacity(8);
     payload.extend_from_slice(&std::process::id().to_be_bytes());
     payload.extend_from_slice(&NEXT_SECRET.fetch_add(1, Ordering::Relaxed).to_be_bytes());
     write_message(stream, b'K', &payload)
 }
 
-fn send_ready(stream: &mut TcpStream) -> io::Result<()> {
+fn send_ready(stream: &mut impl Write) -> io::Result<()> {
     write_message(stream, b'Z', b"I")
 }
 
-fn write_error_response(stream: &mut TcpStream, code: &str, message: &str) -> io::Result<()> {
+fn write_error_response(stream: &mut impl Write, code: &str, message: &str) -> io::Result<()> {
     let mut payload = Vec::new();
     payload.push(b'S');
     payload.extend_from_slice(b"ERROR\0C");
@@ -178,7 +198,7 @@ fn write_error_response(stream: &mut TcpStream, code: &str, message: &str) -> io
     write_message(stream, b'E', &payload)
 }
 
-fn write_fatal(stream: &mut TcpStream, code: &str, message: &str) -> io::Result<()> {
+fn write_fatal(stream: &mut impl Write, code: &str, message: &str) -> io::Result<()> {
     let mut payload = Vec::new();
     payload.push(b'S');
     payload.extend_from_slice(b"FATAL\0C");
@@ -189,9 +209,51 @@ fn write_fatal(stream: &mut TcpStream, code: &str, message: &str) -> io::Result<
     write_message(stream, b'E', &payload)
 }
 
-fn write_message(stream: &mut TcpStream, tag: u8, payload: &[u8]) -> io::Result<()> {
+fn write_message(stream: &mut impl Write, tag: u8, payload: &[u8]) -> io::Result<()> {
     let encoded = encode_message(tag, payload, MAX_MESSAGE_FRAME).map_err(frame_error)?;
     stream.write_all(&encoded)
+}
+
+struct CancellableSocket {
+    stream: TcpStream,
+    stopping: Arc<AtomicBool>,
+}
+
+impl CancellableSocket {
+    fn attempt<T>(&mut self, mut operation: impl FnMut(&mut TcpStream) -> io::Result<T>) -> io::Result<T> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if self.stopping.load(Ordering::Acquire) {
+                return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "PostgreSQL service stopping"));
+            }
+            match operation(&mut self.stream) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "PostgreSQL socket I/O timeout"));
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                result => return result,
+            }
+        }
+    }
+}
+
+impl Read for CancellableSocket {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.attempt(|stream| stream.read(bytes))
+    }
+}
+
+impl Write for CancellableSocket {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.attempt(|stream| stream.write(bytes))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.attempt(Write::flush)
+    }
 }
 
 fn frame_error(error: FrameError) -> io::Error {
