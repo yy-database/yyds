@@ -11,6 +11,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
+use yyds_gateway_pgsql::service::PgsqlService;
 use yyds_gateway_redis::{DEFAULT_PORT, resp::RequestLimits, service::RedisService};
 use yyds_kv::FileShard;
 use yyds_types::{ShardEpoch, ShardId, ShardMap};
@@ -34,6 +35,7 @@ struct Arguments {
     cluster_id: Option<String>,
     node_id: Option<String>,
     redis_port: u16,
+    pgsql_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,6 +46,7 @@ struct RuntimeStatus {
     pid: u32,
     started_at_unix_ms: u128,
     redis_address: SocketAddr,
+    pgsql_address: Option<SocketAddr>,
 }
 
 fn main() {
@@ -76,6 +79,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
     let mut cluster_id = None;
     let mut node_id = None;
     let mut redis_port = DEFAULT_PORT;
+    let mut pgsql_port = None;
     let mut index = 1;
     let mut seen = std::collections::HashSet::new();
     while index < arguments.len() {
@@ -83,7 +87,7 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
         if !seen.insert(flag) {
             return Err(format!("duplicate option `{flag}`"));
         }
-        if command != Command::Start && flag == "--redis-port"
+        if command != Command::Start && matches!(flag, "--redis-port" | "--pgsql-port")
             || matches!(command, Command::Status | Command::Stop) && matches!(flag, "--cluster-id" | "--node-id")
         {
             return Err(format!("option `{flag}` is not valid for this command"));
@@ -97,15 +101,17 @@ fn parse_arguments(arguments: &[String]) -> Result<Arguments, String> {
             "--cluster-id" => cluster_id = Some(value.clone()),
             "--node-id" => node_id = Some(value.clone()),
             "--redis-port" => redis_port = value.parse().map_err(|_| "invalid --redis-port".to_string())?,
+            "--pgsql-port" => pgsql_port = Some(value.parse().map_err(|_| "invalid --pgsql-port".to_string())?),
             _ => return Err(format!("unknown option `{flag}`\n{}", usage())),
         }
         index += 2;
     }
-    Ok(Arguments { command, data_dir: data_dir.ok_or_else(usage)?, cluster_id, node_id, redis_port })
+    Ok(Arguments { command, data_dir: data_dir.ok_or_else(usage)?, cluster_id, node_id, redis_port, pgsql_port })
 }
 
 fn usage() -> String {
-    "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT]".into()
+    "usage: yyds <init|start|status|stop> --data-dir DIR [--cluster-id ID --node-id ID] [--redis-port PORT] [--pgsql-port PORT]"
+        .into()
 }
 
 fn identity(arguments: &Arguments) -> Result<NodeIdentity, String> {
@@ -130,20 +136,28 @@ fn start(arguments: &Arguments) -> Result<(), String> {
     let address = SocketAddr::from(([127, 0, 0, 1], arguments.redis_port));
     let service = RedisService::start_with_executor(Arc::clone(&lease), address, RequestLimits::default(), executor)
         .map_err(|error| error.to_string())?;
+    let pgsql_service = arguments
+        .pgsql_port
+        .map(|port| PgsqlService::start(Arc::clone(&lease), SocketAddr::from(([127, 0, 0, 1], port))))
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let runtime = RuntimeStatus {
         version: CONTROL_VERSION,
         generation: uuid::Uuid::new_v4(),
         pid: std::process::id(),
         started_at_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| error.to_string())?.as_millis(),
         redis_address: service.address(),
+        pgsql_address: pgsql_service.as_ref().map(PgsqlService::address),
     };
     write_status(&arguments.data_dir, &runtime)?;
-    println!("yyds running pid={} redis={}", runtime.pid, runtime.redis_address);
+    println!("yyds running pid={} redis={} pgsql={:?}", runtime.pid, runtime.redis_address, runtime.pgsql_address);
     let stop_path = stop_path(&arguments.data_dir, runtime.generation);
-    while !stop_path.exists() && !service.is_finished() {
+    while !stop_path.exists() && !service.is_finished() && pgsql_service.as_ref().is_none_or(|pgsql| !pgsql.is_finished()) {
         thread::sleep(Duration::from_millis(50));
     }
-    let result = service.stop().map_err(|error| error.to_string());
+    let redis_result = service.stop().map_err(|error| error.to_string());
+    let pgsql_result = pgsql_service.map(PgsqlService::stop).transpose().map_err(|error| error.to_string());
+    let result = redis_result.and(pgsql_result.map(|_| ()));
     let _ = fs::remove_file(arguments.data_dir.join(STATUS_FILE));
     let _ = fs::remove_file(stop_path);
     result
@@ -240,7 +254,11 @@ fn read_status(directory: &Path) -> Result<Option<RuntimeStatus>, String> {
             }
             let status: RuntimeStatus =
                 serde_json::from_slice(&bytes).map_err(|error| format!("corrupt runtime status: {error}"))?;
-            if status.version != CONTROL_VERSION || status.generation.is_nil() || !status.redis_address.ip().is_loopback() {
+            if status.version != CONTROL_VERSION
+                || status.generation.is_nil()
+                || !status.redis_address.ip().is_loopback()
+                || status.pgsql_address.is_some_and(|address| !address.ip().is_loopback())
+            {
                 return Err("unsupported or invalid runtime status".into());
             }
             Ok(Some(status))
