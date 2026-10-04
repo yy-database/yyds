@@ -13,17 +13,18 @@ mod kind;
 mod sql;
 
 pub use crate::catalog_bind::{
-    bind_sql_catalog, SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression,
-    SqlCatalogBoundProjection, SqlCatalogBoundSelect, SqlCatalogBoundStatement,
-    SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable,
+    SqlCatalog, SqlCatalogBoundColumn, SqlCatalogBoundExpression, SqlCatalogBoundProjection, SqlCatalogBoundSelect,
+    SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogTable, bind_sql_catalog,
 };
 
-pub use crate::config::GatewayConfig;
-pub use crate::kind::{GatewayKind, ALL_GATEWAY_KINDS};
-pub use crate::sql::{
-    bind_sql, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral,
-    SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
-    SqlFrontendError,
+pub use crate::{
+    config::GatewayConfig,
+    kind::{ALL_GATEWAY_KINDS, GatewayKind},
+    sql::{
+        SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement,
+        SqlBoundUnaryOperator, SqlFrontendError, SqlSessionCommand, SqlTransactionAction, bind_sql, parse_session_command,
+        parse_sql,
+    },
 };
 
 /// Legacy surfaces that must never be revived as YYDS product paths.
@@ -45,19 +46,12 @@ pub fn version_label() -> String {
 
 /// Startup banner for a configured disguise gateway listener.
 pub fn startup_banner(config: &GatewayConfig) -> String {
-    format!(
-        "{} listening on {} (YYDS {version})",
-        config.kind.crate_name(),
-        config.port,
-        version = version()
-    )
+    format!("{} listening on {} (YYDS {version})", config.kind.crate_name(), config.port, version = version())
 }
 
 /// Returns true when `surface` is a forbidden legacy gateway path.
 pub fn is_forbidden_legacy_surface(surface: &str) -> bool {
-    FORBIDDEN_LEGACY_SURFACES
-        .iter()
-        .any(|entry| entry.eq_ignore_ascii_case(surface))
+    FORBIDDEN_LEGACY_SURFACES.iter().any(|entry| entry.eq_ignore_ascii_case(surface))
 }
 
 /// Optional catalog path attached to a gateway process.
@@ -74,9 +68,7 @@ impl GatewayCatalog {
 
     /// Binds the gateway to a `.yyds` catalog file path.
     pub fn with_path(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: Some(path.into()),
-        }
+        Self { path: Some(path.into()) }
     }
 
     /// Returns the configured catalog path, if any.

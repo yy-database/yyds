@@ -33,12 +33,10 @@ fn pymysql_connects_and_receives_explicit_unsupported_query_error() {
     let port = service.address().port();
     let script = r#"
 import pymysql, sys
-# Keep the probe on wire startup and the requested query, without disguising
-# PyMySQL's implicit SET NAMES initialization as supported SQL execution.
-pymysql.connections.Connection.set_character_set = lambda self, charset, collation=None: None
 connection = pymysql.connect(host='127.0.0.1', port=int(sys.argv[1]), user='yyds',
                              password='', database='yyds', connect_timeout=4,
                              read_timeout=4, write_timeout=4, autocommit=None)
+assert connection.character_set_name() == 'utf8mb4'
 try:
     with connection.cursor() as cursor:
         cursor.execute('select 1')
