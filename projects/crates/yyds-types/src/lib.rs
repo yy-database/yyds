@@ -6,6 +6,7 @@
 
 mod errors;
 mod distributed_execution;
+mod key_value;
 mod identity;
 mod routing;
 mod replication;
@@ -23,6 +24,7 @@ pub use crate::distributed_execution::{
     VectorMetric, VectorValue, VectorValueError, RetryPolicy,
 };
 pub use crate::identity::{CATALOG_SUFFIX, Namespace, SHARD_SUFFIX, ShardId};
+pub use crate::key_value::{KeyValueAction, KeyValueCommand, KeyValueResult};
 pub use crate::routing::{RouteDecision, RoutingError, ShardEpoch, ShardMap};
 pub use crate::replication::{
     FenceToken, LeaderTerm, ReplicaError, ReplicaMember, ReplicaNodeId, ReplicaRole, ReplicaSet,
