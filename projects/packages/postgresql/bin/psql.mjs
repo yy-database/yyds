@@ -226,7 +226,7 @@ async function main(args) {
     for (const result of results) {
         if (options.headers && result.columns.length) console.log(result.columns.join(options.separator));
         for (const row of result.rows) console.log(row.map((value) => value ?? options.nullValue).join(options.separator));
-        if (result.columns.length === 0) console.log(result.tag);
+        if (result.columns.length === 0 && options.headers) console.log(result.tag);
     }
 }
 
