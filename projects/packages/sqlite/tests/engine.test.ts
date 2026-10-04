@@ -43,6 +43,55 @@ test("native SQLite engine preserves storage classes and signed 64-bit values", 
     assert.throws(() => database.execute("SELECT 1; SELECT 2"), /multiple statements/i);
 });
 
+test("native SQLite engine binds parameters without changing their storage classes", {
+    skip: !isYydsNativeInstalled(),
+}, () => {
+    const database = new SqliteConnection(":memory:");
+    database.execute("CREATE TABLE sample (low, high, text_value, blob_value, null_value)");
+    const injection = "'); DROP TABLE sample; --";
+    const inserted = database.executeWithParameters(
+        "INSERT INTO sample VALUES (?, ?, ?, ?, ?)",
+        [
+            { kind: "integer", value: -(1n << 63n) },
+            { kind: "integer", value: (1n << 63n) - 1n },
+            { kind: "text", value: injection },
+            { kind: "blob", value: Buffer.from([0, 255]) },
+            { kind: "null" },
+        ],
+    );
+    assert.equal(inserted.changes, 1n);
+    const result = database.executeWithParameters(
+        "SELECT low, high, text_value, blob_value, null_value FROM sample WHERE text_value = ?",
+        [{ kind: "text", value: injection }],
+    );
+    assert.deepEqual(result.rows[0], [
+        { kind: "integer", value: -(1n << 63n) },
+        { kind: "integer", value: (1n << 63n) - 1n },
+        { kind: "text", value: injection },
+        { kind: "blob", value: Buffer.from([0, 255]) },
+        { kind: "null" },
+    ]);
+    assert.throws(
+        () => database.executeWithParameters("INSERT INTO sample VALUES (?, ?, ?, ?, ?)", []),
+        /parameter/i,
+    );
+    assert.deepEqual(database.execute("SELECT count(*) FROM sample").rows[0][0], { kind: "integer", value: 1n });
+    assert.deepEqual(database.executeWithParameters("SELECT ?2, ?1, ?2", [
+        { kind: "real", value: 1.25 },
+        { kind: "text", value: Buffer.from([255, 0, 128]) },
+    ]).rows[0], [
+        { kind: "text", value: Buffer.from([255, 0, 128]) },
+        { kind: "real", value: 1.25 },
+        { kind: "text", value: Buffer.from([255, 0, 128]) },
+    ]);
+    assert.throws(() => database.executeWithParameters("SELECT ?", [
+        { kind: "integer", value: 1n << 63n },
+    ]), /64-bit range/i);
+    assert.throws(() => database.executeWithParameters("SELECT ?", [
+        { kind: "null" }, { kind: "null" },
+    ]), /parameter/i);
+});
+
 test("native SQLite engine reads and writes files through SQLite's pager", {
     skip: !isYydsNativeInstalled(),
 }, () => {
