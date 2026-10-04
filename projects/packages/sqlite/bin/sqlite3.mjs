@@ -50,11 +50,16 @@ function main(args) {
         );
         return;
     }
+    let readOnly = false;
+    if (args[0] === "-readonly") {
+        readOnly = true;
+        args = args.slice(1);
+    }
     if (args.length !== 2 || args[0].startsWith("-") || args[0] === "") {
-        throw new Error("expected DATABASE and one SQL statement or supported dot command");
+        throw new Error("expected [-readonly] DATABASE and one SQL statement or supported dot command");
     }
     const [path, input] = args;
-    const database = new SqliteConnection(path);
+    const database = new SqliteConnection(path, { readOnly });
     if (input.trim().startsWith(".")) {
         runDotCommand(database, input.trim());
         return;

@@ -128,3 +128,25 @@ test("native SQLite engine reads and writes files through SQLite's pager", {
     assert.equal(value.kind, "text");
     if (value.kind === "text") assert.equal(value.value, "persisted");
 });
+
+test("native SQLite engine opens existing files read-only without creating missing files", {
+    skip: !isYydsNativeInstalled(),
+}, () => {
+    const directory = mkdtempSync(join(tmpdir(), "yyds-sqlite-readonly-"));
+    const path = join(directory, "readonly.sqlite");
+    const writable = new SqliteConnection(path);
+    writable.execute("CREATE TABLE sample (value TEXT)");
+    writable.execute("INSERT INTO sample VALUES ('persisted')");
+
+    const readonly = new SqliteConnection(path, { readOnly: true });
+    assert.deepEqual(readonly.execute("SELECT value FROM sample").rows[0][0], {
+        kind: "text",
+        value: "persisted",
+    });
+    assert.throws(() => readonly.execute("INSERT INTO sample VALUES ('blocked')"), /readonly/i);
+    assert.throws(() => new SqliteConnection(join(directory, "missing.sqlite"), { readOnly: true }));
+    assert.throws(() => new SqliteConnection(":memory:", { readOnly: true }), /in-memory/i);
+    const count = writable.execute("SELECT count(*) FROM sample").rows[0][0];
+    assert.equal(count.kind, "integer");
+    if (count.kind === "integer") assert.equal(count.value, 1n);
+});

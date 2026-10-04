@@ -60,6 +60,19 @@ export interface SqliteQueryResult {
   /** Last insert rowid as exact signed decimal text. */
   lastInsertRowid: string
 }
+/** One SQLite bind parameter preserving its storage class and raw bytes. */
+export interface SqliteParameter {
+  /** SQLite storage class: null, integer, real, text, or blob. */
+  kind: string
+  /** Signed 64-bit integer as decimal text. */
+  integer?: string
+  /** Floating-point value. */
+  real?: number
+  /** Exact TEXT bytes, including non-UTF-8 data. */
+  text?: Buffer
+  /** Exact BLOB bytes. */
+  blob?: Buffer
+}
 /** Library version (matches `yyds-types::version()`). */
 export declare function yydsVersion(): string
 /** Lightweight health probe for native binding smoke tests. */
@@ -75,10 +88,14 @@ export declare class SqliteSnapshot {
 }
 /** A real SQLite connection backed by upstream SQLite, independent of YYDS storage. */
 export declare class SqliteConnection {
-  /** Opens or creates a SQLite database file. Use `:memory:` for a private memory database. */
-  constructor(path: string)
+  /** Opens or creates a SQLite file, or opens an existing file read-only when requested. */
+  constructor(path: string, readOnly?: boolean | undefined | null)
   /** Executes one statement through the SQLite engine. */
   execute(sql: string): SqliteQueryResult
+  /** Executes one statement with SQLite-native positional bind parameters. */
+  executeWithParameters(sql: string, parameters: Array<SqliteParameter>): SqliteQueryResult
+  /** Executes a multi-statement SQLite batch and discards result rows. */
+  executeBatch(sql: string): void
   /** Returns SQLite's native engine source id. */
   sourceId(): string
 }
