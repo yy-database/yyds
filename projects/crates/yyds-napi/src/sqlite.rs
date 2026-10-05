@@ -1,6 +1,6 @@
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi_derive::napi;
-use yyds_sqlite::{SchemaObjectKind, SqliteEngine, SqliteValue, TableLimits, read_named_table, read_schema, validate_database};
+use yyds_sqlite::{SchemaObjectKind, SqliteEngine, SqliteProvider, SqliteValue, TableLimits, read_named_table, read_schema, validate_database};
 
 /// Optional resource bounds for each schema or table scan.
 #[napi(object)]
@@ -162,6 +162,65 @@ impl SqliteConnection {
     #[napi(js_name = "executeBatch")]
     pub fn execute_batch(&self, sql: String) -> napi::Result<()> {
         self.engine.execute_batch(&sql).map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Starts an immediate write transaction.
+    #[napi(js_name = "beginImmediate")]
+    pub fn begin_immediate(&self) -> napi::Result<()> {
+        self.engine.begin_immediate().map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Commits the active transaction.
+    #[napi]
+    pub fn commit(&self) -> napi::Result<()> {
+        self.engine.commit().map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Rolls back the active transaction.
+    #[napi]
+    pub fn rollback(&self) -> napi::Result<()> {
+        self.engine.rollback().map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Creates a named savepoint.
+    #[napi]
+    pub fn savepoint(&self, name: String) -> napi::Result<()> {
+        self.engine.savepoint(&name).map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Releases a named savepoint.
+    #[napi(js_name = "releaseSavepoint")]
+    pub fn release_savepoint(&self, name: String) -> napi::Result<()> {
+        self.engine.release_savepoint(&name).map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Rolls back to a named savepoint without releasing it.
+    #[napi(js_name = "rollbackToSavepoint")]
+    pub fn rollback_to_savepoint(&self, name: String) -> napi::Result<()> {
+        self.engine.rollback_to_savepoint(&name).map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Reports whether the connection is outside a transaction.
+    #[napi(js_name = "isAutocommit")]
+    pub fn is_autocommit(&self) -> napi::Result<bool> {
+        self.engine.is_autocommit().map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    /// Reports the observed SQLite journal mode.
+    #[napi(js_name = "journalMode")]
+    pub fn journal_mode(&self) -> napi::Result<String> {
+        let mode = self.engine.journal_mode().map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(match mode {
+            yyds_sqlite::JournalMode::Delete => "delete",
+            yyds_sqlite::JournalMode::Wal => "wal",
+            yyds_sqlite::JournalMode::Other => "other",
+        }.into())
+    }
+
+    /// Performs a passive WAL checkpoint.
+    #[napi]
+    pub fn checkpoint(&self) -> napi::Result<()> {
+        self.engine.checkpoint().map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     /// Returns SQLite's native engine source id.

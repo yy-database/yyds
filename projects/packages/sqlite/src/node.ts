@@ -84,6 +84,16 @@ export class SqliteConnection {
         this.#native.executeBatch(sql);
     }
 
+    beginImmediate(): void { this.#native.beginImmediate(); }
+    commit(): void { this.#native.commit(); }
+    rollback(): void { this.#native.rollback(); }
+    savepoint(name: string): void { this.#native.savepoint(name); }
+    releaseSavepoint(name: string): void { this.#native.releaseSavepoint(name); }
+    rollbackToSavepoint(name: string): void { this.#native.rollbackToSavepoint(name); }
+    isAutocommit(): boolean { return this.#native.isAutocommit(); }
+    journalMode(): string { return this.#native.journalMode(); }
+    checkpoint(): void { this.#native.checkpoint(); }
+
     sourceId(): string {
         return this.#native.sourceId();
     }
