@@ -46,6 +46,25 @@ pub trait SqliteProvider {
     /// Rolls back the active transaction.
     fn rollback(&self) -> Result<(), SqliteError>;
 
+    /// Creates a named nested transaction savepoint.
+    fn savepoint(&self, name: &str) -> Result<(), SqliteError>;
+
+    /// Releases a named savepoint.
+    fn release_savepoint(&self, name: &str) -> Result<(), SqliteError>;
+
+    /// Rolls the current transaction back to a named savepoint.
+    fn rollback_to_savepoint(&self, name: &str) -> Result<(), SqliteError>;
+
+    /// Reports whether SQLite currently has no active transaction.
+    fn is_autocommit(&self) -> Result<bool, SqliteError>;
+
+    /// Reports SQLite's observed journal mode for this connection.
+    fn journal_mode(&self) -> Result<crate::JournalMode, SqliteError>;
+
+    /// Checkpoints the current WAL. Providers that cannot checkpoint return a
+    /// structured `Unsupported` error rather than silently doing nothing.
+    fn checkpoint(&self) -> Result<(), SqliteError>;
+
     /// Inspects live catalog metadata through SQL metadata queries.
     fn inspect_catalog(&self) -> Result<CatalogSnapshot, SqliteError>;
 }
