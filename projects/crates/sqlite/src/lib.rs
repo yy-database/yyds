@@ -20,7 +20,7 @@ pub use crate::{
     table::{TableLimits, TableRow, read_table},
 };
 
-pub use sqlite_provider::{CONTRACT_VERSION, SqliteProvider, SqliteValue};
+pub use sqlite_provider::{CONTRACT_VERSION, JournalMode, SqliteProvider, SqliteValue};
 
 /// Adapter identifier used in logs and diagnostics.
 pub const BACKEND_ID: &str = "sqlite";
