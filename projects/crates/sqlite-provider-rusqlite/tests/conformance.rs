@@ -74,3 +74,37 @@ fn read_only_open_rejects_mutating_batch() {
     assert!(err.message.contains("read-only") || err.message.contains("readonly"));
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn nested_transaction_and_runtime_journal_contract_are_real() {
+    let provider = RusqliteProvider::open_in_memory().expect("open");
+    assert!(provider.is_autocommit().expect("autocommit"));
+    provider.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)").expect("ddl");
+    provider.begin_immediate().expect("begin");
+    assert!(!provider.is_autocommit().expect("transaction active"));
+    provider.savepoint("user.savepoint").expect("savepoint");
+    provider.execute_one("INSERT INTO t(id, value) VALUES (?1, ?2)", &[SqliteValue::Integer(1), SqliteValue::Text(b"discard".to_vec())]).expect("insert");
+    provider.rollback_to_savepoint("user.savepoint").expect("rollback to savepoint");
+    provider.release_savepoint("user.savepoint").expect("release");
+    provider.commit().expect("commit");
+    assert!(provider.is_autocommit().expect("autocommit"));
+    let rows = provider.execute_one("SELECT count(*) FROM t", &[]).expect("count");
+    assert_eq!(rows.rows[0][0], SqliteValue::Integer(0));
+    assert!(matches!(provider.journal_mode().expect("journal mode"), sqlite_provider::JournalMode::Delete | sqlite_provider::JournalMode::Wal | sqlite_provider::JournalMode::Other));
+    provider.checkpoint().expect("checkpoint");
+}
+
+#[test]
+fn read_only_allows_cte_reads_and_native_rejects_writes() {
+    let path = std::env::temp_dir().join(format!("sqlite-provider-ro-cte-{}.db", std::process::id()));
+    {
+        let provider = RusqliteProvider::open(&path).expect("create");
+        provider.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY)").expect("ddl");
+    }
+    let provider = RusqliteProvider::open_with_options(&path, OpenOptions { read_only: true }).expect("read only");
+    let result = provider.execute_one("WITH rows AS (SELECT id FROM t) SELECT id FROM rows", &[]).expect("cte read");
+    assert!(result.rows.is_empty());
+    let error = provider.execute_one("WITH input(id) AS (SELECT 1) INSERT INTO t SELECT id FROM input", &[]).expect_err("native readonly rejection");
+    assert!(matches!(error.code, sqlite_provider::SqliteErrorCode::SqliteNative));
+    let _ = std::fs::remove_file(path);
+}

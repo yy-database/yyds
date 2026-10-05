@@ -117,6 +117,30 @@ impl SqliteProvider for SqliteEngine {
         self.provider.rollback()
     }
 
+    fn savepoint(&self, name: &str) -> Result<(), SqliteError> {
+        self.provider.savepoint(name)
+    }
+
+    fn release_savepoint(&self, name: &str) -> Result<(), SqliteError> {
+        self.provider.release_savepoint(name)
+    }
+
+    fn rollback_to_savepoint(&self, name: &str) -> Result<(), SqliteError> {
+        self.provider.rollback_to_savepoint(name)
+    }
+
+    fn is_autocommit(&self) -> Result<bool, SqliteError> {
+        self.provider.is_autocommit()
+    }
+
+    fn journal_mode(&self) -> Result<sqlite_provider::JournalMode, SqliteError> {
+        self.provider.journal_mode()
+    }
+
+    fn checkpoint(&self) -> Result<(), SqliteError> {
+        self.provider.checkpoint()
+    }
+
     fn inspect_catalog(&self) -> Result<sqlite_provider::CatalogSnapshot, SqliteError> {
         self.provider.inspect_catalog()
     }

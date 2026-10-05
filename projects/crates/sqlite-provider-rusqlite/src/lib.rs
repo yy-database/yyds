@@ -84,10 +84,6 @@ impl SqliteProvider for RusqliteProvider {
     }
 
     fn execute_one(&self, sql: &str, params: &[SqliteValue]) -> Result<StatementResult, SqliteError> {
-        if self.capabilities.read_only && !sql.trim_start().to_ascii_uppercase().starts_with("SELECT") {
-            return Err(SqliteError::unsupported("read-only SQLite provider rejected a mutating statement"));
-        }
-
         let connection = self.connection.borrow();
         let mut statement = connection.prepare(sql).map_err(|error| map_sqlite_stmt(error, sql))?;
         let columns = statement.column_names().iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
@@ -116,16 +112,10 @@ impl SqliteProvider for RusqliteProvider {
     }
 
     fn execute_batch(&self, sql: &str) -> Result<(), SqliteError> {
-        if self.capabilities.read_only {
-            return Err(SqliteError::unsupported("read-only SQLite provider rejected execute_batch"));
-        }
         self.connection.borrow().execute_batch(sql).map_err(|error| map_sqlite_stmt(error, sql))
     }
 
     fn begin_immediate(&self) -> Result<(), SqliteError> {
-        if self.capabilities.read_only {
-            return Err(SqliteError::unsupported("read-only SQLite provider rejected begin_immediate"));
-        }
         self.connection.borrow().execute_batch("BEGIN IMMEDIATE").map_err(map_sqlite)
     }
 
@@ -135,6 +125,38 @@ impl SqliteProvider for RusqliteProvider {
 
     fn rollback(&self) -> Result<(), SqliteError> {
         self.connection.borrow().execute_batch("ROLLBACK").map_err(map_sqlite)
+    }
+
+    fn savepoint(&self, name: &str) -> Result<(), SqliteError> {
+        let quoted = quote_savepoint(name)?;
+        self.connection.borrow().execute_batch(&format!("SAVEPOINT {quoted}")).map_err(map_sqlite)
+    }
+
+    fn release_savepoint(&self, name: &str) -> Result<(), SqliteError> {
+        let quoted = quote_savepoint(name)?;
+        self.connection.borrow().execute_batch(&format!("RELEASE SAVEPOINT {quoted}")).map_err(map_sqlite)
+    }
+
+    fn rollback_to_savepoint(&self, name: &str) -> Result<(), SqliteError> {
+        let quoted = quote_savepoint(name)?;
+        self.connection.borrow().execute_batch(&format!("ROLLBACK TO SAVEPOINT {quoted}")).map_err(map_sqlite)
+    }
+
+    fn is_autocommit(&self) -> Result<bool, SqliteError> {
+        Ok(self.connection.borrow().is_autocommit())
+    }
+
+    fn journal_mode(&self) -> Result<sqlite_provider::JournalMode, SqliteError> {
+        let mode: String = self.connection.borrow().query_row("PRAGMA journal_mode", [], |row| row.get(0)).map_err(map_sqlite)?;
+        Ok(match mode.to_ascii_lowercase().as_str() {
+            "delete" => sqlite_provider::JournalMode::Delete,
+            "wal" => sqlite_provider::JournalMode::Wal,
+            _ => sqlite_provider::JournalMode::Other,
+        })
+    }
+
+    fn checkpoint(&self) -> Result<(), SqliteError> {
+        self.connection.borrow().execute_batch("PRAGMA wal_checkpoint(PASSIVE)").map_err(map_sqlite)
     }
 
     fn inspect_catalog(&self) -> Result<CatalogSnapshot, SqliteError> {
@@ -168,6 +190,13 @@ impl SqliteProvider for RusqliteProvider {
         }
         Ok(CatalogSnapshot { tables })
     }
+}
+
+fn quote_savepoint(name: &str) -> Result<String, SqliteError> {
+    if name.is_empty() || name.as_bytes().iter().any(|byte| *byte == 0) {
+        return Err(SqliteError::policy("savepoint name must be non-empty and contain no NUL bytes"));
+    }
+    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
 }
 
 struct BindValue(SqliteValue);
