@@ -1,3 +1,4 @@
+use fs_tools::temp::create_folder;
 use std::{
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -11,7 +12,7 @@ use yyds_sqlite::{
 #[ignore = "requires YYDS_SQLITE_REFERENCE_PYTHON pointing to Python with sqlite3"]
 fn reference_sqlite_files_and_blank_database_interoperate() {
     let python = std::env::var_os("YYDS_SQLITE_REFERENCE_PYTHON").expect("reference Python executable");
-    let dir = tempfile::tempdir().unwrap();
+    let dir = create_folder().unwrap();
     let blank = dir.path().join("blank.sqlite");
     drop(SqliteDatabase::open(&blank).unwrap());
     let script = r#"
