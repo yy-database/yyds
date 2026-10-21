@@ -16,4 +16,4 @@ vos = { workspace = true }
 yyds-types = { workspace = true }
 
 [dev-dependencies]
-fs-tools.workspace = true
+boost-fs.workspace = true
