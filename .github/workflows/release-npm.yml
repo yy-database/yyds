@@ -31,18 +31,22 @@ jobs:
             target: x86_64-pc-windows-msvc
             pkg: yyds-win32-x64
             node_file: index.win32-x64-msvc.node
+            lib: yyds_napi.dll
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             pkg: yyds-linux-x64
             node_file: index.linux-x64-gnu.node
+            lib: libyyds_napi.so
           - os: macos-13
             target: x86_64-apple-darwin
             pkg: yyds-darwin-x64
             node_file: index.darwin-x64.node
+            lib: libyyds_napi.dylib
           - os: macos-latest
             target: aarch64-apple-darwin
             pkg: yyds-darwin-arm64
             node_file: index.darwin-arm64.node
+            lib: libyyds_napi.dylib
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -57,7 +61,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SRC="target/${{ matrix.target }}/release/${{ matrix.node_file }}"
+          SRC="target/${{ matrix.target }}/release/${{ matrix.lib }}"
           DEST="projects/packages/${{ matrix.pkg }}/lib/${{ matrix.node_file }}"
           mkdir -p "$(dirname "$DEST")"
           cp "$SRC" "$DEST"
