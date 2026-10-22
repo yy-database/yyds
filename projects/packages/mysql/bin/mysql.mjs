@@ -301,6 +301,6 @@ async function main(args) {
 }
 
 main(process.argv.slice(2)).catch((error) => {
-    console.error(`@yyds/mysql: ${error.message}`);
+    console.error(`@yydb/mysql: ${error.message}`);
     process.exitCode = 1;
 });

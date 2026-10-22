@@ -95,12 +95,12 @@ function eof() {
     return Buffer.from([254, 0, 0, 2, 0]);
 }
 
-test("@yyds/mysql re-exports @yyds/yyds", async () => {
+test("@yydb/mysql re-exports @yydb/yyds", async () => {
     const mysql = await import("../src/index.ts");
     assert.equal(typeof mysql.initWasm, "function");
 });
 
-test("@yyds/mysql node entry re-exports native loader", async () => {
+test("@yydb/mysql node entry re-exports native loader", async () => {
     const node = await import("../src/node.ts");
     assert.equal(typeof node.loadYydsNative, "function");
 });

@@ -2,7 +2,7 @@ name: Release
 
 # Independent of CI (check/test). Trigger only by pushing a semver tag:
 #   git tag v0.0.2 && git push origin v0.0.2
-# Publishes @yyds/* via npm OIDC (platform .node packages included).
+# Publishes @yydb/* via npm OIDC (platform .node packages included).
 # Already-published npm versions are skipped (retry-safe).
 # Trusted Publisher workflow filename must stay: release-npm.yml
 # Release setup: AGENTS.md

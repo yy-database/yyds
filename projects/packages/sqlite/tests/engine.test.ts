@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { isYydsNativeInstalled } from "@yyds/yyds/node";
+import { isYydsNativeInstalled } from "@yydb/yyds/node";
 import { SqliteConnection } from "../src/node.ts";
 
 test("native SQLite engine preserves storage classes and signed 64-bit values", {

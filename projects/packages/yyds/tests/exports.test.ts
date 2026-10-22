@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { yydsStartArguments } from "../src/node/cluster.ts";
 
-test("@yyds/yyds node entry exposes native loader helpers", async () => {
+test("@yydb/yyds node entry exposes native loader helpers", async () => {
     const node = await import("../src/node/index.ts");
     assert.equal(typeof node.loadYydsNative, "function");
     assert.equal(typeof node.isYydsNativeInstalled, "function");

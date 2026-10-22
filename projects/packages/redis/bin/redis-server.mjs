@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { launchYydsServer } from "@yyds/yyds/node/cluster";
+import { launchYydsServer } from "@yydb/yyds/node/cluster";
 
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--help") {
@@ -11,7 +11,7 @@ if (args.length === 1 && args[0] === "--help") {
             process.exitCode = code;
         })
         .catch((error) => {
-            console.error("@yyds/redis: " + error.message);
+            console.error("@yydb/redis: " + error.message);
             process.exitCode = 127;
         });
 }

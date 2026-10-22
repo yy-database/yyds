@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { isYydsNativeInstalled } from "@yyds/yyds/node";
+import { isYydsNativeInstalled } from "@yydb/yyds/node";
 
 const cli = fileURLToPath(new URL("../bin/sqlite3.mjs", import.meta.url));
 

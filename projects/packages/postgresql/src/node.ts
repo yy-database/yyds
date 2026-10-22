@@ -1,1 +1,1 @@
-export * from "@yyds/yyds/node";
+export * from "@yydb/yyds/node";
