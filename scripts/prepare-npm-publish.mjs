@@ -117,15 +117,6 @@ for (const [pkg, binding] of platforms) {
     preparePackageJson(path.join(root, "projects", "packages", pkg));
 }
 
-const wasmSrc = path.join(root, "_engines", "engine-wasm");
-if (!fs.existsSync(wasmSrc)) {
-    throw new Error("missing _engines/engine-wasm");
-}
-const wasmLib = path.join(root, "projects", "packages", "yyds-unknown-wasm32", "lib");
-fs.rmSync(wasmLib, { recursive: true, force: true });
-copyDirContents(wasmSrc, wasmLib);
-preparePackageJson(path.join(root, "projects", "packages", "yyds-unknown-wasm32"));
-
 for (const dir of ["yyds", "redis", "mysql", "postgresql", "sqlite"]) {
     preparePackageJson(path.join(root, "projects", "packages", dir));
 }
