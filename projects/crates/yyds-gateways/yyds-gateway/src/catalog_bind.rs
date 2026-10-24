@@ -269,6 +269,8 @@ pub enum SqlCatalogBoundExpression {
     Column(SqlCatalogBoundColumn),
     /// A SQL literal retaining gateway semantics.
     Literal(SqlBoundLiteral),
+    /// A bare `*` argument; only `COUNT(*)` gives it meaning.
+    Wildcard,
     /// A SQL function call (currently only aggregate functions).
     Function {
         /// Canonical lower-case function name.
@@ -591,6 +593,7 @@ fn bind_expression(
             Ok(SqlCatalogBoundExpression::Column(field))
         }
         SqlBoundExpression::Literal(literal) => Ok(SqlCatalogBoundExpression::Literal(literal)),
+        SqlBoundExpression::Wildcard => Ok(SqlCatalogBoundExpression::Wildcard),
         SqlBoundExpression::Binary { left, operator, right } => Ok(SqlCatalogBoundExpression::Binary {
             left: Box::new(bind_expression(*left, sources, catalog, variables)?),
             operator,
@@ -696,7 +699,7 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
             collect_column_ids(right, out);
         }
         SqlCatalogBoundExpression::Unary { expression, .. } => collect_column_ids(expression, out),
-        SqlCatalogBoundExpression::Literal(_) => {}
+        SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
     }
 }
 
