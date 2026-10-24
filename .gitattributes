@@ -1,0 +1,10 @@
+# Keep formatted sources byte-stable across Windows checkouts (core.autocrlf).
+# `biome.json` uses `lineEnding: "lf"`, so a CRLF worktree would fail `fmt:check`.
+*.ts text eol=lf
+*.mts text eol=lf
+*.cts text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.jsonc text eol=lf
