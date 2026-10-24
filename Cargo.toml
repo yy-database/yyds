@@ -26,7 +26,7 @@ yyds-control = { path = "projects/crates/yyds-control" }
 yyds-execution = { path = "projects/crates/yyds-execution" }
 yyds-gateway = { path = "projects/crates/yyds-gateways/yyds-gateway" }
 serde_json = "1"
-oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "49eaa0bc07f0562c06d2a19fbf5fdd235184a3bb", package = "oak-sql" }
+oak-sql = { git = "https://github.com/yggdrasil-language/oaks.git", rev = "e0320ee4c30482e8aaa166c02aa8837875c067de", package = "oak-sql" }
 # Overlaid by local path `.cargo/config.toml` (git ignored).
 boost-fs = { git = "https://github.com/oovm/rust-boost", branch = "dev" }
 windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Storage_FileSystem"] }
@@ -37,8 +37,3 @@ napi-build = "2"
 [profile.release]
 lto = true
 panic = "abort"
-
-# Vendored oak-sql with SQL keyword fixes (LIKE/BETWEEN/IN/IS) and Pratt precedence adjustments.
-# Upstream rev 49eaa0bc missing these keyword tokens in the lexer table, blocking basic SQL WHERE syntax.
-[patch."https://github.com/yggdrasil-language/oaks.git"]
-oak-sql = { path = "vendor/oak-sql" }
