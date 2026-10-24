@@ -14,15 +14,22 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, parse_session_command, plan_statement, substitute_sql_parameters, SqlCatalog,
-    SqlErrorKind, SqlExecutionPlan, SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    bind_sql_catalog, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command, plan_statement,
+    substitute_sql_parameters, SqlCatalog, SqlCatalogBoundStatement, SqlColumn, SqlErrorKind, SqlExecutionPlan, SqlFieldType,
+    SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
-/// PostgreSQL 类型 OID：`int8`、`float8`、`bool`、`text`。
-const OID_TEXT: u32 = 25;
+/// PostgreSQL type OIDs supported by the gateway.
 const OID_BOOL: u32 = 16;
+const OID_BYTEA: u32 = 17;
+const OID_NAME: u32 = 19;
 const OID_INT8: u32 = 20;
+const OID_INT2: u32 = 21;
+const OID_INT4: u32 = 23;
+const OID_TEXT: u32 = 25;
+const OID_FLOAT4: u32 = 700;
 const OID_FLOAT8: u32 = 701;
+const OID_VARCHAR: u32 = 1043;
 
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
@@ -150,7 +157,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
                 }
                 let step = match tag {
                     b'P' => handle_parse(&mut stream, &message.payload, &mut extended),
-                    b'B' => handle_bind(&mut stream, &message.payload, &mut extended),
+                    b'B' => handle_bind(&mut stream, &message.payload, &mut extended, runtime.as_ref()),
                     b'D' => handle_describe(&mut stream, &message.payload, &mut extended, &mut session, runtime.as_ref()),
                     b'E' => handle_execute(&mut stream, &message.payload, &mut extended, &mut session, runtime.as_ref()),
                     b'C' => handle_close(&mut stream, &message.payload, &mut extended),
@@ -340,8 +347,13 @@ fn handle_simple_query(
             }
             match pg_parameter(&name) {
                 Some(value) => {
-                    write_row_description(stream, &[name.clone()], &[OID_TEXT])?;
-                    write_data_row(stream, &[SqlValue::String(value.to_string())])?;
+                    write_row_description(stream, &[SqlColumn { name: name.clone(), field_type: SqlFieldType::String }], &[0])?;
+                    write_data_row(
+                        stream,
+                        &[SqlValue::String(value.to_string())],
+                        &[SqlColumn { name: name.clone(), field_type: SqlFieldType::String }],
+                        &[0],
+                    )?;
                     write_command_complete(stream, "SHOW")
                 }
                 None => {
@@ -393,7 +405,7 @@ fn execute_simple_query(
 /// 执行结果的统一形状，供 SimpleQuery 与扩展查询共用。
 struct ExecutionOutcome {
     is_read: bool,
-    columns: Vec<String>,
+    description: Vec<SqlColumn>,
     rows: Vec<Vec<SqlValue>>,
     command_tag: String,
 }
@@ -422,6 +434,9 @@ fn run_statement(
         &plan,
         SqlExecutionPlan::Read(_) | SqlExecutionPlan::Scan(_) | SqlExecutionPlan::Join(_) | SqlExecutionPlan::Scalar(_)
     );
+    // Derive the result shape from the catalog plan so an empty result set
+    // reports the declared type instead of falling back to `text`.
+    let description = describe_plan(&plan);
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
     let result = execute_plan(runtime.executor.as_ref(), handle_ref, &plan).map_err(|error| {
         session.fail();
@@ -441,7 +456,8 @@ fn run_statement(
             }
         }
     };
-    Ok(ExecutionOutcome { is_read, columns: result.columns, rows: result.rows, command_tag })
+    debug_assert_eq!(description.len(), result.columns.len(), "described columns must match executed columns");
+    Ok(ExecutionOutcome { is_read, description, rows: result.rows, command_tag })
 }
 
 /// Maps a structured gateway failure to its PostgreSQL SQLSTATE. Protocol code
@@ -472,9 +488,10 @@ fn statement_error(stage: &str, error: SqlFrontendError) -> (String, String) {
 
 fn write_execution_outcome(stream: &mut impl Write, outcome: &ExecutionOutcome) -> io::Result<()> {
     if outcome.is_read {
-        write_row_description(stream, &outcome.columns, &column_oids(&outcome.rows, outcome.columns.len()))?;
+        let formats = vec![0_i16; outcome.description.len()];
+        write_row_description(stream, &outcome.description, &formats)?;
         for row in &outcome.rows {
-            write_data_row(stream, row)?;
+            write_data_row(stream, row, &outcome.description, &formats)?;
         }
     }
     write_command_complete(stream, &outcome.command_tag)
@@ -496,11 +513,18 @@ struct ExtendedSession {
 struct PreparedStatement {
     sql: String,
     parameter_oids: Vec<u32>,
+    /// Catalog-derived result shape, computed once on the first `Describe(S)`
+    /// or `Bind`. Writes describe to an empty shape.
+    description: Option<Vec<SqlColumn>>,
 }
 
 struct Portal {
     sql: String,
     parameters: Vec<SqlValue>,
+    description: Vec<SqlColumn>,
+    /// Requested result formats: empty means all text, one entry applies to all
+    /// columns, otherwise one entry per described column.
+    result_formats: Vec<i16>,
     outcome: Option<Result<ExecutionOutcome, (String, String)>>,
     sent_rows: usize,
 }
@@ -524,18 +548,26 @@ fn handle_parse(stream: &mut impl Write, payload: &[u8], extended: &mut Extended
         };
         parameter_oids.push(oid);
     }
-    extended.statements.insert(name.to_string(), PreparedStatement { sql: sql.to_string(), parameter_oids });
+    extended.statements.insert(
+        name.to_string(),
+        PreparedStatement { sql: sql.to_string(), parameter_oids, description: None },
+    );
     write_message(stream, b'1', &[])?;
     Ok(ExtendedStep::Continue)
 }
 
-fn handle_bind(stream: &mut impl Write, payload: &[u8], extended: &mut ExtendedSession) -> io::Result<ExtendedStep> {
+fn handle_bind(
+    stream: &mut impl Write,
+    payload: &[u8],
+    extended: &mut ExtendedSession,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
+) -> io::Result<ExtendedStep> {
     let mut cursor = 0;
     let (Some(portal_name), Some(statement_name)) = (take_cstring(payload, &mut cursor), take_cstring(payload, &mut cursor))
     else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
     };
-    let Some(statement) = extended.statements.get(statement_name) else {
+    let Some(statement) = extended.statements.get_mut(statement_name) else {
         return extended_protocol_error(
             stream,
             "26000",
@@ -548,18 +580,23 @@ fn handle_bind(stream: &mut impl Write, payload: &[u8], extended: &mut ExtendedS
     let Some(format_count) = take_i16(payload, &mut cursor) else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
     };
+    let mut parameter_formats = Vec::with_capacity(format_count.max(0) as usize);
     for _ in 0..format_count.max(0) {
         let Some(format) = take_i16(payload, &mut cursor) else {
             return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind format codes");
         };
-        if format != 0 {
-            return extended_protocol_error(stream, "0A000", "binary parameter format is not supported");
+        if format != 0 && format != 1 {
+            return extended_protocol_error(stream, "08P01", &format!("unsupported PostgreSQL format code {format}"));
         }
+        parameter_formats.push(format);
     }
 
     let Some(parameter_count) = take_i16(payload, &mut cursor) else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
     };
+    if parameter_formats.len() > 1 && parameter_formats.len() != parameter_count.max(0) as usize {
+        return extended_protocol_error(stream, "08P01", "PostgreSQL parameter format count does not match parameters");
+    }
     let mut parameters = Vec::with_capacity(parameter_count.max(0) as usize);
     for index in 0..parameter_count.max(0) {
         let Some(length) = take_i32(payload, &mut cursor) else {
@@ -573,7 +610,13 @@ fn handle_bind(stream: &mut impl Write, payload: &[u8], extended: &mut ExtendedS
             return extended_protocol_error(stream, "08P01", "truncated PostgreSQL Bind parameter");
         };
         let oid = parameter_oids.get(index as usize).copied().unwrap_or(0);
-        match parameter_value(oid, bytes) {
+        let format = match parameter_formats.len() {
+            0 => 0,
+            1 => parameter_formats[0],
+            _ => parameter_formats[index as usize],
+        };
+        let decoded = if format == 1 { binary_parameter_value(oid, bytes) } else { parameter_value(oid, bytes) };
+        match decoded {
             Ok(value) => parameters.push(value),
             Err((code, message)) => return extended_protocol_error(stream, &code, &message),
         }
@@ -582,18 +625,31 @@ fn handle_bind(stream: &mut impl Write, payload: &[u8], extended: &mut ExtendedS
     let Some(result_format_count) = take_i16(payload, &mut cursor) else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind result formats");
     };
+    let mut result_formats = Vec::with_capacity(result_format_count.max(0) as usize);
     for _ in 0..result_format_count.max(0) {
         let Some(format) = take_i16(payload, &mut cursor) else {
             return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind result formats");
         };
-        if format != 0 {
-            return extended_protocol_error(stream, "0A000", "binary result format is not supported");
+        if format != 0 && format != 1 {
+            return extended_protocol_error(stream, "08P01", &format!("unsupported PostgreSQL format code {format}"));
         }
+        result_formats.push(format);
+    }
+
+    if statement.description.is_none() {
+        match statement_description(&sql, runtime) {
+            Ok(description) => statement.description = Some(description),
+            Err((code, message)) => return extended_protocol_error(stream, &code, &message),
+        }
+    }
+    let description = statement.description.clone().unwrap_or_default();
+    if result_formats.len() > 1 && result_formats.len() != description.len() {
+        return extended_protocol_error(stream, "08P01", "PostgreSQL result format count does not match columns");
     }
 
     extended.portals.insert(
         portal_name.to_string(),
-        Portal { sql, parameters, outcome: None, sent_rows: 0 },
+        Portal { sql, parameters, description, result_formats, outcome: None, sent_rows: 0 },
     );
     write_message(stream, b'2', &[])?;
     Ok(ExtendedStep::Continue)
@@ -615,40 +671,94 @@ fn handle_describe(
     };
     match kind {
         b'S' => {
-            let Some(statement) = extended.statements.get(name) else {
+            let Some(statement) = extended.statements.get_mut(name) else {
                 return extended_protocol_error(
                     stream,
                     "26000",
                     &format!("prepared statement \"{name}\" does not exist"),
                 );
             };
-            write_parameter_description(stream, &statement.parameter_oids)?;
-            write_message(stream, b'n', &[])?;
+            let parameters = statement_parameter_description(&statement.sql, &statement.parameter_oids);
+            if statement.description.is_none() {
+                match statement_description(&statement.sql, runtime) {
+                    Ok(description) => statement.description = Some(description),
+                    Err((code, message)) => {
+                        write_error_response(stream, &code, &message)?;
+                        return Ok(ExtendedStep::Failed);
+                    }
+                }
+            }
+            write_parameter_description(stream, &parameters)?;
+            match statement.description.as_deref() {
+                Some([]) | None => write_message(stream, b'n', &[])?,
+                Some(description) => {
+                    let formats = vec![0_i16; description.len()];
+                    write_row_description(stream, description, &formats)?;
+                }
+            }
             Ok(ExtendedStep::Continue)
         }
         b'P' => {
-            let Some(portal) = extended.portals.get_mut(name) else {
+            // Describe(portal) reports shape only. Execution belongs to Execute.
+            let Some(portal) = extended.portals.get(name) else {
                 return extended_protocol_error(stream, "34000", &format!("portal \"{name}\" does not exist"));
             };
-            prepare_portal(portal, session, runtime);
-            match portal.outcome.as_ref() {
-                Some(Ok(outcome)) if outcome.is_read => {
-                    write_row_description(stream, &outcome.columns, &column_oids(&outcome.rows, outcome.columns.len()))?;
-                    Ok(ExtendedStep::Continue)
-                }
-                Some(Ok(_)) => {
-                    write_message(stream, b'n', &[])?;
-                    Ok(ExtendedStep::Continue)
-                }
-                Some(Err((code, message))) => {
-                    write_error_response(stream, code, message)?;
-                    Ok(ExtendedStep::Failed)
-                }
-                None => unreachable!("prepare_portal always stores an outcome"),
+            if session.failed {
+                write_error_response(
+                    stream,
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block",
+                )?;
+                return Ok(ExtendedStep::Failed);
             }
+            if portal.description.is_empty() {
+                write_message(stream, b'n', &[])?;
+            }
+            else {
+                let formats = resolve_formats(&portal.result_formats, portal.description.len());
+                write_row_description(stream, &portal.description, &formats)?;
+            }
+            Ok(ExtendedStep::Continue)
         }
         _ => extended_protocol_error(stream, "08P01", "unsupported PostgreSQL Describe target"),
     }
+}
+
+/// Number of placeholders the SQL surface references, padding declared
+/// parameter OIDs with zero (`unspecified`) when the client sent fewer.
+fn statement_parameter_description(sql: &str, declared: &[u32]) -> Vec<u32> {
+    let referenced = neutralized_sql_parameters(sql, SqlParameterStyle::DollarNumber).map(|(_, count)| count).unwrap_or(0);
+    let mut parameters = declared.to_vec();
+    parameters.resize(parameters.len().max(referenced), 0);
+    parameters
+}
+
+/// Resolves Bind result formats into one entry per described column.
+fn resolve_formats(formats: &[i16], columns: usize) -> Vec<i16> {
+    match formats.len() {
+        0 => vec![0; columns],
+        1 => vec![formats[0]; columns],
+        _ => formats.to_vec(),
+    }
+}
+
+/// Derives the statement result shape from the catalog without executing.
+fn statement_description(
+    sql: &str,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
+) -> Result<Vec<SqlColumn>, (String, String)> {
+    let Some(runtime) = runtime else {
+        return Err(("0A000".to_string(), "PostgreSQL query execution is not implemented (no SQL runtime)".to_string()));
+    };
+    let (neutral_sql, _) = neutralized_sql_parameters(sql, SqlParameterStyle::DollarNumber)
+        .map_err(|error| statement_error("parameter", error))?;
+    let bound = bind_sql_catalog(&neutral_sql, &runtime.catalog, runtime.schema_version)
+        .map_err(|error| statement_error("bind", error))?;
+    if !matches!(bound, SqlCatalogBoundStatement::Select(_)) {
+        return Ok(Vec::new());
+    }
+    let plan = plan_statement(bound, &runtime.catalog).map_err(|error| statement_error("plan", error))?;
+    Ok(describe_plan(&plan))
 }
 
 fn handle_execute(
@@ -683,10 +793,12 @@ fn handle_execute(
                 else {
                     outcome.rows.len()
                 };
+                let formats = resolve_formats(&portal.result_formats, outcome.description.len());
+                let description = outcome.description.clone();
                 let chunk: Vec<Vec<SqlValue>> = outcome.rows[start..end].to_vec();
                 portal.sent_rows = end;
                 for row in &chunk {
-                    write_data_row(stream, row)?;
+                    write_data_row(stream, row, &description, &formats)?;
                 }
                 if end < outcome.rows.len() {
                     write_message(stream, b's', &[])?;
@@ -781,6 +893,48 @@ fn parameter_value(oid: u32, bytes: &[u8]) -> Result<SqlValue, (String, String)>
     }
 }
 
+/// Decodes a binary-format Bind parameter by its declared OID. An unspecified
+/// OID cannot be decoded without text syntax and is rejected explicitly.
+fn binary_parameter_value(oid: u32, bytes: &[u8]) -> Result<SqlValue, (String, String)> {
+    let width_error = |expected: usize| {
+        ("08P01".to_string(), format!("binary parameter for type OID {oid} expects {expected} bytes, got {}", bytes.len()))
+    };
+    match oid {
+        0 => Err(("42P18".to_string(), "cannot determine data type of a binary parameter".to_string())),
+        OID_BOOL => match bytes {
+            [0] => Ok(SqlValue::Boolean(false)),
+            [1] => Ok(SqlValue::Boolean(true)),
+            _ => Err(width_error(1)),
+        },
+        OID_INT2 => match bytes {
+            [a, b] => Ok(SqlValue::Integer(i16::from_be_bytes([*a, *b]).into())),
+            _ => Err(width_error(2)),
+        },
+        OID_INT4 => match bytes {
+            [a, b, c, d] => Ok(SqlValue::Integer(i32::from_be_bytes([*a, *b, *c, *d]).into())),
+            _ => Err(width_error(4)),
+        },
+        OID_INT8 => match bytes {
+            [a, b, c, d, e, f, g, h] => Ok(SqlValue::Integer(i64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h]))),
+            _ => Err(width_error(8)),
+        },
+        OID_FLOAT4 => match bytes {
+            [a, b, c, d] => Ok(SqlValue::Number(f32::from_be_bytes([*a, *b, *c, *d]).into())),
+            _ => Err(width_error(4)),
+        },
+        OID_FLOAT8 => match bytes {
+            [a, b, c, d, e, f, g, h] => {
+                Ok(SqlValue::Number(f64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h])))
+            }
+            _ => Err(width_error(8)),
+        },
+        OID_TEXT | OID_VARCHAR | OID_NAME | OID_BYTEA => std::str::from_utf8(bytes)
+            .map(|text| SqlValue::String(text.to_string()))
+            .map_err(|_| ("22021".to_string(), "binary parameter is not valid UTF-8".to_string())),
+        _ => Err(("0A000".to_string(), format!("binary input for parameter type OID {oid} is not supported"))),
+    }
+}
+
 /// Parse 未提供 OID 时的宽松推断，保持 `"007"` 这类文本不被数字转义。
 fn infer_parameter_value(text: &str) -> SqlValue {
     if text.parse::<i64>().map(|value| value.to_string() == text).unwrap_or(false) {
@@ -860,40 +1014,35 @@ fn pg_parameter(name: &str) -> Option<&'static str> {
     PG_PARAMETERS.iter().find(|(key, _)| *key == needle).map(|(_, value)| *value)
 }
 
-/// 按首批非空值推断列类型 OID：`integer → int8`、`number → float8`、
-/// `boolean → bool`，其余一律 `text`。空结果集没有可推断依据，按 `text` 报告。
-fn column_oids(rows: &[Vec<SqlValue>], columns: usize) -> Vec<u32> {
-    (0..columns)
-        .map(|index| {
-            rows.iter()
-                .find_map(|row| match row.get(index) {
-                    Some(SqlValue::Integer(_)) => Some(OID_INT8),
-                    Some(SqlValue::Number(_)) => Some(OID_FLOAT8),
-                    Some(SqlValue::Boolean(_)) => Some(OID_BOOL),
-                    Some(SqlValue::String(_)) => Some(OID_TEXT),
-                    Some(SqlValue::Null) | None => None,
-                })
-                .unwrap_or(OID_TEXT)
-        })
-        .collect()
+/// PostgreSQL type OID for a described gateway field type.
+fn pg_oid(field_type: &SqlFieldType) -> u32 {
+    match field_type.inner() {
+        SqlFieldType::Int32 => OID_INT4,
+        SqlFieldType::Int64 => OID_INT8,
+        SqlFieldType::Float64 => OID_FLOAT8,
+        SqlFieldType::Bool => OID_BOOL,
+        SqlFieldType::Bytes => OID_BYTEA,
+        SqlFieldType::String | SqlFieldType::Unknown | SqlFieldType::Optional(_) => OID_TEXT,
+    }
 }
 
-/// PostgreSQL RowDescription message ('T') — 列名 + 推断 OID，所有列 text 格式。
-fn write_row_description(stream: &mut impl Write, columns: &[String], oids: &[u32]) -> io::Result<()> {
+/// PostgreSQL RowDescription message ('T') — catalog-derived OIDs and the
+/// format codes requested at Bind.
+fn write_row_description(stream: &mut impl Write, columns: &[SqlColumn], formats: &[i16]) -> io::Result<()> {
     let mut payload = Vec::with_capacity(64);
     payload.push(b'T');
     let mut body = Vec::with_capacity(48);
     body.extend_from_slice(&(columns.len() as i16).to_be_bytes());
-    for (index, col) in columns.iter().enumerate() {
-        let oid = oids.get(index).copied().unwrap_or(OID_TEXT);
-        body.extend_from_slice(col.as_bytes());
+    for (index, column) in columns.iter().enumerate() {
+        let oid = pg_oid(&column.field_type);
+        body.extend_from_slice(column.name.as_bytes());
         body.push(0);
         body.extend_from_slice(&0_i32.to_be_bytes()); // table_oid = 0
         body.extend_from_slice(&0_i16.to_be_bytes()); // column_attr = 0
         body.extend_from_slice(&oid.to_be_bytes());
         body.extend_from_slice(&type_size(oid).to_be_bytes());
         body.extend_from_slice(&(-1_i32).to_be_bytes()); // type_mod = -1
-        body.extend_from_slice(&0_i16.to_be_bytes()); // format_code = text
+        body.extend_from_slice(&formats.get(index).copied().unwrap_or(0).to_be_bytes());
     }
     payload.extend_from_slice(&(body.len() as i32 + 4).to_be_bytes());
     payload.extend_from_slice(&body);
@@ -903,31 +1052,112 @@ fn write_row_description(stream: &mut impl Write, columns: &[String], oids: &[u3
 fn type_size(oid: u32) -> i16 {
     match oid {
         OID_BOOL => 1,
+        OID_INT2 => 2,
+        OID_INT4 | OID_FLOAT4 => 4,
         OID_INT8 | OID_FLOAT8 => 8,
         _ => -1,
     }
 }
 
-/// PostgreSQL DataRow message ('D') — text encoding for each column value。
-fn write_data_row(stream: &mut impl Write, row: &[SqlValue]) -> io::Result<()> {
+/// PostgreSQL DataRow message ('D') — text or binary encoding per column.
+fn write_data_row(
+    stream: &mut impl Write,
+    row: &[SqlValue],
+    columns: &[SqlColumn],
+    formats: &[i16],
+) -> io::Result<()> {
     let mut payload = Vec::with_capacity(64);
     payload.push(b'D');
     let mut body = Vec::with_capacity(48);
     body.extend_from_slice(&(row.len() as i16).to_be_bytes());
-    for value in row {
-        match value {
-            SqlValue::Null => body.extend_from_slice(&(-1_i32).to_be_bytes()),
-            other => {
-                let text = sql_value_to_pg_text(other);
-                let bytes = text.as_bytes();
-                body.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
-                body.extend_from_slice(bytes);
+    for (index, value) in row.iter().enumerate() {
+        if matches!(value, SqlValue::Null) {
+            body.extend_from_slice(&(-1_i32).to_be_bytes());
+            continue;
+        }
+        let oid = columns.get(index).map(|column| pg_oid(&column.field_type)).unwrap_or(OID_TEXT);
+        let bytes = if formats.get(index).copied().unwrap_or(0) == 1 {
+            match pg_binary_value(oid, value) {
+                Ok(bytes) => bytes,
+                Err((code, message)) => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{code}: {message}")));
+                }
             }
         }
+        else {
+            sql_value_to_pg_text(value).into_bytes()
+        };
+        body.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+        body.extend_from_slice(&bytes);
     }
     payload.extend_from_slice(&(body.len() as i32 + 4).to_be_bytes());
     payload.extend_from_slice(&body);
     stream.write_all(&payload)
+}
+
+/// Encodes a value in the big-endian binary representation of its column OID.
+fn pg_binary_value(oid: u32, value: &SqlValue) -> Result<Vec<u8>, (String, String)> {
+    match oid {
+        OID_BOOL => Ok(vec![u8::from(truthy_value(value)?)]),
+        OID_INT2 => {
+            let value = integer_value(value)?;
+            let narrow = i16::try_from(value)
+                .map_err(|_| ("22003".to_string(), format!("smallint out of range: {value}")))?;
+            Ok(narrow.to_be_bytes().to_vec())
+        }
+        OID_INT4 => {
+            let value = integer_value(value)?;
+            let narrow = i32::try_from(value)
+                .map_err(|_| ("22003".to_string(), format!("integer out of range: {value}")))?;
+            Ok(narrow.to_be_bytes().to_vec())
+        }
+        OID_INT8 => Ok(integer_value(value)?.to_be_bytes().to_vec()),
+        OID_FLOAT4 => Ok((float_value(value)? as f32).to_be_bytes().to_vec()),
+        OID_FLOAT8 => Ok(float_value(value)?.to_be_bytes().to_vec()),
+        OID_TEXT | OID_VARCHAR | OID_NAME => Ok(sql_value_to_pg_text(value).into_bytes()),
+        OID_BYTEA => match value {
+            SqlValue::String(text) => Ok(text.as_bytes().to_vec()),
+            other => Ok(sql_value_to_pg_text(other).into_bytes()),
+        },
+        _ => Err(("0A000".to_string(), format!("binary output for type OID {oid} is not supported"))),
+    }
+}
+
+fn integer_value(value: &SqlValue) -> Result<i64, (String, String)> {
+    match value {
+        SqlValue::Integer(value) => Ok(*value),
+        SqlValue::Boolean(value) => Ok(i64::from(*value)),
+        SqlValue::Number(value) if value.fract() == 0.0 => Ok(*value as i64),
+        SqlValue::String(text) => text
+            .parse::<i64>()
+            .map_err(|_| ("22P02".to_string(), format!("invalid input syntax for integer: \"{text}\""))),
+        other => Err(("22P02".to_string(), format!("value {other:?} is not a binary integer"))),
+    }
+}
+
+fn float_value(value: &SqlValue) -> Result<f64, (String, String)> {
+    match value {
+        SqlValue::Integer(value) => Ok(*value as f64),
+        SqlValue::Number(value) => Ok(*value),
+        SqlValue::Boolean(value) => Ok(if *value { 1.0 } else { 0.0 }),
+        SqlValue::String(text) => text
+            .parse::<f64>()
+            .map_err(|_| ("22P02".to_string(), format!("invalid input syntax for double precision: \"{text}\""))),
+        other => Err(("22P02".to_string(), format!("value {other:?} is not a binary float"))),
+    }
+}
+
+fn truthy_value(value: &SqlValue) -> Result<bool, (String, String)> {
+    match value {
+        SqlValue::Boolean(value) => Ok(*value),
+        SqlValue::Integer(value) => Ok(*value != 0),
+        SqlValue::String(text) => match text.as_str() {
+            "t" | "true" | "1" => Ok(true),
+            "f" | "false" | "0" => Ok(false),
+            _ => Err(("22P02".to_string(), format!("invalid input syntax for type boolean: \"{text}\""))),
+        },
+        other => Err(("22P02".to_string(), format!("value {other:?} is not a binary boolean"))),
+    }
 }
 
 fn sql_value_to_pg_text(value: &SqlValue) -> String {

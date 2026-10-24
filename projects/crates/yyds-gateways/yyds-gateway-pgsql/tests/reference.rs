@@ -145,6 +145,53 @@ print('psycopg2 protocol-v3 startup and explicit unsupported-query response pass
 }
 
 #[test]
+#[ignore = "requires YYDS_PGSQL_REFERENCE_PYTHON with psycopg (3.x) installed"]
+fn psycopg3_binary_results_report_catalog_types_and_round_trip_binary_parameters() {
+    let directory = owner_directory();
+    let owner = Arc::new(lease(&directory));
+    let catalog =
+        catalog("table metrics { @@id: i64, score: f64, active: bool, blob: bytes, small: i32 }\n");
+    let executor: Arc<dyn KeyValueExecutor> = Arc::new(empty_executor());
+    let service =
+        PgsqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, 7).unwrap();
+    let script = r#"
+import psycopg, sys
+
+def connect():
+    return psycopg.connect(host='127.0.0.1', port=int(sys.argv[1]), user='yyds',
+                           dbname='yyds', connect_timeout=4, sslmode='prefer')
+
+connection = connect()
+with connection.cursor() as cursor:
+    cursor.execute("INSERT INTO metrics VALUES (1, 1.5, TRUE, 'bin', 7)")
+connection.commit()
+
+# Binary result formats: every column decodes natively instead of degrading to text.
+with connection.cursor(binary=True) as cursor:
+    cursor.execute("SELECT id, score, active, blob, small FROM metrics WHERE id = %s", (1,))
+    assert [column.type_code for column in cursor.description] == [20, 701, 16, 17, 23], \
+        [column.type_code for column in cursor.description]
+    row = cursor.fetchone()
+    assert row == (1, 1.5, True, b'bin', 7), row
+    assert isinstance(row[0], int) and isinstance(row[1], float) and isinstance(row[4], int), row
+
+# An empty result set still describes the catalog column types, not `text`.
+with connection.cursor(binary=True) as cursor:
+    cursor.execute("SELECT id, score, active, blob, small FROM metrics WHERE id = %s", (2,))
+    assert [column.type_code for column in cursor.description] == [20, 701, 16, 17, 23], \
+        [column.type_code for column in cursor.description]
+    assert cursor.fetchall() == []
+connection.commit()
+
+connection.close()
+print('psycopg3 binary rows and parameters passed')
+"#;
+    run_reference_client(script, service.address().port());
+    service.stop().unwrap();
+    assert_eq!(NodeLease::inspect(directory).unwrap().ownership, LocalOwnership::Available);
+}
+
+#[test]
 #[ignore = "requires YYDS_PGSQL_REFERENCE_PYTHON with psycopg2 installed"]
 fn psycopg2_round_trips_typed_results_parameters_transactions_and_conflicts() {
     let directory = owner_directory();

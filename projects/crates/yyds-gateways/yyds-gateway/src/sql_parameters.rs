@@ -44,14 +44,15 @@ pub fn substitute_sql_parameters(
     Ok(out)
 }
 
-/// Renders every referenced placeholder as `NULL` and reports how many
-/// positions the statement references. Used to derive statement metadata
-/// (parameter count, row description) without bound values.
+/// Renders every referenced placeholder as the literal `0` and reports how
+/// many positions the statement references. Used to derive statement metadata
+/// (parameter count, row description) without bound values. A numeric literal
+/// keeps `WHERE pk = $1` plannable, unlike `NULL`.
 pub fn neutralized_sql_parameters(
     sql: &str,
     style: SqlParameterStyle,
 ) -> Result<(String, usize), SqlFrontendError> {
-    walk_parameters(sql, style, &mut |_| Ok("NULL".to_string()))
+    walk_parameters(sql, style, &mut |_| Ok("0".to_string()))
 }
 
 fn walk_parameters(

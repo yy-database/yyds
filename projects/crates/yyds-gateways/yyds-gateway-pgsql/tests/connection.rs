@@ -186,10 +186,10 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use yyds_execution::LocalExecutor;
     use yyds_gateway::SqlCatalog;
     use yyds_gateway_pgsql::connection::{serve_connection, PgsqlSqlRuntime};
-    use yyds_kv::{KvStore, MemoryShard};
+    use yyds_kv::MemoryShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
-    let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64 }\n";
+    let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64 }\ntable metrics { @@id: i64, score: f64, active: bool, blob: bytes, small: i32 }\n";
     let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
     let manifest = vos::contract::IdentityManifest {
         format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
@@ -210,6 +210,18 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
                 fields: vec![
                     vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 3, virtual_field_index: 0 },
                     vos::contract::FieldIdentity { canonical_name: "user_id".into(), field_id: 4, virtual_field_index: 1 },
+                ],
+            },
+            vos::contract::TypeIdentity {
+                canonical_path: vec!["metrics".into()],
+                type_id: 3,
+                kind: vos::contract::TypeContractKind::Table,
+                fields: vec![
+                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 5, virtual_field_index: 0 },
+                    vos::contract::FieldIdentity { canonical_name: "score".into(), field_id: 6, virtual_field_index: 1 },
+                    vos::contract::FieldIdentity { canonical_name: "active".into(), field_id: 7, virtual_field_index: 2 },
+                    vos::contract::FieldIdentity { canonical_name: "blob".into(), field_id: 8, virtual_field_index: 3 },
+                    vos::contract::FieldIdentity { canonical_name: "small".into(), field_id: 9, virtual_field_index: 4 },
                 ],
             },
         ],
@@ -264,4 +276,174 @@ fn mysql_style_system_variables_are_rejected_with_a_runtime() {
 
     drop(client);
     server.join().unwrap();
+}
+
+fn send_message(client: &mut TcpStream, tag: u8, payload: &[u8]) {
+    client.write_all(&encode_message(tag, payload, 64 * 1024).unwrap()).unwrap();
+}
+
+fn cstring(value: &str) -> Vec<u8> {
+    let mut bytes = value.as_bytes().to_vec();
+    bytes.push(0);
+    bytes
+}
+
+/// `name`, `type OID`, `type size` and `format code` for each described column.
+fn parse_row_description(payload: &[u8]) -> Vec<(String, u32, i16, i16)> {
+    let mut offset = 0;
+    let count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+    offset += 2;
+    let mut columns = Vec::with_capacity(count);
+    for _ in 0..count {
+        let end = payload[offset..].iter().position(|byte| *byte == 0).unwrap() + offset;
+        let name = String::from_utf8(payload[offset..end].to_vec()).unwrap();
+        offset = end + 1 + 4 + 2;
+        let oid = u32::from_be_bytes(payload[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        let size = i16::from_be_bytes([payload[offset], payload[offset + 1]]);
+        offset += 2 + 4;
+        let format = i16::from_be_bytes([payload[offset], payload[offset + 1]]);
+        offset += 2;
+        columns.push((name, oid, size, format));
+    }
+    columns
+}
+
+fn parse_data_row(payload: &[u8]) -> Vec<Option<Vec<u8>>> {
+    let count = i16::from_be_bytes([payload[0], payload[1]]) as usize;
+    let mut offset = 2;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        let length = i32::from_be_bytes(payload[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+        if length < 0 {
+            values.push(None);
+            continue;
+        }
+        let length = length as usize;
+        values.push(Some(payload[offset..offset + length].to_vec()));
+        offset += length;
+    }
+    values
+}
+
+#[test]
+fn describe_statement_reports_catalog_types_and_binary_rows_round_trip() {
+    let (mut client, server) = start_server_with_runtime();
+
+    // 空结果集也必须按 catalog 声明类型描述，而不是退化成 text。
+    let mut parse = cstring("s2");
+    parse.extend_from_slice(&cstring("SELECT id, name FROM users WHERE id = $1"));
+    parse.extend_from_slice(&1_i16.to_be_bytes());
+    parse.extend_from_slice(&20_u32.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    let mut describe = vec![b'S'];
+    describe.extend_from_slice(&cstring("s2"));
+    send_message(&mut client, b'D', &describe);
+    send_message(&mut client, b'S', &[]);
+    let described = receive_until_ready(&mut client);
+    assert_eq!(described[0].0, b'1');
+    assert_eq!(described[1].0, b't');
+    assert_eq!(described[2].0, b'T');
+    let columns = parse_row_description(&described[2].1);
+    assert_eq!(columns, vec![("id".to_string(), 20, 8, 0), ("name".to_string(), 25, -1, 0)]);
+
+    send_query(&mut client, "INSERT INTO metrics VALUES (1, 1.5, 1, 'bin', 7)");
+    let inserted = receive_until_ready(&mut client);
+    assert_eq!(inserted[0].0, b'C');
+
+    let mut parse = cstring("s1");
+    parse.extend_from_slice(&cstring("SELECT id, score, active, blob, small FROM metrics WHERE id = $1"));
+    parse.extend_from_slice(&1_i16.to_be_bytes());
+    parse.extend_from_slice(&20_u32.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'D', &describe_of(&cstring("s1")));
+    send_message(&mut client, b'S', &[]);
+    let described = receive_until_ready(&mut client);
+    let columns = parse_row_description(&described[2].1);
+    assert_eq!(
+        columns,
+        vec![
+            ("id".to_string(), 20, 8, 0),
+            ("score".to_string(), 701, 8, 0),
+            ("active".to_string(), 16, 1, 0),
+            ("blob".to_string(), 17, -1, 0),
+            ("small".to_string(), 23, 4, 0),
+        ]
+    );
+
+    let mut bind = cstring("p1");
+    bind.extend_from_slice(&cstring("s1"));
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&8_i32.to_be_bytes());
+    bind.extend_from_slice(&1_i64.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    let mut describe = vec![b'P'];
+    describe.extend_from_slice(&cstring("p1"));
+    send_message(&mut client, b'D', &describe);
+    send_message(&mut client, b'S', &[]);
+    let described = receive_until_ready(&mut client);
+    assert_eq!(described[0].0, b'2');
+    assert_eq!(described[1].0, b'T');
+    let columns = parse_row_description(&described[1].1);
+    assert!(columns.iter().all(|(_, _, _, format)| *format == 1), "binary formats requested at Bind must be reported");
+
+    let mut bind = cstring("p2");
+    bind.extend_from_slice(&cstring("s1"));
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&8_i32.to_be_bytes());
+    bind.extend_from_slice(&1_i64.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    let mut execute = cstring("p2");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'S', &[]);
+    let executed = receive_until_ready(&mut client);
+    assert_eq!(executed[0].0, b'2');
+    assert_eq!(executed[1].0, b'D');
+    let row = parse_data_row(&executed[1].1);
+    assert_eq!(row.len(), 5);
+    assert_eq!(row[0], Some(1_i64.to_be_bytes().to_vec()));
+    assert_eq!(row[1], Some(1.5_f64.to_be_bytes().to_vec()));
+    assert_eq!(row[2], Some(vec![1]));
+    assert_eq!(row[3], Some(b"bin".to_vec()));
+    assert_eq!(row[4], Some(7_i32.to_be_bytes().to_vec()));
+
+    // 不支持的二进制参数类型必须报 0A000 并指明 OID。
+    let mut parse = cstring("s3");
+    parse.extend_from_slice(&cstring("SELECT name FROM users WHERE id = $1"));
+    parse.extend_from_slice(&1_i16.to_be_bytes());
+    parse.extend_from_slice(&1184_u32.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    let mut bind = cstring("p3");
+    bind.extend_from_slice(&cstring("s3"));
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&1_i16.to_be_bytes());
+    bind.extend_from_slice(&8_i32.to_be_bytes());
+    bind.extend_from_slice(&0_i64.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    send_message(&mut client, b'S', &[]);
+    let rejected = receive_until_ready(&mut client);
+    let error = rejected.iter().find(|(tag, _)| *tag == b'E').expect("binary parameter type must be rejected");
+    let text = String::from_utf8_lossy(&error.1);
+    assert!(text.contains("0A000") && text.contains("1184"), "{text}");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+fn describe_of(statement: &[u8]) -> Vec<u8> {
+    let mut describe = vec![b'S'];
+    describe.extend_from_slice(statement);
+    describe
 }
