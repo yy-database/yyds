@@ -1,6 +1,8 @@
 //! Bounded loopback MySQL protocol-v10 startup and SQL execution.
 
 use std::{
+    borrow::Cow,
+    collections::HashMap,
     io::{self, Read, Write},
     net::TcpStream,
     sync::{
@@ -12,8 +14,10 @@ use std::{
 
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog_with_variables, execute_plan, parse_session_command, plan_statement, SqlBoundExpression, SqlBoundLiteral,
-    SqlCatalog, SqlErrorKind, SqlExecutionPlan, SqlFrontendError, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
+    plan_statement, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlCatalogBoundStatement,
+    SqlColumn, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult,
+    SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -27,6 +31,34 @@ const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
 const CLIENT_PLUGIN_AUTH_LENENC: u32 = 0x0020_0000;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
 const MAX_PACKET: usize = 1024 * 1024;
+
+const COM_QUIT: u8 = 0x01;
+const COM_INIT_DB: u8 = 0x02;
+const COM_QUERY: u8 = 0x03;
+const COM_PING: u8 = 0x0E;
+const COM_STMT_PREPARE: u8 = 0x16;
+const COM_STMT_EXECUTE: u8 = 0x17;
+const COM_STMT_CLOSE: u8 = 0x19;
+const COM_STMT_RESET: u8 = 0x1A;
+
+/// `MYSQL_TYPE_*` codes carried by parameter and column definitions.
+const MYSQL_TYPE_DECIMAL: u8 = 0x00;
+const MYSQL_TYPE_TINY: u8 = 0x01;
+const MYSQL_TYPE_SHORT: u8 = 0x02;
+const MYSQL_TYPE_LONG: u8 = 0x03;
+const MYSQL_TYPE_FLOAT: u8 = 0x04;
+const MYSQL_TYPE_DOUBLE: u8 = 0x05;
+const MYSQL_TYPE_NULL: u8 = 0x06;
+const MYSQL_TYPE_LONGLONG: u8 = 0x08;
+const MYSQL_TYPE_INT24: u8 = 0x09;
+const MYSQL_TYPE_YEAR: u8 = 0x0D;
+const MYSQL_TYPE_NEWDECIMAL: u8 = 0xF6;
+const MYSQL_TYPE_TINY_BLOB: u8 = 0xF9;
+const MYSQL_TYPE_MEDIUM_BLOB: u8 = 0xFA;
+const MYSQL_TYPE_LONG_BLOB: u8 = 0xFB;
+const MYSQL_TYPE_BLOB: u8 = 0xFC;
+const MYSQL_TYPE_VAR_STRING: u8 = 0xFD;
+const MYSQL_TYPE_STRING: u8 = 0xFE;
 
 /// Emulated `SHOW VARIABLES` table. Values describe what this gateway actually
 /// implements: no strict mode, a single-node engine, and utf8mb4 text.
@@ -86,6 +118,40 @@ fn mysql_system_variable(name: &str) -> Result<SqlBoundLiteral, SqlFrontendError
     Ok(SqlBoundLiteral::String(value.to_string()))
 }
 
+/// MySQL drivers spell boolean session values as `ON`/`OFF`, which Oak cannot
+/// read as `SET` values. Rewrite only that trailing literal and leave the rest
+/// of the statement to Oak.
+fn normalize_session_boolean(sql: &str) -> Cow<'_, str> {
+    let trimmed = sql.trim_end();
+    let (statement, terminator) = match trimmed.strip_suffix(';') {
+        Some(statement) => (statement.trim_end(), ";"),
+        None => (trimmed, ""),
+    };
+    if !statement.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("SET ")) {
+        return Cow::Borrowed(sql);
+    }
+    let Some(index) = statement.rfind('=') else {
+        return Cow::Borrowed(sql);
+    };
+    let value = statement[index + 1..].trim();
+    let replacement = if value.eq_ignore_ascii_case("ON") {
+        "TRUE"
+    }
+    else if value.eq_ignore_ascii_case("OFF") {
+        "FALSE"
+    }
+    else {
+        return Cow::Borrowed(sql);
+    };
+    Cow::Owned(format!("{} {replacement}{terminator}", &statement[..=index]))
+}
+
+/// Whether a `SET` target names `autocommit`, including the `@@session.` form.
+fn is_autocommit_variable(name: &str) -> bool {
+    let bare = name.strip_prefix("@@").unwrap_or(name);
+    bare.rsplit('.').next().is_some_and(|variable| variable.eq_ignore_ascii_case("autocommit"))
+}
+
 /// Performs a loopback-only unauthenticated startup and executes SQL against the provided runtime.
 pub fn serve_connection(stream: TcpStream, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<()> {
     if !stream.peer_addr()?.ip().is_loopback() {
@@ -141,8 +207,41 @@ impl Default for MysqlTransactionSession {
     }
 }
 
+/// A prepared statement as advertised by `COM_STMT_PREPARE`: the SQL text, the
+/// catalog-derived result shape and the parameter types the client last bound.
+struct PreparedStatement {
+    sql: String,
+    /// Number of `?` placeholders the statement references.
+    parameter_count: usize,
+    /// Result columns derived from the catalog. Writes describe to no columns.
+    description: Vec<SqlColumn>,
+    /// `(type code, unsigned flag)` per parameter, remembered so an execute
+    /// that reuses the previous binding can decode values.
+    parameter_types: Vec<(u8, bool)>,
+}
+
+/// Per-connection prepared statement registry. Statement ids are never reused
+/// and the whole table is dropped when the session ends.
+struct PreparedStatements {
+    entries: HashMap<u32, PreparedStatement>,
+    next_id: u32,
+}
+
+impl PreparedStatements {
+    fn new() -> Self {
+        Self { entries: HashMap::new(), next_id: 1 }
+    }
+
+    fn allocate(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        id
+    }
+}
+
 fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRuntime>>) -> io::Result<()> {
     let mut session = MysqlTransactionSession::new();
+    let mut statements = PreparedStatements::new();
     write_packet(&mut stream, 0, &handshake())?;
     let response = match read_packet(&mut stream)? {
         Some((1, response)) => response,
@@ -176,8 +275,34 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
             continue;
         }
         match payload[0] {
-            0x01 => return Ok(()),
-            0x03 => {
+            COM_QUIT => return Ok(()),
+            // Drivers issue COM_PING to prove liveness before creating a cursor
+            // and COM_INIT_DB when switching schema. The gateway keeps a single
+            // catalog, so both are answered with the protocol OK packet.
+            COM_PING | COM_INIT_DB => write_ok(&mut stream, sequence.wrapping_add(1))?,
+            COM_STMT_PREPARE => handle_prepare(
+                &mut stream,
+                sequence.wrapping_add(1),
+                &payload,
+                runtime.as_ref(),
+                &mut statements,
+                &mut session,
+            )?,
+            COM_STMT_EXECUTE => handle_execute(
+                &mut stream,
+                sequence.wrapping_add(1),
+                &payload,
+                runtime.as_ref(),
+                &mut statements,
+                &mut session,
+            )?,
+            COM_STMT_CLOSE => {
+                if let Some(id) = take_u32(&payload[1..]) {
+                    statements.entries.remove(&id);
+                }
+            }
+            COM_STMT_RESET => handle_reset(&mut stream, sequence.wrapping_add(1), &payload, &statements)?,
+            COM_QUERY => {
                 let sql = match std::str::from_utf8(&payload[1..]) {
                     Ok(sql) => sql,
                     Err(_) => {
@@ -185,7 +310,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         continue;
                     }
                 };
-                match parse_session_command(sql) {
+                match parse_session_command(&normalize_session_boolean(sql)) {
                     Ok(Some(SqlSessionCommand::SetNames { character_set, .. }))
                         if !character_set.eq_ignore_ascii_case("utf8mb4") =>
                     {
@@ -278,12 +403,12 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         }
                         let result =
                             SqlResult { columns: vec!["Variable_name".into(), "Value".into()], rows, affected_rows: 0 };
-                        write_result_set(&mut stream, sequence.wrapping_add(1), &result)?;
+                        write_result_set(&mut stream, sequence.wrapping_add(1), &result, &[], false)?;
                     }
                     Ok(Some(SqlSessionCommand::SetVariable { name, value, .. })) => {
                         // 引擎没有隐式事务：每条语句立即提交，因此 `autocommit=0` 会造成
                         // 客户端误判事务边界，必须显式拒绝而不是静默接受。
-                        if name.eq_ignore_ascii_case("autocommit") && !variable_truthy(&value) {
+                        if is_autocommit_variable(&name) && !variable_truthy(&value) {
                             session.fail();
                             write_error(
                                 &mut stream,
@@ -335,7 +460,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             continue;
                         }
                         match runtime.as_ref() {
-                            Some(rt) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, rt, &mut session)?,
+                            Some(rt) => execute_sql(&mut stream, sequence.wrapping_add(1), sql, rt, &mut session, &[], false)?,
                             None => write_error(
                                 &mut stream,
                                 sequence.wrapping_add(1),
@@ -493,12 +618,16 @@ fn write_error(stream: &mut impl Write, sequence: u8, code: u16, state: &str, me
 
 /// 把一条 SQL 走完整的 bind → plan → execute → wire 路径。
 /// 根据 plan variant 分发：SELECT → ResultSet；INSERT/UPDATE/DELETE → OK(AffectedRows=1)。
+/// `column_types` 为空时按行值推断列类型，否则使用调用方已经声明的类型。
+/// `binary_rows` 为真时按 MySQL binary protocol 编码结果行（prepared statement 路径）。
 fn execute_sql(
     stream: &mut impl Write,
     sequence: u8,
     sql: &str,
     runtime: &Arc<MysqlSqlRuntime>,
     session: &mut MysqlTransactionSession,
+    column_types: &[u8],
+    binary_rows: bool,
 ) -> io::Result<()> {
     let bound = match bind_sql_catalog_with_variables(sql, &runtime.catalog, runtime.schema_version, &mysql_system_variable) {
         Ok(bound) => bound,
@@ -535,7 +664,7 @@ fn execute_sql(
         write_ok_with_affected(stream, sequence, result.affected_rows)?;
         return Ok(());
     }
-    write_result_set(stream, sequence, &result)
+    write_result_set(stream, sequence, &result, column_types, binary_rows)
 }
 
 /// Maps a structured gateway failure to its MySQL error number and SQLSTATE.
@@ -569,6 +698,341 @@ fn write_statement_error(
     write_error(stream, sequence, code, state, &format!("SQL {stage} error: {}", error.message))
 }
 
+/// `COM_STMT_PREPARE`: validates names against the catalog, derives the result
+/// shape and returns the statement id with parameter and column definitions.
+fn handle_prepare(
+    stream: &mut impl Write,
+    sequence: u8,
+    payload: &[u8],
+    runtime: Option<&Arc<MysqlSqlRuntime>>,
+    statements: &mut PreparedStatements,
+    session: &mut MysqlTransactionSession,
+) -> io::Result<()> {
+    let sql = match std::str::from_utf8(&payload[1..]) {
+        Ok(sql) => sql,
+        Err(_) => {
+            write_error(stream, sequence, 1300, "HY000", "query is not valid UTF-8")?;
+            return Ok(());
+        }
+    };
+    let Some(runtime) = runtime else {
+        session.fail();
+        write_error(stream, sequence, 1235, "42000", "YYDS MySQL SQL execution is not implemented (no SQL runtime)")?;
+        return Ok(());
+    };
+    let (neutral, parameter_count) = match neutralized_sql_parameters(sql, SqlParameterStyle::QuestionMark) {
+        Ok(result) => result,
+        Err(error) => {
+            session.fail();
+            write_statement_error(stream, sequence, "parameter", error)?;
+            return Ok(());
+        }
+    };
+    let bound = match bind_sql_catalog_with_variables(
+        &neutral,
+        &runtime.catalog,
+        runtime.schema_version,
+        &mysql_system_variable,
+    ) {
+        Ok(bound) => bound,
+        Err(error) => {
+            session.fail();
+            write_statement_error(stream, sequence, "bind", error)?;
+            return Ok(());
+        }
+    };
+    // 写入语句的值类型检查推迟到 execute，因为只有执行时才知道参数的真实类型，
+    // 因此这里只为 SELECT 推导结果列。
+    let description = match bound {
+        SqlCatalogBoundStatement::Select(_) => match plan_statement(bound, &runtime.catalog) {
+            Ok(plan) => describe_plan(&plan),
+            Err(error) => {
+                session.fail();
+                write_statement_error(stream, sequence, "plan", error)?;
+                return Ok(());
+            }
+        },
+        _ => Vec::new(),
+    };
+
+    let id = statements.allocate();
+    write_prepare_ok(stream, sequence, id, parameter_count as u16, description.len() as u16)?;
+    let mut next = sequence.wrapping_add(1);
+    if parameter_count > 0 {
+        for _ in 0..parameter_count {
+            write_packet(stream, next, &encode_column_definition("?", MYSQL_TYPE_VAR_STRING))?;
+            next = next.wrapping_add(1);
+        }
+        write_eof(stream, next)?;
+        next = next.wrapping_add(1);
+    }
+    if !description.is_empty() {
+        for column in &description {
+            write_packet(stream, next, &encode_column_definition(&column.name, mysql_field_type(&column.field_type)))?;
+            next = next.wrapping_add(1);
+        }
+        write_eof(stream, next)?;
+    }
+    statements
+        .entries
+        .insert(id, PreparedStatement { sql: sql.to_string(), description, parameter_types: Vec::new(), parameter_count });
+    Ok(())
+}
+
+fn write_prepare_ok(
+    stream: &mut impl Write,
+    sequence: u8,
+    statement_id: u32,
+    parameter_count: u16,
+    column_count: u16,
+) -> io::Result<()> {
+    let mut payload = Vec::with_capacity(12);
+    payload.push(0x00);
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.extend_from_slice(&column_count.to_le_bytes());
+    payload.extend_from_slice(&parameter_count.to_le_bytes());
+    payload.push(0x00); // reserved
+    payload.extend_from_slice(&0_u16.to_le_bytes()); // warning count
+    write_packet(stream, sequence, &payload)
+}
+
+/// `COM_STMT_EXECUTE`: decodes the typed parameter block, renders the statement
+/// with real values and runs it through the shared SQL pipeline.
+fn handle_execute(
+    stream: &mut impl Write,
+    sequence: u8,
+    payload: &[u8],
+    runtime: Option<&Arc<MysqlSqlRuntime>>,
+    statements: &mut PreparedStatements,
+    session: &mut MysqlTransactionSession,
+) -> io::Result<()> {
+    let Some(statement_id) = take_u32(&payload[1..]) else {
+        write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_EXECUTE command")?;
+        return Ok(());
+    };
+    // statement id (4) + flags (1) + iteration count (4)
+    let mut cursor = 5;
+    let Some(_flags) = payload.get(cursor) else {
+        write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_EXECUTE command")?;
+        return Ok(());
+    };
+    cursor += 1;
+    let Some(iteration) = take_u32(&payload[cursor..]) else {
+        write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_EXECUTE iteration count")?;
+        return Ok(());
+    };
+    cursor += 4;
+    if iteration != 1 {
+        write_error(stream, sequence, 1210, "HY000", "COM_STMT_EXECUTE iteration count must be 1")?;
+        return Ok(());
+    }
+    let Some(statement) = statements.entries.get_mut(&statement_id) else {
+        write_error(
+            stream,
+            sequence,
+            1243,
+            "HY000",
+            &format!("Unknown prepared statement handler ({statement_id})"),
+        )?;
+        return Ok(());
+    };
+
+    let mut values = Vec::with_capacity(statement.parameter_count);
+    if statement.parameter_count > 0 {
+        let bitmap_length = statement.parameter_count.div_ceil(8);
+        let Some(bitmap) = payload.get(cursor..cursor + bitmap_length) else {
+            write_error(stream, sequence, 1210, "HY000", "truncated COM_STMT_EXECUTE null bitmap")?;
+            return Ok(());
+        };
+        cursor += bitmap_length;
+        let Some(&bound_flag) = payload.get(cursor) else {
+            write_error(stream, sequence, 1210, "HY000", "missing COM_STMT_EXECUTE parameter types")?;
+            return Ok(());
+        };
+        cursor += 1;
+        if bound_flag == 1 {
+            let mut types = Vec::with_capacity(statement.parameter_count);
+            for _ in 0..statement.parameter_count {
+                let Some(&code) = payload.get(cursor) else {
+                    write_error(stream, sequence, 1210, "HY000", "truncated COM_STMT_EXECUTE parameter types")?;
+                    return Ok(());
+                };
+                let Some(&flags) = payload.get(cursor + 1) else {
+                    write_error(stream, sequence, 1210, "HY000", "truncated COM_STMT_EXECUTE parameter types")?;
+                    return Ok(());
+                };
+                types.push((code, flags & 0x80 != 0));
+                cursor += 2;
+            }
+            statement.parameter_types = types;
+        }
+        else if statement.parameter_types.len() != statement.parameter_count {
+            write_error(
+                stream,
+                sequence,
+                1210,
+                "HY000",
+                "COM_STMT_EXECUTE reused parameter types before they were bound",
+            )?;
+            return Ok(());
+        }
+        for index in 0..statement.parameter_count {
+            if bitmap[index / 8] & (1 << (index % 8)) != 0 {
+                values.push(SqlValue::Null);
+                continue;
+            }
+            let (code, unsigned) = statement.parameter_types[index];
+            match decode_parameter(payload, &mut cursor, code, unsigned) {
+                Ok(value) => values.push(value),
+                Err(message) => {
+                    write_error(stream, sequence, 1235, "42000", &message)?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    let sql = statement.sql.clone();
+    let description = statement.description.clone();
+    if session.failed {
+        write_error(stream, sequence, 40001, "HY000", "current transaction is aborted")?;
+        return Ok(());
+    }
+    let Some(runtime) = runtime else {
+        session.fail();
+        write_error(stream, sequence, 1235, "42000", "YYDS MySQL SQL execution is not implemented (no SQL runtime)")?;
+        return Ok(());
+    };
+    let rendered = match substitute_sql_parameters(&sql, &values, SqlParameterStyle::QuestionMark) {
+        Ok(rendered) => rendered,
+        Err(error) => {
+            session.fail();
+            write_statement_error(stream, sequence, "parameter", error)?;
+            return Ok(());
+        }
+    };
+    let column_types: Vec<u8> = description.iter().map(|column| mysql_field_type(&column.field_type)).collect();
+    execute_sql(stream, sequence, &rendered, runtime, session, &column_types, true)
+}
+
+/// `COM_STMT_RESET` clears the cached parameter binding and returns OK.
+fn handle_reset(
+    stream: &mut impl Write,
+    sequence: u8,
+    payload: &[u8],
+    statements: &PreparedStatements,
+) -> io::Result<()> {
+    let Some(statement_id) = take_u32(&payload[1..]) else {
+        return write_error(stream, sequence, 1210, "HY000", "malformed COM_STMT_RESET command");
+    };
+    if statements.entries.contains_key(&statement_id) {
+        write_ok(stream, sequence)
+    }
+    else {
+        write_error(stream, sequence, 1243, "HY000", &format!("Unknown prepared statement handler ({statement_id})"))
+    }
+}
+
+/// Decodes one `COM_STMT_EXECUTE` parameter value by its `MYSQL_TYPE_*` code.
+fn decode_parameter(payload: &[u8], cursor: &mut usize, code: u8, unsigned: bool) -> Result<SqlValue, String> {
+    match code {
+        MYSQL_TYPE_TINY => {
+            let bytes = take_slice(payload, cursor, 1)?;
+            Ok(SqlValue::Integer(if unsigned { i64::from(bytes[0]) } else { i64::from(bytes[0] as i8) }))
+        }
+        MYSQL_TYPE_SHORT | MYSQL_TYPE_YEAR => {
+            let bytes = take_slice(payload, cursor, 2)?;
+            let raw = u16::from_le_bytes([bytes[0], bytes[1]]);
+            Ok(SqlValue::Integer(if unsigned { i64::from(raw) } else { i64::from(raw as i16) }))
+        }
+        MYSQL_TYPE_INT24 => {
+            let bytes = take_slice(payload, cursor, 3)?;
+            let raw = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]);
+            Ok(SqlValue::Integer(if unsigned { i64::from(raw) } else { i64::from(((raw << 8) as i32) >> 8) }))
+        }
+        MYSQL_TYPE_LONG => {
+            let bytes = take_slice(payload, cursor, 4)?;
+            let raw = u32::from_le_bytes(bytes.try_into().expect("checked length"));
+            Ok(SqlValue::Integer(if unsigned { i64::from(raw) } else { i64::from(raw as i32) }))
+        }
+        MYSQL_TYPE_LONGLONG => {
+            let bytes = take_slice(payload, cursor, 8)?;
+            let raw = u64::from_le_bytes(bytes.try_into().expect("checked length"));
+            Ok(SqlValue::Integer(raw as i64))
+        }
+        MYSQL_TYPE_FLOAT => {
+            let bytes = take_slice(payload, cursor, 4)?;
+            Ok(SqlValue::Number(f64::from(f32::from_le_bytes(bytes.try_into().expect("checked length")))))
+        }
+        MYSQL_TYPE_DOUBLE => {
+            let bytes = take_slice(payload, cursor, 8)?;
+            Ok(SqlValue::Number(f64::from_le_bytes(bytes.try_into().expect("checked length"))))
+        }
+        MYSQL_TYPE_NULL => Ok(SqlValue::Null),
+        MYSQL_TYPE_DECIMAL
+        | MYSQL_TYPE_NEWDECIMAL
+        | MYSQL_TYPE_VAR_STRING
+        | MYSQL_TYPE_STRING
+        | MYSQL_TYPE_TINY_BLOB
+        | MYSQL_TYPE_MEDIUM_BLOB
+        | MYSQL_TYPE_LONG_BLOB
+        | MYSQL_TYPE_BLOB => {
+            let length = take_length_encoded(payload, cursor)?;
+            let bytes = take_slice(payload, cursor, length)?;
+            let text = std::str::from_utf8(bytes)
+                .map_err(|_| format!("COM_STMT_EXECUTE parameter type {code:#04X} is not valid UTF-8"))?;
+            Ok(SqlValue::String(text.to_string()))
+        }
+        _ => Err(format!("COM_STMT_EXECUTE parameter type {code:#04X} is not supported")),
+    }
+}
+
+fn take_slice<'a>(payload: &'a [u8], cursor: &mut usize, length: usize) -> Result<&'a [u8], String> {
+    let end = cursor.checked_add(length).ok_or_else(|| "truncated COM_STMT_EXECUTE parameter".to_string())?;
+    let bytes = payload.get(*cursor..end).ok_or_else(|| "truncated COM_STMT_EXECUTE parameter".to_string())?;
+    *cursor = end;
+    Ok(bytes)
+}
+
+fn take_length_encoded(payload: &[u8], cursor: &mut usize) -> Result<usize, String> {
+    let first = *payload.get(*cursor).ok_or_else(|| "truncated length-encoded parameter".to_string())?;
+    *cursor += 1;
+    match first {
+        0..=250 => Ok(usize::from(first)),
+        251 => Err("NULL length-encoded parameter must be flagged in the null bitmap".to_string()),
+        252 => {
+            let bytes = take_slice(payload, cursor, 2)?;
+            Ok(usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))
+        }
+        253 => {
+            let bytes = take_slice(payload, cursor, 3)?;
+            Ok(usize::try_from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0])).expect("u24 fits usize"))
+        }
+        254 => {
+            let bytes = take_slice(payload, cursor, 8)?;
+            usize::try_from(u64::from_le_bytes(bytes.try_into().expect("checked length")))
+                .map_err(|_| "length-encoded parameter length exceeds the address space".to_string())
+        }
+        _ => Err("invalid length-encoded parameter length".to_string()),
+    }
+}
+
+fn take_u32(bytes: &[u8]) -> Option<u32> {
+    bytes.get(..4).map(|slice| u32::from_le_bytes(slice.try_into().expect("checked length")))
+}
+
+/// MySQL column type for a catalog-declared gateway field type.
+fn mysql_field_type(field_type: &SqlFieldType) -> u8 {
+    match field_type.inner() {
+        SqlFieldType::Int32 => MYSQL_TYPE_LONG,
+        SqlFieldType::Int64 => MYSQL_TYPE_LONGLONG,
+        SqlFieldType::Float64 => MYSQL_TYPE_DOUBLE,
+        SqlFieldType::Bool => MYSQL_TYPE_TINY,
+        SqlFieldType::Bytes => MYSQL_TYPE_BLOB,
+        SqlFieldType::String | SqlFieldType::Unknown | SqlFieldType::Optional(_) => MYSQL_TYPE_VAR_STRING,
+    }
+}
+
 /// 带 affected_rows 的 MySQL OK packet（INSERT/UPDATE/DELETE）。
 fn write_ok_with_affected(stream: &mut impl Write, sequence: u8, affected: u64) -> io::Result<()> {
     let mut payload = Vec::with_capacity(11);
@@ -579,8 +1043,14 @@ fn write_ok_with_affected(stream: &mut impl Write, sequence: u8, affected: u64) 
     write_packet(stream, sequence, &payload)
 }
 
-/// 把 SqlResult 编码成 MySQL text ResultSet 协议包。
-fn write_result_set(stream: &mut impl Write, mut sequence: u8, result: &SqlResult) -> io::Result<()> {
+/// 把 SqlResult 编码成 MySQL ResultSet 协议包。
+fn write_result_set(
+    stream: &mut impl Write,
+    mut sequence: u8,
+    result: &SqlResult,
+    column_types: &[u8],
+    binary_rows: bool,
+) -> io::Result<()> {
     // 包 1: column count
     let count = result.columns.len();
     let mut col_count = Vec::new();
@@ -590,7 +1060,8 @@ fn write_result_set(stream: &mut impl Write, mut sequence: u8, result: &SqlResul
 
     // 包 2..N: column definitions
     for (index, col) in result.columns.iter().enumerate() {
-        let def = encode_column_definition(col, column_type(&result.rows, index));
+        let declared = column_types.get(index).copied();
+        let def = encode_column_definition(col, declared.unwrap_or_else(|| column_type(&result.rows, index)));
         write_packet(stream, sequence, &def)?;
         sequence = sequence.wrapping_add(1);
     }
@@ -601,10 +1072,16 @@ fn write_result_set(stream: &mut impl Write, mut sequence: u8, result: &SqlResul
 
     // Row packets
     for row in &result.rows {
-        let mut payload = Vec::new();
-        for value in row {
-            encode_sql_value(&mut payload, value);
+        let payload = if binary_rows {
+            encode_binary_row(row, column_types)
         }
+        else {
+            let mut payload = Vec::new();
+            for value in row {
+                encode_sql_value(&mut payload, value);
+            }
+            payload
+        };
         write_packet(stream, sequence, &payload)?;
         sequence = sequence.wrapping_add(1);
     }
@@ -613,17 +1090,51 @@ fn write_result_set(stream: &mut impl Write, mut sequence: u8, result: &SqlResul
     write_eof(stream, sequence)
 }
 
+/// 按列声明类型把一行编码成 MySQL binary protocol row（prepared statement 结果）。
+fn encode_binary_row(row: &[SqlValue], column_types: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(0x00); // binary row header
+    let mut bitmap = vec![0_u8; (row.len() + 2).div_ceil(8)];
+    for (index, value) in row.iter().enumerate() {
+        if matches!(value, SqlValue::Null) {
+            let bit = index + 2;
+            bitmap[bit / 8] |= 1 << (bit % 8);
+        }
+    }
+    out.extend_from_slice(&bitmap);
+    for (index, value) in row.iter().enumerate() {
+        if matches!(value, SqlValue::Null) {
+            continue;
+        }
+        let column_type = column_types.get(index).copied().unwrap_or(MYSQL_TYPE_VAR_STRING);
+        match (column_type, value) {
+            (MYSQL_TYPE_LONGLONG, SqlValue::Integer(number)) => out.extend_from_slice(&number.to_le_bytes()),
+            (MYSQL_TYPE_LONG, SqlValue::Integer(number)) => out.extend_from_slice(&(*number as i32).to_le_bytes()),
+            (MYSQL_TYPE_INT24, SqlValue::Integer(number)) => {
+                out.extend_from_slice(&(*number as i32).to_le_bytes()[..3]);
+            }
+            (MYSQL_TYPE_SHORT, SqlValue::Integer(number)) => out.extend_from_slice(&(*number as i16).to_le_bytes()),
+            (MYSQL_TYPE_TINY, SqlValue::Integer(number)) => out.push(*number as u8),
+            (MYSQL_TYPE_TINY, SqlValue::Boolean(truth)) => out.push(u8::from(*truth)),
+            (MYSQL_TYPE_DOUBLE, SqlValue::Number(number)) => out.extend_from_slice(&number.to_le_bytes()),
+            (MYSQL_TYPE_FLOAT, SqlValue::Number(number)) => out.extend_from_slice(&(*number as f32).to_le_bytes()),
+            _ => encode_sql_value(&mut out, value),
+        }
+    }
+    out
+}
+
 /// 按首批非空值推断 MySQL 列类型：`LONGLONG`、`DOUBLE`、`TINY`、`VAR_STRING`。
 fn column_type(rows: &[Vec<SqlValue>], index: usize) -> u8 {
     rows.iter()
         .find_map(|row| match row.get(index) {
-            Some(SqlValue::Integer(_)) => Some(0x08), // MYSQL_TYPE_LONGLONG
-            Some(SqlValue::Number(_)) => Some(0x05),  // MYSQL_TYPE_DOUBLE
-            Some(SqlValue::Boolean(_)) => Some(0x01), // MYSQL_TYPE_TINY
-            Some(SqlValue::String(_)) => Some(0xFD),  // MYSQL_TYPE_VAR_STRING
+            Some(SqlValue::Integer(_)) => Some(MYSQL_TYPE_LONGLONG),
+            Some(SqlValue::Number(_)) => Some(MYSQL_TYPE_DOUBLE),
+            Some(SqlValue::Boolean(_)) => Some(MYSQL_TYPE_TINY),
+            Some(SqlValue::String(_)) => Some(MYSQL_TYPE_VAR_STRING),
             Some(SqlValue::Null) | None => None,
         })
-        .unwrap_or(0xFD)
+        .unwrap_or(MYSQL_TYPE_VAR_STRING)
 }
 
 fn encode_column_definition(name: &str, column_type: u8) -> Vec<u8> {
@@ -641,7 +1152,7 @@ fn encode_column_definition(name: &str, column_type: u8) -> Vec<u8> {
     out.extend_from_slice(&255_u32.to_le_bytes()); // column_length
     out.push(column_type);
     out.extend_from_slice(&0_u16.to_le_bytes()); // flags
-    out.push(if column_type == 0x05 { 31 } else { 0 }); // decimals
+    out.push(if column_type == MYSQL_TYPE_DOUBLE { 31 } else { 0 }); // decimals
     out.extend_from_slice(&[0u8; 2]); // filler
     out
 }

@@ -161,7 +161,8 @@ pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError
 
 /// Projects the small set of protocol session commands from Oak's SQL AST.
 pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, SqlFrontendError> {
-    let root = parse_sql(source)?;
+    let normalized = normalize_quoted_set_names(source);
+    let root = parse_sql(normalized.as_deref().unwrap_or(source))?;
     if root.statements.len() != 1 {
         return Ok(None);
     }
@@ -195,6 +196,33 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
         }),
         _ => None,
     })
+}
+
+/// MySQL clients spell charset negotiation as `SET NAMES 'utf8mb4' COLLATE
+/// 'utf8mb4_general_ci'`, while Oak's session grammar only reads bare
+/// identifiers. Unquote simple identifier literals for this one statement and
+/// leave every other SQL surface untouched.
+fn normalize_quoted_set_names(source: &str) -> Option<String> {
+    let trimmed = source.trim();
+    let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+    trimmed.get(..9).filter(|prefix| prefix.eq_ignore_ascii_case("SET NAMES"))?;
+    let tokens = trimmed[9..].split_whitespace().collect::<Vec<_>>();
+    let mut words = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        words.push(unquote_simple_identifier(token)?);
+    }
+    if !(words.len() == 1 || (words.len() == 3 && words[1].eq_ignore_ascii_case("COLLATE"))) {
+        return None;
+    }
+    Some(format!("SET NAMES {}", words.join(" ")))
+}
+
+fn unquote_simple_identifier(token: &str) -> Option<&str> {
+    let inner = token.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')).unwrap_or(token);
+    if inner.is_empty() || !inner.chars().all(|character| character.is_ascii_alphanumeric() || character == '_') {
+        return None;
+    }
+    Some(inner)
 }
 
 fn project_variable_scope(scope: oak_sql::ast::SessionScope) -> SqlVariableScope {

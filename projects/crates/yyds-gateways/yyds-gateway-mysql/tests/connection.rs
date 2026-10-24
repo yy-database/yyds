@@ -525,6 +525,240 @@ fn sql_payload(sql: &str) -> Vec<u8> {
     payload
 }
 
+/// 发送 `COM_STMT_PREPARE` 并读完 OK + 参数定义 + 列定义，返回语句 id 与元数据。
+fn prepare(client: &mut TcpStream, sql: &str) -> (u32, u16, u16, Vec<String>, Vec<u8>) {
+    let mut payload = vec![0x16];
+    payload.extend_from_slice(sql.as_bytes());
+    client.write_all(&encode_packet(0, &payload).unwrap()).unwrap();
+    let (sequence, ok) = read_packet_full(client);
+    assert_eq!(sequence, 1);
+    assert_eq!(ok[0], 0x00, "prepare failed for `{sql}`: {ok:?}");
+    let statement_id = u32::from_le_bytes([ok[1], ok[2], ok[3], ok[4]]);
+    let columns = u16::from_le_bytes([ok[5], ok[6]]);
+    let parameters = u16::from_le_bytes([ok[7], ok[8]]);
+    for _ in 0..parameters {
+        let (_, definition) = read_packet_full(client);
+        assert_eq!(extract_column_name(&definition), "?");
+    }
+    if parameters > 0 {
+        let (_, eof) = read_packet_full(client);
+        assert_eq!(eof[0], 0xFE);
+    }
+    let mut names = Vec::new();
+    let mut types = Vec::new();
+    for _ in 0..columns {
+        let (_, definition) = read_packet_full(client);
+        names.push(extract_column_name(&definition));
+        types.push(column_type_byte(&definition));
+    }
+    if columns > 0 {
+        let (_, eof) = read_packet_full(client);
+        assert_eq!(eof[0], 0xFE);
+    }
+    (statement_id, columns, parameters, names, types)
+}
+
+/// 发送 `COM_STMT_PREPARE` 并断言失败，返回 (error_code, sqlstate)。
+fn prepare_error(client: &mut TcpStream, sql: &str) -> (u16, String) {
+    let mut payload = vec![0x16];
+    payload.extend_from_slice(sql.as_bytes());
+    client.write_all(&encode_packet(0, &payload).unwrap()).unwrap();
+    let (_, packet) = read_packet_full(client);
+    assert_eq!(packet[0], 0xFF, "prepare unexpectedly succeeded for `{sql}`: {packet:?}");
+    (u16::from_le_bytes([packet[1], packet[2]]), String::from_utf8_lossy(&packet[4..9]).into_owned())
+}
+
+/// 构造 `COM_STMT_EXECUTE`：`rebind` 为假时复用语句上一次绑定的参数类型。
+fn execute_payload(statement_id: u32, types: &[(u8, bool)], values: &[Option<&[u8]>], rebind: bool) -> Vec<u8> {
+    let mut payload = vec![0x17];
+    payload.extend_from_slice(&statement_id.to_le_bytes());
+    payload.push(0); // CURSOR_TYPE_NO_CURSOR
+    payload.extend_from_slice(&1_u32.to_le_bytes()); // iteration count
+    if values.is_empty() {
+        return payload;
+    }
+    let mut bitmap = vec![0_u8; values.len().div_ceil(8)];
+    for (index, value) in values.iter().enumerate() {
+        if value.is_none() {
+            bitmap[index / 8] |= 1 << (index % 8);
+        }
+    }
+    payload.extend_from_slice(&bitmap);
+    payload.push(u8::from(rebind));
+    if rebind {
+        assert_eq!(types.len(), values.len(), "one type per parameter");
+        for (code, unsigned) in types {
+            payload.push(*code);
+            payload.push(if *unsigned { 0x80 } else { 0x00 });
+        }
+    }
+    for value in values.iter().flatten() {
+        payload.extend_from_slice(value);
+    }
+    payload
+}
+
+/// 以单字节长度前缀编码字符串参数（够用的 length-encoded string）。
+fn lenenc_bytes(bytes: &[u8]) -> Vec<u8> {
+    assert!(bytes.len() <= 250, "fixture strings stay in the one-byte length range");
+    let mut out = vec![bytes.len() as u8];
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// 读出列定义里的 `MYSQL_TYPE_*` 代码。
+fn column_type_byte(definition: &[u8]) -> u8 {
+    let mut cursor = 0usize;
+    // def, schema, table, org_table, name, org_name
+    for _ in 0..6 {
+        let (length, consumed) = read_lenenc(&definition[cursor..]);
+        cursor += consumed + length as usize;
+    }
+    definition[cursor + 1 + 2 + 4]
+}
+
+/// 发送 `COM_STMT_EXECUTE` 并读取第一个响应包。
+fn execute(client: &mut TcpStream, payload: &[u8]) -> (u8, Vec<u8>) {
+    client.write_all(&encode_packet(0, payload).unwrap()).unwrap();
+    read_packet_full(client)
+}
+
+#[test]
+fn prepared_statements_round_trip_typed_parameters_and_results() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    let _ = read_packet_full(&mut client);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    // 列类型来自 catalog 声明，而不是结果行推断。
+    let (select_id, columns, parameters, names, types) = prepare(&mut client, "SELECT id, name FROM users WHERE id = ?");
+    assert_eq!((columns, parameters), (2, 1));
+    assert_eq!(names, vec!["id".to_string(), "name".to_string()]);
+    assert_eq!(types, vec![0x08, 0xFD]);
+
+    let id_value = 42_i64.to_le_bytes();
+    let payload = execute_payload(select_id, &[(0x08, false)], &[Some(&id_value)], true);
+    let (_, count) = execute(&mut client, &payload);
+    assert_eq!(read_lenenc(&count).0, 2);
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "id");
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "name");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+    // prepared statement 的结果行使用 binary protocol：header + NULL 位图 + 类型化值。
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(row[0], 0x00, "binary row header");
+    assert_eq!(row[1], 0x00, "no NULL columns");
+    assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 42);
+    assert_eq!(row[10] as usize, b"alice".len());
+    assert_eq!(&row[11..], b"alice");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // 复用上一次的参数类型（new_params_bound = 0）。
+    let payload = execute_payload(select_id, &[], &[Some(&id_value)], false);
+    let (_, count) = execute(&mut client, &payload);
+    assert_eq!(read_lenenc(&count).0, 2);
+    let _ = read_packet_full(&mut client);
+    let _ = read_packet_full(&mut client);
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 42);
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // NULL 通过位图传入，结果集为空但仍返回列定义。
+    let (null_id, columns, parameters, _, _) = prepare(&mut client, "SELECT id FROM users WHERE name = ?");
+    assert_eq!((columns, parameters), (1, 1));
+    let payload = execute_payload(null_id, &[(0xFD, false)], &[None], true);
+    let (_, count) = execute(&mut client, &payload);
+    assert_eq!(read_lenenc(&count).0, 1);
+    let (_, definition) = read_packet_full(&mut client);
+    assert_eq!(extract_column_name(&definition), "id");
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    // 写入语句没有结果列，执行后按 affected rows 回 OK。
+    let (insert_id, columns, parameters, _, _) =
+        prepare(&mut client, "INSERT INTO users (id, name, age) VALUES (?, ?, ?)");
+    assert_eq!((columns, parameters), (0, 3));
+    let name_value = lenenc_bytes(b"carol");
+    let age_value = 40_i64.to_le_bytes();
+    let insert_value = 100_i64.to_le_bytes();
+    let payload = execute_payload(
+        insert_id,
+        &[(0x08, false), (0xFD, false), (0x08, false)],
+        &[Some(&insert_value), Some(&name_value), Some(&age_value)],
+        true,
+    );
+    let (_, ok) = execute(&mut client, &payload);
+    assert_eq!(ok[0], 0x00, "insert execute must answer OK: {ok:?}");
+    assert_eq!(read_lenenc(&ok[1..]).0, 1);
+    assert_eq!(expect_single_value(&mut client, "SELECT name FROM users WHERE id = 100"), b"carol".to_vec());
+
+    // RESET 保留语句并回 OK，CLOSE 之后句柄不可再用。
+    let mut reset = vec![0x1A];
+    reset.extend_from_slice(&select_id.to_le_bytes());
+    let (_, ok) = execute(&mut client, &reset);
+    assert_eq!(ok[0], 0x00);
+    let mut close = vec![0x19];
+    close.extend_from_slice(&select_id.to_le_bytes());
+    client.write_all(&encode_packet(0, &close).unwrap()).unwrap();
+    let payload = execute_payload(select_id, &[], &[Some(&id_value)], false);
+    let (_, error) = execute(&mut client, &payload);
+    assert_eq!(error[0], 0xFF);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1243);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn prepared_statements_report_catalog_errors_and_reject_unknown_parameter_types() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    let _ = read_packet_full(&mut client);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    let (code, state) = prepare_error(&mut client, "SELECT id FROM missing");
+    assert_eq!((code, state.as_str()), (1146, "42S02"));
+    let (code, state) = prepare_error(&mut client, "SELECT nope FROM users");
+    assert_eq!((code, state.as_str()), (1054, "42S22"));
+    let (code, state) = prepare_error(&mut client, "SELECT ( FROM users");
+    assert_eq!((code, state.as_str()), (1064, "42000"));
+
+    // 未实现的参数类型必须显式报错，不能静默按文本处理。
+    let (statement_id, _, _, _, _) = prepare(&mut client, "SELECT id FROM users WHERE id = ?");
+    let unsupported = 0_i64.to_le_bytes();
+    let payload = execute_payload(statement_id, &[(0x10, false)], &[Some(&unsupported)], true);
+    let (_, error) = execute(&mut client, &payload);
+    assert_eq!(error[0], 0xFF);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1235);
+    assert!(
+        error.windows(4).any(|window| window == b"0x10"),
+        "error must name the unsupported type: {}",
+        String::from_utf8_lossy(&error)
+    );
+
+    // 未绑定的语句句柄按 MySQL 语义报 1243。
+    let mut unknown = vec![0x17];
+    unknown.extend_from_slice(&9_999_u32.to_le_bytes());
+    unknown.push(0);
+    unknown.extend_from_slice(&1_u32.to_le_bytes());
+    let (_, error) = execute(&mut client, &unknown);
+    assert_eq!(error[0], 0xFF);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1243);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 发送一条语句并读取第一个响应包。
 fn exchange(client: &mut TcpStream, sql: &str) -> (u8, Vec<u8>) {
     client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
