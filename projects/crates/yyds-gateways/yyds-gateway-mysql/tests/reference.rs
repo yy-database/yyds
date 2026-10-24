@@ -523,4 +523,3 @@ for name, reason in SKIPPED:
 connection.close()
 print('mysql-connector shared SQL cases passed')
 "#;
-
