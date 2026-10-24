@@ -569,6 +569,11 @@ fn encode_column_definition(name: &str) -> Vec<u8> {
 fn encode_sql_value(out: &mut Vec<u8>, value: &SqlValue) {
     match value {
         SqlValue::Null => out.push(0xFB),
+        SqlValue::Integer(n) => {
+            let text = n.to_string();
+            encode_length_encoded(out, text.len() as u64);
+            out.extend_from_slice(text.as_bytes());
+        }
         SqlValue::Number(n) => {
             let text = format!("{n}");
             encode_length_encoded(out, text.len() as u64);

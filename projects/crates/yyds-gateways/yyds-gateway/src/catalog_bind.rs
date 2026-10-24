@@ -5,7 +5,10 @@ use crate::sql::{
     SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
     SqlBoundUpdate, SqlFrontendError,
 };
-use vos::contract::{CanonicalType, ResolvedCanonicalType};
+use vos::{
+    ast::{BuiltinType, TypeExpr},
+    contract::{CanonicalType, ResolvedCanonicalType},
+};
 
 /// Scalar types the gateway can project from a VOS field contract.
 ///
@@ -78,6 +81,29 @@ fn project_projection_type(ty: &CanonicalType) -> SqlFieldType {
             _ => SqlFieldType::Unknown,
         },
         CanonicalType::Optional(inner) => SqlFieldType::Optional(Box::new(project_projection_type(inner))),
+        _ => SqlFieldType::Unknown,
+    }
+}
+
+/// Map an AST type expression from a published catalog snapshot to a gateway-facing type.
+///
+/// Snapshot-only catalogs still carry enough type information to decode integer columns
+/// exactly. Types whose SQL value semantics the gateway does not model (for example
+/// `decimal` and `u64`) stay [`SqlFieldType::Unknown`] rather than being guessed.
+fn project_type_expr(ty: &TypeExpr) -> SqlFieldType {
+    match ty {
+        TypeExpr::Builtin(builtin) => match builtin {
+            BuiltinType::I8 | BuiltinType::I16 | BuiltinType::I32 => SqlFieldType::Int32,
+            BuiltinType::I64 | BuiltinType::U8 | BuiltinType::U16 | BuiltinType::U32 => SqlFieldType::Int64,
+            BuiltinType::F32 | BuiltinType::F64 => SqlFieldType::Float64,
+            BuiltinType::Bool => SqlFieldType::Bool,
+            BuiltinType::Utf8 | BuiltinType::Utf16 => SqlFieldType::String,
+            BuiltinType::Bytes => SqlFieldType::Bytes,
+            BuiltinType::Uuid | BuiltinType::Date | BuiltinType::Time | BuiltinType::DateTimeUtc => SqlFieldType::String,
+            _ => SqlFieldType::Unknown,
+        },
+        TypeExpr::Optional(inner) => SqlFieldType::Optional(Box::new(project_type_expr(inner))),
+        TypeExpr::Reference(inner) => project_type_expr(inner),
         _ => SqlFieldType::Unknown,
     }
 }
@@ -192,10 +218,10 @@ impl SqlCatalog {
                     .map(|field| SqlCatalogField {
                         field_id: field.field_id.0,
                         name: field.current_name.clone(),
-                        // Snapshot fields carry a TypeExpr (AST form), not a CanonicalType —
-                        // project lazily to Unknown. The resolved-contract path carries full
-                        // canonical type information via `from_resolved_contract`.
-                        field_type: SqlFieldType::Unknown,
+                        // Snapshot fields carry the AST `TypeExpr`, which still distinguishes
+                        // integers, floats, strings and booleans. Project it so snapshot-only
+                        // catalogs do not fall back to untyped row inference.
+                        field_type: project_type_expr(&field.ty),
                     })
                     .collect(),
             })
