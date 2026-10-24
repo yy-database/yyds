@@ -604,35 +604,12 @@ pub enum SqlBoundUnaryOperator {
 
 /// Binds the supported SQL compatibility subset without executing it.
 pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
-    let surface = scan_grouping_surface(source)?;
-    let rewritten = rewrite_grouping_surface(source, &surface)?;
-    let parse_source = rewritten.as_deref().unwrap_or(source);
-    let root = parse_sql(parse_source)?;
+    let root = parse_sql(source)?;
     if root.statements.len() != 1 {
         return Err(bind_error("SQL gateway accepts exactly one statement"));
     }
-    let modifiers = scan_select_modifiers(source);
-    if modifiers.nulls_modifiers > 0 {
-        return Err(SqlFrontendError::unsupported(
-            "NULLS FIRST/LAST is not exposed by the pinned Oak SQL AST and is outside the gateway subset",
-        ));
-    }
-    if !matches!(root.statements[0], SqlStatement::Select(_)) && modifiers.distinct_tokens > 0 {
-        return Err(SqlFrontendError::unsupported("DISTINCT is supported only as the leading modifier of a SELECT statement"));
-    }
     match &root.statements[0] {
-        SqlStatement::Select(select) => {
-            let distinct = modifiers.select_distinct.first().copied().unwrap_or(false);
-            if modifiers.select_distinct.iter().skip(1).any(|value| *value) {
-                return Err(SqlFrontendError::unsupported("SELECT DISTINCT inside a subquery is outside the gateway subset"));
-            }
-            if modifiers.distinct_tokens > usize::from(distinct) {
-                return Err(SqlFrontendError::unsupported(
-                    "DISTINCT is supported only as the leading modifier of a SELECT statement",
-                ));
-            }
-            Ok(SqlBoundStatement::Select(bind_select_statement(select, distinct)?))
-        }
+        SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(select)?)),
         SqlStatement::Insert(insert) => {
             let columns = if insert.columns.is_empty() {
                 None
@@ -672,341 +649,15 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     }
 }
 
-/// `SELECT` modifiers recovered from the statement surface.
-///
-/// Oak's pinned SQL AST parses `SELECT DISTINCT` but does not publish the
-/// modifier, so the gateway classifies each unquoted `SELECT` keyword from the
-/// token surface. Quoted strings, quoted identifiers and comments are skipped,
-/// and the scan never guesses at expression semantics.
-struct SelectModifiers {
-    /// One entry per unquoted `SELECT` keyword, in source order.
-    select_distinct: Vec<bool>,
-    /// Number of unquoted `DISTINCT` keyword tokens anywhere in the statement.
-    distinct_tokens: usize,
-    /// Number of `NULLS FIRST` / `NULLS LAST` modifiers in the statement.
-    nulls_modifiers: usize,
-}
-
-fn scan_select_modifiers(source: &str) -> SelectModifiers {
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    let mut modifiers = SelectModifiers { select_distinct: Vec::new(), distinct_tokens: 0, nulls_modifiers: 0 };
-    let mut awaiting_select_modifier = false;
-    let mut awaiting_nulls_modifier = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte.is_ascii_whitespace() {
-            index += 1;
-            continue;
-        }
-        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
-            index = skip_line_comment(bytes, index + 2);
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index = skip_block_comment(bytes, index + 2);
-            continue;
-        }
-        if byte == b'#' {
-            index = skip_line_comment(bytes, index + 1);
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`' | b'[') {
-            if awaiting_select_modifier {
-                modifiers.select_distinct.push(false);
-                awaiting_select_modifier = false;
-            }
-            awaiting_nulls_modifier = false;
-            index = skip_quoted(bytes, index, byte);
-            continue;
-        }
-        if byte.is_ascii_alphabetic() || byte == b'_' {
-            let start = index;
-            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$' | b'#')) {
-                index += 1;
-            }
-            let word = &source[start..index];
-            if awaiting_select_modifier {
-                modifiers.select_distinct.push(word.eq_ignore_ascii_case("DISTINCT"));
-                awaiting_select_modifier = false;
-            }
-            if awaiting_nulls_modifier && (word.eq_ignore_ascii_case("FIRST") || word.eq_ignore_ascii_case("LAST")) {
-                modifiers.nulls_modifiers += 1;
-            }
-            awaiting_nulls_modifier = word.eq_ignore_ascii_case("NULLS");
-            if word.eq_ignore_ascii_case("DISTINCT") {
-                modifiers.distinct_tokens += 1;
-            }
-            if word.eq_ignore_ascii_case("SELECT") {
-                awaiting_select_modifier = true;
-            }
-            continue;
-        }
-        if awaiting_select_modifier {
-            modifiers.select_distinct.push(false);
-            awaiting_select_modifier = false;
-        }
-        awaiting_nulls_modifier = false;
-        index += 1;
-    }
-    if awaiting_select_modifier {
-        modifiers.select_distinct.push(false);
-    }
-    modifiers
-}
-
-/// Top-level grouping clauses recovered from the statement surface.
-///
-/// Oak's pinned SQL AST builds `GroupByClause` only from child `Expression`
-/// nodes, so a bare column (`GROUP BY age`) yields an empty column list, and a
-/// bare `HAVING` condition fails to build at all. The gateway classifies the
-/// clause bodies from the token surface and re-parses them with every item
-/// parenthesized, which makes Oak wrap each item in an `Expression` node.
-/// Nothing below guesses at expression semantics: every body is still parsed by
-/// Oak.
-#[derive(Default)]
-struct GroupingSurface {
-    /// Byte range of the `GROUP BY` body in the statement.
-    group_body: Option<(usize, usize)>,
-    /// Byte range of the `HAVING` body in the statement.
-    having_body: Option<(usize, usize)>,
-}
-
-fn scan_grouping_surface(source: &str) -> Result<GroupingSurface, SqlFrontendError> {
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    let mut depth = 0usize;
-    let mut words: Vec<(usize, usize, usize)> = Vec::new();
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte.is_ascii_whitespace() {
-            index += 1;
-            continue;
-        }
-        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
-            index = skip_line_comment(bytes, index + 2);
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index = skip_block_comment(bytes, index + 2);
-            continue;
-        }
-        if byte == b'#' {
-            index = skip_line_comment(bytes, index + 1);
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`' | b'[') {
-            index = skip_quoted(bytes, index, byte);
-            continue;
-        }
-        if byte == b'(' {
-            depth += 1;
-            index += 1;
-            continue;
-        }
-        if byte == b')' {
-            depth = depth.saturating_sub(1);
-            index += 1;
-            continue;
-        }
-        if byte.is_ascii_alphabetic() || byte == b'_' {
-            let start = index;
-            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$' | b'#')) {
-                index += 1;
-            }
-            words.push((start, index, depth));
-            continue;
-        }
-        index += 1;
-    }
-    if !words.first().is_some_and(|(start, end, _)| source[*start..*end].eq_ignore_ascii_case("SELECT")) {
-        return Ok(GroupingSurface::default());
-    }
-    let mut surface = GroupingSurface::default();
-    for (position, (start, end, word_depth)) in words.iter().enumerate() {
-        let word = &source[*start..*end];
-        let is_group = word.eq_ignore_ascii_case("GROUP") && group_keyword_is_followed_by(source, &words, position);
-        let is_having = word.eq_ignore_ascii_case("HAVING");
-        if !is_group && !is_having {
-            continue;
-        }
-        if *word_depth > 0 {
-            return Err(SqlFrontendError::unsupported("GROUP BY / HAVING inside a subquery is outside the gateway subset"));
-        }
-        if is_group {
-            let (_, body_start, _) = words[position + 1];
-            if surface.group_body.is_some() {
-                return Err(SqlFrontendError::unsupported("duplicate GROUP BY is outside the gateway subset"));
-            }
-            let body_end = clause_body_end(source, &words, position + 2, &["HAVING", "ORDER", "LIMIT", "OFFSET"]);
-            surface.group_body = Some((body_start, body_end));
-        }
-        else {
-            if surface.having_body.is_some() {
-                return Err(SqlFrontendError::unsupported("duplicate HAVING is outside the gateway subset"));
-            }
-            let body_end = clause_body_end(source, &words, position + 1, &["ORDER", "LIMIT", "OFFSET"]);
-            surface.having_body = Some((*end, body_end));
-        }
-    }
-    Ok(surface)
-}
-
-fn group_keyword_is_followed_by(source: &str, words: &[(usize, usize, usize)], position: usize) -> bool {
-    match words.get(position + 1) {
-        Some((start, end, depth)) if *depth == words[position].2 => source[*start..*end].eq_ignore_ascii_case("BY"),
-        _ => false,
-    }
-}
-
-/// First top-level clause keyword after `from`, or the end of the statement.
-fn clause_body_end(source: &str, words: &[(usize, usize, usize)], from: usize, stops: &[&str]) -> usize {
-    for (start, end, depth) in &words[from.min(words.len())..] {
-        if *depth == 0 && stops.iter().any(|stop| source[*start..*end].eq_ignore_ascii_case(stop)) {
-            return *start;
-        }
-    }
-    statement_end(source)
-}
-
-fn statement_end(source: &str) -> usize {
-    let mut end = source.len();
-    while end > 0 && source.as_bytes()[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    if end > 0 && source.as_bytes()[end - 1] == b';' {
-        end -= 1;
-    }
-    end
-}
-
-/// Splits a clause body on top-level commas, skipping comments and quoted text.
-fn split_group_items(source: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
-    let bytes = source.as_bytes();
-    let mut index = start;
-    let mut depth = 0usize;
-    let mut item_start = start;
-    let mut items = Vec::new();
-    while index < end {
-        let byte = bytes[index];
-        if byte.is_ascii_whitespace() {
-            index += 1;
-            continue;
-        }
-        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
-            index = skip_line_comment(bytes, index + 2);
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index = skip_block_comment(bytes, index + 2);
-            continue;
-        }
-        if byte == b'#' {
-            index = skip_line_comment(bytes, index + 1);
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"' | b'`' | b'[') {
-            index = skip_quoted(bytes, index, byte);
-            continue;
-        }
-        if byte == b'(' {
-            depth += 1;
-            index += 1;
-            continue;
-        }
-        if byte == b')' {
-            depth = depth.saturating_sub(1);
-            index += 1;
-            continue;
-        }
-        if byte == b',' && depth == 0 {
-            items.push((item_start, index));
-            index += 1;
-            item_start = index;
-            continue;
-        }
-        index += 1;
-    }
-    items.push((item_start, end));
-    items
-}
-
-fn rewrite_grouping_surface(source: &str, surface: &GroupingSurface) -> Result<Option<String>, SqlFrontendError> {
-    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-    if let Some((start, end)) = surface.group_body {
-        let items = split_group_items(source, start, end);
-        let mut body = String::new();
-        for (position, (item_start, item_end)) in items.iter().enumerate() {
-            let item = source[*item_start..*item_end].trim();
-            if item.is_empty() {
-                return Err(bind_error("GROUP BY requires at least one column"));
-            }
-            if position > 0 {
-                body.push_str(", ");
-            }
-            body.push('(');
-            body.push_str(item);
-            body.push(')');
-        }
-        replacements.push((start, end, body));
-    }
-    if let Some((start, end)) = surface.having_body {
-        let condition = source[start..end].trim();
-        if condition.is_empty() {
-            return Err(bind_error("HAVING requires a condition"));
-        }
-        replacements.push((start, end, format!("({condition})")));
-    }
-    if replacements.is_empty() {
-        return Ok(None);
-    }
-    replacements.sort_by(|left, right| right.0.cmp(&left.0));
-    let mut rewritten = source.to_string();
-    for (start, end, replacement) in replacements {
-        rewritten.replace_range(start..end, &replacement);
-    }
-    Ok(Some(rewritten))
-}
-
-fn skip_line_comment(bytes: &[u8], mut index: usize) -> usize {
-    while index < bytes.len() && bytes[index] != b'\n' {
-        index += 1;
-    }
-    index
-}
-
-fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
-    while index + 1 < bytes.len() {
-        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
-            return index + 2;
-        }
-        index += 1;
-    }
-    bytes.len()
-}
-
-fn skip_quoted(bytes: &[u8], mut index: usize, quote: u8) -> usize {
-    let closing = if quote == b'[' { b']' } else { quote };
-    index += 1;
-    while index < bytes.len() {
-        if bytes[index] == b'\\' && quote == b'\'' {
-            index += 2;
-            continue;
-        }
-        if bytes[index] == closing {
-            if bytes.get(index + 1) == Some(&closing) {
-                index += 2;
-                continue;
-            }
-            return index + 1;
-        }
-        index += 1;
-    }
-    bytes.len()
-}
-
 /// Binds one Oak `SELECT` — shared by top-level statements and `IN (SELECT ...)` subqueries.
-fn bind_select_statement(select: &oak_sql::ast::SelectStatement, distinct: bool) -> Result<SqlBoundSelect, SqlFrontendError> {
+fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBoundSelect, SqlFrontendError> {
+    let distinct = match &select.quantifier {
+        None | Some(oak_sql::ast::SelectQuantifier::All { .. }) => false,
+        Some(oak_sql::ast::SelectQuantifier::Distinct { .. }) => true,
+        Some(oak_sql::ast::SelectQuantifier::DistinctOn { .. }) => {
+            return Err(SqlFrontendError::unsupported("SELECT DISTINCT ON is outside the gateway subset"));
+        }
+    };
     let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
     let (limit, offset) = match &select.limit {
         Some(clause) => {
@@ -1023,6 +674,11 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement, distinct: bool)
                 .items
                 .iter()
                 .map(|item| {
+                    if item.nulls.is_some() {
+                        return Err(SqlFrontendError::unsupported(
+                            "ORDER BY NULLS FIRST/LAST is not wired into gateway ordering yet",
+                        ));
+                    }
                     Ok(SqlBoundOrderByItem {
                         expr: bind_expression(&item.expr)?,
                         direction: match item.direction {
@@ -1204,6 +860,11 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
             if SqlAggregateFunction::from_name(&fname).is_some() {
+                if bound_args.is_empty() {
+                    return Err(SqlFrontendError::unsupported(
+                        "aggregate functions require an argument, and aggregate DISTINCT forms such as COUNT(DISTINCT x) are outside the gateway subset",
+                    ));
+                }
                 return Ok(SqlBoundExpression::Function { name: fname, args: bound_args });
             }
             let scalar = SqlScalarFunction::from_name(&fname).ok_or_else(|| {
@@ -1234,7 +895,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
         }
         Expression::InSubquery { expr, query, negated, .. } => Ok(SqlBoundExpression::InSubquery {
             expression: Box::new(bind_expression(expr)?),
-            select: Box::new(bind_select_statement(query, false)?),
+            select: Box::new(bind_select_statement(query)?),
             negated: *negated,
         }),
         // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
