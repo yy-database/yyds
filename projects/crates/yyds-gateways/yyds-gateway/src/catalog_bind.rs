@@ -3,7 +3,7 @@
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind,
     SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
-    SqlBoundUpdate, SqlErrorKind, SqlFrontendError,
+    SqlBoundUpdate, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
 };
 use vos::{
     ast::{BuiltinType, TypeExpr},
@@ -348,9 +348,20 @@ pub struct SqlCatalogBoundSelect {
     /// Optional OFFSET count, propagated from the gateway binder.
     pub offset: Option<usize>,
     /// Optional ORDER BY items, propagated from the gateway binder.
-    pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+    pub order_by: Option<Vec<SqlCatalogBoundOrderByItem>>,
     /// Whether the projection list carries the `DISTINCT` modifier.
     pub distinct: bool,
+}
+
+/// One ORDER BY item after SQL names are bound to YYDS catalog identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlCatalogBoundOrderByItem {
+    /// Ordering expression.
+    pub expression: SqlCatalogBoundExpression,
+    /// Sort direction.
+    pub direction: SqlBoundOrderDirection,
+    /// Explicit `NULLS FIRST` / `NULLS LAST`, when written.
+    pub nulls: Option<SqlNullsOrder>,
 }
 
 /// One JOIN clause after SQL names are bound to YYDS catalog identity.
@@ -561,7 +572,13 @@ fn bind_select(
         Some(items) => {
             let bound = items
                 .into_iter()
-                .map(|item| Ok((bind_expression(item.expr, &sources, catalog, variables)?, item.direction)))
+                .map(|item| {
+                    Ok(SqlCatalogBoundOrderByItem {
+                        expression: bind_expression(item.expr, &sources, catalog, variables)?,
+                        direction: item.direction,
+                        nulls: item.nulls,
+                    })
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             Some(bound)
         }

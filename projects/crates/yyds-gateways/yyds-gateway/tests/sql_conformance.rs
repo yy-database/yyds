@@ -189,7 +189,6 @@ fn sql_distinct_unsupported_shapes_are_rejected() {
         "SELECT DISTINCT COUNT(*) FROM users",
         "SELECT DISTINCT age FROM users ORDER BY id",
         "SELECT COUNT(DISTINCT age) FROM users",
-        "SELECT id FROM users ORDER BY id NULLS FIRST",
     ] {
         let error = fixture.execute(None, sql).expect_err(sql);
         assert!(!error.is_empty(), "`{sql}` must report a reason");

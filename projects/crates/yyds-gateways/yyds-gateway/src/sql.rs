@@ -331,11 +331,12 @@ pub enum SqlBoundJoinKind {
     Full,
 }
 
-/// One SQL ORDER BY item — expression + direction.
+/// One SQL ORDER BY item — expression, direction and explicit NULL placement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundOrderByItem {
     pub expr: SqlBoundExpression,
     pub direction: SqlBoundOrderDirection,
+    pub nulls: Option<SqlNullsOrder>,
 }
 
 /// Sort direction for ORDER BY.
@@ -343,6 +344,13 @@ pub struct SqlBoundOrderByItem {
 pub enum SqlBoundOrderDirection {
     Asc,
     Desc,
+}
+
+/// Explicit `NULLS FIRST` / `NULLS LAST` written in ORDER BY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlNullsOrder {
+    First,
+    Last,
 }
 
 /// SQL INSERT request owned by the compatibility gateway.
@@ -674,17 +682,16 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
                 .items
                 .iter()
                 .map(|item| {
-                    if item.nulls.is_some() {
-                        return Err(SqlFrontendError::unsupported(
-                            "ORDER BY NULLS FIRST/LAST is not wired into gateway ordering yet",
-                        ));
-                    }
                     Ok(SqlBoundOrderByItem {
                         expr: bind_expression(&item.expr)?,
                         direction: match item.direction {
                             oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
                             oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
                         },
+                        nulls: item.nulls.map(|nulls| match nulls {
+                            oak_sql::ast::NullsOrder::First => SqlNullsOrder::First,
+                            oak_sql::ast::NullsOrder::Last => SqlNullsOrder::Last,
+                        }),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;

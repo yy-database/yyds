@@ -1424,6 +1424,49 @@ fn sql_null_is_distinct_from_empty_string() {
 }
 
 #[test]
+fn sql_order_by_nulls_first_last_overrides_dialect_default() {
+    use yyds_gateway::SqlDialect;
+
+    let (catalog, executor) = nullable_users();
+    let ids = |dialect: SqlDialect, sql: &str| -> Vec<yyds_gateway::SqlValue> {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("order bind");
+        let plan = yyds_gateway::plan_statement_for_dialect(bound, &catalog, dialect).expect("order plan");
+        yyds_gateway::execute_plan(&executor, None, &plan)
+            .expect("order exec")
+            .rows
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect()
+    };
+    let integer = yyds_gateway::SqlValue::Integer;
+
+    // PostgreSQL 视 NULL 为最大值：ASC 置后，DESC 置前。
+    assert_eq!(ids(SqlDialect::Postgres, "SELECT id FROM users ORDER BY age ASC"), vec![integer(2), integer(3), integer(1)]);
+    assert_eq!(ids(SqlDialect::Postgres, "SELECT id FROM users ORDER BY age DESC"), vec![integer(1), integer(3), integer(2)]);
+    // MySQL 视 NULL 为最小值：ASC 置前，DESC 置后。
+    assert_eq!(ids(SqlDialect::Mysql, "SELECT id FROM users ORDER BY age ASC"), vec![integer(1), integer(2), integer(3)]);
+    assert_eq!(ids(SqlDialect::Mysql, "SELECT id FROM users ORDER BY age DESC"), vec![integer(3), integer(2), integer(1)]);
+
+    // 显式 NULLS FIRST/LAST 覆盖方言默认。
+    assert_eq!(
+        ids(SqlDialect::Postgres, "SELECT id FROM users ORDER BY age ASC NULLS FIRST"),
+        vec![integer(1), integer(2), integer(3)]
+    );
+    assert_eq!(
+        ids(SqlDialect::Postgres, "SELECT id FROM users ORDER BY age DESC NULLS LAST"),
+        vec![integer(3), integer(2), integer(1)]
+    );
+    assert_eq!(
+        ids(SqlDialect::Mysql, "SELECT id FROM users ORDER BY age ASC NULLS LAST"),
+        vec![integer(2), integer(3), integer(1)]
+    );
+    assert_eq!(
+        ids(SqlDialect::Mysql, "SELECT id FROM users ORDER BY age DESC NULLS FIRST"),
+        vec![integer(1), integer(3), integer(2)]
+    );
+}
+
+#[test]
 fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
     let (catalog, executor) = nullable_users();
 
