@@ -123,9 +123,9 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
     assert!(matches!(
         &select.projections[1],
         SqlBoundProjection::Expression {
-            expression: SqlBoundExpression::Literal(SqlBoundLiteral::Number(value)),
+            expression: SqlBoundExpression::Literal(SqlBoundLiteral::Integer(value)),
             alias: Some(alias),
-        } if value == "1" && alias == "constant"
+        } if *value == 1 && alias == "constant"
     ));
     assert!(select.predicate.is_some());
 }

@@ -502,6 +502,26 @@ fn sql_is_predicates_follow_three_valued_logic() {
     );
 }
 
+/// 纯整数形式的字面量绑定为 `i64`，只在小数点或指数出现时才走浮点。
+/// 超出 `i64` 的整数与无法用有限 `f64` 表示的字面量都直接报错。
+#[test]
+fn sql_numeric_literals_keep_integer_precision() {
+    let fixture = Fixture::new();
+    let values = |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}`: {error}")).rows;
+
+    assert_eq!(values("SELECT 9007199254740993"), rows(&[&[Lit::Int(9_007_199_254_740_993)]]));
+    assert_eq!(values("SELECT 9223372036854775807"), rows(&[&[Lit::Int(i64::MAX)]]));
+    assert_eq!(values("SELECT -9223372036854775808"), rows(&[&[Lit::Int(i64::MIN)]]));
+    assert_eq!(values("SELECT 1.0"), rows(&[&[Lit::Float(1.0)]]));
+    assert_eq!(
+        values("SELECT 9007199254740993 = 9007199254740992, 9007199254740993 - 9007199254740992"),
+        rows(&[&[Lit::Bool(false), Lit::Int(1)]])
+    );
+
+    assert!(fixture.execute(None, "SELECT 9223372036854775808").is_err());
+    assert!(fixture.execute(None, "SELECT 1e309").is_err());
+}
+
 #[test]
 fn sql_conformance_types_aggregates_and_paging() {
     use Lit::{Float, Int, Null, Text};

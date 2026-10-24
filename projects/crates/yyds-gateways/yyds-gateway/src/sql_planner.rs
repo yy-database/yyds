@@ -779,6 +779,7 @@ fn combine_remaining(
 
 fn pk_literal_to_rowid(literal: &SqlBoundLiteral) -> Result<Vec<u8>, SqlFrontendError> {
     match literal {
+        SqlBoundLiteral::Integer(value) => Ok(value.to_string().into_bytes()),
         SqlBoundLiteral::Number(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::String(text) => Ok(text.as_bytes().to_vec()),
         SqlBoundLiteral::Boolean(value) => Ok((if *value { "1" } else { "0" }).as_bytes().to_vec()),
@@ -831,6 +832,7 @@ fn find_table(catalog: &SqlCatalog, type_id: u64) -> Result<&crate::SqlCatalogTa
 fn scalar_projection_label(expr: &SqlCatalogBoundExpression) -> String {
     match expr {
         SqlCatalogBoundExpression::Literal(lit) => match lit {
+            SqlBoundLiteral::Integer(value) => value.to_string(),
             SqlBoundLiteral::Number(text) | SqlBoundLiteral::String(text) => text.clone(),
             SqlBoundLiteral::Boolean(value) => if *value { "true" } else { "false" }.to_string(),
             SqlBoundLiteral::Null => "NULL".to_string(),
