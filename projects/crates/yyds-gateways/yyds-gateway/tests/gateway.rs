@@ -1479,11 +1479,7 @@ fn sql_group_by_ordinal_and_unqualified_having() {
     // `GROUP BY 1` resolves to the first projection expression (`age`).
     assert_eq!(
         rows("SELECT age, COUNT(*) FROM users GROUP BY 1 ORDER BY age ASC"),
-        vec![
-            vec![integer(0), integer(1)],
-            vec![integer(10), integer(1)],
-            vec![yyds_gateway::SqlValue::Null, integer(1)],
-        ]
+        vec![vec![integer(0), integer(1)], vec![integer(10), integer(1)], vec![yyds_gateway::SqlValue::Null, integer(1)],]
     );
     // HAVING binds without GROUP BY and filters the global aggregate row.
     assert_eq!(rows("SELECT COUNT(*) FROM users HAVING COUNT(*) > 2"), vec![vec![integer(3)]]);

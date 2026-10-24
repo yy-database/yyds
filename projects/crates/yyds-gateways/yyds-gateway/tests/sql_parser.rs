@@ -43,8 +43,7 @@ fn select_clauses_come_from_ast_fields() {
     };
     assert_eq!(select.group_by, Some(vec![SqlBoundExpression::Identifier("age".into())]));
 
-    let SqlBoundStatement::Select(select) =
-        bind_sql("SELECT age FROM users ORDER BY age DESC NULLS FIRST").expect("bind")
+    let SqlBoundStatement::Select(select) = bind_sql("SELECT age FROM users ORDER BY age DESC NULLS FIRST").expect("bind")
     else {
         panic!("expected SELECT")
     };
@@ -92,7 +91,8 @@ fn select_distinct_modifier_is_bound() {
     else {
         panic!("expected SELECT")
     };
-    let Some(yyds_gateway::SqlBoundExpression::InSubquery { select, .. }) = subquery.predicate else {
+    let Some(yyds_gateway::SqlBoundExpression::InSubquery { select, .. }) = subquery.predicate
+    else {
         panic!("expected IN (SELECT ...) predicate")
     };
     assert!(select.distinct);
