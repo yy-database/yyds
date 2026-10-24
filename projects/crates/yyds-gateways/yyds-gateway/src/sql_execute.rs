@@ -1262,6 +1262,16 @@ fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue) ->
     }
     Ok(match (left, right) {
         (Integer(a), Integer(b)) => integer_binary(op, *a, *b)?,
+        // 整数与浮点混合比较必须先走精确序关系，否则 2^53 以上的 `i64` 会先被
+        // 舍入成 `f64`，导致 `9007199254740993 > 9007199254740992.0` 判成相等。
+        (Integer(a), Number(b)) if is_comparison(op) => match compare_integer_float(*a, *b) {
+            Some(ordering) => comparison_value(op, ordering),
+            None => float_binary(op, *a as f64, *b),
+        },
+        (Number(a), Integer(b)) if is_comparison(op) => match compare_integer_float(*b, *a) {
+            Some(ordering) => comparison_value(op, ordering.reverse()),
+            None => float_binary(op, *a, *b as f64),
+        },
         (Integer(a), Number(b)) => float_binary(op, *a as f64, *b),
         (Number(a), Integer(b)) => float_binary(op, *a, *b as f64),
         (Number(a), Number(b)) => float_binary(op, *a, *b),
@@ -1282,6 +1292,58 @@ fn eval_binary(op: SqlBoundBinaryOperator, left: &SqlValue, right: &SqlValue) ->
         },
         _ => Null,
     })
+}
+
+/// 比较类操作符（`=`/`<>`/`<`/`>`/`<=`/`>=`），其余是算术或逻辑操作符。
+fn is_comparison(op: SqlBoundBinaryOperator) -> bool {
+    matches!(
+        op,
+        SqlBoundBinaryOperator::Equal
+            | SqlBoundBinaryOperator::NotEqual
+            | SqlBoundBinaryOperator::Less
+            | SqlBoundBinaryOperator::Greater
+            | SqlBoundBinaryOperator::LessEqual
+            | SqlBoundBinaryOperator::GreaterEqual
+    )
+}
+
+/// 把一个精确序关系映射成布尔比较结果。调用方保证 `op` 是比较操作符。
+fn comparison_value(op: SqlBoundBinaryOperator, ordering: std::cmp::Ordering) -> SqlValue {
+    SqlValue::Boolean(match op {
+        SqlBoundBinaryOperator::Equal => ordering.is_eq(),
+        SqlBoundBinaryOperator::NotEqual => !ordering.is_eq(),
+        SqlBoundBinaryOperator::Less => ordering.is_lt(),
+        SqlBoundBinaryOperator::Greater => ordering.is_gt(),
+        SqlBoundBinaryOperator::LessEqual => ordering.is_le(),
+        SqlBoundBinaryOperator::GreaterEqual => ordering.is_ge(),
+        _ => false,
+    })
+}
+
+/// 精确比较 `i64` 与 `f64`。浮点是 NaN 时返回 `None`，调用方保留原有浮点比较语义。
+///
+/// `i64` 的上下界在 `f64` 中可精确表示：`i64::MIN as f64 == -2^63`，
+/// 而 `i64::MAX as f64` 向上舍入到 `2^63`。因此先把浮点截断成整数再比较，
+/// 只有整数部分相等时才用小数部分决定序关系，避免 `i64` 先转 `f64` 丢精度。
+fn compare_integer_float(integer: i64, float: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if float.is_nan() {
+        return None;
+    }
+    const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
+    if float >= TWO_POW_63 {
+        return Some(Ordering::Less);
+    }
+    if float < -TWO_POW_63 {
+        return Some(Ordering::Greater);
+    }
+    let truncated = float.trunc();
+    let truncated_integer = truncated as i64;
+    match integer.cmp(&truncated_integer) {
+        Ordering::Equal if float > truncated => Some(Ordering::Less),
+        Ordering::Equal if float < truncated => Some(Ordering::Greater),
+        other => Some(other),
+    }
 }
 
 /// 整数之间的四则与比较：加、减、乘、模保持精确整数，只在溢出时显式报错。
@@ -1494,8 +1556,13 @@ fn compare_values(a: Option<&SqlValue>, b: Option<&SqlValue>) -> std::cmp::Order
         (Some(_), None | Some(SqlValue::Null)) => Ordering::Less,
         (Some(x), Some(y)) => match (x, y) {
             (SqlValue::Integer(n1), SqlValue::Integer(n2)) => n1.cmp(n2),
-            (SqlValue::Integer(n1), SqlValue::Number(n2)) => (*n1 as f64).partial_cmp(n2).unwrap_or(Ordering::Equal),
-            (SqlValue::Number(n1), SqlValue::Integer(n2)) => n1.partial_cmp(&(*n2 as f64)).unwrap_or(Ordering::Equal),
+            // 排序同样不能把 `i64` 先转 `f64`，否则超出 2^53 的行会并列。
+            (SqlValue::Integer(n1), SqlValue::Number(n2)) => {
+                compare_integer_float(*n1, *n2).unwrap_or(Ordering::Equal)
+            }
+            (SqlValue::Number(n1), SqlValue::Integer(n2)) => compare_integer_float(*n2, *n1)
+                .map(Ordering::reverse)
+                .unwrap_or(Ordering::Equal),
             (SqlValue::Number(n1), SqlValue::Number(n2)) => n1.partial_cmp(n2).unwrap_or(Ordering::Equal),
             (SqlValue::String(s1), SqlValue::String(s2)) => s1.cmp(s2),
             (SqlValue::Boolean(b1), SqlValue::Boolean(b2)) => b1.cmp(b2),
