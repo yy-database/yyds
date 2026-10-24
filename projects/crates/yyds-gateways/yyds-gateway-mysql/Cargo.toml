@@ -20,5 +20,6 @@ yyds-types = { workspace = true }
 vos = { workspace = true }
 yyds-execution = { workspace = true }
 yyds-gateway = { workspace = true }
+yyds-gateway-conformance = { workspace = true }
 yyds-kv = { workspace = true }
 yyds-types = { workspace = true }
