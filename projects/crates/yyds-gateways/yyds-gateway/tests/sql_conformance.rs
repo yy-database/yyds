@@ -13,8 +13,8 @@ use yyds_gateway::{
     SqlValue,
 };
 use yyds_gateway_conformance::{
-    crud_cases, distinct_cases, group_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED,
-    USERS_SCHEMA,
+    crud_cases, distinct_cases, group_cases, order_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION,
+    SEED, USERS_SCHEMA,
 };
 use yyds_kv::MemoryShard;
 
@@ -136,6 +136,11 @@ fn sql_conformance_distinct() {
 #[test]
 fn sql_conformance_group_by_and_having() {
     run_cases(&group_cases());
+}
+
+#[test]
+fn sql_conformance_order_by() {
+    run_cases(&order_cases());
 }
 
 #[test]
