@@ -294,6 +294,24 @@ pub enum SqlCatalogBoundExpression {
         /// Operand.
         expression: Box<Self>,
     },
+    /// `expr IN (<subquery>)` with the subquery already planned.
+    InSubquery {
+        /// Left-hand side expression.
+        expression: Box<Self>,
+        /// Executable plan for the subquery.
+        plan: Box<crate::sql_planner::SqlExecutionPlan>,
+        /// Whether the predicate is spelled `NOT IN`.
+        negated: bool,
+    },
+    /// `IN` predicate whose subquery rows were materialized before evaluation.
+    InValues {
+        /// Left-hand side expression.
+        expression: Box<Self>,
+        /// Literal values produced by the subquery.
+        values: Vec<SqlBoundLiteral>,
+        /// Whether the predicate is spelled `NOT IN`.
+        negated: bool,
+    },
 }
 
 /// SQL projection after catalog binding.
@@ -608,6 +626,16 @@ fn bind_expression(
                 args.into_iter().map(|arg| bind_expression(arg, sources, catalog, variables)).collect::<Result<Vec<_>, _>>()?;
             Ok(SqlCatalogBoundExpression::Function { name, args: bound_args })
         }
+        SqlBoundExpression::InSubquery { expression, select, negated } => {
+            // 子查询自带 FROM 作用域，不继承外层 sources，因此不支持相关子查询。
+            let bound_select = bind_select(*select, catalog, variables)?;
+            let plan = crate::sql_planner::plan_select(bound_select, catalog)?;
+            Ok(SqlCatalogBoundExpression::InSubquery {
+                expression: Box::new(bind_expression(*expression, sources, catalog, variables)?),
+                plan: Box::new(plan),
+                negated,
+            })
+        }
     }
 }
 
@@ -699,6 +727,8 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
             collect_column_ids(right, out);
         }
         SqlCatalogBoundExpression::Unary { expression, .. } => collect_column_ids(expression, out),
+        SqlCatalogBoundExpression::InSubquery { expression, .. }
+        | SqlCatalogBoundExpression::InValues { expression, .. } => collect_column_ids(expression, out),
         SqlCatalogBoundExpression::Literal(_) | SqlCatalogBoundExpression::Wildcard => {}
     }
 }

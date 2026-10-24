@@ -286,22 +286,18 @@ fn sql_conformance_crud_and_predicates() {
         case("select not predicate")
             .sql("SELECT id FROM users WHERE NOT (age = 20) ORDER BY id")
             .rows(&[&[Int(1)], &[Int(3)]])
-            .pending("`oak-sql` does not project `NOT` into a predicate the planner can evaluate")
             .build(),
         case("select is null")
             .sql("SELECT id FROM users WHERE tag IS NULL")
             .rows(&[&[Int(2)]])
-            .pending("`oak-sql` folds `IS NULL` into `= NULL`, so the predicate is always NULL")
             .build(),
         case("select is not null")
             .sql("SELECT id FROM users WHERE tag IS NOT NULL ORDER BY id")
             .rows(&[&[Int(1)], &[Int(3)]])
-            .pending("`oak-sql` folds `IS NOT NULL` into `<> NULL`, so the predicate is always NULL")
             .build(),
         case("select in subquery")
             .sql("SELECT id FROM users WHERE id IN (SELECT id FROM users WHERE age = 20)")
             .rows(&[&[Int(2)]])
-            .pending("`IN (SELECT ...)` subquery is not projected by `oak-sql` yet")
             .build(),
         case("select null equality stays unknown")
             .sql("SELECT id FROM users WHERE tag = NULL")
@@ -314,7 +310,6 @@ fn sql_conformance_crud_and_predicates() {
         case("select null not stays unknown")
             .sql("SELECT id FROM users WHERE NOT (NULL = NULL)")
             .rows(&[])
-            .pending("`oak-sql` drops a `WHERE NOT (...)` predicate during binding, so the filter is skipped")
             .build(),
         case("parameter question mark numeric")
             .sql("SELECT id FROM users WHERE age >= ? ORDER BY id")
