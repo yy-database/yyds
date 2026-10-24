@@ -105,6 +105,8 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
             projection_fields,
             projection_expressions,
             remaining_predicate,
+            // `LIMIT 0` 按 SQL 语义返回空结果集，单点读同样不能绕过。
+            suppress_rows: select.limit == Some(0),
             field_types: field_types.clone(),
         }));
     }
@@ -135,6 +137,7 @@ pub fn plan_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resul
         order_by: select.order_by,
         limit_after_sort,
         offset_after_sort,
+        suppress_rows: select.limit == Some(0),
         has_aggregate,
         field_types,
     }))
@@ -216,6 +219,7 @@ fn plan_join_select(select: SqlCatalogBoundSelect, catalog: &SqlCatalog) -> Resu
         order_by,
         limit_after_sort: limit.unwrap_or(0),
         offset_after_sort: offset.unwrap_or(0),
+        suppress_rows: limit == Some(0),
         field_types,
     }))
 }
@@ -391,6 +395,8 @@ pub struct ReadPlan {
     pub projection_expressions: Vec<(SqlCatalogBoundExpression, String)>,
     /// 从原 WHERE 里剥掉主键等值后剩下的表达式；`None` 表示没有剩余。
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
+    /// `LIMIT 0`：结果集必须为空，不允许单点读绕过。
+    pub suppress_rows: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
@@ -428,6 +434,8 @@ pub struct ScanPlan {
     /// True when any projection expression is an aggregate function
     /// (COUNT/SUM/AVG/MAX/MIN). execute_scan will produce aggregated result rows.
     pub has_aggregate: bool,
+    /// `LIMIT 0`：结果集必须为空，包括聚合结果。
+    pub suppress_rows: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }
@@ -451,6 +459,8 @@ pub struct JoinPlan {
     pub limit_after_sort: usize,
     /// 排序之后才应用的 OFFSET。默认 0。
     pub offset_after_sort: usize,
+    /// `LIMIT 0`：结果集必须为空。
+    pub suppress_rows: bool,
     /// field_id → SqlFieldType 映射，execute 层 decode_row / 求值用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 }

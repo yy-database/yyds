@@ -337,6 +337,9 @@ fn execute_read(
     transaction: Option<&dyn TransactionHandle>,
     plan: &ReadPlan,
 ) -> Result<SqlResult, SqlFrontendError> {
+    if plan.suppress_rows {
+        return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new(), affected_rows: 0 });
+    }
     let namespace = Namespace(plan.namespace.clone());
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Get };
     let batch_result = match transaction {
@@ -384,6 +387,10 @@ fn execute_join(
     transaction: Option<&dyn TransactionHandle>,
     plan: &JoinPlan,
 ) -> Result<SqlResult, SqlFrontendError> {
+    let columns = join_column_labels(plan);
+    if plan.suppress_rows {
+        return Ok(SqlResult { columns, rows: Vec::new(), affected_rows: 0 });
+    }
     let mut rows = scan_join_source(executor, transaction, &plan.base)?;
     for source in &plan.joins {
         let right_rows = scan_join_source(executor, transaction, source)?;
@@ -403,7 +410,6 @@ fn execute_join(
         rows = merged;
     }
 
-    let columns = join_column_labels(plan);
     let mut staged: Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)> = Vec::new();
     for row in &rows {
         if let Some(predicate) = &plan.remaining_predicate {
@@ -492,6 +498,10 @@ fn execute_scan(
     transaction: Option<&dyn TransactionHandle>,
     plan: &ScanPlan,
 ) -> Result<SqlResult, SqlFrontendError> {
+    let columns = scan_column_labels(plan);
+    if plan.suppress_rows {
+        return Ok(SqlResult { columns, rows: Vec::new(), affected_rows: 0 });
+    }
     let namespace = Namespace(plan.namespace.clone());
     let scanned = scan_rows(
         executor,
@@ -504,7 +514,6 @@ fn execute_scan(
         "scan",
     )?;
 
-    let columns = scan_column_labels(plan);
     let needed_ids = scan_needed_field_ids(plan);
 
     // Top-N heap 优化：ORDER BY + (LIMIT 或 OFFSET) 时，用 BinaryHeap 保留 Top-N，
@@ -1218,7 +1227,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 /// Render a numeric SQL value with no trailing `.0` for integral values.
-fn format_number(value: f64) -> String {
+pub(crate) fn format_number(value: f64) -> String {
     if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 {
         format!("{}", value as i64)
     }
