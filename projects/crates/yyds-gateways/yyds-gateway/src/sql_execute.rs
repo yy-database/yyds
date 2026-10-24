@@ -18,7 +18,7 @@ use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 use crate::{
     catalog_bind::{collect_column_ids, SqlCatalogBoundExpression},
     sql::{
-        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlFrontendError,
+        SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlErrorKind, SqlFrontendError,
         SqlScalarFunction,
     },
     sql_planner::{
@@ -947,6 +947,12 @@ fn execute_insert(
     };
     let affected = match result {
         yyds_types::KeyValueResult::PutIfAbsent { revision: Some(_) } => 1,
+        yyds_types::KeyValueResult::PutIfAbsent { revision: None } => {
+            return Err(SqlFrontendError::new(
+                SqlErrorKind::UniqueViolation,
+                format!("duplicate key value violates unique constraint: {}", plan.namespace),
+            ));
+        }
         _ => 0,
     };
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
@@ -996,7 +1002,7 @@ fn execute_update(
         // 另一个事务在此期间提交同一行时 COMMIT 会被拒绝，而不是静默覆盖。
         Some(handle) => handle
             .write_if_unchanged(put_cmd, Some(existing_bytes))
-            .map_err(|e| execute_error(&format!("TransactionHandle.update failed: {e}")))?,
+            .map_err(|e| write_error(format!("TransactionHandle.update failed: {e}"), &e))?,
         None => executor.execute(put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
     };
     let _ = put_result;
@@ -1047,7 +1053,7 @@ fn execute_delete(
         // 事务内 DELETE 同样交给 OCC：pre-image 已被并发事务改写时 COMMIT 被拒绝。
         Some(handle) => handle
             .write_if_unchanged(command, pre_image)
-            .map_err(|e| execute_error(&format!("TransactionHandle.delete failed: {e}")))?,
+            .map_err(|e| write_error(format!("TransactionHandle.delete failed: {e}"), &e))?,
         None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
     };
     let affected = match delete_result {
@@ -1096,7 +1102,7 @@ fn execute_update_scan(
         match transaction {
             Some(handle) => handle
                 .write_if_unchanged(command, Some(pre_image))
-                .map_err(|e| execute_error(&format!("TransactionHandle.update_scan failed: {e}")))?,
+                .map_err(|e| write_error(format!("TransactionHandle.update_scan failed: {e}"), &e))?,
             None => {
                 executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.update_scan failed: {e}")))?
             }
@@ -1137,7 +1143,7 @@ fn execute_delete_scan(
             // 事务内逐行删除同样走 OCC：pre-image 被并发改写时 COMMIT 被拒绝。
             Some(handle) => handle
                 .write_if_unchanged(command, Some(pre_image))
-                .map_err(|e| execute_error(&format!("TransactionHandle.delete_scan failed: {e}")))?,
+                .map_err(|e| write_error(format!("TransactionHandle.delete_scan failed: {e}"), &e))?,
             None => {
                 executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete_scan failed: {e}")))?
             }
@@ -1865,7 +1871,16 @@ fn eval_having(
 }
 
 fn execute_error(message: &str) -> SqlFrontendError {
-    SqlFrontendError { message: message.into() }
+    SqlFrontendError::new(SqlErrorKind::Execution, message)
+}
+
+/// Storage failures that other transactions can resolve by retrying are
+/// reported as serialization conflicts rather than generic execution errors.
+fn write_error(message: String, error: &yyds_types::Error) -> SqlFrontendError {
+    match error {
+        yyds_types::Error::CasConflict { .. } => SqlFrontendError::new(SqlErrorKind::Conflict, message),
+        _ => SqlFrontendError::new(SqlErrorKind::Execution, message),
+    }
 }
 
 /// NULLs sort last (standard SQL behavior). Mixed types collate equal.

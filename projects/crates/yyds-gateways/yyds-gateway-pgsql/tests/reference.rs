@@ -226,6 +226,34 @@ except psycopg2.Error as error:
 else:
     raise AssertionError('malformed SQL unexpectedly passed Oak parsing')
 connection.rollback()
+try:
+    cursor.execute("SELECT nope FROM users")
+except psycopg2.Error as error:
+    assert error.pgcode == '42703', (error.pgcode, str(error))
+else:
+    raise AssertionError('unknown column unexpectedly resolved')
+connection.rollback()
+try:
+    cursor.execute("INSERT INTO users VALUES (9, 42, 0, 0.0, 1)")
+except psycopg2.Error as error:
+    assert error.pgcode == '42804', (error.pgcode, str(error))
+else:
+    raise AssertionError('integer write into a text column unexpectedly passed')
+connection.rollback()
+try:
+    cursor.execute("INSERT INTO users VALUES (NULL, 'x', 0, 0.0, 1)")
+except psycopg2.Error as error:
+    assert error.pgcode == '23502', (error.pgcode, str(error))
+else:
+    raise AssertionError('NULL primary key unexpectedly passed')
+connection.rollback()
+try:
+    cursor.execute("INSERT INTO users VALUES (1, 'dup', 0, 0.0, 1)")
+except psycopg2.Error as error:
+    assert error.pgcode == '23505', (error.pgcode, str(error))
+else:
+    raise AssertionError('duplicate primary key unexpectedly passed')
+connection.rollback()
 
 # 7. Concurrent read-modify-write must surface a serialization failure at COMMIT
 other = connect()

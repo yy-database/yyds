@@ -13,7 +13,7 @@ use std::{
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog_with_variables, execute_plan, parse_session_command, plan_statement, SqlBoundExpression, SqlBoundLiteral,
-    SqlCatalog, SqlExecutionPlan, SqlFrontendError, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    SqlCatalog, SqlErrorKind, SqlExecutionPlan, SqlFrontendError, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -75,7 +75,9 @@ fn mysql_system_variable(name: &str) -> Result<SqlBoundLiteral, SqlFrontendError
         .iter()
         .find(|(candidate, _)| *candidate == variable)
         .map(|(_, value)| *value)
-        .ok_or_else(|| SqlFrontendError { message: format!("Unknown system variable '{variable}'").into() })?;
+        .ok_or_else(|| {
+            SqlFrontendError::new(SqlErrorKind::UnknownVariable, format!("Unknown system variable '{variable}'"))
+        })?;
     if !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()) {
         if let Ok(number) = value.parse::<i64>() {
             return Ok(SqlBoundLiteral::Integer(number));
@@ -502,7 +504,7 @@ fn execute_sql(
         Ok(bound) => bound,
         Err(error) => {
             session.fail();
-            write_error(stream, sequence, 1064, "42000", &format!("SQL bind error: {}", error.message))?;
+            write_statement_error(stream, sequence, "bind", error)?;
             return Ok(());
         }
     };
@@ -510,7 +512,7 @@ fn execute_sql(
         Ok(plan) => plan,
         Err(error) => {
             session.fail();
-            write_error(stream, sequence, 1235, "42000", &format!("SQL plan error: {}", error.message))?;
+            write_statement_error(stream, sequence, "plan", error)?;
             return Ok(());
         }
     };
@@ -525,7 +527,7 @@ fn execute_sql(
         Ok(result) => result,
         Err(error) => {
             session.fail();
-            write_error(stream, sequence, 5000, "HY000", &format!("SQL execution error: {}", error.message))?;
+            write_statement_error(stream, sequence, "execution", error)?;
             return Ok(());
         }
     };
@@ -534,6 +536,37 @@ fn execute_sql(
         return Ok(());
     }
     write_result_set(stream, sequence, &result)
+}
+
+/// Maps a structured gateway failure to its MySQL error number and SQLSTATE.
+fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
+    use SqlErrorKind::*;
+    match kind {
+        Syntax => (1064, "42000"),
+        UnknownTable | UnknownTableQualifier => (1146, "42S02"),
+        AmbiguousTable | AmbiguousColumn => (1052, "23000"),
+        UnknownColumn => (1054, "42S22"),
+        TypeMismatch => (1366, "HY000"),
+        NotNullViolation => (1048, "23000"),
+        Unsupported => (1235, "42000"),
+        UnknownFunction => (1305, "42000"),
+        UnknownVariable => (1193, "HY000"),
+        Catalog => (1105, "HY000"),
+        Parameter => (1210, "HY000"),
+        UniqueViolation => (1062, "23000"),
+        Conflict => (1213, "40001"),
+        Execution => (1105, "HY000"),
+    }
+}
+
+fn write_statement_error(
+    stream: &mut impl Write,
+    sequence: u8,
+    stage: &str,
+    error: SqlFrontendError,
+) -> io::Result<()> {
+    let (code, state) = mysql_error_code(error.kind);
+    write_error(stream, sequence, code, state, &format!("SQL {stage} error: {}", error.message))
 }
 
 /// 带 affected_rows 的 MySQL OK packet（INSERT/UPDATE/DELETE）。

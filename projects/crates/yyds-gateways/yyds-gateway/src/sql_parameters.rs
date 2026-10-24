@@ -4,7 +4,7 @@
 //! 再交给 `bind_sql_catalog`。替换只识别字符串、标识符、注释之外的位置，
 //! 不会改写已有字面量内容。SQL 语义本身仍由 planner 和 executor 决定。
 
-use crate::sql::SqlFrontendError;
+use crate::sql::{SqlErrorKind, SqlFrontendError};
 use crate::sql_execute::{format_number, SqlValue};
 
 /// 参数占位符风格。
@@ -34,10 +34,35 @@ pub fn substitute_sql_parameters(
     parameters: &[SqlValue],
     style: SqlParameterStyle,
 ) -> Result<String, SqlFrontendError> {
+    let (out, referenced) = walk_parameters(sql, style, &mut |index| render_parameter(parameters, index, style))?;
+    if referenced < parameters.len() {
+        return Err(parameter_error(&format!(
+            "{} parameters were supplied but only {referenced} placeholders were referenced",
+            style.label()
+        )));
+    }
+    Ok(out)
+}
+
+/// Renders every referenced placeholder as `NULL` and reports how many
+/// positions the statement references. Used to derive statement metadata
+/// (parameter count, row description) without bound values.
+pub fn neutralized_sql_parameters(
+    sql: &str,
+    style: SqlParameterStyle,
+) -> Result<(String, usize), SqlFrontendError> {
+    walk_parameters(sql, style, &mut |_| Ok("NULL".to_string()))
+}
+
+fn walk_parameters(
+    sql: &str,
+    style: SqlParameterStyle,
+    render: &mut dyn FnMut(usize) -> Result<String, SqlFrontendError>,
+) -> Result<(String, usize), SqlFrontendError> {
     let chars: Vec<char> = sql.chars().collect();
-    let mut out = String::with_capacity(sql.len() + parameters.len() * 8);
+    let mut out = String::with_capacity(sql.len() + 16);
     let mut index = 0;
-    let mut next_parameter = 0usize;
+    let mut referenced = 0usize;
 
     while index < chars.len() {
         let current = chars[index];
@@ -67,8 +92,8 @@ pub fn substitute_sql_parameters(
                 }
             }
             '?' if style == SqlParameterStyle::QuestionMark => {
-                out.push_str(&render_parameter(parameters, next_parameter, style)?);
-                next_parameter += 1;
+                out.push_str(&render(referenced)?);
+                referenced += 1;
                 index += 1;
             }
             '$' if style == SqlParameterStyle::DollarNumber && chars.get(index + 1).is_some_and(char::is_ascii_digit) => {
@@ -85,8 +110,8 @@ pub fn substitute_sql_parameters(
                 if ordinal == 0 {
                     return Err(parameter_error("SQL parameter indexes are one-based"));
                 }
-                out.push_str(&render_parameter(parameters, ordinal - 1, style)?);
-                next_parameter = next_parameter.max(ordinal);
+                out.push_str(&render(ordinal - 1)?);
+                referenced = referenced.max(ordinal);
                 index = end;
             }
             _ => {
@@ -96,13 +121,7 @@ pub fn substitute_sql_parameters(
         }
     }
 
-    if next_parameter < parameters.len() {
-        return Err(parameter_error(&format!(
-            "{} parameters were supplied but only {next_parameter} placeholders were referenced",
-            style.label()
-        )));
-    }
-    Ok(out)
+    Ok((out, referenced))
 }
 
 fn copy_quoted(chars: &[char], mut index: usize, quote: char, out: &mut String) -> usize {
@@ -166,5 +185,5 @@ fn render_parameter(
 }
 
 fn parameter_error(message: &str) -> SqlFrontendError {
-    SqlFrontendError { message: message.into() }
+    SqlFrontendError::new(SqlErrorKind::Parameter, message)
 }

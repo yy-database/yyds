@@ -22,7 +22,7 @@ pub use crate::{
         SqlCatalogField, SqlCatalogTable, SqlFieldType,
     },
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
-    sql_parameters::{substitute_sql_parameters, SqlParameterStyle},
+    sql_parameters::{neutralized_sql_parameters, substitute_sql_parameters, SqlParameterStyle},
     sql_planner::{
         plan_select, plan_statement, DeletePlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, SqlExecutionPlan, UpdatePlan,
         WritePlan,
@@ -34,8 +34,8 @@ pub use crate::{
     kind::{GatewayKind, ALL_GATEWAY_KINDS},
     sql::{
         bind_sql, parse_session_command, parse_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundJoin, SqlBoundJoinKind,
-        SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlFrontendError,
-        SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
+        SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator, SqlErrorKind,
+        SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
     },
 };
 

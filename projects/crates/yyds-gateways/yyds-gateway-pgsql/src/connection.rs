@@ -15,7 +15,7 @@ use crate::wire::{decode_message, decode_startup, encode_message, FrameError, St
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, execute_plan, parse_session_command, plan_statement, substitute_sql_parameters, SqlCatalog,
-    SqlExecutionPlan, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    SqlErrorKind, SqlExecutionPlan, SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL 类型 OID：`int8`、`float8`、`bool`、`text`。
@@ -412,11 +412,11 @@ fn run_statement(
     }
     let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version).map_err(|error| {
         session.fail();
-        ("42P01".to_string(), format!("SQL bind error: {}", error.message))
+        statement_error("bind", error)
     })?;
     let plan = plan_statement(bound, &runtime.catalog).map_err(|error| {
         session.fail();
-        ("42883".to_string(), format!("SQL plan error: {}", error.message))
+        statement_error("plan", error)
     })?;
     let is_read = matches!(
         &plan,
@@ -425,7 +425,7 @@ fn run_statement(
     let handle_ref: Option<&dyn TransactionHandle> = session.handle.as_deref();
     let result = execute_plan(runtime.executor.as_ref(), handle_ref, &plan).map_err(|error| {
         session.fail();
-        ("58P01".to_string(), format!("SQL execution error: {}", error.message))
+        statement_error("execution", error)
     })?;
     let command_tag = if is_read {
         format!("SELECT {}", result.rows.len())
@@ -442,6 +442,32 @@ fn run_statement(
         }
     };
     Ok(ExecutionOutcome { is_read, columns: result.columns, rows: result.rows, command_tag })
+}
+
+/// Maps a structured gateway failure to its PostgreSQL SQLSTATE. Protocol code
+/// never inspects diagnostic text to recover the category.
+fn pg_sqlstate(kind: SqlErrorKind) -> &'static str {
+    use SqlErrorKind::*;
+    match kind {
+        Syntax => "42601",
+        UnknownTable | UnknownTableQualifier => "42P01",
+        AmbiguousTable | AmbiguousColumn => "42702",
+        UnknownColumn => "42703",
+        TypeMismatch => "42804",
+        NotNullViolation => "23502",
+        Unsupported => "0A000",
+        UnknownFunction => "42883",
+        UnknownVariable => "42704",
+        Catalog => "XX000",
+        Parameter => "08P01",
+        UniqueViolation => "23505",
+        Conflict => "40001",
+        Execution => "XX000",
+    }
+}
+
+fn statement_error(stage: &str, error: SqlFrontendError) -> (String, String) {
+    (pg_sqlstate(error.kind).to_string(), format!("SQL {stage} error: {}", error.message))
 }
 
 fn write_execution_outcome(stream: &mut impl Write, outcome: &ExecutionOutcome) -> io::Result<()> {
@@ -726,7 +752,7 @@ fn prepare_portal(
         Ok(sql) => sql,
         Err(error) => {
             session.fail();
-            portal.outcome = Some(Err(("42601".to_string(), format!("SQL parameter error: {}", error.message))));
+            portal.outcome = Some(Err(statement_error("parameter", error)));
             return;
         }
     };

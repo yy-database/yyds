@@ -140,6 +140,46 @@ fn transaction_commands_track_failed_state_and_rollback_recovery() {
     server.join().unwrap();
 }
 
+fn assert_sqlstate(client: &mut TcpStream, sql: &str, state: &[u8]) {
+    send_query(client, sql);
+    let responses = receive_until_ready(client);
+    assert_eq!(responses[0].0, b'E', "{sql} must fail");
+    assert!(
+        responses[0].1.windows(state.len()).any(|window| window == state),
+        "{sql} must report SQLSTATE {}, got {}",
+        String::from_utf8_lossy(state),
+        String::from_utf8_lossy(&responses[0].1)
+    );
+    assert_eq!(responses.last().unwrap(), &(b'Z', b"I".to_vec()), "{sql} leaves the session ready");
+}
+
+#[test]
+fn sqlstate_reflects_structured_gateway_errors() {
+    let (mut client, server) = start_server_with_runtime();
+
+    assert_sqlstate(&mut client, "SELECT id FROM missing", b"42P01");
+    assert_sqlstate(&mut client, "SELECT nope FROM users", b"42703");
+    assert_sqlstate(&mut client, "SELECT nope.id FROM users", b"42P01");
+    assert_sqlstate(
+        &mut client,
+        "SELECT id FROM users INNER JOIN orders ON users.id = orders.user_id",
+        b"42702",
+    );
+    assert_sqlstate(&mut client, "SELECT ( FROM users", b"42601");
+    assert_sqlstate(&mut client, "SELECT nope_fn(name) FROM users", b"42883");
+    assert_sqlstate(&mut client, "SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", b"0A000");
+    assert_sqlstate(&mut client, "INSERT INTO users VALUES (1, 42)", b"42804");
+    assert_sqlstate(&mut client, "INSERT INTO users VALUES (NULL, 'x')", b"23502");
+
+    send_query(&mut client, "INSERT INTO users VALUES (1, 'alice')");
+    let inserted = receive_until_ready(&mut client);
+    assert_eq!(inserted[0].0, b'C');
+    assert_sqlstate(&mut client, "INSERT INTO users VALUES (1, 'bob')", b"23505");
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 带 SQL runtime 的服务端，用于验证 PostgreSQL 语法下 `@@` 必须被拒绝。
 fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;
@@ -149,19 +189,30 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use yyds_kv::{KvStore, MemoryShard};
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
-    let source = "table users { @@id: i64, name: utf8 }\n";
+    let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64 }\n";
     let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
     let manifest = vos::contract::IdentityManifest {
         format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
-        types: vec![vos::contract::TypeIdentity {
-            canonical_path: vec!["users".into()],
-            type_id: 1,
-            kind: vos::contract::TypeContractKind::Table,
-            fields: vec![
-                vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
-                vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
-            ],
-        }],
+        types: vec![
+            vos::contract::TypeIdentity {
+                canonical_path: vec!["users".into()],
+                type_id: 1,
+                kind: vos::contract::TypeContractKind::Table,
+                fields: vec![
+                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
+                    vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+                ],
+            },
+            vos::contract::TypeIdentity {
+                canonical_path: vec!["orders".into()],
+                type_id: 2,
+                kind: vos::contract::TypeContractKind::Table,
+                fields: vec![
+                    vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 3, virtual_field_index: 0 },
+                    vos::contract::FieldIdentity { canonical_name: "user_id".into(), field_id: 4, virtual_field_index: 1 },
+                ],
+            },
+        ],
     };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
@@ -197,11 +248,11 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
 fn mysql_style_system_variables_are_rejected_with_a_runtime() {
     let (mut client, server) = start_server_with_runtime();
 
-    // `@@` 在 PostgreSQL 里不是变量语法，必须报绑定错误而不是当作列名。
+    // `@@` 在 PostgreSQL 里不是变量语法，必须按未知参数报错而不是当作列名。
     send_query(&mut client, "SELECT @@version");
     let rejected = receive_until_ready(&mut client);
     assert_eq!(rejected[0].0, b'E');
-    assert!(rejected[0].1.windows(5).any(|window| window == b"42P01"));
+    assert!(rejected[0].1.windows(5).any(|window| window == b"42704"));
     assert!(String::from_utf8_lossy(&rejected[0].1).contains("system variable"));
     assert_eq!(rejected.last().unwrap(), &(b'Z', b"I".to_vec()));
 

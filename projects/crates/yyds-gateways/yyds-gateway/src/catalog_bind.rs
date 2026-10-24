@@ -3,7 +3,7 @@
 use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundDelete, SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind,
     SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundProjection, SqlBoundSelect, SqlBoundStatement, SqlBoundUnaryOperator,
-    SqlBoundUpdate, SqlFrontendError,
+    SqlBoundUpdate, SqlErrorKind, SqlFrontendError,
 };
 use vos::{
     ast::{BuiltinType, TypeExpr},
@@ -446,7 +446,10 @@ pub fn bind_sql_catalog_with_variables(
 
 /// Default resolver for dialects without `@@` system variables.
 fn reject_system_variable(name: &str) -> Result<SqlBoundLiteral, SqlFrontendError> {
-    Err(catalog_error(&format!("SQL system variable {name} is not supported by this gateway")))
+    Err(SqlFrontendError::new(
+        SqlErrorKind::UnknownVariable,
+        format!("SQL system variable {name} is not supported by this gateway"),
+    ))
 }
 
 fn bind_insert(
@@ -477,7 +480,7 @@ fn bind_insert(
         }
     };
     if bound_fields.len() != insert.values.len() {
-        return Err(catalog_error(&format!(
+        return Err(SqlFrontendError::syntax(format!(
             "INSERT column/value count mismatch: {} columns, {} values",
             bound_fields.len(),
             insert.values.len()
@@ -530,11 +533,13 @@ fn bind_select(
     let mut joins: Vec<SqlCatalogBoundJoin> = Vec::with_capacity(select.joins.len());
     for join in select.joins {
         if join.kind != SqlBoundJoinKind::Inner {
-            return Err(catalog_error("SQL gateway supports INNER JOIN only"));
+            return Err(SqlFrontendError::unsupported("SQL gateway supports INNER JOIN only"));
         }
         let table = find_table(catalog, &join.table)?;
         if sources.iter().any(|visible| visible.type_id == table.type_id) {
-            return Err(catalog_error("SQL self join requires table aliases, which the gateway does not support"));
+            return Err(SqlFrontendError::unsupported(
+                "SQL self join requires table aliases, which the gateway does not support",
+            ));
         }
         sources.push(table.clone());
         let on = bind_expression(join.on, &sources, catalog, variables)?;
@@ -584,7 +589,7 @@ fn bind_projection(
     match projection {
         SqlBoundProjection::Star => {
             if sources.is_empty() {
-                return Err(catalog_error("SQL star projection requires a catalog table source"));
+                return Err(SqlFrontendError::unsupported("SQL star projection requires a catalog table source"));
             }
             Ok(sources.iter().cloned().map(SqlCatalogBoundProjection::Star).collect())
         }
@@ -642,9 +647,9 @@ fn bind_expression(
 fn find_table(catalog: &SqlCatalog, name: &str) -> Result<SqlCatalogBoundTable, SqlFrontendError> {
     let matches = catalog.tables.iter().filter(|table| table.name == name).collect::<Vec<_>>();
     match matches.as_slice() {
-        [] => Err(catalog_error(&format!("unknown SQL table: {name}"))),
+        [] => Err(SqlFrontendError::new(SqlErrorKind::UnknownTable, format!("unknown SQL table: {name}"))),
         [table] => Ok(SqlCatalogBoundTable { type_id: table.type_id, name: table.name.clone() }),
-        _ => Err(catalog_error(&format!("ambiguous SQL table: {name}"))),
+        _ => Err(SqlFrontendError::new(SqlErrorKind::AmbiguousTable, format!("ambiguous SQL table: {name}"))),
     }
 }
 
@@ -659,7 +664,10 @@ fn find_field(
     catalog: &SqlCatalog,
 ) -> Result<SqlCatalogBoundColumn, SqlFrontendError> {
     if sources.is_empty() {
-        return Err(catalog_error("SQL column reference requires a table source"));
+        return Err(SqlFrontendError::new(
+            SqlErrorKind::UnknownColumn,
+            "SQL column reference requires a table source",
+        ));
     }
     if let Some((qualifier, column)) = name.split_once('.') {
         let qualifier = qualifier.trim();
@@ -667,9 +675,16 @@ fn find_field(
         let source = sources
             .iter()
             .find(|source| source.name == qualifier)
-            .ok_or_else(|| catalog_error(&format!("unknown SQL table qualifier: {qualifier}")))?;
+            .ok_or_else(|| {
+                SqlFrontendError::new(
+                    SqlErrorKind::UnknownTableQualifier,
+                    format!("unknown SQL table qualifier: {qualifier}"),
+                )
+            })?;
         return find_field_in_table(column, source, catalog)?
-            .ok_or_else(|| catalog_error(&format!("unknown SQL column: {qualifier}.{column}")));
+            .ok_or_else(|| {
+                SqlFrontendError::new(SqlErrorKind::UnknownColumn, format!("unknown SQL column: {qualifier}.{column}"))
+            });
     }
     let mut matches = Vec::new();
     for source in sources {
@@ -678,9 +693,12 @@ fn find_field(
         }
     }
     match matches.len() {
-        0 => Err(catalog_error(&format!("unknown SQL column: {name}"))),
+        0 => Err(SqlFrontendError::new(SqlErrorKind::UnknownColumn, format!("unknown SQL column: {name}"))),
         1 => Ok(matches.remove(0)),
-        _ => Err(catalog_error(&format!("ambiguous SQL column: {name} (qualify it with a table name)"))),
+        _ => Err(SqlFrontendError::new(
+            SqlErrorKind::AmbiguousColumn,
+            format!("ambiguous SQL column: {name} (qualify it with a table name)"),
+        )),
     }
 }
 
@@ -704,7 +722,7 @@ fn find_field_in_table(
             table_name: table.name.clone(),
             field_name: field.name.clone(),
         })),
-        _ => Err(catalog_error(&format!("ambiguous SQL column: {name}"))),
+        _ => Err(SqlFrontendError::new(SqlErrorKind::AmbiguousColumn, format!("ambiguous SQL column: {name}"))),
     }
 }
 
@@ -734,5 +752,5 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
 }
 
 fn catalog_error(message: &str) -> SqlFrontendError {
-    SqlFrontendError { message: message.into() }
+    SqlFrontendError::catalog(message)
 }

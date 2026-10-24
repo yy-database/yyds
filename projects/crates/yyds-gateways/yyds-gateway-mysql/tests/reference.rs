@@ -206,15 +206,39 @@ assert cursor.fetchall() == ((4,),)
 try:
     cursor.execute("SELECT id FROM missing")
 except pymysql.err.ProgrammingError as error:
-    assert error.args[0] == 1064, error.args
+    assert error.args[0] == 1146, error.args
 else:
     raise AssertionError('missing table unexpectedly resolved')
+try:
+    cursor.execute("SELECT nope FROM users")
+except pymysql.err.Error as error:
+    assert error.args[0] == 1054, error.args
+else:
+    raise AssertionError('unknown column unexpectedly resolved')
 try:
     cursor.execute("SELECT (")
 except pymysql.err.ProgrammingError as error:
     assert error.args[0] == 1064, error.args
 else:
     raise AssertionError('malformed SQL unexpectedly passed Oak parsing')
+try:
+    cursor.execute("INSERT INTO users VALUES (9, 42, 0, 0.0, 1)")
+except pymysql.err.Error as error:
+    assert error.args[0] == 1366, error.args
+else:
+    raise AssertionError('integer write into a text column unexpectedly passed')
+try:
+    cursor.execute("INSERT INTO users VALUES (NULL, 'x', 0, 0.0, 1)")
+except pymysql.err.Error as error:
+    assert error.args[0] == 1048, error.args
+else:
+    raise AssertionError('NULL primary key unexpectedly passed')
+try:
+    cursor.execute("INSERT INTO users VALUES (1, 'dup', 0, 0.0, 1)")
+except pymysql.err.Error as error:
+    assert error.args[0] == 1062, error.args
+else:
+    raise AssertionError('duplicate primary key unexpectedly passed')
 
 # 6. Concurrent read-modify-write must surface a serialization failure at COMMIT
 other = connect()

@@ -5,11 +5,81 @@
 
 use oak_sql::ast::{BinaryOperator, Expression, Literal, SelectItem, SqlStatement};
 
+/// Structured failure category from the Oak SQL frontend, gateway binder,
+/// planner or executor.
+///
+/// Protocol adapters map categories to wire error codes and SQLSTATE values.
+/// They never inspect [`SqlFrontendError::message`] to recover the category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlErrorKind {
+    /// Oak rejected the SQL surface.
+    Syntax,
+    /// The catalog does not publish the referenced table.
+    UnknownTable,
+    /// The visible scope has no table matching a column qualifier.
+    UnknownTableQualifier,
+    /// The catalog publishes more than one table with the requested name.
+    AmbiguousTable,
+    /// No visible column matches the requested name.
+    UnknownColumn,
+    /// More than one visible column matches an unqualified name.
+    AmbiguousColumn,
+    /// A write value cannot be represented by the target column type.
+    TypeMismatch,
+    /// A write supplies `NULL` for a primary key.
+    NotNullViolation,
+    /// The statement is valid SQL but outside the gateway's supported subset.
+    Unsupported,
+    /// A function name or arity is not part of the gateway subset.
+    UnknownFunction,
+    /// A `@@` system variable is not published by the gateway.
+    UnknownVariable,
+    /// Catalog construction or publication is inconsistent.
+    Catalog,
+    /// Parameter substitution or a bind parameter position is invalid.
+    Parameter,
+    /// A write would create a duplicate primary key.
+    UniqueViolation,
+    /// Optimistic concurrency rejected a read-modify-write.
+    Conflict,
+    /// The storage layer failed while executing the statement.
+    Execution,
+}
+
 /// Structured failure from the Oak SQL frontend or gateway binder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlFrontendError {
-    /// Diagnostic text returned by the Oak parser.
+    /// Failure category consumed by protocol adapters.
+    pub kind: SqlErrorKind,
+    /// Diagnostic text returned by the failing gateway stage.
     pub message: String,
+}
+
+impl SqlFrontendError {
+    /// Creates a categorized frontend error.
+    pub fn new(kind: SqlErrorKind, message: impl Into<String>) -> Self {
+        Self { kind, message: message.into() }
+    }
+
+    /// Oak rejected the SQL surface.
+    pub fn syntax(message: impl Into<String>) -> Self {
+        Self::new(SqlErrorKind::Syntax, message)
+    }
+
+    /// A literal cannot be represented by the target column type.
+    pub fn type_mismatch(message: impl Into<String>) -> Self {
+        Self::new(SqlErrorKind::TypeMismatch, message)
+    }
+
+    /// The statement is outside the gateway subset.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(SqlErrorKind::Unsupported, message)
+    }
+
+    /// A catalog identity is missing or inconsistent.
+    pub fn catalog(message: impl Into<String>) -> Self {
+        Self::new(SqlErrorKind::Catalog, message)
+    }
 }
 
 /// A session statement lowered from Oak's SQL syntax tree.
@@ -75,10 +145,10 @@ pub enum SqlTransactionAction {
 
 /// Parses one SQL surface statement through the official Oak SQL frontend.
 pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError> {
-    let root = oak_sql::parse(source).map_err(|message| SqlFrontendError { message })?;
+    let root = oak_sql::parse(source).map_err(SqlFrontendError::syntax)?;
     for statement in &root.statements {
         match statement {
-            SqlStatement::Error { message, .. } => return Err(SqlFrontendError { message: message.to_string() }),
+            SqlStatement::Error { message, .. } => return Err(SqlFrontendError::syntax(message.to_string())),
             SqlStatement::Unknown { .. } => {}
             _ => {}
         }
@@ -509,7 +579,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
             table: normalize_identifier(delete.table_name.name.name.as_ref()),
             predicate: delete.selection.as_ref().map(bind_expression).transpose()?,
         })),
-        _ => Err(bind_error("SQL gateway binding accepts SELECT/INSERT/UPDATE/DELETE only")),
+        _ => Err(SqlFrontendError::unsupported("SQL gateway binding accepts SELECT/INSERT/UPDATE/DELETE only")),
     }
 }
 
@@ -698,22 +768,28 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                 return Ok(SqlBoundExpression::Function { name: fname, args: bound_args });
             }
             let scalar = SqlScalarFunction::from_name(&fname).ok_or_else(|| {
-                bind_error(&format!(
-                    "unknown SQL function: {fname} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/COALESCE/ABS/ROUND)"
-                ))
+                SqlFrontendError::new(
+                    SqlErrorKind::UnknownFunction,
+                    format!(
+                        "unknown SQL function: {fname} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/LOWER/UPPER/LENGTH/COALESCE/ABS/ROUND)"
+                    ),
+                )
             })?;
             let (minimum, maximum) = scalar.arity();
             let supplied = bound_args.len();
             if supplied < minimum || maximum.is_some_and(|max| supplied > max) {
-                return Err(bind_error(&format!(
-                    "{fname}() expects {}{} argument(s), got {supplied}",
-                    minimum,
-                    match maximum {
-                        Some(max) if max == minimum => String::new(),
-                        Some(max) => format!("..{max}"),
-                        None => "+".to_string(),
-                    }
-                )));
+                return Err(SqlFrontendError::new(
+                    SqlErrorKind::UnknownFunction,
+                    format!(
+                        "{fname}() expects {}{} argument(s), got {supplied}",
+                        minimum,
+                        match maximum {
+                            Some(max) if max == minimum => String::new(),
+                            Some(max) => format!("..{max}"),
+                            None => "+".to_string(),
+                        }
+                    ),
+                ));
             }
             Ok(SqlBoundExpression::Function { name: fname, args: bound_args })
         }
@@ -723,8 +799,12 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             negated: *negated,
         }),
         // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
-        Expression::Subquery { .. } => Err(bind_error("SQL subquery is only supported as the right side of IN")),
-        Expression::Vector { .. } => Err(bind_error("SQL vector literals are outside the gateway binding subset")),
+        Expression::Subquery { .. } => Err(SqlFrontendError::unsupported(
+            "SQL subquery is only supported as the right side of IN",
+        )),
+        Expression::Vector { .. } => Err(SqlFrontendError::unsupported(
+            "SQL vector literals are outside the gateway binding subset",
+        )),
         Expression::Error { message, .. } => Err(bind_error(message)),
     }
 }
@@ -787,7 +867,7 @@ fn bind_binary_operator(operator: BinaryOperator) -> Result<SqlBoundBinaryOperat
 }
 
 fn bind_error(message: &str) -> SqlFrontendError {
-    SqlFrontendError { message: message.into() }
+    SqlFrontendError::syntax(message)
 }
 
 /// Extracts a non-negative integer from an Oak SQL expression — only accepts
