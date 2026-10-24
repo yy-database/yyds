@@ -57,7 +57,6 @@ pub fn plan_select_for_dialect(
     catalog: &SqlCatalog,
     dialect: SqlDialect,
 ) -> Result<SqlExecutionPlan, SqlFrontendError> {
-    validate_grouped_select(&select)?;
     validate_distinct_shape(&select)?;
     if !select.joins.is_empty() {
         return plan_join_select(select, catalog, dialect);
@@ -108,6 +107,7 @@ pub fn plan_select_for_dialect(
     if has_aggregate && has_non_aggregate && select.group_by.is_none() {
         return Err(planner_error("cannot mix aggregate and non-aggregate projections without GROUP BY"));
     }
+    validate_grouped_select(&select, has_aggregate)?;
     if select.distinct {
         validate_distinct_order_by(select.order_by.as_ref(), &projection_fields, &projection_expressions)?;
     }
@@ -954,11 +954,17 @@ fn expression_has_aggregate(expr: &SqlCatalogBoundExpression) -> bool {
 }
 
 /// 分组查询只允许投影分组列/分组表达式或聚合函数，避免返回任意组内行。
-fn validate_grouped_select(select: &SqlCatalogBoundSelect) -> Result<(), SqlFrontendError> {
+fn validate_grouped_select(select: &SqlCatalogBoundSelect, has_aggregate: bool) -> Result<(), SqlFrontendError> {
     let Some(group_expressions) = select.group_by.as_ref()
     else {
-        if select.having.is_some() {
-            return Err(planner_error("SQL HAVING requires GROUP BY in the gateway subset"));
+        let Some(having) = select.having.as_ref()
+        else {
+            return Ok(());
+        };
+        if !has_aggregate || !grouped_expression_allowed(having, &[], &[]) {
+            return Err(planner_error(
+                "SQL HAVING without GROUP BY requires aggregate projections and aggregate-only predicates",
+            ));
         }
         return Ok(());
     };

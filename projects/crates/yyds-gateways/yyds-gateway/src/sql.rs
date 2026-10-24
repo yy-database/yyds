@@ -708,9 +708,19 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
                         SqlBoundExpression::Identifier(normalize_identifier(identifier.name.as_ref()))
                     }
                     oak_sql::ast::GroupByItem::Expression(expression) => bind_expression(expression)?,
-                    oak_sql::ast::GroupByItem::Position { .. } => {
-                        return Err(SqlFrontendError::unsupported("GROUP BY ordinal position is outside the gateway subset"));
-                    }
+                    oak_sql::ast::GroupByItem::Position { index, .. } => match projections.get(index.saturating_sub(1)) {
+                        Some(SqlBoundProjection::Expression { expression, .. }) => expression.clone(),
+                        Some(SqlBoundProjection::Star) => {
+                            return Err(SqlFrontendError::unsupported(
+                                "GROUP BY ordinal position cannot reference a star projection",
+                            ));
+                        }
+                        None => {
+                            return Err(SqlFrontendError::unsupported(
+                                "GROUP BY ordinal position is outside the projection list",
+                            ));
+                        }
+                    },
                 });
             }
             Some(expressions)
