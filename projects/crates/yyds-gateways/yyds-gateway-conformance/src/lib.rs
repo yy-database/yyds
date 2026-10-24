@@ -252,6 +252,30 @@ pub fn null_order_cases() -> Vec<Case> {
             .rows(&[&[Text(""), Int(1)], &[Text("x"), Int(1)], &[Null, Int(2)]])
             .rows_for(Driver::Mysql, &[&[Null, Int(2)], &[Text(""), Int(1)], &[Text("x"), Int(1)]])
             .build(),
+        case("nulls first overrides ascending default")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag ASC NULLS FIRST")
+            .rows(&[&[Int(2)], &[Int(4)], &[Int(3)], &[Int(1)]])
+            .build(),
+        case("nulls last overrides ascending default")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag ASC NULLS LAST")
+            .rows(&[&[Int(3)], &[Int(1)], &[Int(2)], &[Int(4)]])
+            .build(),
+        case("nulls first overrides descending default")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag DESC NULLS FIRST")
+            .rows(&[&[Int(2)], &[Int(4)], &[Int(1)], &[Int(3)]])
+            .build(),
+        case("nulls last overrides descending default")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag DESC NULLS LAST")
+            .rows(&[&[Int(1)], &[Int(3)], &[Int(2)], &[Int(4)]])
+            .build(),
     ]
 }
 
@@ -685,8 +709,29 @@ pub fn group_cases() -> Vec<Case> {
             .sql("SELECT tag, COUNT(*) FROM users GROUP BY tag")
             .rows(&[&[Null, Int(2)]])
             .build(),
+        case("group by ordinal position")
+            .sql("SELECT age, COUNT(*) FROM users GROUP BY 1 ORDER BY age")
+            .rows(&[&[Int(20), Int(1)], &[Int(30), Int(1)], &[Int(40), Int(1)]])
+            .build(),
+        case("having without group by keeps aggregate row")
+            .sql("SELECT COUNT(*) FROM users HAVING COUNT(*) > 2")
+            .rows(&[&[Int(3)]])
+            .build(),
+        case("having without group by excludes aggregate row")
+            .sql("SELECT COUNT(*) FROM users HAVING COUNT(*) > 3")
+            .rows(&[])
+            .build(),
     ]
 }
+
+/// Upstream forms that the gateway must reject explicitly instead of guessing.
+pub const REJECTED_SQL: &[(&str, &str)] = &[
+    ("DISTINCT ON", "SELECT DISTINCT ON (age) id FROM users ORDER BY age"),
+    ("COUNT(DISTINCT x)", "SELECT COUNT(DISTINCT age) FROM users"),
+    ("GROUPING SETS", "SELECT age FROM users GROUP BY GROUPING SETS ((age))"),
+    ("UNION", "SELECT id FROM users UNION SELECT id FROM users"),
+    ("FOR UPDATE", "SELECT id FROM users FOR UPDATE"),
+];
 
 /// Every case that both the in-process suite and the real-client suites run.
 pub fn all_cases() -> Vec<Case> {
