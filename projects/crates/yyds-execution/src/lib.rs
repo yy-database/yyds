@@ -87,16 +87,19 @@ pub enum CommitCondition {
     PutIfAbsent,
     /// The key must be present in the base store (PutIfPresent).
     PutIfPresent,
+    /// The base-store value must still equal this snapshot (`None` means the key must be absent).
+    ///
+    /// Used for read-modify-write SQL statements so that two transactions cannot both read the
+    /// same pre-image and then overwrite each other in turn.
+    ValueEquals(Option<Vec<u8>>),
 }
 
 /// A local transaction handle that exposes the same command surface as the executor but
 /// wraps it in a begin/commit/rollback contract.
 ///
-/// The current reference implementation (`LocalTransactionHandle`) delegates each command
-/// immediately to the underlying shard so that commits and rollbacks are currently no-ops.
-/// This design is stable enough that gateway layers can bind BEGIN/COMMIT/ROLLBACK today,
-/// and a future buffered implementation that batches writes until commit can replace it
-/// without changing the gateway contract.
+/// The reference implementation (`LocalTransactionHandle`) buffers every write until commit,
+/// serves reads from that buffer before falling back to the executor, and re-checks OCC
+/// pre-image conditions under the executor-wide lock at commit time.
 pub trait TransactionHandle: Debug {
     /// Executes one command within the transaction.
     fn execute(&self, command: KeyValueCommand) -> yyds_types::Result<KeyValueResult>;
@@ -104,6 +107,31 @@ pub trait TransactionHandle: Debug {
     /// Reads an ordered batch within the transaction, preserving duplicate keys.
     fn execute_read_batch(&self, _commands: &[KeyValueCommand]) -> yyds_types::Result<Vec<KeyValueResult>> {
         Err(Error::Unsupported("transaction batch reads are not implemented by this handle"))
+    }
+
+    /// Ordered prefix scan within the transaction, merging buffered writes over the executor.
+    ///
+    /// Handles without a transaction snapshot must reject the request instead of silently
+    /// reading the base store, otherwise read-your-writes is violated.
+    fn execute_scan(
+        &self,
+        _namespace: &Namespace,
+        _prefix: &[u8],
+        _after: Option<&[u8]>,
+        _before: Option<&[u8]>,
+        _limit: usize,
+    ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        Err(Error::Unsupported("transaction scans are not implemented by this handle"))
+    }
+
+    /// Buffers a `Put` / `Delete` whose base-store pre-image must equal `expected` at commit time
+    /// (`None` means the key must be absent).
+    ///
+    /// Callers use this for read-modify-write statements so that a concurrent commit between
+    /// their read and their commit is rejected by OCC instead of being overwritten. Handles
+    /// without OCC support must reject the request rather than degrade to an unconditional write.
+    fn write_if_unchanged(&self, _command: KeyValueCommand, _expected: Option<Vec<u8>>) -> yyds_types::Result<KeyValueResult> {
+        Err(Error::Unsupported("conditional transaction writes are not implemented by this handle"))
     }
 
     /// Finalises the transaction and persists any pending state.
@@ -248,17 +276,20 @@ where
 ///
 /// Only the final state per key is stored so that a second `Put` on the same key simply
 /// overwrites the first without needing to replay a multi-value history. When the final
-/// state was reached through a conditional write (PutIfAbsent / PutIfPresent) that original
-/// condition is preserved so that [`LocalTransactionHandle::commit`] can re-check it against
-/// the base store as part of OCC validate-then-commit.
+/// state was reached through a conditional write (PutIfAbsent / PutIfPresent / a captured
+/// read-modify-write pre-image) that original condition is preserved so that
+/// [`LocalTransactionHandle::commit`] can re-check it against the base store as part of OCC
+/// validate-then-commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BufferedState {
     /// The key has been set to this value inside the transaction. The optional conditional
     /// records whether the first write on this key was a PutIfAbsent or PutIfPresent so that
     /// commit-time OCC re-checks the correct pre-image.
     Value(Vec<u8>, Option<CommitCondition>),
-    /// The key has been deleted inside the transaction.
-    Deleted,
+    /// The key has been deleted inside the transaction. The optional conditional records the
+    /// pre-image captured by a read-modify-write delete so that commit-time OCC can reject a
+    /// concurrent writer.
+    Deleted(Option<CommitCondition>),
 }
 
 /// Buffered local transaction handle.
@@ -286,7 +317,7 @@ impl LocalTransactionHandle {
         if let Some(state) = buffer.get(&(namespace.to_owned(), key.to_vec())) {
             return Ok(match state {
                 BufferedState::Value(bytes, _) => Some(bytes.clone()),
-                BufferedState::Deleted => None,
+                BufferedState::Deleted(_) => None,
             });
         }
         Ok(
@@ -343,7 +374,7 @@ impl TransactionHandle for LocalTransactionHandle {
                 let existed = self.resolve(&namespace.0, &key)?.is_some();
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
                 // Delete 覆盖任何已有 Value 状态，Delete 本身不携带条件。
-                buffer.insert((namespace.0, key), BufferedState::Deleted);
+                buffer.insert((namespace.0, key), BufferedState::Deleted(None));
                 Ok(KeyValueResult::Delete { removed: existed })
             }
             KeyValueAction::GetSet(new_value) => {
@@ -355,7 +386,7 @@ impl TransactionHandle for LocalTransactionHandle {
             KeyValueAction::GetDelete => {
                 let previous = self.resolve(&namespace.0, &key)?;
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
-                buffer.insert((namespace.0, key), BufferedState::Deleted);
+                buffer.insert((namespace.0, key), BufferedState::Deleted(None));
                 Ok(KeyValueResult::GetDelete(previous))
             }
             KeyValueAction::IncrementBy(delta) => {
@@ -385,6 +416,72 @@ impl TransactionHandle for LocalTransactionHandle {
             .collect()
     }
 
+    fn execute_scan(
+        &self,
+        namespace: &Namespace,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        before: Option<&[u8]>,
+        limit: usize,
+    ) -> yyds_types::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        // The base scan is requested without a limit so that buffered inserts can still be
+        // merged into the ordered result before the caller's limit is applied.
+        let mut merged: std::collections::BTreeMap<Vec<u8>, Option<Vec<u8>>> = std::collections::BTreeMap::new();
+        for (key, value) in self.executor.execute_scan(namespace, prefix, after, before, 0)? {
+            merged.insert(key, Some(value));
+        }
+        let buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+        for ((buffered_namespace, key), state) in buffer.iter() {
+            if buffered_namespace != &namespace.0 || !scan_key_matches(key, prefix, after, before) {
+                continue;
+            }
+            match state {
+                BufferedState::Value(value, _) => {
+                    merged.insert(key.clone(), Some(value.clone()));
+                }
+                BufferedState::Deleted(_) => {
+                    merged.insert(key.clone(), None);
+                }
+            }
+        }
+        drop(buffer);
+        let mut rows: Vec<(Vec<u8>, Vec<u8>)> =
+            merged.into_iter().filter_map(|(key, value)| value.map(|value| (key, value))).collect();
+        if limit > 0 {
+            rows.truncate(limit);
+        }
+        Ok(rows)
+    }
+
+    fn write_if_unchanged(&self, command: KeyValueCommand, expected: Option<Vec<u8>>) -> yyds_types::Result<KeyValueResult> {
+        let KeyValueCommand { namespace, key, action } = command;
+        // `removed` must be resolved before taking the buffer lock because `resolve` uses it too.
+        let removed = match action {
+            KeyValueAction::Delete => self.resolve(&namespace.0, &key)?.is_some(),
+            KeyValueAction::Put(_) => false,
+            _ => return Err(Error::Unsupported("conditional transaction writes accept only Put and Delete")),
+        };
+        let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
+        // The earliest write on this key already captured the authoritative base pre-image, so a
+        // later write in the same transaction keeps that condition instead of replacing it with
+        // the value the transaction has already observed.
+        let condition = match buffer.get(&(namespace.0.clone(), key.clone())) {
+            Some(BufferedState::Value(_, condition) | BufferedState::Deleted(condition)) => condition.clone(),
+            None => Some(CommitCondition::ValueEquals(expected)),
+        };
+        match action {
+            KeyValueAction::Put(value) => {
+                buffer.insert((namespace.0, key), BufferedState::Value(value, condition));
+                Ok(KeyValueResult::Put { revision: 1 })
+            }
+            KeyValueAction::Delete => {
+                buffer.insert((namespace.0, key), BufferedState::Deleted(condition));
+                Ok(KeyValueResult::Delete { removed })
+            }
+            _ => unreachable!("conditional transaction writes accept only Put and Delete"),
+        }
+    }
+
     fn commit(self: Box<Self>) -> yyds_types::Result<()> {
         let buffer = self.buffer.into_inner().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
 
@@ -394,7 +491,7 @@ impl TransactionHandle for LocalTransactionHandle {
         for ((namespace, key), state) in buffer {
             let (action, condition) = match state {
                 BufferedState::Value(value, cond) => (KeyValueAction::Put(value), cond),
-                BufferedState::Deleted => (KeyValueAction::Delete, None),
+                BufferedState::Deleted(cond) => (KeyValueAction::Delete, cond),
             };
             batch.push(BufferedCommit { command: KeyValueCommand { namespace: Namespace(namespace), key, action }, condition });
         }
@@ -496,10 +593,11 @@ where
                         key: entry.command.key.clone(),
                         action: KeyValueAction::Get,
                     })?;
-                    let exists = match base {
-                        KeyValueResult::Get(value) => value.is_some(),
+                    let base_value = match base {
+                        KeyValueResult::Get(value) => value,
                         _ => unreachable!("Get always yields a Get result"),
                     };
+                    let exists = base_value.is_some();
                     match condition {
                         CommitCondition::PutIfAbsent if exists => {
                             return Err(Error::CasConflict {
@@ -507,6 +605,11 @@ where
                             });
                         }
                         CommitCondition::PutIfPresent if !exists => {
+                            return Err(Error::CasConflict {
+                                key: format!("{}:{}", entry.command.namespace.0, String::from_utf8_lossy(&entry.command.key)),
+                            });
+                        }
+                        CommitCondition::ValueEquals(expected) if base_value != *expected => {
                             return Err(Error::CasConflict {
                                 key: format!("{}:{}", entry.command.namespace.0, String::from_utf8_lossy(&entry.command.key)),
                             });
@@ -521,6 +624,11 @@ where
             Ok(())
         })
     }
+}
+
+/// Applies the same prefix / exclusive-bound filters a shard scan uses to one buffered key.
+fn scan_key_matches(key: &[u8], prefix: &[u8], after: Option<&[u8]>, before: Option<&[u8]>) -> bool {
+    key.starts_with(prefix) && after.is_none_or(|after| key > after) && before.is_none_or(|before| key < before)
 }
 
 fn parse_integer(bytes: &[u8]) -> yyds_types::Result<i64> {

@@ -308,8 +308,8 @@ pub fn execute_plan(
 ) -> Result<SqlResult, SqlFrontendError> {
     match plan {
         SqlExecutionPlan::Read(read_plan) => execute_read(executor, transaction, read_plan),
-        SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, scan_plan),
-        SqlExecutionPlan::Join(join_plan) => execute_join(executor, join_plan),
+        SqlExecutionPlan::Scan(scan_plan) => execute_scan(executor, transaction, scan_plan),
+        SqlExecutionPlan::Join(join_plan) => execute_join(executor, transaction, join_plan),
         SqlExecutionPlan::Scalar(scalar_plan) => execute_scalar(scalar_plan),
         SqlExecutionPlan::Insert(write_plan) => execute_insert(executor, transaction, write_plan),
         SqlExecutionPlan::Update(update_plan) => execute_update(executor, transaction, update_plan),
@@ -379,10 +379,14 @@ fn execute_read(
 ///
 /// 合并后的行同时携带两侧表的字段（field_id 全局唯一），因此投影 / WHERE /
 /// ORDER BY 全部复用单表路径的 `eval_expression`。
-fn execute_join(executor: &dyn KeyValueExecutor, plan: &JoinPlan) -> Result<SqlResult, SqlFrontendError> {
-    let mut rows = scan_join_source(executor, &plan.base)?;
+fn execute_join(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &JoinPlan,
+) -> Result<SqlResult, SqlFrontendError> {
+    let mut rows = scan_join_source(executor, transaction, &plan.base)?;
     for source in &plan.joins {
-        let right_rows = scan_join_source(executor, source)?;
+        let right_rows = scan_join_source(executor, transaction, source)?;
         let mut merged = Vec::new();
         for left in &rows {
             for right in &right_rows {
@@ -448,11 +452,13 @@ fn execute_join(executor: &dyn KeyValueExecutor, plan: &JoinPlan) -> Result<SqlR
 }
 
 /// 整表扫描一个 JOIN 来源，只解码该表参与的字段。
-fn scan_join_source(executor: &dyn KeyValueExecutor, source: &JoinSourcePlan) -> Result<Vec<RowFieldValues>, SqlFrontendError> {
+fn scan_join_source(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    source: &JoinSourcePlan,
+) -> Result<Vec<RowFieldValues>, SqlFrontendError> {
     let namespace = Namespace(source.namespace.clone());
-    let scanned = executor
-        .execute_scan(&namespace, &[], None, None, 0)
-        .map_err(|e| execute_error(&format!("KeyValueExecutor.scan failed: {e}")))?;
+    let scanned = scan_rows(executor, transaction, &namespace, &[], None, None, 0, "scan")?;
     let mut rows = Vec::with_capacity(scanned.len());
     for (_rowid, value_bytes) in scanned {
         rows.push(decode_row_fields(&value_bytes, &source.needed_field_ids)?);
@@ -460,11 +466,43 @@ fn scan_join_source(executor: &dyn KeyValueExecutor, source: &JoinSourcePlan) ->
     Ok(rows)
 }
 
-fn execute_scan(executor: &dyn KeyValueExecutor, plan: &ScanPlan) -> Result<SqlResult, SqlFrontendError> {
+/// 扫描一行 namespace。事务存在时必须走事务快照，否则同一事务内的写入对 SELECT 不可见。
+fn scan_rows(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    namespace: &Namespace,
+    prefix: &[u8],
+    after: Option<&[u8]>,
+    before: Option<&[u8]>,
+    limit: usize,
+    operation: &str,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, SqlFrontendError> {
+    match transaction {
+        Some(handle) => handle
+            .execute_scan(namespace, prefix, after, before, limit)
+            .map_err(|e| execute_error(&format!("TransactionHandle.{operation} failed: {e}"))),
+        None => executor
+            .execute_scan(namespace, prefix, after, before, limit)
+            .map_err(|e| execute_error(&format!("KeyValueExecutor.{operation} failed: {e}"))),
+    }
+}
+
+fn execute_scan(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plan: &ScanPlan,
+) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
-    let scanned = executor
-        .execute_scan(&namespace, &plan.rowid_prefix, plan.rowid_after.as_deref(), plan.rowid_before.as_deref(), plan.limit)
-        .map_err(|e| execute_error(&format!("KeyValueExecutor.scan failed: {e}")))?;
+    let scanned = scan_rows(
+        executor,
+        transaction,
+        &namespace,
+        &plan.rowid_prefix,
+        plan.rowid_after.as_deref(),
+        plan.rowid_before.as_deref(),
+        plan.limit,
+        "scan",
+    )?;
 
     let columns = scan_column_labels(plan);
     let needed_ids = scan_needed_field_ids(plan);
@@ -791,7 +829,11 @@ fn execute_update(
     let encoded = encode_row(&row);
     let put_cmd = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
     let put_result = match transaction {
-        Some(handle) => handle.execute(put_cmd).map_err(|e| execute_error(&format!("TransactionHandle.update failed: {e}")))?,
+        // 事务内 UPDATE 是 read-modify-write：把读到的 pre-image 交给 OCC，
+        // 另一个事务在此期间提交同一行时 COMMIT 会被拒绝，而不是静默覆盖。
+        Some(handle) => handle
+            .write_if_unchanged(put_cmd, Some(existing_bytes))
+            .map_err(|e| execute_error(&format!("TransactionHandle.update failed: {e}")))?,
         None => executor.execute(put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
     };
     let _ = put_result;
@@ -805,8 +847,9 @@ fn execute_delete(
 ) -> Result<SqlResult, SqlFrontendError> {
     let namespace = Namespace(plan.namespace.clone());
 
-    // 如果有 remaining_predicate —— 先 Get 拿到行评估，不通过就不删。
-    if let Some(ref predicate) = plan.remaining_predicate {
+    // 事务内 DELETE 也要捕获 pre-image 供 OCC 校验；有 remaining_predicate 时还必须
+    // 先 Get 拿到行评估，不通过就不删。
+    let pre_image = if transaction.is_some() || plan.remaining_predicate.is_some() {
         let get_cmd = KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Get };
         let batch_result = match transaction {
             Some(handle) => handle
@@ -821,18 +864,27 @@ fn execute_delete(
             // 行已不存在 — 也是 0 影响行
             _ => return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 }),
         };
-        let needed_ids = expression_needed_field_ids(&[], &[], Some(predicate));
-        let row = decode_row_fields(&existing_bytes, &needed_ids)?;
-        let v = eval_expression(predicate, &row, &plan.field_types)?;
-        if !truthy(&v) {
-            return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
+        if let Some(ref predicate) = plan.remaining_predicate {
+            let needed_ids = expression_needed_field_ids(&[], &[], Some(predicate));
+            let row = decode_row_fields(&existing_bytes, &needed_ids)?;
+            let v = eval_expression(predicate, &row, &plan.field_types)?;
+            if !truthy(&v) {
+                return Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 0 });
+            }
         }
+        Some(existing_bytes)
     }
+    else {
+        None
+    };
 
     let action = KeyValueAction::Delete;
     let command = KeyValueCommand { namespace, key: plan.rowid.clone(), action };
     let delete_result = match transaction {
-        Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.delete failed: {e}")))?,
+        // 事务内 DELETE 同样交给 OCC：pre-image 已被并发事务改写时 COMMIT 被拒绝。
+        Some(handle) => handle
+            .write_if_unchanged(command, pre_image)
+            .map_err(|e| execute_error(&format!("TransactionHandle.delete failed: {e}")))?,
         None => executor.execute(command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
     };
     let affected = match delete_result {

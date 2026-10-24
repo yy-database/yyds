@@ -409,6 +409,93 @@ fn transaction_delete_is_undone_by_rollback() {
 }
 
 #[test]
+fn transaction_scan_merges_buffered_writes_over_base() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"base".to_vec()), b"a")).unwrap();
+    executor.execute(command(KeyValueAction::Put(b"base".to_vec()), b"c")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.execute(command(KeyValueAction::Put(b"txn".to_vec()), b"b")).unwrap();
+    handle.execute(command(KeyValueAction::Put(b"txn".to_vec()), b"a")).unwrap();
+    handle.execute(command(KeyValueAction::Delete, b"c")).unwrap();
+
+    let rows = handle.execute_scan(&Namespace("redis:0".into()), b"", None, None, 0).unwrap();
+    assert_eq!(rows, vec![(b"a".to_vec(), b"txn".to_vec()), (b"b".to_vec(), b"txn".to_vec())]);
+
+    // Base store is untouched until commit.
+    let base_rows = executor.execute_scan(&Namespace("redis:0".into()), b"", None, None, 0).unwrap();
+    assert_eq!(base_rows, vec![(b"a".to_vec(), b"base".to_vec()), (b"c".to_vec(), b"base".to_vec())]);
+
+    handle.rollback();
+}
+
+#[test]
+fn transaction_scan_applies_prefix_and_bounds_to_buffered_writes() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let executor = make_executor();
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    for key in [b"p-1".as_slice(), b"p-2".as_slice(), b"q-1".as_slice()] {
+        handle.execute(command(KeyValueAction::Put(b"v".to_vec()), key)).unwrap();
+    }
+
+    let namespace = Namespace("redis:0".into());
+    assert_eq!(
+        handle.execute_scan(&namespace, b"p-", None, None, 0).unwrap(),
+        vec![(b"p-1".to_vec(), b"v".to_vec()), (b"p-2".to_vec(), b"v".to_vec()),]
+    );
+    assert_eq!(
+        handle.execute_scan(&namespace, b"", Some(b"p-1"), Some(b"q-1"), 0).unwrap(),
+        vec![(b"p-2".to_vec(), b"v".to_vec()),]
+    );
+    assert_eq!(handle.execute_scan(&namespace, b"", None, None, 1).unwrap(), vec![(b"p-1".to_vec(), b"v".to_vec())]);
+
+    handle.rollback();
+}
+
+#[test]
+fn write_if_unchanged_occ_rejects_stale_pre_image_at_commit() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+    use yyds_types::Error;
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
+
+    // Both transactions read the same pre-image, then both try a read-modify-write Put.
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    t1.write_if_unchanged(command(KeyValueAction::Put(b"t1".to_vec()), b"k"), Some(b"pre".to_vec())).unwrap();
+    t2.write_if_unchanged(command(KeyValueAction::Put(b"t2".to_vec()), b"k"), Some(b"pre".to_vec())).unwrap();
+
+    t1.commit().unwrap();
+    let err = t2.commit().unwrap_err();
+    assert!(matches!(err, Error::CasConflict { .. }), "expected CasConflict, got: {err:?}");
+
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"t1".to_vec())));
+}
+
+#[test]
+fn write_if_unchanged_delete_rejects_recreated_key_at_commit() {
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+    use yyds_types::Error;
+
+    let executor = make_executor();
+    executor.execute(command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
+
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    handle.write_if_unchanged(command(KeyValueAction::Delete, b"k"), Some(b"pre".to_vec())).unwrap();
+
+    // Concurrent writer replaces the pre-image before the delete commits.
+    executor.execute(command(KeyValueAction::Put(b"new".to_vec()), b"k")).unwrap();
+
+    let err = handle.commit().unwrap_err();
+    assert!(matches!(err, Error::CasConflict { .. }), "expected CasConflict, got: {err:?}");
+    assert_eq!(executor.execute(command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"new".to_vec())));
+}
+
+#[test]
 fn transaction_increment_rollback_leaves_base_untouched() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
