@@ -1037,8 +1037,20 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement, distinct: bool)
         _ => None,
     };
     let group_by = match &select.group_by {
-        Some(clause) if !clause.columns.is_empty() => {
-            Some(clause.columns.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?)
+        Some(clause) if !clause.items.is_empty() => {
+            let mut expressions = Vec::with_capacity(clause.items.len());
+            for item in &clause.items {
+                expressions.push(match item {
+                    oak_sql::ast::GroupByItem::Column(identifier) => {
+                        SqlBoundExpression::Identifier(normalize_identifier(identifier.name.as_ref()))
+                    }
+                    oak_sql::ast::GroupByItem::Expression(expression) => bind_expression(expression)?,
+                    oak_sql::ast::GroupByItem::Position { .. } => {
+                        return Err(SqlFrontendError::unsupported("GROUP BY ordinal position is outside the gateway subset"));
+                    }
+                });
+            }
+            Some(expressions)
         }
         _ => None,
     };
