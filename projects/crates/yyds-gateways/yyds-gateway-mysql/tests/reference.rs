@@ -167,7 +167,19 @@ row = cursor.fetchone()
 assert row == (1, 'alice', 30, 1.5, 1), row
 assert isinstance(row[0], int) and isinstance(row[2], int) and isinstance(row[3], float), row
 
-# 2. Client-side parameter binding keeps text and NULL distinct
+# 1b. Multi-row UPDATE and DELETE without a primary-key equality
+connection.begin()
+cursor.execute("INSERT INTO users VALUES (3, 'bob', 20, 0.5, 1)")
+assert cursor.rowcount == 1, cursor.rowcount
+cursor.execute("UPDATE users SET age = 31 WHERE active = TRUE")
+assert cursor.rowcount == 2, cursor.rowcount
+cursor.execute("DELETE FROM users WHERE active = TRUE")
+assert cursor.rowcount == 2, cursor.rowcount
+connection.rollback()
+cursor.execute("SELECT id, age FROM users WHERE active = TRUE")
+assert cursor.fetchall() == ((1, 30),)
+
+# 3. Client-side parameter binding keeps text and NULL distinct
 cursor.execute("SELECT name FROM users WHERE name = %s", ('alice',))
 assert cursor.fetchall() == (('alice',),)
 cursor.execute("SELECT id FROM users WHERE name = %s", (None,))

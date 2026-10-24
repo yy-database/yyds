@@ -164,11 +164,6 @@ impl CaseBuilder {
         self
     }
 
-    fn pending(mut self, reason: &'static str) -> Self {
-        self.case.pending = Some(reason);
-        self
-    }
-
     fn build(self) -> Case {
         self.case
     }
@@ -237,8 +232,11 @@ fn run_cases(cases: &[Case]) {
             case.sql
         );
     }
-    if !pending.is_empty() {
-        eprintln!("pending upstream `oaks` gaps:");
+    if pending.is_empty() {
+        eprintln!("pending `oaks` / protocol gaps: none");
+    }
+    else {
+        eprintln!("pending `oaks` / protocol gaps:");
         for item in pending {
             eprintln!("  - {item}");
         }

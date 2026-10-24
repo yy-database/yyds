@@ -170,7 +170,18 @@ cursor.execute("INSERT INTO users VALUES (1, 'alice', 30, 1.5, 1)")
 assert cursor.rowcount == 1, cursor.rowcount
 connection.commit()
 
-# 2. Extended query: text-format values cast by the declared column OIDs
+# 1b. Multi-row UPDATE and DELETE without a primary-key equality
+cursor.execute("INSERT INTO users VALUES (3, 'bob', 20, 0.5, 1)")
+assert cursor.rowcount == 1, cursor.rowcount
+cursor.execute("UPDATE users SET age = 31 WHERE active = TRUE")
+assert cursor.rowcount == 2, cursor.rowcount
+cursor.execute("DELETE FROM users WHERE active = TRUE")
+assert cursor.rowcount == 2, cursor.rowcount
+connection.rollback()
+cursor.execute("SELECT id, age FROM users WHERE active = TRUE")
+assert cursor.fetchall() == [(1, 30)]
+
+# 3. Extended query: text-format values cast by the declared column OIDs
 cursor.execute("SELECT id, name, age, score, active FROM users WHERE id = %s", (1,))
 assert [entry[0] for entry in cursor.description] == ['id', 'name', 'age', 'score', 'active']
 assert [entry[1] for entry in cursor.description] == [20, 25, 20, 701, 16], [entry[1] for entry in cursor.description]
