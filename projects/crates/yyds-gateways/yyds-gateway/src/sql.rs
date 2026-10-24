@@ -108,7 +108,7 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
         SqlStatement::SetVariable(statement) => Some(SqlSessionCommand::SetVariable {
             scope: statement.scope.map(project_variable_scope),
             name: statement.name.to_string(),
-            value: bind_expression(&statement.value, source)?,
+            value: bind_expression(&statement.value)?,
         }),
         SqlStatement::Show(statement) => {
             let scope = statement.scope.map(project_variable_scope);
@@ -121,7 +121,7 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
         }
         SqlStatement::Pragma(statement) => Some(SqlSessionCommand::Pragma {
             name: statement.name.to_string(),
-            value: statement.value.as_ref().map(|value| bind_expression(value, source)).transpose()?,
+            value: statement.value.as_ref().map(bind_expression).transpose()?,
         }),
         _ => None,
     })
@@ -455,6 +455,13 @@ pub enum SqlBoundUnaryOperator {
     IsNull,
     /// `IS NOT NULL`.
     IsNotNull,
+    /// `IS [NOT] TRUE` / `IS [NOT] FALSE` — three-valued truth test, not a comparison.
+    IsTruth {
+        /// The boolean value the operand is tested against.
+        value: bool,
+        /// Whether the predicate is spelled `IS NOT`.
+        negated: bool,
+    },
 }
 
 /// Binds the supported SQL compatibility subset without executing it.
@@ -464,7 +471,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
         return Err(bind_error("SQL gateway accepts exactly one statement"));
     }
     match &root.statements[0] {
-        SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(source, select)?)),
+        SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(select)?)),
         SqlStatement::Insert(insert) => {
             let columns = if insert.columns.is_empty() {
                 None
@@ -472,7 +479,7 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
             else {
                 Some(insert.columns.iter().map(|id| normalize_identifier(id.name.as_ref())).collect())
             };
-            let values = insert.values.iter().map(|value| bind_expression(value, source)).collect::<Result<Vec<_>, _>>()?;
+            let values = insert.values.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             Ok(SqlBoundStatement::Insert(SqlBoundInsert {
                 table: normalize_identifier(insert.table_name.name.name.as_ref()),
                 columns,
@@ -486,27 +493,27 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
                 .map(|a| {
                     Ok(SqlBoundAssignment {
                         column: normalize_identifier(a.column.name.as_ref()),
-                        value: bind_expression(&a.value, source)?,
+                        value: bind_expression(&a.value)?,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(SqlBoundStatement::Update(SqlBoundUpdate {
                 table: normalize_identifier(update.table_name.name.name.as_ref()),
                 assignments,
-                predicate: update.selection.as_ref().map(|selection| bind_expression(selection, source)).transpose()?,
+                predicate: update.selection.as_ref().map(bind_expression).transpose()?,
             }))
         }
         SqlStatement::Delete(delete) => Ok(SqlBoundStatement::Delete(SqlBoundDelete {
             table: normalize_identifier(delete.table_name.name.name.as_ref()),
-            predicate: delete.selection.as_ref().map(|selection| bind_expression(selection, source)).transpose()?,
+            predicate: delete.selection.as_ref().map(bind_expression).transpose()?,
         })),
         _ => Err(bind_error("SQL gateway binding accepts SELECT/INSERT/UPDATE/DELETE only")),
     }
 }
 
 /// Binds one Oak `SELECT` — shared by top-level statements and `IN (SELECT ...)` subqueries.
-fn bind_select_statement(source: &str, select: &oak_sql::ast::SelectStatement) -> Result<SqlBoundSelect, SqlFrontendError> {
-    let projections = select.items.iter().map(|item| bind_projection(item, source)).collect::<Result<Vec<_>, _>>()?;
+fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBoundSelect, SqlFrontendError> {
+    let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
     let (limit, offset) = match &select.limit {
         Some(clause) => {
             let n = extract_u64(&clause.limit).ok_or_else(|| bind_error("SQL LIMIT must be a non-negative integer literal"))?
@@ -523,7 +530,7 @@ fn bind_select_statement(source: &str, select: &oak_sql::ast::SelectStatement) -
                 .iter()
                 .map(|item| {
                     Ok(SqlBoundOrderByItem {
-                        expr: bind_expression(&item.expr, source)?,
+                        expr: bind_expression(&item.expr)?,
                         direction: match item.direction {
                             oak_sql::ast::OrderDirection::Asc => SqlBoundOrderDirection::Asc,
                             oak_sql::ast::OrderDirection::Desc => SqlBoundOrderDirection::Desc,
@@ -537,11 +544,11 @@ fn bind_select_statement(source: &str, select: &oak_sql::ast::SelectStatement) -
     };
     let group_by = match &select.group_by {
         Some(clause) if !clause.columns.is_empty() => {
-            Some(clause.columns.iter().map(|column| bind_expression(column, source)).collect::<Result<Vec<_>, _>>()?)
+            Some(clause.columns.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?)
         }
         _ => None,
     };
-    let having = select.having.as_ref().map(|h| bind_expression(&h.condition, source)).transpose()?;
+    let having = select.having.as_ref().map(|h| bind_expression(&h.condition)).transpose()?;
     let joins = select
         .joins
         .iter()
@@ -558,7 +565,7 @@ fn bind_select_statement(source: &str, select: &oak_sql::ast::SelectStatement) -
                     .on
                     .as_ref()
                     .ok_or_else(|| bind_error("SQL JOIN requires an ON condition"))
-                    .and_then(|on| bind_expression(on, source))?,
+                    .and_then(bind_expression)?,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -566,7 +573,7 @@ fn bind_select_statement(source: &str, select: &oak_sql::ast::SelectStatement) -
         source: select.from.as_ref().map(|table| normalize_identifier(table.name.name.as_ref())),
         joins,
         projections,
-        predicate: select.expr.as_ref().map(|expr| bind_expression(expr, source)).transpose()?,
+        predicate: select.expr.as_ref().map(bind_expression).transpose()?,
         group_by,
         having,
         limit,
@@ -575,17 +582,17 @@ fn bind_select_statement(source: &str, select: &oak_sql::ast::SelectStatement) -
     })
 }
 
-fn bind_projection(item: &SelectItem, source: &str) -> Result<SqlBoundProjection, SqlFrontendError> {
+fn bind_projection(item: &SelectItem) -> Result<SqlBoundProjection, SqlFrontendError> {
     match item {
         SelectItem::Star { .. } => Ok(SqlBoundProjection::Star),
         SelectItem::Expression { expr, alias, .. } => Ok(SqlBoundProjection::Expression {
-            expression: bind_expression(expr, source)?,
+            expression: bind_expression(expr)?,
             alias: alias.as_ref().map(|alias| normalize_identifier(alias.name.as_ref())),
         }),
     }
 }
 
-fn bind_expression(expression: &Expression, source: &str) -> Result<SqlBoundExpression, SqlFrontendError> {
+fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFrontendError> {
     match expression {
         Expression::Identifier(identifier) => {
             Ok(SqlBoundExpression::Identifier(normalize_identifier(identifier.name.as_ref())))
@@ -597,35 +604,32 @@ fn bind_expression(expression: &Expression, source: &str) -> Result<SqlBoundExpr
             Literal::Null(_) => SqlBoundLiteral::Null,
         })),
         Expression::Wildcard { .. } => Ok(SqlBoundExpression::Wildcard),
-        Expression::Binary { left, op, right, .. } => {
-            // `oak-sql` 把 `IS [NOT] NULL` 折成 `= NULL` / `<> NULL`。AST 只有比较运算符，
-            // 因此从两个操作数的 span 之间恢复 `IS` 关键字，把它绑成独立的空值判断，
-            // 而不是退化成与 NULL 的比较。
-            if let Some(negated) = is_null_test(source, left, right) {
-                return Ok(SqlBoundExpression::Unary {
-                    operator: if negated { SqlBoundUnaryOperator::IsNotNull } else { SqlBoundUnaryOperator::IsNull },
-                    expression: Box::new(bind_expression(left, source)?),
-                });
-            }
-            Ok(SqlBoundExpression::Binary {
-                left: Box::new(bind_expression(left, source)?),
-                operator: bind_binary_operator(*op)?,
-                right: Box::new(bind_expression(right, source)?),
-            })
-        }
+        Expression::Binary { left, op, right, .. } => Ok(SqlBoundExpression::Binary {
+            left: Box::new(bind_expression(left)?),
+            operator: bind_binary_operator(*op)?,
+            right: Box::new(bind_expression(right)?),
+        }),
         Expression::Unary { op, expr, .. } => Ok(SqlBoundExpression::Unary {
             operator: match op {
                 oak_sql::ast::UnaryOperator::Plus => SqlBoundUnaryOperator::Plus,
                 oak_sql::ast::UnaryOperator::Minus => SqlBoundUnaryOperator::Minus,
                 oak_sql::ast::UnaryOperator::Not => SqlBoundUnaryOperator::Not,
             },
-            expression: Box::new(bind_expression(expr, source)?),
+            expression: Box::new(bind_expression(expr)?),
+        }),
+        Expression::IsNull { expr, negated, .. } => Ok(SqlBoundExpression::Unary {
+            operator: if *negated { SqlBoundUnaryOperator::IsNotNull } else { SqlBoundUnaryOperator::IsNull },
+            expression: Box::new(bind_expression(expr)?),
+        }),
+        Expression::IsTruth { expr, value, negated, .. } => Ok(SqlBoundExpression::Unary {
+            operator: SqlBoundUnaryOperator::IsTruth { value: *value, negated: *negated },
+            expression: Box::new(bind_expression(expr)?),
         }),
         Expression::Between { expr, low, high, negated, .. } => {
             // 先构造 `expr >= low AND expr <= high`
-            let e = bind_expression(expr, source)?;
-            let lo = bind_expression(low, source)?;
-            let hi = bind_expression(high, source)?;
+            let e = bind_expression(expr)?;
+            let lo = bind_expression(low)?;
+            let hi = bind_expression(high)?;
             let left = SqlBoundExpression::Binary {
                 left: Box::new(e.clone()),
                 operator: SqlBoundBinaryOperator::GreaterEqual,
@@ -653,13 +657,13 @@ fn bind_expression(expression: &Expression, source: &str) -> Result<SqlBoundExpr
             if list.is_empty() {
                 return Err(bind_error("IN list must not be empty"));
             }
-            let bound_expr = bind_expression(expr, source)?;
+            let bound_expr = bind_expression(expr)?;
             let mut or_tree: Option<SqlBoundExpression> = None;
             for item in list {
                 let eq = SqlBoundExpression::Binary {
                     left: Box::new(bound_expr.clone()),
                     operator: SqlBoundBinaryOperator::Equal,
-                    right: Box::new(bind_expression(item, source)?),
+                    right: Box::new(bind_expression(item)?),
                 };
                 or_tree = match or_tree {
                     None => Some(eq),
@@ -680,7 +684,7 @@ fn bind_expression(expression: &Expression, source: &str) -> Result<SqlBoundExpr
         }
         Expression::FunctionCall { name, args, .. } => {
             let fname = normalize_identifier(name.name.as_ref());
-            let bound_args = args.iter().map(|arg| bind_expression(arg, source)).collect::<Result<Vec<_>, _>>()?;
+            let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
             if SqlAggregateFunction::from_name(&fname).is_some() {
                 return Ok(SqlBoundExpression::Function { name: fname, args: bound_args });
@@ -706,8 +710,8 @@ fn bind_expression(expression: &Expression, source: &str) -> Result<SqlBoundExpr
             Ok(SqlBoundExpression::Function { name: fname, args: bound_args })
         }
         Expression::InSubquery { expr, query, negated, .. } => Ok(SqlBoundExpression::InSubquery {
-            expression: Box::new(bind_expression(expr, source)?),
-            select: Box::new(bind_select_statement(source, query)?),
+            expression: Box::new(bind_expression(expr)?),
+            select: Box::new(bind_select_statement(query)?),
             negated: *negated,
         }),
         // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。
@@ -715,27 +719,6 @@ fn bind_expression(expression: &Expression, source: &str) -> Result<SqlBoundExpr
         Expression::Vector { .. } => Err(bind_error("SQL vector literals are outside the gateway binding subset")),
         Expression::Error { message, .. } => Err(bind_error(message)),
     }
-}
-
-/// Detects `IS [NOT] NULL` that Oak's builder folded into `= NULL` / `<> NULL`.
-///
-/// Returns `Some(negated)` when the text between the operands contains an `IS`
-/// keyword, i.e. the comparison is a null test rather than a NULL comparison.
-fn is_null_test(source: &str, left: &Expression, right: &Expression) -> Option<bool> {
-    if !matches!(right, Expression::Literal(Literal::Null(_))) {
-        return None;
-    }
-    let between = source.get(left.span().end..right.span().start)?;
-    let mut has_is = false;
-    let mut has_not = false;
-    for token in between.split_whitespace() {
-        match token.to_ascii_uppercase().as_str() {
-            "IS" => has_is = true,
-            "NOT" => has_not = true,
-            _ => {}
-        }
-    }
-    has_is.then_some(has_not)
 }
 
 fn bind_binary_operator(operator: BinaryOperator) -> Result<SqlBoundBinaryOperator, SqlFrontendError> {
