@@ -7,7 +7,11 @@ export interface YydsBindings {
         acquire(dataDir: string, identity: unknown): unknown;
     };
     LocalExecutorHandle: new (dataDir: string) => unknown;
-    RedisServiceHandle: new (lease: unknown, port: number, executor: unknown) => RedisServiceBinding;
+    RedisServiceHandle: new (
+        lease: unknown,
+        port: number,
+        executor: unknown,
+    ) => RedisServiceBinding;
     PgsqlServiceHandle: new (lease: unknown, port: number) => PgsqlServiceBinding;
     MysqlServiceHandle: new (lease: unknown, port: number) => MysqlServiceBinding;
     WireServerHandle: new (port: number, executor: unknown) => WireServiceBinding;

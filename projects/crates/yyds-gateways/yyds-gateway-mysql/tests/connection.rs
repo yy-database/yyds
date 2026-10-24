@@ -684,8 +684,7 @@ fn prepared_statements_round_trip_typed_parameters_and_results() {
     assert_eq!(eof[0], 0xFE);
 
     // 写入语句没有结果列，执行后按 affected rows 回 OK。
-    let (insert_id, columns, parameters, _, _) =
-        prepare(&mut client, "INSERT INTO users (id, name, age) VALUES (?, ?, ?)");
+    let (insert_id, columns, parameters, _, _) = prepare(&mut client, "INSERT INTO users (id, name, age) VALUES (?, ?, ?)");
     assert_eq!((columns, parameters), (0, 3));
     let name_value = lenenc_bytes(b"carol");
     let age_value = 40_i64.to_le_bytes();

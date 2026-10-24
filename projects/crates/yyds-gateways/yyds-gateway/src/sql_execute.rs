@@ -1560,9 +1560,7 @@ fn eval_unary(op: SqlBoundUnaryOperator, operand: SqlValue) -> Result<SqlValue, 
         SqlBoundUnaryOperator::IsNotNull => SqlValue::Boolean(!matches!(operand, SqlValue::Null)),
         // 真值判断同样是三值谓词：`NULL IS TRUE` 与 `NULL IS FALSE` 都为 FALSE，
         // 因此永远不会返回 NULL。
-        SqlBoundUnaryOperator::IsTruth { value, negated } => {
-            SqlValue::Boolean((sql_truth(&operand) == Some(value)) != negated)
-        }
+        SqlBoundUnaryOperator::IsTruth { value, negated } => SqlValue::Boolean((sql_truth(&operand) == Some(value)) != negated),
     })
 }
 
@@ -1893,12 +1891,10 @@ fn compare_values(a: Option<&SqlValue>, b: Option<&SqlValue>) -> std::cmp::Order
         (Some(x), Some(y)) => match (x, y) {
             (SqlValue::Integer(n1), SqlValue::Integer(n2)) => n1.cmp(n2),
             // 排序同样不能把 `i64` 先转 `f64`，否则超出 2^53 的行会并列。
-            (SqlValue::Integer(n1), SqlValue::Number(n2)) => {
-                compare_integer_float(*n1, *n2).unwrap_or(Ordering::Equal)
+            (SqlValue::Integer(n1), SqlValue::Number(n2)) => compare_integer_float(*n1, *n2).unwrap_or(Ordering::Equal),
+            (SqlValue::Number(n1), SqlValue::Integer(n2)) => {
+                compare_integer_float(*n2, *n1).map(Ordering::reverse).unwrap_or(Ordering::Equal)
             }
-            (SqlValue::Number(n1), SqlValue::Integer(n2)) => compare_integer_float(*n2, *n1)
-                .map(Ordering::reverse)
-                .unwrap_or(Ordering::Equal),
             (SqlValue::Number(n1), SqlValue::Number(n2)) => n1.partial_cmp(n2).unwrap_or(Ordering::Equal),
             (SqlValue::String(s1), SqlValue::String(s2)) => s1.cmp(s2),
             (SqlValue::Boolean(b1), SqlValue::Boolean(b2)) => b1.cmp(b2),

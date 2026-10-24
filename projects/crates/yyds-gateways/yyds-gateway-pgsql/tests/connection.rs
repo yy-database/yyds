@@ -160,11 +160,7 @@ fn sqlstate_reflects_structured_gateway_errors() {
     assert_sqlstate(&mut client, "SELECT id FROM missing", b"42P01");
     assert_sqlstate(&mut client, "SELECT nope FROM users", b"42703");
     assert_sqlstate(&mut client, "SELECT nope.id FROM users", b"42P01");
-    assert_sqlstate(
-        &mut client,
-        "SELECT id FROM users INNER JOIN orders ON users.id = orders.user_id",
-        b"42702",
-    );
+    assert_sqlstate(&mut client, "SELECT id FROM users INNER JOIN orders ON users.id = orders.user_id", b"42702");
     assert_sqlstate(&mut client, "SELECT ( FROM users", b"42601");
     assert_sqlstate(&mut client, "SELECT nope_fn(name) FROM users", b"42883");
     assert_sqlstate(&mut client, "SELECT id FROM users LEFT JOIN orders ON users.id = orders.user_id", b"0A000");

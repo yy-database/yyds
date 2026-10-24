@@ -14,9 +14,7 @@ use std::{
 use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
 use yyds_gateway::SqlCatalog;
-use yyds_gateway_conformance::{
-    python_string, render_python, ClientMode, SCHEMA_VERSION, USERS_SCHEMA,
-};
+use yyds_gateway_conformance::{python_string, render_python, ClientMode, SCHEMA_VERSION, USERS_SCHEMA};
 use yyds_gateway_mysql::service::MysqlService;
 
 fn owner_directory() -> PathBuf {
@@ -170,8 +168,7 @@ fn mysql_connector_prepared_statements_round_trip_typed_parameters() {
     let owner = Arc::new(lease(&directory));
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool }\n");
     let executor: Arc<dyn KeyValueExecutor> = Arc::new(empty_executor());
-    let service =
-        MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, 7).unwrap();
+    let service = MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, 7).unwrap();
     let script = r#"
 import mysql.connector, sys
 
@@ -223,8 +220,7 @@ fn pymysql_round_trips_typed_results_parameters_transactions_and_conflicts() {
     let owner = Arc::new(lease(&directory));
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool }\n");
     let executor: Arc<dyn KeyValueExecutor> = Arc::new(empty_executor());
-    let service =
-        MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, 7).unwrap();
+    let service = MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, 7).unwrap();
     let script = r#"
 import pymysql, sys
 
@@ -359,8 +355,7 @@ fn mysql_connector_runs_the_shared_sql_cases_in_text_and_prepared_modes() {
     let catalog = catalog(USERS_SCHEMA);
     let executor: Arc<dyn KeyValueExecutor> = Arc::new(empty_executor());
     let service =
-        MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, SCHEMA_VERSION)
-            .unwrap();
+        MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, SCHEMA_VERSION).unwrap();
     for mode in [ClientMode::MysqlText, ClientMode::MysqlPrepared] {
         run_mysql_connector_conformance(&service, mode);
     }

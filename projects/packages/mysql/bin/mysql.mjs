@@ -132,7 +132,8 @@ function lengthEncoded(payload, offset) {
     const width = { 252: 2, 253: 3, 254: 8 }[marker];
     if (!width || offset + width > payload.length)
         throw new Error("invalid MySQL length-encoded value");
-    const length = width === 8 ? payload.readBigUInt64LE(offset) : BigInt(payload.readUIntLE(offset, width));
+    const length =
+        width === 8 ? payload.readBigUInt64LE(offset) : BigInt(payload.readUIntLE(offset, width));
     if (length > BigInt(maxPacketBytes)) throw new Error("MySQL value exceeds byte limit");
     return { length: Number(length), next: offset + width };
 }
@@ -161,21 +162,31 @@ function columnName(payload) {
 }
 
 function eofPacket(payload) {
-    if (payload.length !== 5 || payload[0] !== 0xfe)
-        throw new Error("expected MySQL EOF packet");
-    if (payload.readUInt16LE(3) & 8) throw new Error("multiple MySQL result sets are not supported");
+    if (payload.length !== 5 || payload[0] !== 0xfe) throw new Error("expected MySQL EOF packet");
+    if (payload.readUInt16LE(3) & 8)
+        throw new Error("multiple MySQL result sets are not supported");
 }
 
 function displayField(value, raw) {
     if (value === null) return "NULL";
     if (raw) return value.toString("utf8");
-    return value.toString("utf8").replaceAll("\\", "\\\\").replaceAll("\0", "\\0")
-        .replaceAll("\t", "\\t").replaceAll("\n", "\\n").replaceAll("\r", "\\r");
+    return value
+        .toString("utf8")
+        .replaceAll("\\", "\\\\")
+        .replaceAll("\0", "\\0")
+        .replaceAll("\t", "\\t")
+        .replaceAll("\n", "\\n")
+        .replaceAll("\r", "\\r");
 }
 
 async function resultSet(response, read, options) {
     const count = lengthEncoded(response, 0);
-    if (count.next !== response.length || count.length === null || count.length < 1 || count.length > 1024)
+    if (
+        count.next !== response.length ||
+        count.length === null ||
+        count.length < 1 ||
+        count.length > 1024
+    )
         throw new Error("invalid MySQL result column count");
     let sequence = 2;
     let totalBytes = response.length;
@@ -294,7 +305,9 @@ async function main(args) {
         return;
     }
     if (args.length === 1 && args[0] === "--help") {
-        console.log("Usage: mysql [-B] [-N] [-r] [-h HOST] [-P PORT] [-u USER] [-D DATABASE] -e SQL");
+        console.log(
+            "Usage: mysql [-B] [-N] [-r] [-h HOST] [-P PORT] [-u USER] [-D DATABASE] -e SQL",
+        );
         return;
     }
     await run(optionsFrom(args));

@@ -31,13 +31,15 @@ function argumentsFor(args) {
         }
         if (option === "-F" || option === "--field-separator") {
             const value = args[++index];
-            if (value === undefined || value.includes("\0")) throw new Error(`invalid value for ${option}`);
+            if (value === undefined || value.includes("\0"))
+                throw new Error(`invalid value for ${option}`);
             options.separator = value;
             continue;
         }
         if (option === "-P" || option === "--pset") {
             const value = args[++index];
-            if (value === undefined || !value.startsWith("null=")) throw new Error("only psql null output is configurable");
+            if (value === undefined || !value.startsWith("null="))
+                throw new Error("only psql null output is configurable");
             options.nullValue = value.slice(5);
             continue;
         }
@@ -174,7 +176,8 @@ function query(options) {
                         )
                             throw new Error("invalid ReadyForQuery");
                         if (started) {
-                            if (currentResult !== null) throw new Error("PostgreSQL result ended before CommandComplete");
+                            if (currentResult !== null)
+                                throw new Error("PostgreSQL result ended before CommandComplete");
                             finish();
                             return;
                         }
@@ -184,14 +187,19 @@ function query(options) {
                             throw new Error("PostgreSQL query exceeds byte limit");
                         socket.write(message("Q", sql));
                     } else if (tag === "T") {
-                        if (!started || currentResult !== null) throw new Error("unexpected PostgreSQL RowDescription");
+                        if (!started || currentResult !== null)
+                            throw new Error("unexpected PostgreSQL RowDescription");
                         currentResult = { columns: columnsFrom(payload), rows: [], tag: "" };
                     } else if (tag === "D") {
-                        if (!started || currentResult === null) throw new Error("DataRow without RowDescription");
+                        if (!started || currentResult === null)
+                            throw new Error("DataRow without RowDescription");
                         currentResult.rows.push(rowFrom(payload, currentResult.columns.length));
-                    }
-                    else if (tag === "C") {
-                        if (!started || payload.length < 2 || payload.indexOf(0) !== payload.length - 1)
+                    } else if (tag === "C") {
+                        if (
+                            !started ||
+                            payload.length < 2 ||
+                            payload.indexOf(0) !== payload.length - 1
+                        )
                             throw new Error("invalid CommandComplete");
                         const result = currentResult ?? { columns: [], rows: [], tag: "" };
                         result.tag = payload.toString("utf8", 0, payload.length - 1);
@@ -218,14 +226,18 @@ async function main(args) {
         return;
     }
     if (args.length === 1 && args[0] === "--help") {
-        console.log("Usage: psql [-h HOST] [-p PORT] [-U USER] [-d DATABASE] [-t] [-F SEP] [-P null=TEXT] -c SQL");
+        console.log(
+            "Usage: psql [-h HOST] [-p PORT] [-U USER] [-d DATABASE] [-t] [-F SEP] [-P null=TEXT] -c SQL",
+        );
         return;
     }
     const options = argumentsFor(args);
     const results = await query(options);
     for (const result of results) {
-        if (options.headers && result.columns.length) console.log(result.columns.join(options.separator));
-        for (const row of result.rows) console.log(row.map((value) => value ?? options.nullValue).join(options.separator));
+        if (options.headers && result.columns.length)
+            console.log(result.columns.join(options.separator));
+        for (const row of result.rows)
+            console.log(row.map((value) => value ?? options.nullValue).join(options.separator));
         if (result.columns.length === 0 && options.headers) console.log(result.tag);
     }
 }

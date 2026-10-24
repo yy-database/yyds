@@ -7,7 +7,15 @@ function usage() {
 }
 
 function parseCommonArgs(command, args) {
-    const options = { dataDir: "", clusterId: "", nodeId: "", redisPort: 6379, pgsqlPort: undefined, mysqlPort: undefined, wirePort: undefined };
+    const options = {
+        dataDir: "",
+        clusterId: "",
+        nodeId: "",
+        redisPort: 6379,
+        pgsqlPort: undefined,
+        mysqlPort: undefined,
+        wirePort: undefined,
+    };
     for (let index = 0; index < args.length; index += 1) {
         const flag = args[index];
         const value = args[index + 1];
@@ -26,22 +34,26 @@ function parseCommonArgs(command, args) {
                 index += 1;
                 break;
             case "--redis-port":
-                if (command !== "start") throw new Error(`option ${flag} is not valid for this command`);
+                if (command !== "start")
+                    throw new Error(`option ${flag} is not valid for this command`);
                 options.redisPort = Number(value);
                 index += 1;
                 break;
             case "--pgsql-port":
-                if (command !== "start") throw new Error(`option ${flag} is not valid for this command`);
+                if (command !== "start")
+                    throw new Error(`option ${flag} is not valid for this command`);
                 options.pgsqlPort = Number(value);
                 index += 1;
                 break;
             case "--mysql-port":
-                if (command !== "start") throw new Error(`option ${flag} is not valid for this command`);
+                if (command !== "start")
+                    throw new Error(`option ${flag} is not valid for this command`);
                 options.mysqlPort = Number(value);
                 index += 1;
                 break;
             case "--wire-port":
-                if (command !== "start") throw new Error(`option ${flag} is not valid for this command`);
+                if (command !== "start")
+                    throw new Error(`option ${flag} is not valid for this command`);
                 options.wirePort = Number(value);
                 index += 1;
                 break;
@@ -82,13 +94,15 @@ async function main(args) {
             return;
         case "status": {
             const snapshot = native.nodeInspect(options.dataDir);
-            console.log(JSON.stringify({
-                directory: snapshot.directory,
-                identity: JSON.parse(snapshot.identity),
-                ownership: snapshot.ownership,
-                runtime: snapshot.runtime ? JSON.parse(snapshot.runtime) : null,
-                health: snapshot.health,
-            }));
+            console.log(
+                JSON.stringify({
+                    directory: snapshot.directory,
+                    identity: JSON.parse(snapshot.identity),
+                    ownership: snapshot.ownership,
+                    runtime: snapshot.runtime ? JSON.parse(snapshot.runtime) : null,
+                    health: snapshot.health,
+                }),
+            );
             return;
         }
         case "stop": {

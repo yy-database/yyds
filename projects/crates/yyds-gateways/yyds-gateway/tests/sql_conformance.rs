@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use yyds_execution::{KeyValueExecutor, LocalExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, execute_plan, plan_statement, substitute_sql_parameters, SqlCatalog, SqlParameterStyle,
-    SqlResult, SqlValue,
+    bind_sql_catalog, execute_plan, plan_statement, substitute_sql_parameters, SqlCatalog, SqlParameterStyle, SqlResult,
+    SqlValue,
 };
 use yyds_gateway_conformance::{
     crud_cases, rows, type_cases, Case, Lit, DEFAULT_STATE_COLUMNS, SCHEMA_VERSION, SEED, USERS_SCHEMA,
@@ -46,9 +46,7 @@ impl Fixture {
     }
 
     fn snapshot(&self, columns: &str) -> Vec<Vec<SqlValue>> {
-        self.execute(None, &format!("SELECT {columns} FROM users ORDER BY id"))
-            .expect("state query")
-            .rows
+        self.execute(None, &format!("SELECT {columns} FROM users ORDER BY id")).expect("state query").rows
     }
 }
 
@@ -79,10 +77,7 @@ fn catalog(source: &str) -> SqlCatalog {
                 .collect(),
         })
         .collect();
-    let manifest = vos::contract::IdentityManifest {
-        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
-        types,
-    };
+    let manifest = vos::contract::IdentityManifest { format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(), types };
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     SqlCatalog::from_resolved_contract(SCHEMA_VERSION, &contract).expect("gateway catalog")
 }
@@ -102,11 +97,7 @@ fn run_cases(cases: &[Case]) {
             .execute_with(case.sql, case.parameters, case.style)
             .unwrap_or_else(|error| panic!("{} `{}`: {error}", case.name, case.sql));
         assert_eq!(result.rows, rows(case.expected_rows), "{} returned rows for `{}`", case.name, case.sql);
-        assert_eq!(
-            result.affected_rows, case.expected_affected_rows,
-            "{} affected rows for `{}`",
-            case.name, case.sql
-        );
+        assert_eq!(result.affected_rows, case.expected_affected_rows, "{} affected rows for `{}`", case.name, case.sql);
         assert_eq!(
             fixture.snapshot(case.state_columns),
             rows(case.expected_state),
@@ -145,14 +136,7 @@ fn sql_is_predicates_follow_three_valued_logic() {
     let is_values = |sql: &str| fixture.execute(None, sql).unwrap_or_else(|error| panic!("`{sql}`: {error}")).rows;
     assert_eq!(
         is_values("SELECT NULL IS NULL, NULL IS NOT NULL, NULL IS TRUE, NULL IS NOT TRUE, NULL IS FALSE, NULL IS NOT FALSE"),
-        rows(&[&[
-            Lit::Bool(true),
-            Lit::Bool(false),
-            Lit::Bool(false),
-            Lit::Bool(true),
-            Lit::Bool(false),
-            Lit::Bool(true),
-        ]])
+        rows(&[&[Lit::Bool(true), Lit::Bool(false), Lit::Bool(false), Lit::Bool(true), Lit::Bool(false), Lit::Bool(true),]])
     );
     assert_eq!(
         is_values("SELECT TRUE IS TRUE, TRUE IS NOT TRUE, FALSE IS FALSE, FALSE IS NOT FALSE"),
@@ -163,10 +147,7 @@ fn sql_is_predicates_follow_three_valued_logic() {
         fixture.execute(None, sql).expect("seed");
     }
     assert_eq!(is_values("SELECT id FROM users WHERE tag IS NULL"), rows(&[&[Lit::Int(2)]]));
-    assert_eq!(
-        is_values("SELECT id FROM users WHERE active IS TRUE ORDER BY id"),
-        rows(&[&[Lit::Int(1)], &[Lit::Int(3)]])
-    );
+    assert_eq!(is_values("SELECT id FROM users WHERE active IS TRUE ORDER BY id"), rows(&[&[Lit::Int(1)], &[Lit::Int(3)]]));
     assert_eq!(is_values("SELECT id FROM users WHERE active IS NOT TRUE"), rows(&[&[Lit::Int(2)]]));
 }
 
@@ -205,9 +186,7 @@ fn sql_conformance_transaction_commit_and_rollback() {
         .execute(Some(handle.as_ref()), "INSERT INTO users VALUES (4, 'dave', 25, 0.5, FALSE, NULL)")
         .expect("transaction insert");
     assert_eq!(inserted.affected_rows, 1);
-    let visible = fixture
-        .execute(Some(handle.as_ref()), "SELECT id, name FROM users WHERE id = 4")
-        .expect("transaction read");
+    let visible = fixture.execute(Some(handle.as_ref()), "SELECT id, name FROM users WHERE id = 4").expect("transaction read");
     assert_eq!(visible.rows, rows(&[&[Int(4), Text("dave")]]));
     assert_eq!(
         fixture.execute(None, "SELECT id FROM users WHERE id = 4").expect("outside read").rows,
@@ -228,11 +207,9 @@ fn sql_conformance_transaction_commit_and_rollback() {
 
     // 回滚丢弃全部写入与更新，状态回到提交后的快照。
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&fixture.executor)));
-    let updated =
-        fixture.execute(Some(handle.as_ref()), "UPDATE users SET age = 99 WHERE id = 1").expect("transaction update");
+    let updated = fixture.execute(Some(handle.as_ref()), "UPDATE users SET age = 99 WHERE id = 1").expect("transaction update");
     assert_eq!(updated.affected_rows, 1);
-    let deleted =
-        fixture.execute(Some(handle.as_ref()), "DELETE FROM users WHERE id = 2").expect("transaction delete");
+    let deleted = fixture.execute(Some(handle.as_ref()), "DELETE FROM users WHERE id = 2").expect("transaction delete");
     assert_eq!(deleted.affected_rows, 1);
     let rolled_back = fixture.execute(Some(handle.as_ref()), "SELECT COUNT(*) FROM users").expect("transaction state");
     assert_eq!(rolled_back.rows, rows(&[&[Int(3)]]));

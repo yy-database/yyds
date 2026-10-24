@@ -33,7 +33,8 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
         const argument = args[index];
         if (["--port", "-p", "-P"].includes(argument)) {
             const value = Number(args[++index]);
-            if (!Number.isInteger(value) || value < 0) throw new Error(`missing port after ${argument}`);
+            if (!Number.isInteger(value) || value < 0)
+                throw new Error(`missing port after ${argument}`);
             if (protocol === "redis") options.redisPort = value;
             if (protocol === "mysql") options.mysqlPort = value;
             if (protocol === "postgresql") options.pgsqlPort = value;
@@ -89,10 +90,23 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     const identity = new native.NodeIdentityHandle(options.clusterId, options.nodeId);
     const lease = native.NodeLeaseHandle.acquire(options.dataDir, identity);
     const executor = new native.LocalExecutorHandle(options.dataDir);
-    const redis = new native.RedisServiceHandle(lease, options.redisPort ?? DEFAULT_REDIS_PORT, executor);
-    const pgsql = options.pgsqlPort === undefined ? undefined : new native.PgsqlServiceHandle(lease, options.pgsqlPort);
-    const mysql = options.mysqlPort === undefined ? undefined : new native.MysqlServiceHandle(lease, options.mysqlPort);
-    const wire = options.wirePort === undefined ? undefined : new native.WireServerHandle(options.wirePort, executor);
+    const redis = new native.RedisServiceHandle(
+        lease,
+        options.redisPort ?? DEFAULT_REDIS_PORT,
+        executor,
+    );
+    const pgsql =
+        options.pgsqlPort === undefined
+            ? undefined
+            : new native.PgsqlServiceHandle(lease, options.pgsqlPort);
+    const mysql =
+        options.mysqlPort === undefined
+            ? undefined
+            : new native.MysqlServiceHandle(lease, options.mysqlPort);
+    const wire =
+        options.wirePort === undefined
+            ? undefined
+            : new native.WireServerHandle(options.wirePort, executor);
 
     const runtime = {
         version: 1,

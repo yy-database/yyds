@@ -3,7 +3,7 @@
     "version": "0.0.13",
     "description": "Node.js facade, CLI, and native bindings for local YYDS nodes.",
     "license": "MPL-2.0",
-        "type": "module",
+    "type": "module",
     "sideEffects": false,
     "exports": {
         ".": {
