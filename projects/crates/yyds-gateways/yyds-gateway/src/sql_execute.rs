@@ -723,13 +723,11 @@ fn execute_scan(
 
         // 对每个 bucket 计算结果行
         let mut staged: Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)> = Vec::new();
-        let first_row = all_rows.first().cloned();
 
         for (_key_str, (group_key_vals, bucket_rows)) in &buckets {
             let bucket_rows = bucket_rows;
-            let first = bucket_rows.first().ok_or_else(|| execute_error("GROUP BY bucket is unexpectedly empty"))?;
 
-            // projection_fields: 按 field_id 找到对应的 GROUP BY 表达式或从 bucket 首行取
+            // projection_fields: 只允许分组列，值直接取自 group key
             let mut row_values: Vec<SqlValue> = Vec::new();
             for (field_id, _display_name) in &plan.projection_fields {
                 let mut matched_key_idx: Option<usize> = None;
@@ -741,21 +739,15 @@ fn execute_scan(
                         }
                     }
                 }
-                if let Some(idx) = matched_key_idx {
-                    row_values.push(group_key_vals[idx].clone());
-                }
+                let Some(idx) = matched_key_idx
                 else {
-                    row_values.push(first.value_typed(*field_id, &plan.field_types).unwrap_or(SqlValue::Null));
-                }
+                    return Err(execute_error("grouped projection references a column outside the GROUP BY key"));
+                };
+                row_values.push(group_key_vals[idx].clone());
             }
-            // projection_expressions
+            // projection_expressions — eval_having 支持嵌套聚合与分组列上的标量函数
             for (expr, _) in &plan.projection_expressions {
-                match expr {
-                    SqlCatalogBoundExpression::Function { .. } => {
-                        row_values.push(eval_aggregate(expr, bucket_rows, &plan.field_types)?);
-                    }
-                    other => row_values.push(eval_expression(other, first, &plan.field_types)?),
-                }
+                row_values.push(eval_having(expr, bucket_rows, group_exprs, &plan.field_types)?);
             }
 
             // HAVING — 用 eval_having 处理聚合函数引用
@@ -776,7 +768,6 @@ fn execute_scan(
             };
             staged.push((sort_keys, row_values));
         }
-        let _ = first_row;
 
         // Sort if ORDER BY present — multi-column 逐列比较
         if let Some(order_items) = &plan.order_by {
@@ -1849,11 +1840,20 @@ fn eval_having(
         SqlCatalogBoundExpression::Wildcard => {
             return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
         }
-        SqlCatalogBoundExpression::Function { name, .. } => {
-            // Function 在 HAVING / GROUP BY ORDER BY 里一定是聚合函数
-            SqlAggregateFunction::from_name(name)
-                .ok_or_else(|| execute_error(&format!("unknown aggregate function in HAVING/ORDER BY: {name}")))?;
-            eval_aggregate(expr, bucket_rows, field_types)?
+        SqlCatalogBoundExpression::Function { name, args } => {
+            if SqlAggregateFunction::from_name(name).is_some() {
+                eval_aggregate(expr, bucket_rows, field_types)?
+            }
+            else if let Some(function) = SqlScalarFunction::from_name(name) {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(eval_having(arg, bucket_rows, group_exprs, field_types)?);
+                }
+                eval_scalar_function(function, &values)?
+            }
+            else {
+                return Err(execute_error(&format!("unknown function in grouped expression: {name}")));
+            }
         }
         SqlCatalogBoundExpression::Unary { operator, expression } => {
             let inner = eval_having(expression, bucket_rows, group_exprs, field_types)?;

@@ -587,7 +587,10 @@ pub enum SqlBoundUnaryOperator {
 
 /// Binds the supported SQL compatibility subset without executing it.
 pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
-    let root = parse_sql(source)?;
+    let surface = scan_grouping_surface(source)?;
+    let rewritten = rewrite_grouping_surface(source, &surface)?;
+    let parse_source = rewritten.as_deref().unwrap_or(source);
+    let root = parse_sql(parse_source)?;
     if root.statements.len() != 1 {
         return Err(bind_error("SQL gateway accepts exactly one statement"));
     }
@@ -733,6 +736,219 @@ fn scan_select_modifiers(source: &str) -> SelectModifiers {
         modifiers.select_distinct.push(false);
     }
     modifiers
+}
+
+/// Top-level grouping clauses recovered from the statement surface.
+///
+/// Oak's pinned SQL AST builds `GroupByClause` only from child `Expression`
+/// nodes, so a bare column (`GROUP BY age`) yields an empty column list, and a
+/// bare `HAVING` condition fails to build at all. The gateway classifies the
+/// clause bodies from the token surface and re-parses them with every item
+/// parenthesized, which makes Oak wrap each item in an `Expression` node.
+/// Nothing below guesses at expression semantics: every body is still parsed by
+/// Oak.
+#[derive(Default)]
+struct GroupingSurface {
+    /// Byte range of the `GROUP BY` body in the statement.
+    group_body: Option<(usize, usize)>,
+    /// Byte range of the `HAVING` body in the statement.
+    having_body: Option<(usize, usize)>,
+}
+
+fn scan_grouping_surface(source: &str) -> Result<GroupingSurface, SqlFrontendError> {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut depth = 0usize;
+    let mut words: Vec<(usize, usize, usize)> = Vec::new();
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            index = skip_line_comment(bytes, index + 2);
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index = skip_block_comment(bytes, index + 2);
+            continue;
+        }
+        if byte == b'#' {
+            index = skip_line_comment(bytes, index + 1);
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`' | b'[') {
+            index = skip_quoted(bytes, index, byte);
+            continue;
+        }
+        if byte == b'(' {
+            depth += 1;
+            index += 1;
+            continue;
+        }
+        if byte == b')' {
+            depth = depth.saturating_sub(1);
+            index += 1;
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = index;
+            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$' | b'#')) {
+                index += 1;
+            }
+            words.push((start, index, depth));
+            continue;
+        }
+        index += 1;
+    }
+    if !words.first().is_some_and(|(start, end, _)| source[*start..*end].eq_ignore_ascii_case("SELECT")) {
+        return Ok(GroupingSurface::default());
+    }
+    let mut surface = GroupingSurface::default();
+    for (position, (start, end, word_depth)) in words.iter().enumerate() {
+        let word = &source[*start..*end];
+        let is_group = word.eq_ignore_ascii_case("GROUP") && group_keyword_is_followed_by(source, &words, position);
+        let is_having = word.eq_ignore_ascii_case("HAVING");
+        if !is_group && !is_having {
+            continue;
+        }
+        if *word_depth > 0 {
+            return Err(SqlFrontendError::unsupported("GROUP BY / HAVING inside a subquery is outside the gateway subset"));
+        }
+        if is_group {
+            let (_, body_start, _) = words[position + 1];
+            if surface.group_body.is_some() {
+                return Err(SqlFrontendError::unsupported("duplicate GROUP BY is outside the gateway subset"));
+            }
+            let body_end = clause_body_end(source, &words, position + 2, &["HAVING", "ORDER", "LIMIT", "OFFSET"]);
+            surface.group_body = Some((body_start, body_end));
+        }
+        else {
+            if surface.having_body.is_some() {
+                return Err(SqlFrontendError::unsupported("duplicate HAVING is outside the gateway subset"));
+            }
+            let body_end = clause_body_end(source, &words, position + 1, &["ORDER", "LIMIT", "OFFSET"]);
+            surface.having_body = Some((*end, body_end));
+        }
+    }
+    Ok(surface)
+}
+
+fn group_keyword_is_followed_by(source: &str, words: &[(usize, usize, usize)], position: usize) -> bool {
+    match words.get(position + 1) {
+        Some((start, end, depth)) if *depth == words[position].2 => source[*start..*end].eq_ignore_ascii_case("BY"),
+        _ => false,
+    }
+}
+
+/// First top-level clause keyword after `from`, or the end of the statement.
+fn clause_body_end(source: &str, words: &[(usize, usize, usize)], from: usize, stops: &[&str]) -> usize {
+    for (start, end, depth) in &words[from.min(words.len())..] {
+        if *depth == 0 && stops.iter().any(|stop| source[*start..*end].eq_ignore_ascii_case(stop)) {
+            return *start;
+        }
+    }
+    statement_end(source)
+}
+
+fn statement_end(source: &str) -> usize {
+    let mut end = source.len();
+    while end > 0 && source.as_bytes()[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end > 0 && source.as_bytes()[end - 1] == b';' {
+        end -= 1;
+    }
+    end
+}
+
+/// Splits a clause body on top-level commas, skipping comments and quoted text.
+fn split_group_items(source: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut index = start;
+    let mut depth = 0usize;
+    let mut item_start = start;
+    let mut items = Vec::new();
+    while index < end {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            index = skip_line_comment(bytes, index + 2);
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index = skip_block_comment(bytes, index + 2);
+            continue;
+        }
+        if byte == b'#' {
+            index = skip_line_comment(bytes, index + 1);
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`' | b'[') {
+            index = skip_quoted(bytes, index, byte);
+            continue;
+        }
+        if byte == b'(' {
+            depth += 1;
+            index += 1;
+            continue;
+        }
+        if byte == b')' {
+            depth = depth.saturating_sub(1);
+            index += 1;
+            continue;
+        }
+        if byte == b',' && depth == 0 {
+            items.push((item_start, index));
+            index += 1;
+            item_start = index;
+            continue;
+        }
+        index += 1;
+    }
+    items.push((item_start, end));
+    items
+}
+
+fn rewrite_grouping_surface(source: &str, surface: &GroupingSurface) -> Result<Option<String>, SqlFrontendError> {
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+    if let Some((start, end)) = surface.group_body {
+        let items = split_group_items(source, start, end);
+        let mut body = String::new();
+        for (position, (item_start, item_end)) in items.iter().enumerate() {
+            let item = source[*item_start..*item_end].trim();
+            if item.is_empty() {
+                return Err(bind_error("GROUP BY requires at least one column"));
+            }
+            if position > 0 {
+                body.push_str(", ");
+            }
+            body.push('(');
+            body.push_str(item);
+            body.push(')');
+        }
+        replacements.push((start, end, body));
+    }
+    if let Some((start, end)) = surface.having_body {
+        let condition = source[start..end].trim();
+        if condition.is_empty() {
+            return Err(bind_error("HAVING requires a condition"));
+        }
+        replacements.push((start, end, format!("({condition})")));
+    }
+    if replacements.is_empty() {
+        return Ok(None);
+    }
+    replacements.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut rewritten = source.to_string();
+    for (start, end, replacement) in replacements {
+        rewritten.replace_range(start..end, &replacement);
+    }
+    Ok(Some(rewritten))
 }
 
 fn skip_line_comment(bytes: &[u8], mut index: usize) -> usize {
