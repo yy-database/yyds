@@ -358,6 +358,22 @@ fn empty_executor() -> yyds_execution::LocalExecutor<yyds_kv::MemoryShard> {
     yyds_execution::LocalExecutor::new(routing, shards).expect("executor")
 }
 
+/// 三行可空数据：id=1 全 NULL，id=2 空串与 0，id=3 正常字符串与 10。
+fn nullable_users() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yyds_kv::MemoryShard>) {
+    let catalog = catalog("table users { @@id: i64, name: utf8?, age: i64? }\n");
+    let executor = empty_executor();
+    for sql in [
+        "INSERT INTO users VALUES (1, NULL, NULL)",
+        "INSERT INTO users VALUES (2, '', 0)",
+        "INSERT INTO users VALUES (3, 'x', 10)",
+    ] {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("insert bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("insert plan");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("insert nullable row");
+    }
+    (catalog, executor)
+}
+
 fn make_executor_with_rows(
     namespace: &str,
     rows: &[(&[u8], &[(u64, &[u8])])],
@@ -1152,6 +1168,112 @@ fn utf8_field_preserves_empty_string() {
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String(String::new()));
+}
+
+#[test]
+fn sql_null_is_distinct_from_empty_string() {
+    let (catalog, executor) = nullable_users();
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users", &catalog, 7).expect("scan bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("scan plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("scan nullable rows");
+
+    assert_eq!(
+        result.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Null],
+            vec![yyds_gateway::SqlValue::String(String::new()), yyds_gateway::SqlValue::Integer(0)],
+            vec![yyds_gateway::SqlValue::String("x".into()), yyds_gateway::SqlValue::Integer(10)],
+        ]
+    );
+}
+
+#[test]
+fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
+    let (catalog, executor) = nullable_users();
+
+    // 扫描路径：NULL > 5 求值为 NULL，不进入结果，也不报错。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE age > 5", &catalog, 7).expect("scan bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("scan plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("null predicate should not error");
+    assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::Integer(3)]]);
+
+    // 主键 Read 路径的剩余谓词同样按三值逻辑处理：NULL 条件为假，影响 0 行。
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 1 AND age > 5", &catalog, 7).expect("read bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("read plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("null remaining predicate");
+    assert!(result.rows.is_empty());
+
+    // 投影里的比较结果本身是 NULL。
+    let bound = yyds_gateway::bind_sql_catalog("SELECT age > 5 FROM users WHERE id = 1", &catalog, 7).expect("projection bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("projection plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("null comparison projection");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Null]);
+
+    // ASC 时 NULL 最后，DESC 时 NULL 最前。
+    let ids = |sql: &str| -> Vec<yyds_gateway::SqlValue> {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("order bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("order plan");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("order exec").rows.into_iter().map(|r| r[0].clone()).collect()
+    };
+    assert_eq!(
+        ids("SELECT id FROM users ORDER BY age ASC"),
+        vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::Integer(1),]
+    );
+    assert_eq!(
+        ids("SELECT id FROM users ORDER BY age DESC"),
+        vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::Integer(2),]
+    );
+
+    // 聚合忽略 NULL：COUNT(age)=2，SUM=10，AVG=5，MAX=10，MIN=0。
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT COUNT(age), SUM(age), AVG(age), MAX(age), MIN(age) FROM users", &catalog, 7)
+            .expect("aggregate bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("aggregate plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("aggregate exec");
+    assert_eq!(
+        result.rows[0],
+        vec![
+            yyds_gateway::SqlValue::Integer(2),
+            yyds_gateway::SqlValue::Integer(10),
+            yyds_gateway::SqlValue::Number(5.0),
+            yyds_gateway::SqlValue::Integer(10),
+            yyds_gateway::SqlValue::Integer(0),
+        ]
+    );
+}
+
+#[test]
+fn sql_null_three_valued_predicate_logic() {
+    let (catalog, executor) = nullable_users();
+    let count = |predicate: &str| -> yyds_gateway::SqlValue {
+        let sql = format!("SELECT COUNT(*) FROM users WHERE {predicate}");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("predicate bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("predicate plan");
+        yyds_gateway::execute_plan(&executor, None, &plan).expect("predicate exec").rows[0][0].clone()
+    };
+
+    // NULL AND FALSE = FALSE，NULL OR TRUE = TRUE。
+    assert_eq!(count("NULL AND FALSE"), yyds_gateway::SqlValue::Integer(0));
+    assert_eq!(count("NULL OR TRUE"), yyds_gateway::SqlValue::Integer(3));
+    // NULL 参与比较后仍是 NULL，作为 WHERE 条件不命中。
+    assert_eq!(count("NULL = NULL"), yyds_gateway::SqlValue::Integer(0));
+}
+
+#[test]
+fn sql_update_set_null_removes_field() {
+    let (catalog, executor) = nullable_users();
+
+    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET age = NULL WHERE id = 3", &catalog, 7).expect("update bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("update plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("update set null");
+    assert_eq!(result.affected_rows, 1);
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT age FROM users WHERE id = 3", &catalog, 7).expect("select bind");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("select plan");
+    let result = yyds_gateway::execute_plan(&executor, None, &plan).expect("select null after update");
+    assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Null]);
 }
 
 #[test]

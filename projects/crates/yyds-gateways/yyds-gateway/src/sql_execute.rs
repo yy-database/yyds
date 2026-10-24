@@ -98,24 +98,36 @@ impl SqlValue {
     pub fn from_row_bytes_typed(bytes: &[u8], field_type: &crate::catalog_bind::SqlFieldType) -> Self {
         let inner = field_type.inner();
         match inner {
+            // 字符串类型保留空串语义：空 bytes 是 `''`，不是 NULL。
             crate::catalog_bind::SqlFieldType::String => SqlValue::String(String::from_utf8_lossy(bytes).into_owned()),
             crate::catalog_bind::SqlFieldType::Int64 | crate::catalog_bind::SqlFieldType::Int32 => {
+                if bytes.is_empty() {
+                    return SqlValue::Null;
+                }
                 let text = String::from_utf8_lossy(bytes).into_owned();
                 text.parse::<i64>().map(SqlValue::Integer).unwrap_or(SqlValue::String(text))
             }
             crate::catalog_bind::SqlFieldType::Float64 => {
+                if bytes.is_empty() {
+                    return SqlValue::Null;
+                }
                 let text = String::from_utf8_lossy(bytes).into_owned();
                 text.parse::<f64>().ok().filter(|f| f.is_finite()).map(SqlValue::Number).unwrap_or(SqlValue::String(text))
             }
             crate::catalog_bind::SqlFieldType::Bool => {
+                if bytes.is_empty() {
+                    return SqlValue::Null;
+                }
                 let text = String::from_utf8_lossy(bytes).into_owned();
                 match text.as_str() {
                     "true" | "True" | "TRUE" | "1" => SqlValue::Boolean(true),
-                    "false" | "False" | "FALSE" | "0" | "" => SqlValue::Boolean(false),
+                    "false" | "False" | "FALSE" | "0" => SqlValue::Boolean(false),
                     _ => SqlValue::String(text),
                 }
             }
             crate::catalog_bind::SqlFieldType::Bytes => SqlValue::String(String::from_utf8_lossy(bytes).into_owned()),
+            // 没有类型信息时只能宽松推断。gateway 写入 NULL 时会省略字段，
+            // 因此这里把空 bytes 视为空串，真正缺失的字段由调用方映射为 NULL。
             crate::catalog_bind::SqlFieldType::Unknown => Self::from_row_bytes(bytes),
             crate::catalog_bind::SqlFieldType::Optional(_) => unreachable!("inner() strips Optional"),
         }
@@ -147,6 +159,12 @@ impl RowFieldValues {
     /// 插入/覆盖一个字段值（field_id → bytes）。
     pub fn insert(&mut self, field_id: u64, value: Vec<u8>) {
         self.fields.insert(field_id, value);
+    }
+
+    /// 删除一个字段。SQL NULL 在 row 编码里表示为字段缺失，因此
+    /// `SET col = NULL` 必须移除已有字段而不是写入空 bytes。
+    pub fn remove(&mut self, field_id: u64) {
+        self.fields.remove(&field_id);
     }
 
     /// 按 field_id 取原始 bytes；不存在返回 None。
@@ -765,7 +783,10 @@ fn execute_update(
     }
 
     for field in &plan.fields {
-        row.insert(field.field_id, sql_value_to_bytes(&field.value));
+        match sql_value_to_bytes(&field.value) {
+            Some(bytes) => row.insert(field.field_id, bytes),
+            None => row.remove(field.field_id),
+        }
     }
     let encoded = encode_row(&row);
     let put_cmd = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
@@ -824,18 +845,20 @@ fn execute_delete(
 fn write_plan_to_row(plan: &WritePlan) -> RowFieldValues {
     let mut row = RowFieldValues::new();
     for field in &plan.fields {
-        row.insert(field.field_id, sql_value_to_bytes(&field.value));
+        // NULL 不写入 TLV：字段缺失就是 NULL，空 bytes 留给真正的空串。
+        if let Some(bytes) = sql_value_to_bytes(&field.value) {
+            row.insert(field.field_id, bytes);
+        }
     }
     row
 }
 
-fn sql_value_to_bytes(lit: &SqlBoundLiteral) -> Vec<u8> {
-    // TLV 里的原始 bytes — 让 decode 侧的 from_row_bytes 推断类型。
+fn sql_value_to_bytes(lit: &SqlBoundLiteral) -> Option<Vec<u8>> {
     match lit {
-        SqlBoundLiteral::Number(text) => text.as_bytes().to_vec(),
-        SqlBoundLiteral::String(text) => text.as_bytes().to_vec(),
-        SqlBoundLiteral::Boolean(v) => (if *v { "1" } else { "0" }).as_bytes().to_vec(),
-        SqlBoundLiteral::Null => Vec::new(),
+        SqlBoundLiteral::Number(text) => Some(text.as_bytes().to_vec()),
+        SqlBoundLiteral::String(text) => Some(text.as_bytes().to_vec()),
+        SqlBoundLiteral::Boolean(v) => Some((if *v { "1" } else { "0" }).as_bytes().to_vec()),
+        SqlBoundLiteral::Null => None,
     }
 }
 
@@ -1028,9 +1051,8 @@ fn eval_expression(
     field_types: &std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
 ) -> Result<SqlValue, SqlFrontendError> {
     Ok(match expr {
-        SqlCatalogBoundExpression::Column(col) => row
-            .value_typed(col.field_id, field_types)
-            .ok_or_else(|| execute_error(&format!("column {} not present in row", col.field_name)))?,
+        // 缺失字段就是 SQL NULL（写入 NULL 时字段会被省略），比较和投影都按 NULL 处理。
+        SqlCatalogBoundExpression::Column(col) => row.value_typed(col.field_id, field_types).unwrap_or(SqlValue::Null),
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Unary { operator, expression } => {
             let inner = eval_expression(expression, row, field_types)?;
@@ -1387,9 +1409,7 @@ fn eval_having(
 ) -> Result<SqlValue, SqlFrontendError> {
     let first = bucket_rows.first().ok_or_else(|| execute_error("eval_having: empty bucket"))?;
     Ok(match expr {
-        SqlCatalogBoundExpression::Column(col) => first
-            .value_typed(col.field_id, field_types)
-            .ok_or_else(|| execute_error(&format!("column {} not present in row", col.field_name)))?,
+        SqlCatalogBoundExpression::Column(col) => first.value_typed(col.field_id, field_types).unwrap_or(SqlValue::Null),
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Function { name, .. } => {
             // Function 在 HAVING / GROUP BY ORDER BY 里一定是聚合函数
