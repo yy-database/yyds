@@ -229,12 +229,32 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             write_ok(&mut stream, sequence.wrapping_add(1))?;
                         }
                         SqlTransactionAction::Commit => {
+                            let mut commit_error = None;
                             if let Some(handle) = session.handle.take() {
-                                let _ = handle.commit();
+                                if let Err(err) = handle.commit() {
+                                    commit_error = Some(err);
+                                }
                             }
                             session.executor = None;
                             session.failed = false;
-                            write_ok(&mut stream, sequence.wrapping_add(1))?;
+                            match commit_error {
+                                // OCC 拒绝必须回报给客户端，否则并发写会被静默丢弃。
+                                Some(err @ yyds_types::Error::CasConflict { .. }) => write_error(
+                                    &mut stream,
+                                    sequence.wrapping_add(1),
+                                    1213,
+                                    "40001",
+                                    &format!("COMMIT failed: serialization conflict: {err}"),
+                                )?,
+                                Some(err) => write_error(
+                                    &mut stream,
+                                    sequence.wrapping_add(1),
+                                    1105,
+                                    "HY000",
+                                    &format!("COMMIT failed: {err}"),
+                                )?,
+                                None => write_ok(&mut stream, sequence.wrapping_add(1))?,
+                            }
                         }
                         SqlTransactionAction::Rollback => {
                             if let Some(handle) = session.handle.take() {

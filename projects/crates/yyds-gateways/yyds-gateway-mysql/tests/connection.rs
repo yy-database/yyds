@@ -517,3 +517,136 @@ fn extract_column_name(col_def: &[u8]) -> String {
     let (name_bytes, c) = read_lenenc_str(&col_def[cursor..]);
     String::from_utf8(name_bytes.to_vec()).unwrap_or_default()
 }
+
+/// MySQL 报文：0x03 + SQL 文本。
+fn sql_payload(sql: &str) -> Vec<u8> {
+    let mut payload = vec![0x03];
+    payload.extend_from_slice(sql.as_bytes());
+    payload
+}
+
+/// 发送一条语句并读取第一个响应包。
+fn exchange(client: &mut TcpStream, sql: &str) -> (u8, Vec<u8>) {
+    client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
+    read_packet_full(client)
+}
+
+/// 发送一条语句并断言 OK 包。
+fn expect_ok(client: &mut TcpStream, sql: &str) {
+    let (_, packet) = exchange(client, sql);
+    assert_eq!(packet[0], 0x00, "expected OK for `{sql}`, got {:?}", packet);
+}
+
+/// 发送一条语句并断言 ERR 包，返回 (error_code, sqlstate)。
+fn expect_error(client: &mut TcpStream, sql: &str) -> (u16, String) {
+    let (_, packet) = exchange(client, sql);
+    assert_eq!(packet[0], 0xFF, "expected ERR for `{sql}`, got {:?}", packet);
+    let code = u16::from_le_bytes([packet[1], packet[2]]);
+    let state = String::from_utf8_lossy(&packet[4..9]).into_owned();
+    (code, state)
+}
+
+/// 读取一个 SELECT 的首行首列。
+fn expect_single_value(client: &mut TcpStream, sql: &str) -> Vec<u8> {
+    client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
+    let (_, count) = read_packet_full(client);
+    let columns = read_lenenc(&count).0 as usize;
+    for _ in 0..columns {
+        read_packet_full(client);
+    }
+    let (_, eof) = read_packet_full(client);
+    assert_eq!(eof[0], 0xFE);
+    let (_, row) = read_packet_full(client);
+    let (value, _) = read_lenenc_str(&row);
+    let value = value.to_vec();
+    // 读掉行结束的 EOF，避免客户端带着未读数据关闭连接触发 RST。
+    let (_, eof) = read_packet_full(client);
+    assert_eq!(eof[0], 0xFE);
+    value
+}
+
+/// 两条连接共享同一个 runtime，接受两次连接后各起一个服务线程。
+fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlCatalog;
+    use yyds_gateway_mysql::connection::MysqlSqlRuntime;
+    use yyds_kv::MemoryShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let source = "table users { @@id: i64, name: utf8 }\n";
+    let projection = vos::parse_oak(source).expect("Oak parses").project_schema().expect("projection");
+    let manifest = vos::contract::IdentityManifest {
+        format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(),
+        types: vec![vos::contract::TypeIdentity {
+            canonical_path: vec!["users".into()],
+            type_id: 1,
+            kind: vos::contract::TypeContractKind::Table,
+            fields: vec![
+                vos::contract::FieldIdentity { canonical_name: "id".into(), field_id: 1, virtual_field_index: 0 },
+                vos::contract::FieldIdentity { canonical_name: "name".into(), field_id: 2, virtual_field_index: 1 },
+            ],
+        }],
+    };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
+
+    let mut shard = MemoryShard::new();
+    put_row(&mut shard, "table:1", b"42", &[(1, b"42"), (2, b"alice")]);
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards).expect("executor");
+
+    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (first, _) = listener.accept().unwrap();
+        let (second, _) = listener.accept().unwrap();
+        let runtime_a = Arc::clone(&runtime);
+        let runtime_b = runtime;
+        let a = thread::spawn(move || serve_connection(first, Some(runtime_a)).unwrap());
+        let b = thread::spawn(move || serve_connection(second, Some(runtime_b)).unwrap());
+        a.join().unwrap();
+        b.join().unwrap();
+    });
+    let mut client_a = TcpStream::connect(address).unwrap();
+    let mut client_b = TcpStream::connect(address).unwrap();
+    for client in [&mut client_a, &mut client_b] {
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let _ = read_packet_full(client); // handshake
+        client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+        let (_, ok) = read_packet_full(client);
+        assert_eq!(ok[0], 0x00);
+        expect_ok(client, "SET NAMES utf8mb4");
+    }
+    (client_a, client_b, server)
+}
+
+#[test]
+fn mysql_commit_reports_occ_conflict_instead_of_silently_dropping_the_write() {
+    let (mut first, mut second, server) = start_two_client_server();
+
+    expect_ok(&mut first, "BEGIN");
+    expect_ok(&mut second, "BEGIN");
+
+    // 两个会话读到同一 pre-image，然后各自 read-modify-write。
+    expect_ok(&mut first, "UPDATE users SET name = 't1' WHERE id = 42");
+    expect_ok(&mut second, "UPDATE users SET name = 't2' WHERE id = 42");
+
+    expect_ok(&mut first, "COMMIT");
+    let (code, state) = expect_error(&mut second, "COMMIT");
+    assert_eq!(code, 1213, "expected MySQL deadlock/serialization error code");
+    assert_eq!(state, "40001", "expected SQLSTATE serialization failure");
+
+    // 后提交事务的值不能覆盖先提交者。
+    assert_eq!(expect_single_value(&mut first, "SELECT name FROM users WHERE id = 42"), b"t1".to_vec());
+
+    drop(first);
+    drop(second);
+    server.join().unwrap();
+}
