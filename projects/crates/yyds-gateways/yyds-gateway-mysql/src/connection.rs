@@ -307,7 +307,19 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         session.fail();
                         write_error(&mut stream, sequence.wrapping_add(1), 1064, "42000", "PRAGMA is not MySQL syntax")?;
                     }
-                    Ok(None) | Err(_) => {
+                    Err(_) => {
+                        // 语法错误与“未接入执行器”必须是不同错误，否则没有 runtime 时
+                        // 客户端会把语法错误误判为不支持的能力。
+                        session.fail();
+                        write_error(
+                            &mut stream,
+                            sequence.wrapping_add(1),
+                            1064,
+                            "42000",
+                            "Oak could not parse the SQL statement",
+                        )?;
+                    }
+                    Ok(None) => {
                         if session.failed {
                             write_error(
                                 &mut stream,
@@ -542,8 +554,8 @@ fn write_result_set(stream: &mut impl Write, mut sequence: u8, result: &SqlResul
     sequence = sequence.wrapping_add(1);
 
     // 包 2..N: column definitions
-    for col in &result.columns {
-        let def = encode_column_definition(col);
+    for (index, col) in result.columns.iter().enumerate() {
+        let def = encode_column_definition(col, column_type(&result.rows, index));
         write_packet(stream, sequence, &def)?;
         sequence = sequence.wrapping_add(1);
     }
@@ -566,7 +578,20 @@ fn write_result_set(stream: &mut impl Write, mut sequence: u8, result: &SqlResul
     write_eof(stream, sequence)
 }
 
-fn encode_column_definition(name: &str) -> Vec<u8> {
+/// 按首批非空值推断 MySQL 列类型：`LONGLONG`、`DOUBLE`、`TINY`、`VAR_STRING`。
+fn column_type(rows: &[Vec<SqlValue>], index: usize) -> u8 {
+    rows.iter()
+        .find_map(|row| match row.get(index) {
+            Some(SqlValue::Integer(_)) => Some(0x08), // MYSQL_TYPE_LONGLONG
+            Some(SqlValue::Number(_)) => Some(0x05),  // MYSQL_TYPE_DOUBLE
+            Some(SqlValue::Boolean(_)) => Some(0x01), // MYSQL_TYPE_TINY
+            Some(SqlValue::String(_)) => Some(0xFD),  // MYSQL_TYPE_VAR_STRING
+            Some(SqlValue::Null) | None => None,
+        })
+        .unwrap_or(0xFD)
+}
+
+fn encode_column_definition(name: &str, column_type: u8) -> Vec<u8> {
     let mut out = Vec::new();
     encode_length_encoded(&mut out, b"def".len() as u64);
     out.extend_from_slice(b"def");
@@ -579,9 +604,9 @@ fn encode_column_definition(name: &str) -> Vec<u8> {
     out.push(0x0C); // fixed length
     out.extend_from_slice(&0x000C_u16.to_le_bytes()); // charset = utf8_bin
     out.extend_from_slice(&255_u32.to_le_bytes()); // column_length
-    out.push(0xFB); // column_type = MYSQL_TYPE_STRING (简化)
+    out.push(column_type);
     out.extend_from_slice(&0_u16.to_le_bytes()); // flags
-    out.push(0); // decimals
+    out.push(if column_type == 0x05 { 31 } else { 0 }); // decimals
     out.extend_from_slice(&[0u8; 2]); // filler
     out
 }

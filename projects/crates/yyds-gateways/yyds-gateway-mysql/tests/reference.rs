@@ -1,4 +1,6 @@
 use std::{
+    collections::HashMap,
+    ffi::OsString,
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
@@ -10,6 +12,8 @@ use std::{
 };
 
 use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
+use yyds_execution::{KeyValueExecutor, LocalExecutor};
+use yyds_gateway::SqlCatalog;
 use yyds_gateway_mysql::service::MysqlService;
 
 fn owner_directory() -> PathBuf {
@@ -22,15 +26,88 @@ fn owner_directory() -> PathBuf {
     ))
 }
 
+fn reference_python() -> OsString {
+    std::env::var_os("YYDS_MYSQL_REFERENCE_PYTHON").expect("reference Python executable")
+}
+
+fn lease(directory: &PathBuf) -> NodeLease {
+    NodeLease::acquire(directory, NodeIdentity::new("reference-cluster", "reference-node").unwrap()).unwrap()
+}
+
+/// Runs an embedded PyMySQL script against the bound gateway port.
+fn run_reference_client(script: &str, port: u16) {
+    let mut child = Command::new(reference_python())
+        .arg("-c")
+        .arg(script)
+        .arg(port.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            let output = child.wait_with_output().unwrap();
+            panic!("reference client exceeded deadline: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+/// Builds the gateway catalog from a VOS schema source.
+fn catalog(source: &str) -> SqlCatalog {
+    let projection = vos::parse_oak(source).expect("Oak VOS source").project_schema().expect("projection");
+    let mut next_field_id = 1u64;
+    let types = projection
+        .types
+        .iter()
+        .enumerate()
+        .map(|(type_index, entry)| vos::contract::TypeIdentity {
+            canonical_path: entry.canonical_path.clone(),
+            type_id: type_index as u64 + 1,
+            kind: entry.kind,
+            fields: entry
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(field_index, field)| {
+                    let field_id = next_field_id;
+                    next_field_id += 1;
+                    vos::contract::FieldIdentity {
+                        canonical_name: field.canonical_name.clone(),
+                        field_id,
+                        virtual_field_index: field_index as u32,
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    let manifest = vos::contract::IdentityManifest { format_version: vos::contract::IDENTITY_MANIFEST_VERSION.into(), types };
+    let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
+    SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog")
+}
+
+fn empty_executor() -> LocalExecutor<yyds_kv::MemoryShard> {
+    use yyds_kv::MemoryShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let epoch = ShardEpoch(1);
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
+    let mut shards = HashMap::new();
+    shards.insert(shard_id, MemoryShard::new());
+    LocalExecutor::new(routing, shards).expect("executor")
+}
+
 #[test]
 #[ignore = "requires YYDS_MYSQL_REFERENCE_PYTHON with PyMySQL installed"]
 fn pymysql_connects_and_receives_explicit_unsupported_query_error() {
-    let python = std::env::var_os("YYDS_MYSQL_REFERENCE_PYTHON").expect("reference Python executable");
     let directory = owner_directory();
-    let owner =
-        Arc::new(NodeLease::acquire(&directory, NodeIdentity::new("reference-cluster", "reference-node").unwrap()).unwrap());
+    let owner = Arc::new(lease(&directory));
     let service = MysqlService::start(owner, "127.0.0.1:0".parse().unwrap(), None).unwrap();
-    let port = service.address().port();
     let script = r#"
 import pymysql, sys
 connection = pymysql.connect(host='127.0.0.1', port=int(sys.argv[1]), user='yyds',
@@ -54,25 +131,101 @@ else:
 connection.close()
 print('PyMySQL protocol-v10 startup and explicit unsupported-query response passed')
 "#;
-    let mut child = Command::new(python)
-        .arg("-c")
-        .arg(script)
-        .arg(port.to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(12);
-    while child.try_wait().unwrap().is_none() {
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            let output = child.wait_with_output().unwrap();
-            panic!("reference client exceeded deadline: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    run_reference_client(script, service.address().port());
+    service.stop().unwrap();
+    assert_eq!(NodeLease::inspect(directory).unwrap().ownership, LocalOwnership::Available);
+}
+
+#[test]
+#[ignore = "requires YYDS_MYSQL_REFERENCE_PYTHON with PyMySQL installed"]
+fn pymysql_round_trips_typed_results_parameters_transactions_and_conflicts() {
+    let directory = owner_directory();
+    let owner = Arc::new(lease(&directory));
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool }\n");
+    let executor: Arc<dyn KeyValueExecutor> = Arc::new(empty_executor());
+    let service =
+        MysqlService::start_with_executor(owner, "127.0.0.1:0".parse().unwrap(), executor, catalog, 7).unwrap();
+    let script = r#"
+import pymysql, sys
+
+def connect():
+    return pymysql.connect(host='127.0.0.1', port=int(sys.argv[1]), user='yyds', password='',
+                           database='yyds', connect_timeout=4, read_timeout=4, write_timeout=4,
+                           autocommit=True)
+
+connection = connect()
+assert connection.character_set_name() == 'utf8mb4'
+cursor = connection.cursor()
+
+# 1. SimpleQuery INSERT and typed text result set
+cursor.execute("INSERT INTO users VALUES (1, 'alice', 30, 1.5, 1)")
+assert cursor.rowcount == 1, cursor.rowcount
+cursor.execute("SELECT id, name, age, score, active FROM users WHERE id = %s", (1,))
+assert [entry[0] for entry in cursor.description] == ['id', 'name', 'age', 'score', 'active']
+assert [entry[1] for entry in cursor.description] == [8, 253, 8, 5, 1], [entry[1] for entry in cursor.description]
+row = cursor.fetchone()
+assert row == (1, 'alice', 30, 1.5, 1), row
+assert isinstance(row[0], int) and isinstance(row[2], int) and isinstance(row[3], float), row
+
+# 2. Client-side parameter binding keeps text and NULL distinct
+cursor.execute("SELECT name FROM users WHERE name = %s", ('alice',))
+assert cursor.fetchall() == (('alice',),)
+cursor.execute("SELECT id FROM users WHERE name = %s", (None,))
+assert cursor.fetchall() == ()
+
+# 3. Text with a leading zero must not be coerced to an integer
+cursor.execute("INSERT INTO users VALUES (2, '007', 0, 0.25, 0)")
+cursor.execute("SELECT name, age FROM users WHERE id = %s", (2,))
+assert cursor.fetchone() == ('007', 0)
+
+# 4. Rollback discards buffered writes and commit persists them
+connection.begin()
+cursor.execute("INSERT INTO users VALUES (3, 'temp', 5, 0.0, 1)")
+connection.rollback()
+cursor.execute("SELECT id FROM users WHERE id = %s", (3,))
+assert cursor.fetchall() == ()
+connection.begin()
+cursor.execute("INSERT INTO users VALUES (4, 'kept', 5, 0.0, 1)")
+connection.commit()
+cursor.execute("SELECT id FROM users WHERE id = %s", (4,))
+assert cursor.fetchall() == ((4,),)
+
+# 5. Error responses carry the gateway's MySQL error codes
+try:
+    cursor.execute("SELECT id FROM missing")
+except pymysql.err.ProgrammingError as error:
+    assert error.args[0] == 1064, error.args
+else:
+    raise AssertionError('missing table unexpectedly resolved')
+try:
+    cursor.execute("SELECT (")
+except pymysql.err.ProgrammingError as error:
+    assert error.args[0] == 1064, error.args
+else:
+    raise AssertionError('malformed SQL unexpectedly passed Oak parsing')
+
+# 6. Concurrent read-modify-write must surface a serialization failure at COMMIT
+other = connect()
+other_cursor = other.cursor()
+connection.begin()
+cursor.execute("UPDATE users SET age = 41 WHERE id = %s", (1,))
+other.begin()
+other_cursor.execute("UPDATE users SET age = 42 WHERE id = %s", (1,))
+other.commit()
+try:
+    connection.commit()
+except pymysql.err.Error as error:
+    assert error.args[0] == 1213, error.args
+else:
+    raise AssertionError('stale transaction commit unexpectedly succeeded')
+cursor.execute("SELECT age FROM users WHERE id = %s", (1,))
+assert cursor.fetchone() == (42,)
+
+other.close()
+connection.close()
+print('PyMySQL typed results, parameters, transactions and conflicts passed')
+"#;
+    run_reference_client(script, service.address().port());
     service.stop().unwrap();
     assert_eq!(NodeLease::inspect(directory).unwrap().ownership, LocalOwnership::Available);
 }
