@@ -66,6 +66,8 @@ pub struct Case {
     pub style: SqlParameterStyle,
     /// Expected result rows.
     pub expected_rows: &'static [&'static [Lit]],
+    /// Protocol-specific result rows when a dialect rule changes the order (NULL sorting).
+    pub driver_rows: Option<(Driver, &'static [&'static [Lit]])>,
     /// Expected affected rows for writes.
     pub expected_affected_rows: u64,
     /// Columns projected for the state check.
@@ -74,6 +76,16 @@ pub struct Case {
     pub expected_state: &'static [&'static [Lit]],
     /// Known gap in an upstream component, or `None` when the case must pass.
     pub pending: Option<&'static str>,
+}
+
+impl Case {
+    /// Rows this protocol must observe, honoring a dialect-specific override.
+    pub fn expected_rows_for(&self, driver: Driver) -> &'static [&'static [Lit]] {
+        match self.driver_rows {
+            Some((overridden, rows)) if overridden == driver => rows,
+            _ => self.expected_rows,
+        }
+    }
 }
 
 /// Default state projection covering text, NULL, boolean and floating values.
@@ -105,6 +117,7 @@ pub fn case(name: &'static str) -> CaseBuilder {
             parameters: &[],
             style: SqlParameterStyle::QuestionMark,
             expected_rows: &[],
+            driver_rows: None,
             expected_affected_rows: 0,
             state_columns: DEFAULT_STATE_COLUMNS,
             expected_state: seed_state(),
@@ -146,6 +159,12 @@ impl CaseBuilder {
     /// Sets the expected result rows.
     pub fn rows(mut self, rows: &'static [&'static [Lit]]) -> Self {
         self.case.expected_rows = rows;
+        self
+    }
+
+    /// Overrides the expected rows for one protocol when a dialect rule applies.
+    pub fn rows_for(mut self, driver: Driver, rows: &'static [&'static [Lit]]) -> Self {
+        self.case.driver_rows = Some((driver, rows));
         self
     }
 
@@ -422,10 +441,61 @@ pub fn type_cases() -> Vec<Case> {
     ]
 }
 
+/// Fixture with duplicate projected values for `DISTINCT` de-duplication.
+pub const DISTINCT_SEED: &[&str] = &[
+    "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
+    "INSERT INTO users VALUES (2, 'alice', 30, 1.5, FALSE, 'x')",
+    "INSERT INTO users VALUES (3, 'carol', 20, 3.25, TRUE, NULL)",
+    "INSERT INTO users VALUES (4, 'bob', 30, 0.5, FALSE, '')",
+];
+
+/// State after [`DISTINCT_SEED`].
+pub fn distinct_state() -> &'static [&'static [Lit]] {
+    &[
+        &[Lit::Int(1), Lit::Text("alice"), Lit::Int(30), Lit::Float(1.5), Lit::Bool(true), Lit::Text("x")],
+        &[Lit::Int(2), Lit::Text("alice"), Lit::Int(30), Lit::Float(1.5), Lit::Bool(false), Lit::Text("x")],
+        &[Lit::Int(3), Lit::Text("carol"), Lit::Int(20), Lit::Float(3.25), Lit::Bool(true), Lit::Null],
+        &[Lit::Int(4), Lit::Text("bob"), Lit::Int(30), Lit::Float(0.5), Lit::Bool(false), Lit::Text("")],
+    ]
+}
+
+/// `SELECT DISTINCT` de-duplication over one or more projected columns.
+pub fn distinct_cases() -> Vec<Case> {
+    use Lit::{Float, Int, Text};
+
+    vec![
+        case("distinct single column")
+            .setup(DISTINCT_SEED)
+            .state(DEFAULT_STATE_COLUMNS, distinct_state())
+            .sql("SELECT DISTINCT age FROM users ORDER BY age")
+            .rows(&[&[Int(20)], &[Int(30)]])
+            .build(),
+        case("distinct exact float values")
+            .setup(DISTINCT_SEED)
+            .state(DEFAULT_STATE_COLUMNS, distinct_state())
+            .sql("SELECT DISTINCT score FROM users ORDER BY score")
+            .rows(&[&[Float(0.5)], &[Float(1.5)], &[Float(3.25)]])
+            .build(),
+        case("distinct multi column")
+            .setup(DISTINCT_SEED)
+            .state(DEFAULT_STATE_COLUMNS, distinct_state())
+            .sql("SELECT DISTINCT name, age FROM users ORDER BY name, age")
+            .rows(&[&[Text("alice"), Int(30)], &[Text("bob"), Int(30)], &[Text("carol"), Int(20)]])
+            .build(),
+        case("distinct with limit and offset")
+            .setup(DISTINCT_SEED)
+            .state(DEFAULT_STATE_COLUMNS, distinct_state())
+            .sql("SELECT DISTINCT age FROM users ORDER BY age LIMIT 1 OFFSET 1")
+            .rows(&[&[Int(30)]])
+            .build(),
+    ]
+}
+
 /// Every case that both the in-process suite and the real-client suites run.
 pub fn all_cases() -> Vec<Case> {
     let mut cases = crud_cases();
     cases.extend(type_cases());
+    cases.extend(distinct_cases());
     cases
 }
 
@@ -525,7 +595,7 @@ pub fn render_python(mode: ClientMode) -> RenderedCases {
         let parameters =
             case.parameters.iter().map(|value| lit_python(*value, mode, &mut notes)).collect::<Vec<_>>().join(", ");
         let expected_rows = case
-            .expected_rows
+            .expected_rows_for(mode.driver())
             .iter()
             .map(|row| {
                 format!("[{}]", row.iter().map(|value| lit_python(*value, mode, &mut notes)).collect::<Vec<_>>().join(", "))

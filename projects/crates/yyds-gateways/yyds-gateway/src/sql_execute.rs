@@ -587,6 +587,9 @@ fn execute_join(
         }
         staged.push((sort_keys, row_values));
     }
+    if plan.distinct {
+        retain_distinct_projected_rows(&mut staged);
+    }
 
     if let Some(order_items) = &plan.order_by {
         let dirs: Vec<crate::sql::SqlBoundOrderDirection> = order_items.iter().map(|(_, d)| d.clone()).collect();
@@ -868,6 +871,9 @@ fn execute_scan(
             row_values.push(eval_expression(expr, &row, &plan.field_types)?);
         }
         staged.push((sort_keys, row_values));
+    }
+    if plan.distinct {
+        retain_distinct_projected_rows(&mut staged);
     }
 
     // Sort if ORDER BY present — multi-column, 逐列比较直到分出胜负。
@@ -1879,6 +1885,49 @@ fn write_error(message: String, error: &yyds_types::Error) -> SqlFrontendError {
         yyds_types::Error::CasConflict { .. } => SqlFrontendError::new(SqlErrorKind::Conflict, message),
         _ => SqlFrontendError::new(SqlErrorKind::Execution, message),
     }
+}
+
+/// SQL value equality used by `SELECT DISTINCT`.
+///
+/// `NULL` equals `NULL` for de-duplication, integers and floats compare by exact
+/// numeric value (never through a lossy `f64` cast for `i64`), and unrelated
+/// storage variants are never collapsed into one row.
+fn values_equal(left: &SqlValue, right: &SqlValue) -> bool {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (SqlValue::Integer(left), SqlValue::Integer(right)) => left == right,
+        (SqlValue::Integer(integer), SqlValue::Number(float)) => {
+            compare_integer_float(*integer, *float) == Some(Ordering::Equal)
+        }
+        (SqlValue::Number(float), SqlValue::Integer(integer)) => {
+            compare_integer_float(*integer, *float) == Some(Ordering::Equal)
+        }
+        (SqlValue::Number(left), SqlValue::Number(right)) => {
+            left.partial_cmp(right).unwrap_or(Ordering::Equal) == Ordering::Equal
+        }
+        (SqlValue::String(left), SqlValue::String(right)) => left == right,
+        (SqlValue::Boolean(left), SqlValue::Boolean(right)) => left == right,
+        (SqlValue::Null, SqlValue::Null) => true,
+        _ => false,
+    }
+}
+
+fn projected_rows_equal(left: &[SqlValue], right: &[SqlValue]) -> bool {
+    left.len() == right.len() && left.iter().zip(right.iter()).all(|(left, right)| values_equal(left, right))
+}
+
+/// Keeps the first occurrence of each projected row, preserving scan order.
+fn retain_distinct_projected_rows(staged: &mut Vec<(Vec<Option<SqlValue>>, Vec<SqlValue>)>) {
+    let mut seen: Vec<Vec<SqlValue>> = Vec::new();
+    staged.retain(|(_, row)| {
+        if seen.iter().any(|candidate| projected_rows_equal(candidate, row)) {
+            false
+        }
+        else {
+            seen.push(row.clone());
+            true
+        }
+    });
 }
 
 /// NULLs sort last (standard SQL behavior). Mixed types collate equal.

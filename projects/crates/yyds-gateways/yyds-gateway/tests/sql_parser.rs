@@ -34,6 +34,24 @@ fn oak_prefix_unary_minus_survives_parsing() {
 }
 
 #[test]
+fn select_distinct_modifier_is_bound() {
+    use yyds_gateway::{bind_sql, SqlBoundStatement};
+
+    let SqlBoundStatement::Select(distinct) = bind_sql("SELECT DISTINCT id FROM users ORDER BY id").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    assert!(distinct.distinct);
+    let SqlBoundStatement::Select(plain) = bind_sql("select id from users").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    assert!(!plain.distinct);
+    // `DISTINCT` other than the leading SELECT modifier has no gateway semantics.
+    assert!(bind_sql("SELECT COUNT(DISTINCT id) FROM users").is_err());
+}
+
+#[test]
 fn oak_session_statements_are_projected_without_gateway_parsing() {
     use yyds_gateway::{parse_session_command, SqlSessionCommand, SqlTransactionAction};
 

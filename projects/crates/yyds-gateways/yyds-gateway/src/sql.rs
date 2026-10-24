@@ -286,6 +286,8 @@ pub struct SqlBoundSelect {
     pub offset: Option<usize>,
     /// Optional SQL ORDER BY clause — supports multi-column ordering.
     pub order_by: Option<Vec<SqlBoundOrderByItem>>,
+    /// Whether the projection list carries the `DISTINCT` modifier.
+    pub distinct: bool,
 }
 
 /// One JOIN clause retained by the gateway binder.
@@ -589,8 +591,28 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     if root.statements.len() != 1 {
         return Err(bind_error("SQL gateway accepts exactly one statement"));
     }
+    let modifiers = scan_select_modifiers(source);
+    if modifiers.nulls_modifiers > 0 {
+        return Err(SqlFrontendError::unsupported(
+            "NULLS FIRST/LAST is not exposed by the pinned Oak SQL AST and is outside the gateway subset",
+        ));
+    }
+    if !matches!(root.statements[0], SqlStatement::Select(_)) && modifiers.distinct_tokens > 0 {
+        return Err(SqlFrontendError::unsupported("DISTINCT is supported only as the leading modifier of a SELECT statement"));
+    }
     match &root.statements[0] {
-        SqlStatement::Select(select) => Ok(SqlBoundStatement::Select(bind_select_statement(select)?)),
+        SqlStatement::Select(select) => {
+            let distinct = modifiers.select_distinct.first().copied().unwrap_or(false);
+            if modifiers.select_distinct.iter().skip(1).any(|value| *value) {
+                return Err(SqlFrontendError::unsupported("SELECT DISTINCT inside a subquery is outside the gateway subset"));
+            }
+            if modifiers.distinct_tokens > usize::from(distinct) {
+                return Err(SqlFrontendError::unsupported(
+                    "DISTINCT is supported only as the leading modifier of a SELECT statement",
+                ));
+            }
+            Ok(SqlBoundStatement::Select(bind_select_statement(select, distinct)?))
+        }
         SqlStatement::Insert(insert) => {
             let columns = if insert.columns.is_empty() {
                 None
@@ -630,8 +652,128 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
     }
 }
 
+/// `SELECT` modifiers recovered from the statement surface.
+///
+/// Oak's pinned SQL AST parses `SELECT DISTINCT` but does not publish the
+/// modifier, so the gateway classifies each unquoted `SELECT` keyword from the
+/// token surface. Quoted strings, quoted identifiers and comments are skipped,
+/// and the scan never guesses at expression semantics.
+struct SelectModifiers {
+    /// One entry per unquoted `SELECT` keyword, in source order.
+    select_distinct: Vec<bool>,
+    /// Number of unquoted `DISTINCT` keyword tokens anywhere in the statement.
+    distinct_tokens: usize,
+    /// Number of `NULLS FIRST` / `NULLS LAST` modifiers in the statement.
+    nulls_modifiers: usize,
+}
+
+fn scan_select_modifiers(source: &str) -> SelectModifiers {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    let mut modifiers = SelectModifiers { select_distinct: Vec::new(), distinct_tokens: 0, nulls_modifiers: 0 };
+    let mut awaiting_select_modifier = false;
+    let mut awaiting_nulls_modifier = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if byte == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            index = skip_line_comment(bytes, index + 2);
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index = skip_block_comment(bytes, index + 2);
+            continue;
+        }
+        if byte == b'#' {
+            index = skip_line_comment(bytes, index + 1);
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"' | b'`' | b'[') {
+            if awaiting_select_modifier {
+                modifiers.select_distinct.push(false);
+                awaiting_select_modifier = false;
+            }
+            awaiting_nulls_modifier = false;
+            index = skip_quoted(bytes, index, byte);
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = index;
+            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$' | b'#')) {
+                index += 1;
+            }
+            let word = &source[start..index];
+            if awaiting_select_modifier {
+                modifiers.select_distinct.push(word.eq_ignore_ascii_case("DISTINCT"));
+                awaiting_select_modifier = false;
+            }
+            if awaiting_nulls_modifier && (word.eq_ignore_ascii_case("FIRST") || word.eq_ignore_ascii_case("LAST")) {
+                modifiers.nulls_modifiers += 1;
+            }
+            awaiting_nulls_modifier = word.eq_ignore_ascii_case("NULLS");
+            if word.eq_ignore_ascii_case("DISTINCT") {
+                modifiers.distinct_tokens += 1;
+            }
+            if word.eq_ignore_ascii_case("SELECT") {
+                awaiting_select_modifier = true;
+            }
+            continue;
+        }
+        if awaiting_select_modifier {
+            modifiers.select_distinct.push(false);
+            awaiting_select_modifier = false;
+        }
+        awaiting_nulls_modifier = false;
+        index += 1;
+    }
+    if awaiting_select_modifier {
+        modifiers.select_distinct.push(false);
+    }
+    modifiers
+}
+
+fn skip_line_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index += 1;
+    }
+    index
+}
+
+fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn skip_quoted(bytes: &[u8], mut index: usize, quote: u8) -> usize {
+    let closing = if quote == b'[' { b']' } else { quote };
+    index += 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && quote == b'\'' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == closing {
+            if bytes.get(index + 1) == Some(&closing) {
+                index += 2;
+                continue;
+            }
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
 /// Binds one Oak `SELECT` — shared by top-level statements and `IN (SELECT ...)` subqueries.
-fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBoundSelect, SqlFrontendError> {
+fn bind_select_statement(select: &oak_sql::ast::SelectStatement, distinct: bool) -> Result<SqlBoundSelect, SqlFrontendError> {
     let projections = select.items.iter().map(bind_projection).collect::<Result<Vec<_>, _>>()?;
     let (limit, offset) = match &select.limit {
         Some(clause) => {
@@ -698,6 +840,7 @@ fn bind_select_statement(select: &oak_sql::ast::SelectStatement) -> Result<SqlBo
         limit,
         offset,
         order_by,
+        distinct,
     })
 }
 
@@ -846,7 +989,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
         }
         Expression::InSubquery { expr, query, negated, .. } => Ok(SqlBoundExpression::InSubquery {
             expression: Box::new(bind_expression(expr)?),
-            select: Box::new(bind_select_statement(query)?),
+            select: Box::new(bind_select_statement(query, false)?),
             negated: *negated,
         }),
         // 子查询只在 `IN (<subquery>)` 里有语义；单独出现的 `(SELECT ...)` 不在网关子集内。

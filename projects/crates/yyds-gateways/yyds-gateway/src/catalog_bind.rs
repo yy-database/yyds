@@ -349,6 +349,8 @@ pub struct SqlCatalogBoundSelect {
     pub offset: Option<usize>,
     /// Optional ORDER BY items, propagated from the gateway binder.
     pub order_by: Option<Vec<(SqlCatalogBoundExpression, SqlBoundOrderDirection)>>,
+    /// Whether the projection list carries the `DISTINCT` modifier.
+    pub distinct: bool,
 }
 
 /// One JOIN clause after SQL names are bound to YYDS catalog identity.
@@ -575,6 +577,7 @@ fn bind_select(
         limit: select.limit,
         offset: select.offset,
         order_by,
+        distinct: select.distinct,
     })
 }
 
