@@ -15,9 +15,9 @@ use std::{
 use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
-    plan_statement, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlCatalogBoundStatement,
-    SqlColumn, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult, SqlSessionCommand,
-    SqlTransactionAction, SqlValue,
+    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
+    SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
+    SqlParameterStyle, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -635,7 +635,7 @@ fn execute_sql(
             return Ok(());
         }
     };
-    let plan = match plan_statement(bound, &runtime.catalog) {
+    let plan = match plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Mysql) {
         Ok(plan) => plan,
         Err(error) => {
             session.fail();
@@ -738,7 +738,7 @@ fn handle_prepare(
     // 写入语句的值类型检查推迟到 execute，因为只有执行时才知道参数的真实类型，
     // 因此这里只为 SELECT 推导结果列。
     let description = match bound {
-        SqlCatalogBoundStatement::Select(_) => match plan_statement(bound, &runtime.catalog) {
+        SqlCatalogBoundStatement::Select(_) => match plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Mysql) {
             Ok(plan) => describe_plan(&plan),
             Err(error) => {
                 session.fail();

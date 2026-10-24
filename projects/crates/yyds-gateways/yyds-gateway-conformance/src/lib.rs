@@ -187,6 +187,74 @@ impl CaseBuilder {
     }
 }
 
+/// Fixture with two NULL tags for dialect-specific NULL ordering.
+pub const NULL_ORDER_SEED: &[&str] = &[
+    "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
+    "INSERT INTO users VALUES (2, 'bob', 20, 2.5, FALSE, NULL)",
+    "INSERT INTO users VALUES (3, 'carol', 40, 3.25, TRUE, '')",
+    "INSERT INTO users VALUES (4, 'dave', 30, 0.5, FALSE, NULL)",
+];
+
+/// State after [`NULL_ORDER_SEED`].
+pub fn null_order_state() -> &'static [&'static [Lit]] {
+    &[
+        &[Lit::Int(1), Lit::Text("alice"), Lit::Int(30), Lit::Float(1.5), Lit::Bool(true), Lit::Text("x")],
+        &[Lit::Int(2), Lit::Text("bob"), Lit::Int(20), Lit::Float(2.5), Lit::Bool(false), Lit::Null],
+        &[Lit::Int(3), Lit::Text("carol"), Lit::Int(40), Lit::Float(3.25), Lit::Bool(true), Lit::Text("")],
+        &[Lit::Int(4), Lit::Text("dave"), Lit::Int(30), Lit::Float(0.5), Lit::Bool(false), Lit::Null],
+    ]
+}
+
+/// `NULL` ordering: PostgreSQL sorts `NULL` after every value, MySQL before.
+pub fn null_order_cases() -> Vec<Case> {
+    use Lit::{Int, Null, Text};
+
+    vec![
+        case("null ordering ascending")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag ASC")
+            .rows(&[&[Int(3)], &[Int(1)], &[Int(2)], &[Int(4)]])
+            .rows_for(Driver::Mysql, &[&[Int(2)], &[Int(4)], &[Int(3)], &[Int(1)]])
+            .build(),
+        case("null ordering descending")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag DESC")
+            .rows(&[&[Int(2)], &[Int(4)], &[Int(1)], &[Int(3)]])
+            .rows_for(Driver::Mysql, &[&[Int(1)], &[Int(3)], &[Int(2)], &[Int(4)]])
+            .build(),
+        case("null ordering with tie break")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag ASC, id DESC")
+            .rows(&[&[Int(3)], &[Int(1)], &[Int(4)], &[Int(2)]])
+            .rows_for(Driver::Mysql, &[&[Int(4)], &[Int(2)], &[Int(3)], &[Int(1)]])
+            .build(),
+        case("null ordering with limit")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT id FROM users ORDER BY tag ASC LIMIT 2")
+            .rows(&[&[Int(3)], &[Int(1)]])
+            .rows_for(Driver::Mysql, &[&[Int(2)], &[Int(4)]])
+            .build(),
+        case("null ordering after distinct")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT DISTINCT tag FROM users ORDER BY tag")
+            .rows(&[&[Text("")], &[Text("x")], &[Null]])
+            .rows_for(Driver::Mysql, &[&[Null], &[Text("")], &[Text("x")]])
+            .build(),
+        case("null ordering after group by")
+            .setup(NULL_ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, null_order_state())
+            .sql("SELECT tag, COUNT(*) FROM users GROUP BY tag ORDER BY tag")
+            .rows(&[&[Text(""), Int(1)], &[Text("x"), Int(1)], &[Null, Int(2)]])
+            .rows_for(Driver::Mysql, &[&[Null, Int(2)], &[Text(""), Int(1)], &[Text("x"), Int(1)]])
+            .build(),
+    ]
+}
+
 /// Predicates, projections and parameter binding cases.
 pub fn crud_cases() -> Vec<Case> {
     use Lit::{Bool, Int, Null, Text};
@@ -627,6 +695,7 @@ pub fn all_cases() -> Vec<Case> {
     cases.extend(distinct_cases());
     cases.extend(group_cases());
     cases.extend(order_cases());
+    cases.extend(null_order_cases());
     cases
 }
 

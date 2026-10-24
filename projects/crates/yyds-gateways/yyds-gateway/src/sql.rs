@@ -265,6 +265,23 @@ pub enum SqlBoundStatement {
     Delete(SqlBoundDelete),
 }
 
+/// SQL dialect that owns protocol-visible ordering rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SqlDialect {
+    /// PostgreSQL: `NULL` sorts after every non-NULL value.
+    #[default]
+    Postgres,
+    /// MySQL: `NULL` sorts before every non-NULL value.
+    Mysql,
+}
+
+impl SqlDialect {
+    /// Whether `NULL` values sort before every non-NULL value.
+    pub fn nulls_sort_first(self) -> bool {
+        matches!(self, Self::Mysql)
+    }
+}
+
 /// SQL SELECT request owned by the compatibility gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundSelect {
