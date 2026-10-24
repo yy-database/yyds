@@ -484,6 +484,9 @@ sqlstate_is("SELECT (", '42601')
 sqlstate_is("SELECT DISTINCT age, COUNT(*) FROM users GROUP BY age", '0A000')
 sqlstate_is("SELECT DISTINCT age FROM users ORDER BY id", '0A000')
 sqlstate_is("SELECT id FROM users ORDER BY id NULLS FIRST", '0A000')
+sqlstate_is("SELECT name FROM users GROUP BY age", '0A000')
+sqlstate_is("SELECT * FROM users GROUP BY age", '0A000')
+sqlstate_is("SELECT age FROM users HAVING COUNT(*) > 1", '0A000')
 sqlstate_is("INSERT INTO users VALUES (NULL, 'x', 0, 0.0, TRUE, NULL)", '23502')
 
 try:
