@@ -390,7 +390,38 @@ fn sql_conformance_crud_and_predicates() {
         case("update by non primary key predicate")
             .sql("UPDATE users SET age = 99 WHERE name = 'alice'")
             .affected(1)
-            .pending("gateway plans single-row UPDATE only, `WHERE` must contain `id = literal`")
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(99), Lit::Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Lit::Float(2.5), Bool(false), Null],
+                    &[Int(3), Text("carol"), Int(40), Lit::Float(3.25), Bool(true), Text("")],
+                ],
+            )
+            .build(),
+        case("update rewrites every matching row")
+            .sql("UPDATE users SET tag = 'vip' WHERE active = TRUE")
+            .affected(2)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(30), Lit::Float(1.5), Bool(true), Text("vip")],
+                    &[Int(2), Text("bob"), Int(20), Lit::Float(2.5), Bool(false), Null],
+                    &[Int(3), Text("carol"), Int(40), Lit::Float(3.25), Bool(true), Text("vip")],
+                ],
+            )
+            .build(),
+        case("update by primary key range")
+            .sql("UPDATE users SET age = 18 WHERE age > 20")
+            .affected(2)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[
+                    &[Int(1), Text("alice"), Int(18), Lit::Float(1.5), Bool(true), Text("x")],
+                    &[Int(2), Text("bob"), Int(20), Lit::Float(2.5), Bool(false), Null],
+                    &[Int(3), Text("carol"), Int(18), Lit::Float(3.25), Bool(true), Text("")],
+                ],
+            )
             .build(),
         case("delete one row")
             .sql("DELETE FROM users WHERE id = 2")
@@ -406,6 +437,19 @@ fn sql_conformance_crud_and_predicates() {
         case("delete skipped by remaining predicate")
             .sql("DELETE FROM users WHERE id = 2 AND age = 30")
             .affected(0)
+            .build(),
+        case("delete every matching row")
+            .sql("DELETE FROM users WHERE active = TRUE")
+            .affected(2)
+            .state(
+                DEFAULT_STATE_COLUMNS,
+                &[&[Int(2), Text("bob"), Int(20), Lit::Float(2.5), Bool(false), Null]],
+            )
+            .build(),
+        case("delete without predicate")
+            .sql("DELETE FROM users")
+            .affected(3)
+            .state(DEFAULT_STATE_COLUMNS, &[])
             .build(),
     ];
 

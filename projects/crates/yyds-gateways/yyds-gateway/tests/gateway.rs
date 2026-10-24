@@ -592,6 +592,95 @@ fn sql_null_tests_and_not_predicate_use_three_valued_logic() {
 }
 
 #[test]
+fn sql_scan_update_and_delete_rewrite_matching_rows() {
+    let (catalog, executor) = nullable_users();
+
+    // name IS NULL 只在 id=1 成立，扫描路径必须只改这一行。
+    let updated = run_sql(&executor, None, &catalog, "UPDATE users SET age = 5 WHERE name IS NULL");
+    assert_eq!(updated.affected_rows, 1);
+    let ids = select_integers(&executor, &catalog, "SELECT id FROM users WHERE age = 5");
+    assert_eq!(ids, vec![1]);
+
+    // 主键范围条件走 rowid 下推 + 扫描，两条匹配行都要改。
+    let updated = run_sql(&executor, None, &catalog, "UPDATE users SET name = 'u' WHERE id > 1");
+    assert_eq!(updated.affected_rows, 2);
+    let ids = select_integers(&executor, &catalog, "SELECT id FROM users WHERE name = 'u' ORDER BY id");
+    assert_eq!(ids, vec![2, 3]);
+
+    // 无 WHERE 的 UPDATE 覆盖整个 namespace。
+    let updated = run_sql(&executor, None, &catalog, "UPDATE users SET age = 7");
+    assert_eq!(updated.affected_rows, 3);
+
+    // 扫描 DELETE 返回真实影响行数。
+    let deleted = run_sql(&executor, None, &catalog, "DELETE FROM users WHERE age = 7");
+    assert_eq!(deleted.affected_rows, 3);
+    let ids = select_integers(&executor, &catalog, "SELECT id FROM users");
+    assert!(ids.is_empty(), "scan delete should remove every matching row");
+}
+
+#[test]
+fn sql_scan_update_and_delete_inside_transaction_roll_back() {
+    use std::sync::Arc;
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let (catalog, executor) = nullable_users();
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(executor);
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+
+    let updated =
+        run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "UPDATE users SET age = 99 WHERE name IS NOT NULL");
+    assert_eq!(updated.affected_rows, 2);
+    let deleted = run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "DELETE FROM users WHERE age = 99");
+    assert_eq!(deleted.affected_rows, 2);
+    let inside = run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "SELECT id FROM users");
+    assert_eq!(inside.rows, vec![vec![yyds_gateway::SqlValue::Integer(1)]]);
+
+    handle.rollback();
+
+    // 回滚后 base 完全恢复，扫描写入没有留下部分提交。
+    let ids = select_integers(executor.as_ref(), &catalog, "SELECT id FROM users ORDER BY id");
+    assert_eq!(ids, vec![1, 2, 3]);
+    let ages = select_integers(executor.as_ref(), &catalog, "SELECT age FROM users WHERE age IS NOT NULL ORDER BY id");
+    assert_eq!(ages, vec![0, 10]);
+}
+
+#[test]
+fn sql_scan_update_conflict_is_rejected_at_commit() {
+    use std::sync::Arc;
+    use yyds_execution::{LocalTransactionHandle, TransactionHandle};
+
+    let (catalog, executor) = nullable_users();
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(executor);
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+
+    let first = run_sql(executor.as_ref(), Some(t1.as_ref()), &catalog, "UPDATE users SET age = 1 WHERE age IS NOT NULL");
+    assert_eq!(first.affected_rows, 2);
+    let second = run_sql(executor.as_ref(), Some(t2.as_ref()), &catalog, "UPDATE users SET age = 2 WHERE age IS NOT NULL");
+    assert_eq!(second.affected_rows, 2);
+
+    t1.commit().expect("first transaction commits");
+    let error = t2.commit().expect_err("scan update must still be validated by OCC");
+    assert!(
+        matches!(error, yyds_types::Error::CasConflict { .. }),
+        "expected CasConflict for the stale scan pre-images, got: {error:?}"
+    );
+}
+
+/// 执行一条返回单列的 SELECT，只保留 INTEGER 值。
+fn select_integers(executor: &dyn yyds_execution::KeyValueExecutor, catalog: &yyds_gateway::SqlCatalog, sql: &str) -> Vec<i64> {
+    let result = run_sql(executor, None, catalog, sql);
+    result
+        .rows
+        .iter()
+        .map(|row| match row.first() {
+            Some(yyds_gateway::SqlValue::Integer(value)) => *value,
+            other => panic!("{sql}: unexpected row {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
 fn sql_in_subquery_evaluates_membership_with_three_valued_logic() {
     let (catalog, executor) = nullable_users();
 
