@@ -2,6 +2,11 @@
 import { defineConfig } from '@doki-land/nifty';
 
 export default defineConfig({
+    authorMap: 'documentation/maintenance/author-github.json',
+    changelog: {
+        repo: 'yy-database/yyds',
+        releasesDir: 'documentation/maintenance/releases',
+    },
     format: {
         preset: 'nifty',
         style: {
