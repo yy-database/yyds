@@ -37,3 +37,6 @@ time-travel.*
 *.swp
 *.swo
 *.log
+
+# Nifty change-logs draft index (local only — regenerate with `nifty change-logs --version X.Y.Z --write`)
+documentation/maintenance/releases/*.reference.md

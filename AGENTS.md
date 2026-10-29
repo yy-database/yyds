@@ -6,15 +6,17 @@ YYDS hybrid monorepo: `projects/yyds.rs/` (Rust), `projects/yyds.ts/` (`@yydb/*`
 
 For repository agents only. Do not link these from user-facing READMEs.
 
-| Skill | Path | When to load |
-|-------|------|--------------|
+| Skill        | Path                                   | When to load                                               |
+|--------------|----------------------------------------|------------------------------------------------------------|
 | YYDS release | `.agents/skills/yyds-release/SKILL.md` | npm publish, placeholders, Trusted Publisher, tag `v*.*.*` |
 
 ## Downstream skills (`@yydb/yyds-skills`)
 
 User- and integrator-facing Agent Skills live in `projects/yyds.ts/packages/yyds-skills/`.
 
-Architecture, contracts and roadmaps are internal and live outside this repository — locate them from the workspace root `AGENTS.md` index. Do not recreate root `documentation/`, `docs/` or design notes here.
+Architecture, contracts and roadmaps are internal and live outside this repository — locate them from the workspace root
+`AGENTS.md` index. Do not recreate root `docs/` or design notes here. Maintainer-only release notes may live under
+`documentation/maintenance/` (not user-facing; never link internal design paths).
 
 ## Quick commands
 
@@ -25,4 +27,5 @@ pnpm placeholder:publish          # nifty publish --placeholder (publish.package
 pnpm placeholder:publish:skills   # nifty publish --placeholder --package @yydb/yyds-skills
 pnpm placeholder:trust            # OIDC trust for publish.packages
 pnpm placeholder:trust:skills     # OIDC trust for @yydb/yyds-skills
+nifty change-logs --version X.Y.Z --write
 ```
