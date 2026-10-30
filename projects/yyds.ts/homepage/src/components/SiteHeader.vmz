@@ -11,6 +11,7 @@
                 <a href="/welcome" :aria-current="welcomeCurrent">{{ navWelcomeLabel }}</a>
                 <a href="/playground" :aria-current="playgroundCurrent">{{ navPlaygroundLabel }}</a>
                 <a href="/d/" :aria-current="docsCurrent">{{ navDocsLabel }}</a>
+                <a href="/install" :aria-current="installCurrent">{{ navInstallLabel }}</a>
                 <a href="/wire" :aria-current="wireCurrent">{{ navWireLabel }}</a>
             </nav>
 
@@ -71,6 +72,7 @@ import {
     navWelcome,
     navPlayground,
     navDocs,
+    navInstall,
     navWire,
     navPrimary,
     github,
@@ -93,6 +95,7 @@ export default class SiteHeader {
     navWelcomeLabel = "";
     navPlaygroundLabel = "";
     navDocsLabel = "";
+    navInstallLabel = "";
     navWireLabel = "";
     navPrimaryLabel = "";
     homeAriaLabel = "";
@@ -109,6 +112,7 @@ export default class SiteHeader {
     welcomeCurrent = null;
     playgroundCurrent = null;
     docsCurrent = null;
+    installCurrent = null;
     wireCurrent = null;
     _unwatchLocale = null;
 
@@ -130,6 +134,7 @@ export default class SiteHeader {
         this.welcomeCurrent = isActivePath("/welcome") ? "page" : null;
         this.playgroundCurrent = isActivePath("/playground") ? "page" : null;
         this.docsCurrent = isActivePath("/d") ? "page" : null;
+        this.installCurrent = isActivePath("/install") ? "page" : null;
         this.wireCurrent = isActivePath("/wire") ? "page" : null;
     }
 
@@ -140,6 +145,7 @@ export default class SiteHeader {
         this.navWelcomeLabel = navWelcome();
         this.navPlaygroundLabel = navPlayground();
         this.navDocsLabel = navDocs();
+        this.navInstallLabel = navInstall();
         this.navWireLabel = navWire();
         this.navPrimaryLabel = navPrimary();
         this.homeAriaLabel = `${this.brandShortLabel} home`;
