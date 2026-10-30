@@ -1,7 +1,7 @@
 /* ==========================================================================
    YYDB site styles — dense, flat, single-accent. No gradients, no pills,
    no oversized radii. Radii are capped at 4px; cards use 1px rules.
-   Layers: 1 reset  2 chrome  3 landing  4 install  5 wire  6 welcome
+   Layers: 1 reset  2 chrome  3 landing  4 install  5 wire  5b playground  6 welcome  7 responsive
    ========================================================================== */
 
 /* 1. Reset and base ------------------------------------------------------- */
@@ -1012,6 +1012,86 @@ pre {
     margin: 0.75rem 0 0;
     max-height: 16rem;
     overflow: auto;
+}
+
+/* 5b. Playground ----------------------------------------------------------- */
+
+.playground-page {
+    max-width: 62rem;
+    margin: 0 auto;
+    padding: 2.5rem var(--vmz-layout-gutter) 3rem;
+}
+
+.playground-panel {
+    margin-top: 1.75rem;
+    border: 1px solid var(--vmz-line-default);
+    background: var(--vmz-surface-paper);
+    padding: 1.25rem;
+}
+
+.playground-panel h2 {
+    font-size: 1rem;
+}
+
+.playground-panel__label {
+    display: block;
+    margin: 1rem 0 0.375rem;
+    font-family: var(--vmz-font-mono);
+    font-size: 0.6875rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--vmz-text-muted);
+}
+
+.playground-panel__editor {
+    display: block;
+    width: 100%;
+    resize: vertical;
+    border: 1px solid var(--vmz-line-strong);
+    border-radius: var(--vmz-radius-xs);
+    background: var(--vmz-surface-fill);
+    color: var(--vmz-text-ink);
+    font-family: var(--vmz-font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    padding: 0.625rem 0.75rem;
+}
+
+.playground-panel__editor::placeholder {
+    color: var(--vmz-text-muted);
+}
+
+.playground-panel__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+.playground-panel__mono {
+    font-family: var(--vmz-font-mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--vmz-surface-code);
+    color: #dbe4ee;
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    padding: 0.75rem;
+    border-radius: var(--vmz-radius-xs);
+    margin: 0;
+    min-height: 4.5rem;
+    max-height: 16rem;
+    overflow: auto;
+}
+
+.playground-note {
+    margin-top: 1.25rem;
+}
+
+.playground-note__link {
+    margin-top: 0.5rem;
+    font-family: var(--vmz-font-mono);
+    font-size: 0.75rem;
 }
 
 /* 6. Welcome -------------------------------------------------------------- */
