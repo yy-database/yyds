@@ -127,6 +127,27 @@ fn limit_and_offset_bind_as_constant_expressions() {
     }
 }
 
+/// Oak 按关键字把 standalone `OFFSET` 分流成 `limit: None` 与 `offset: Some(n)`，
+/// 网关 bind 层原样保留该形状：跳过的行数不得被当成结果集的行数上限。
+#[test]
+fn standalone_offset_binds_without_a_limit() {
+    use yyds_gateway::{bind_sql, SqlBoundExpression, SqlBoundLiteral, SqlBoundStatement};
+
+    let SqlBoundStatement::Select(select) = bind_sql("SELECT id FROM users OFFSET 2").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    assert!(select.limit.is_none(), "a standalone OFFSET must not bind a LIMIT row count");
+    assert_eq!(select.offset, Some(SqlBoundExpression::Literal(SqlBoundLiteral::Integer(2))));
+
+    let SqlBoundStatement::Select(limited) = bind_sql("SELECT id FROM users LIMIT 3").expect("bind")
+    else {
+        panic!("expected SELECT")
+    };
+    assert_eq!(limited.limit, Some(SqlBoundExpression::Literal(SqlBoundLiteral::Integer(3))));
+    assert!(limited.offset.is_none(), "a plain LIMIT must not bind an OFFSET");
+}
+
 /// `INTERSECT` 比 `UNION` / `UNION ALL` / `EXCEPT` 结合更紧，同级运算符左结合。
 /// Oak 给出的是扁平链，bind 阶段把它折成固定形状的树，planner 只按树计划。
 #[test]

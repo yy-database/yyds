@@ -1327,6 +1327,11 @@ fn close_intersect_group(operands: Vec<SqlBoundSetOperand>) -> SqlBoundSetOperan
 /// Only the planner knows the statement dialect, and folding there keeps one
 /// evaluation path instead of a second literal-only parser.
 ///
+/// `LIMIT` is optional in the AST: a standalone `OFFSET n` binds to
+/// `(None, Some(n))` and must skip rows without capping the result, while
+/// `LIMIT m` alone keeps its row-count meaning. The keyword split is Oak's, so
+/// the gateway never re-reads the text to guess which clause was written.
+///
 /// Anything that would need a row — column references, `*`, subqueries or
 /// window functions — is rejected here. Silently dropping the clause is never
 /// an option: `OFFSET` changes the result set, so an unsupported shape fails the
@@ -1338,8 +1343,14 @@ fn bind_limit_clause(
     else {
         return Ok((None, None));
     };
-    let limit = bind_expression(&clause.limit)?;
-    validate_row_count_expression(&limit, "LIMIT")?;
+    let limit = match clause.limit.as_ref() {
+        Some(limit) => {
+            let bound = bind_expression(limit)?;
+            validate_row_count_expression(&bound, "LIMIT")?;
+            Some(bound)
+        }
+        None => None,
+    };
     let offset = match clause.offset.as_ref() {
         Some(offset) => {
             let bound = bind_expression(offset)?;
@@ -1348,7 +1359,7 @@ fn bind_limit_clause(
         }
         None => None,
     };
-    Ok((Some(limit), offset))
+    Ok((limit, offset))
 }
 
 /// Rejects `LIMIT` / `OFFSET` shapes that cannot be evaluated without a row.
