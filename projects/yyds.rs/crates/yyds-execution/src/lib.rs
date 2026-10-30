@@ -54,29 +54,36 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
 
     /// Applies multiple commands as an atomic batch.
     ///
-    /// The default implementation folds over [`KeyValueExecutor::execute`] sequentially.
-    /// Executors that can guarantee atomicity across the batch should override this method.
+    /// Implementors must guarantee that the whole batch either applies completely or does not
+    /// apply at all; a sequential fold over [`KeyValueExecutor::execute`] is not an acceptable
+    /// implementation because it can leave a half-committed batch behind after a mid-batch
+    /// failure. Executors without an atomic write contract must return `Error::Unsupported`
+    /// (the default) instead of degrading to per-command execution.
     fn execute_batch(
         &self,
         fence: Option<&FenceToken>,
         commands: Vec<KeyValueCommand>,
     ) -> yyds_types::Result<Vec<KeyValueResult>> {
-        commands.into_iter().map(|command| self.execute(fence, command)).collect()
+        let _ = (fence, commands);
+        Err(Error::Unsupported("atomic batch writes are not implemented by this executor"))
     }
 
-    /// Commits a buffered transaction with OCC validation.
+    /// Commits a buffered transaction with OCC validation under the caller's ownership context.
     ///
     /// Each element of `batch` carries the write command together with the original conditional
     /// (if any). Implementations must hold an exclusive executor-wide lock while re-checking
-    /// every pre-image condition against the base store and then applying the writes so that a
-    /// concurrent transaction cannot slip between validate and apply.
+    /// every `BufferedCommit::condition` against the base store and then applying the writes
+    /// atomically, so that a concurrent transaction cannot slip between validate and apply and a
+    /// rejected condition never leaves a half-committed batch.
     ///
-    /// The default implementation applies all commands directly without OCC re-check.
-    fn commit_batch(&self, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
-        for entry in batch {
-            self.execute(None, entry.command)?;
-        }
-        Ok(())
+    /// `fence` is validated at the boundary where the writes are applied: when `Some(token)` is
+    /// supplied the implementation must reject the commit if the token no longer matches the
+    /// catalog-published owner of every routed shard. `None` keeps the single-node local mode
+    /// (no owner context). Executors without an atomic OCC-validated commit contract must
+    /// return `Error::Unsupported` (the default) instead of replaying commands one by one.
+    fn commit_batch(&self, fence: Option<&FenceToken>, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
+        let _ = (fence, batch);
+        Err(Error::Unsupported("atomic OCC-validated batch commits are not implemented by this executor"))
     }
 
     /// Opens a local transaction handle bound to this executor.
@@ -573,6 +580,8 @@ impl TransactionHandle for LocalTransactionHandle {
 
         // 组装 commit_batch 参数：最终 replay command + 可选 OCC 条件。
         // validate + batch apply 都在 executor.commit_batch 内部的同一全局锁里完成。
+        // handle 本身没有 owner 上下文（begin_transaction 不携带 fence），所以这里传 None，
+        // 即单节点本地模式；executor 侧对 None 的放行语义与 execute 路径一致。
         let mut batch = Vec::with_capacity(buffer.len());
         for ((namespace, key), state) in buffer {
             let (action, condition) = match state {
@@ -582,7 +591,7 @@ impl TransactionHandle for LocalTransactionHandle {
             batch.push(BufferedCommit { command: KeyValueCommand { namespace: Namespace(namespace), key, action }, condition });
         }
 
-        self.executor.commit_batch(batch)
+        self.executor.commit_batch(None, batch)
     }
 
     fn rollback(self: Box<Self>) {
@@ -673,7 +682,7 @@ where
 
     fn execute_scan(
         &self,
-        _fence: Option<&FenceToken>,
+        fence: Option<&FenceToken>,
         namespace: &Namespace,
         prefix: &[u8],
         after: Option<&[u8]>,
@@ -684,6 +693,9 @@ where
         // Each shard yields ordered records; we merge them sorted by key bytes.
         let mut shard_results: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
         for shard_id in self.routing.shards() {
+            // The scan reads every mounted shard, so fencing must guard the read path too:
+            // a stale coordinator must not observe shard contents it no longer owns.
+            self.check_fence(fence, shard_id)?;
             let shard = self.shards.get(shard_id).ok_or(Error::Unsupported("shard not mounted"))?;
             let guard = shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?;
             let records = guard.scan(namespace, prefix, after, before, 0)?; // per-shard unlimited; merge applies global limit
@@ -723,11 +735,17 @@ where
         Self::with_global_lock(|| commands.into_iter().map(|command| self.execute_single_locked(command)).collect())
     }
 
-    fn commit_batch(&self, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
-        // The entire OCC pre-check plus replay must sit inside one global-lock holding
-        // interval; otherwise a concurrent `PutIfAbsent` from another transaction could sneak
-        // between our re-check and our own replay and we would silently overwrite it.
+    fn commit_batch(&self, fence: Option<&FenceToken>, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
+        // The entire fence validation, OCC pre-check and replay must sit inside one global-lock
+        // holding interval; otherwise a concurrent `PutIfAbsent` from another transaction could
+        // sneak between our re-check and our own replay and we would silently overwrite it.
         Self::with_global_lock(|| {
+            // Ownership must be proven at the boundary where the writes are applied: every
+            // routed shard of the batch has to still belong to the fence's leader and term.
+            for entry in &batch {
+                let decision = self.routing.route(&entry.command.namespace.0, &entry.command.key);
+                self.check_fence(fence, &decision.shard)?;
+            }
             for entry in &batch {
                 if let Some(condition) = &entry.condition {
                     let base = self.execute_single_locked(KeyValueCommand {

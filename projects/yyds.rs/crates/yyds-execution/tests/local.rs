@@ -838,3 +838,121 @@ fn fencing_guards_execute_batch() {
     // 确保没有东西被写入（fence 在 batch 执行前被拒绝）
     assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k1")).unwrap(), KeyValueResult::Get(None));
 }
+
+#[test]
+fn fencing_guards_execute_scan() {
+    let node_b = ReplicaNodeId("node-b".to_owned());
+    let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
+    let executor = make_fence_test_executor(owners);
+
+    // 先通过 fence=None 写入数据（单节点本地路径）
+    executor.execute(None, command(KeyValueAction::Put(b"v1".to_vec()), b"k")).unwrap();
+
+    // 过期 fence 必须拒绝 scan 读路径
+    let stale_fence =
+        Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
+    let err = executor.execute_scan(stale_fence.as_ref(), &Namespace("redis:0".into()), b"", None, None, 0).unwrap_err();
+    assert!(matches!(err, yyds_types::Error::FencingRejected { .. }));
+
+    // None fence 放行（单节点 gateway 路径），匹配的 fence 也放行
+    let results = executor.execute_scan(None, &Namespace("redis:0".into()), b"", None, None, 0).unwrap();
+    assert_eq!(results, vec![(b"k".to_vec(), b"v1".to_vec())]);
+    let fresh_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(5), leader: node_b });
+    let results = executor.execute_scan(fresh_fence.as_ref(), &Namespace("redis:0".into()), b"", None, None, 0).unwrap();
+    assert_eq!(results, vec![(b"k".to_vec(), b"v1".to_vec())]);
+}
+
+#[test]
+fn commit_batch_rejects_stale_fence() {
+    let node_b = ReplicaNodeId("node-b".to_owned());
+    let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
+    let executor = make_fence_test_executor(owners);
+
+    let batch = vec![
+        yyds_execution::BufferedCommit { command: command(KeyValueAction::Put(b"x1".to_vec()), b"k1"), condition: None },
+        yyds_execution::BufferedCommit { command: command(KeyValueAction::Put(b"x2".to_vec()), b"k2"), condition: None },
+    ];
+    let stale_fence =
+        Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
+    let err = executor.commit_batch(stale_fence.as_ref(), batch).unwrap_err();
+    assert!(matches!(err, yyds_types::Error::FencingRejected { .. }));
+
+    // 整批都不允许落盘
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k1")).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k2")).unwrap(), KeyValueResult::Get(None));
+
+    // 匹配的 fence 提交成功
+    let fresh_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(5), leader: node_b });
+    let batch =
+        vec![yyds_execution::BufferedCommit { command: command(KeyValueAction::Put(b"ok".to_vec()), b"k1"), condition: None }];
+    executor.commit_batch(fresh_fence.as_ref(), batch).unwrap();
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k1")).unwrap(), KeyValueResult::Get(Some(b"ok".to_vec())));
+}
+
+#[test]
+fn commit_batch_occ_conflict_leaves_no_partial_apply() {
+    let executor = make_fence_test_executor(Vec::new());
+
+    // 第二个条目的 PutIfAbsent 条件在 base 已存在时会冲突；第一个条目是无条件 Put。
+    // OCC 预检必须在应用任何写入之前扫描完整批次，因此冲突时整批不应用（无半提交）。
+    executor.execute(None, command(KeyValueAction::Put(b"existing".to_vec()), b"conflict-key")).unwrap();
+    let batch = vec![
+        yyds_execution::BufferedCommit {
+            command: command(KeyValueAction::Put(b"first".to_vec()), b"plain-key"),
+            condition: None,
+        },
+        yyds_execution::BufferedCommit {
+            command: command(KeyValueAction::Put(b"second".to_vec()), b"conflict-key"),
+            condition: Some(yyds_execution::CommitCondition::PutIfAbsent),
+        },
+    ];
+    let err = executor.commit_batch(None, batch).unwrap_err();
+    assert!(matches!(err, yyds_types::Error::CasConflict { .. }), "expected CasConflict, got {err:?}");
+
+    // 无条件写入的 plain-key 绝不能被半提交
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"plain-key")).unwrap(), KeyValueResult::Get(None));
+    // conflict-key 保持原值
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"conflict-key")).unwrap(),
+        KeyValueResult::Get(Some(b"existing".to_vec()))
+    );
+}
+
+// ────────────────────────────────────────────────────────────────
+// 默认接口合同测试：无原子批写/OCC 提交能力的 executor 必须显式拒绝
+// ────────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct MinimalExecutor;
+
+impl KeyValueExecutor for MinimalExecutor {
+    fn execute(&self, _fence: Option<&FenceToken>, _command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
+        Ok(KeyValueResult::Get(None))
+    }
+}
+
+#[test]
+fn default_execute_batch_contract_returns_unsupported() {
+    let executor = MinimalExecutor;
+    let err = executor.execute_batch(None, vec![command(KeyValueAction::Put(b"v".to_vec()), b"k")]).unwrap_err();
+    match err {
+        yyds_types::Error::Unsupported(feature) => assert!(feature.contains("atomic batch writes"), "got {feature}"),
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn default_commit_batch_contract_returns_unsupported() {
+    let executor = MinimalExecutor;
+    let batch = vec![yyds_execution::BufferedCommit {
+        command: command(KeyValueAction::Put(b"v".to_vec()), b"k"),
+        condition: Some(yyds_execution::CommitCondition::PutIfAbsent),
+    }];
+    let err = executor.commit_batch(None, batch).unwrap_err();
+    match err {
+        yyds_types::Error::Unsupported(feature) => {
+            assert!(feature.contains("atomic OCC-validated batch commits"), "got {feature}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
