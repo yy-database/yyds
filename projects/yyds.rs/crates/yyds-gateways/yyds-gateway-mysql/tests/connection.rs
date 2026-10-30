@@ -1413,7 +1413,7 @@ fn blob_columns_round_trip_raw_octets_and_reject_text_only_paths() {
     );
 
     // 超出声明容量在 bind 期拒绝，而不是写入截断值。
-    let oversized = "00".repeat(yyds_gateway::SqlFieldType::BYTES_CAPACITY + 1);
+    let oversized = "00".repeat(yyds_gateway::MYSQL_BLOB_CAPACITY + 1);
     let oversized_sql = format!("INSERT INTO payloads (id, blob) VALUES (5, CAST('{oversized}' AS BLOB))");
     assert_eq!(expect_error(&mut client, &oversized_sql), (1366, "HY000".into()));
 

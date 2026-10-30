@@ -7,7 +7,7 @@ use crate::sql::{
     SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlBoundWindowFrame, SqlBoundWindowSpec, SqlErrorKind,
     SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
 };
-use vos::types::{CanonicalScalar, CanonicalType, ResolvedCanonicalType};
+use vos::types::{CanonicalScalar, ResolvedCanonicalType};
 
 /// Scalar types the gateway can project from a VOS field contract.
 ///
@@ -30,9 +30,9 @@ pub enum SqlFieldType {
     /// Raw opaque bytes (`bytes`).
     ///
     /// This is a precise binary type, not a loose "some opaque value" fallback:
-    /// values decode to [`crate::SqlValue::Bytes`] without any UTF-8 conversion
-    /// and the column carries [`Self::BYTES_CAPACITY`] as its declared length
-    /// limit.
+    /// values decode to [`crate::SqlValue::Bytes`] without any UTF-8 conversion.
+    /// The declared length limit is a dialect wire fact, not part of this type:
+    /// see [`crate::SqlDialect::bytes_capacity`].
     Bytes,
     /// Optional wrapper — inner type + NULL. Box breaks the recursion
     Optional(Box<SqlFieldType>),
@@ -41,15 +41,6 @@ pub enum SqlFieldType {
 }
 
 impl SqlFieldType {
-    /// Declared capacity of one binary column, in octets.
-    ///
-    /// Both SQL gateways describe a `bytes` column as a length-prefixed binary
-    /// column: PostgreSQL `BYTEA` and MySQL `BLOB`. MySQL's plain `BLOB` protocol
-    /// type is capped at 65 535 octets, so the smaller wire limit is the declared
-    /// capacity of the column type. A longer payload is rejected at bind time
-    /// instead of being truncated or silently widened into another column type.
-    pub const BYTES_CAPACITY: usize = 65_535;
-
     /// Extract the innermost non-optional type.
     pub fn inner(&self) -> SqlFieldType {
         match self {
@@ -65,6 +56,12 @@ impl SqlFieldType {
 }
 
 /// Map a resolved VOS type to a gateway-facing [`SqlFieldType`].
+///
+/// Every VOS type is classified on purpose. Types with no SQL equivalent —
+/// the `file` user type, the `vector` generic type, `u64`, `decimal`, and the
+/// remaining composites — project to [`SqlFieldType::Unknown`] here and are
+/// rejected with a field-naming diagnostic by [`reject_unknown_field`] on
+/// every bind path; nothing silently degrades into a runtime guess.
 fn project_resolved_type(ty: &ResolvedCanonicalType) -> SqlFieldType {
     match ty {
         ResolvedCanonicalType::Scalar(scalar) => match scalar {
@@ -77,9 +74,23 @@ fn project_resolved_type(ty: &ResolvedCanonicalType) -> SqlFieldType {
             CanonicalScalar::Uuid | CanonicalScalar::Date | CanonicalScalar::Time | CanonicalScalar::DateTime => {
                 SqlFieldType::String
             }
-            _ => SqlFieldType::Unknown,
+            // `u64` cannot narrow into `i64` without lying about the range and
+            // `decimal` has no lossless gateway numeric type. Both stay
+            // `Unknown` and are rejected at bind time with the VOS type name.
+            CanonicalScalar::U64 | CanonicalScalar::Decimal => SqlFieldType::Unknown,
         },
         ResolvedCanonicalType::Optional(inner) => SqlFieldType::Optional(Box::new(project_resolved_type(inner))),
+        // VOS `file` is a user-declared identity with canonical path `file`.
+        // Explicit branch, no wildcard: it has no SQL equivalent and is
+        // rejected at bind time with the original type name.
+        ResolvedCanonicalType::User { path, .. } if path.last().map(String::as_str) == Some("file") => SqlFieldType::Unknown,
+        // VOS `vector<..>` is a generic type with canonical path `vector`.
+        // Same explicit treatment as `file`.
+        ResolvedCanonicalType::Generic { path, .. } if path.last().map(String::as_str) == Some("vector") => {
+            SqlFieldType::Unknown
+        }
+        // Remaining composites (`Reference`, `List`, other `User` / `Generic`)
+        // also have no SQL equivalent: `Unknown` plus the bind-time rejection.
         _ => SqlFieldType::Unknown,
     }
 }
@@ -105,23 +116,6 @@ fn canonical_type_display_name(ty: &ResolvedCanonicalType) -> String {
         ResolvedCanonicalType::List(inner) => format!("list<{}>", canonical_type_display_name(inner)),
         ResolvedCanonicalType::Reference(inner) => canonical_type_display_name(inner),
         ResolvedCanonicalType::Optional(inner) => canonical_type_display_name(inner),
-    }
-}
-
-/// Map a schema-projection VOS type to a gateway-facing [`SqlFieldType`].
-fn project_projection_type(ty: &CanonicalType) -> SqlFieldType {
-    match ty {
-        CanonicalType::Named(path) => match path.iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice() {
-            ["i64"] | ["int64"] | ["Int64"] => SqlFieldType::Int64,
-            ["i32"] | ["int32"] | ["Int32"] => SqlFieldType::Int32,
-            ["f64"] | ["float64"] | ["Float64"] => SqlFieldType::Float64,
-            ["utf8"] | ["String"] | ["string"] => SqlFieldType::String,
-            ["bool"] | ["Bool"] => SqlFieldType::Bool,
-            ["bytes"] | ["Bytes"] => SqlFieldType::Bytes,
-            _ => SqlFieldType::Unknown,
-        },
-        CanonicalType::Optional(inner) => SqlFieldType::Optional(Box::new(project_projection_type(inner))),
-        _ => SqlFieldType::Unknown,
     }
 }
 
@@ -1782,6 +1776,25 @@ mod tests {
             assert_eq!(err.kind, SqlErrorKind::Unsupported);
             assert!(err.message.contains("`photo`") || err.message.contains("`vec`"), "应报 Unknown 字段: {}", err.message);
         }
+    }
+
+    #[test]
+    fn project_resolved_type_classifies_file_vector_and_unmappable_scalars_explicitly() {
+        // `file`（User path）与 `vector`（Generic path）走显式分支，不再是通配兜底。
+        let file = ResolvedCanonicalType::User { path: vec!["file".to_string()], type_id: 7 };
+        assert_eq!(project_resolved_type(&file), SqlFieldType::Unknown);
+        let vector = ResolvedCanonicalType::Generic { path: vec!["vector".to_string()], arguments: Vec::new() };
+        assert_eq!(project_resolved_type(&vector), SqlFieldType::Unknown);
+        // Optional 壳递归到底层显式分支。
+        assert_eq!(
+            project_resolved_type(&ResolvedCanonicalType::Optional(Box::new(file))),
+            SqlFieldType::Optional(Box::new(SqlFieldType::Unknown))
+        );
+        // 无 SQL 等价的高位标量同样显式落 Unknown。
+        assert_eq!(project_resolved_type(&ResolvedCanonicalType::Scalar(CanonicalScalar::U64)), SqlFieldType::Unknown);
+        assert_eq!(project_resolved_type(&ResolvedCanonicalType::Scalar(CanonicalScalar::Decimal)), SqlFieldType::Unknown);
+        // bytes 仍是精确类型，不经过任何 Unknown 兜底。
+        assert_eq!(project_resolved_type(&ResolvedCanonicalType::Scalar(CanonicalScalar::Bytes)), SqlFieldType::Bytes);
     }
 
     #[test]

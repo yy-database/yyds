@@ -3642,14 +3642,22 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     // 字符串字面量里的 `::` 不是类型转换，照常通过。
     assert_eq!(run_sql(&executor, None, &catalog, "SELECT '::bytea'").rows, vec![vec![SqlValue::String("::bytea".into())]]);
 
-    // 超过声明容量（MySQL 裸 BLOB 的 65 535 octets）必须拒绝并给出诊断。
-    let too_big = "00".repeat(yyds_gateway::SqlFieldType::BYTES_CAPACITY + 1);
+    // 容量上限是方言 wire 事实：MySQL 裸 BLOB 超过 65 535 octets 必须拒绝并给出诊断，
+    // PostgreSQL `BYTEA` 不继承该上限，同一载荷必须原样落盘并回读。
+    let too_big = "00".repeat(yyds_gateway::MYSQL_BLOB_CAPACITY + 1);
     let bound =
         yyds_gateway::bind_sql_catalog(&format!("INSERT INTO payloads VALUES (4, CAST('{too_big}' AS BYTEA))"), &catalog, 7)
             .expect("bind");
-    let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("capacity");
+    let error =
+        yyds_gateway::plan_statement_for_dialect(bound.clone(), &catalog, SqlDialect::Mysql).expect_err("mysql capacity");
     assert_eq!(error.kind, SqlErrorKind::TypeMismatch);
     assert!(error.message.contains("exceeds the declared capacity"), "{}", error.message);
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("postgres has no dialect-level bytes cap");
+    yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("postgres stores the oversized payload");
+    assert_eq!(
+        run_sql(&executor, None, &catalog, "SELECT LENGTH(body) FROM payloads WHERE id = 4").rows,
+        vec![vec![SqlValue::Integer(65_536)]]
+    );
 
     // 文本函数没有二进制的文本形式，显式拒绝而不是退化成 NULL。
     let bound = yyds_gateway::bind_sql_catalog("SELECT LOWER(body) FROM payloads", &catalog, 7).expect("bind");

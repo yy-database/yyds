@@ -17,7 +17,7 @@ use yyds_gateway::{
     bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
     plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
     SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
-    SqlParameterStyle, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    SqlParameterStyle, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -1296,7 +1296,7 @@ fn encode_column_definition(name: &str, column_type: u8, nullable: bool) -> Vec<
     out.extend_from_slice(&charset.to_le_bytes()); // charset
     let column_length: u32 = match column_type {
         MYSQL_TYPE_TINY => 1,
-        MYSQL_TYPE_BLOB => 65_535,
+        MYSQL_TYPE_BLOB => MYSQL_BLOB_CAPACITY as u32,
         _ => 255,
     };
     out.extend_from_slice(&column_length.to_le_bytes());
