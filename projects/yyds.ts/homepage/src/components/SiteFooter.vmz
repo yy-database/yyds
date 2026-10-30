@@ -10,6 +10,8 @@
                 <h2>{{ footerExploreLabel }}</h2>
                 <ul>
                     <li><a href="/">{{ navHomeLabel }}</a></li>
+                    <li><a href="/welcome">{{ navWelcomeLabel }}</a></li>
+                    <li><a href="/playground">{{ navPlaygroundLabel }}</a></li>
                     <li><a href="/d/">{{ footerDocsLabel }}</a></li>
                     <li><a href="/wire">{{ navWireLabel }}</a></li>
                 </ul>
@@ -27,6 +29,8 @@ import {
     brandShort,
     brandFull,
     navHome,
+    navWelcome,
+    navPlayground,
     navWire,
     footerBlurb,
     footerResources,
@@ -40,6 +44,8 @@ export default class SiteFooter {
     brandShortLabel = "";
     brandFullLabel = "";
     navHomeLabel = "";
+    navWelcomeLabel = "";
+    navPlaygroundLabel = "";
     navWireLabel = "";
     footerBlurbLabel = "";
     footerExploreLabel = "";
@@ -66,6 +72,8 @@ export default class SiteFooter {
         this.brandShortLabel = brandShort();
         this.brandFullLabel = brandFull();
         this.navHomeLabel = navHome();
+        this.navWelcomeLabel = navWelcome();
+        this.navPlaygroundLabel = navPlayground();
         this.navWireLabel = navWire();
         this.footerBlurbLabel = footerBlurb();
         this.footerExploreLabel = footerResources();

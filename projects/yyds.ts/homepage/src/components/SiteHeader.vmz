@@ -8,7 +8,8 @@
 
             <nav class="site-nav" :aria-label="navPrimaryLabel">
                 <a href="/" :aria-current="homeCurrent">{{ navHomeLabel }}</a>
-                <a href="/install" :aria-current="installCurrent">{{ navInstallLabel }}</a>
+                <a href="/welcome" :aria-current="welcomeCurrent">{{ navWelcomeLabel }}</a>
+                <a href="/playground" :aria-current="playgroundCurrent">{{ navPlaygroundLabel }}</a>
                 <a href="/d/" :aria-current="docsCurrent">{{ navDocsLabel }}</a>
                 <a href="/wire" :aria-current="wireCurrent">{{ navWireLabel }}</a>
             </nav>
@@ -67,7 +68,8 @@ import {
     brandShort,
     brandFull,
     navHome,
-    navInstall,
+    navWelcome,
+    navPlayground,
     navDocs,
     navWire,
     navPrimary,
@@ -88,7 +90,8 @@ export default class SiteHeader {
     brandShortLabel = "";
     brandFullLabel = "";
     navHomeLabel = "";
-    navInstallLabel = "";
+    navWelcomeLabel = "";
+    navPlaygroundLabel = "";
     navDocsLabel = "";
     navWireLabel = "";
     navPrimaryLabel = "";
@@ -103,7 +106,8 @@ export default class SiteHeader {
     discussionsHref = DISCUSSIONS_HREF;
     localeId = "zh-hans";
     homeCurrent = null;
-    installCurrent = null;
+    welcomeCurrent = null;
+    playgroundCurrent = null;
     docsCurrent = null;
     wireCurrent = null;
     _unwatchLocale = null;
@@ -123,7 +127,8 @@ export default class SiteHeader {
 
     syncNavState() {
         this.homeCurrent = isActivePath("/") ? "page" : null;
-        this.installCurrent = isActivePath("/install") ? "page" : null;
+        this.welcomeCurrent = isActivePath("/welcome") ? "page" : null;
+        this.playgroundCurrent = isActivePath("/playground") ? "page" : null;
         this.docsCurrent = isActivePath("/d") ? "page" : null;
         this.wireCurrent = isActivePath("/wire") ? "page" : null;
     }
@@ -132,7 +137,8 @@ export default class SiteHeader {
         this.brandShortLabel = brandShort();
         this.brandFullLabel = brandFull();
         this.navHomeLabel = navHome();
-        this.navInstallLabel = navInstall();
+        this.navWelcomeLabel = navWelcome();
+        this.navPlaygroundLabel = navPlayground();
         this.navDocsLabel = navDocs();
         this.navWireLabel = navWire();
         this.navPrimaryLabel = navPrimary();

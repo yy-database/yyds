@@ -1,0 +1,137 @@
+<template>
+    <SiteHeader />
+    <main class="main" id="main">
+        <div class="playground-page">
+            <header>
+                <p class="page__eyebrow">{{ pgEyebrowLabel }}</p>
+                <h1 class="page__title">{{ pgTitleLabel }}</h1>
+                <p class="page__lede">{{ pgLedeLabel }}</p>
+            </header>
+
+            <section class="playground-panel" aria-labelledby="playground-panel-title">
+                <h2 id="playground-panel-title">{{ pgPanelTitleLabel }}</h2>
+                <label class="playground-panel__label" for="playground-input">{{ pgInputLabel }}</label>
+                <textarea
+                    id="playground-input"
+                    class="playground-panel__editor"
+                    rows="6"
+                    spellcheck="false"
+                    :value="queryText"
+                    :placeholder="pgInputPlaceholderLabel"
+                    @input="onQueryInput"
+                ></textarea>
+                <div class="playground-panel__row">
+                    <Button type="button" @click="run">{{ pgRunLabel }}</Button>
+                    <Button type="button" variant="secondary" @click="clear">{{ pgClearLabel }}</Button>
+                </div>
+                <p class="playground-panel__label" id="playground-output-label">{{ pgOutputLabel }}</p>
+                <pre
+                    class="playground-panel__mono"
+                    role="status"
+                    aria-live="polite"
+                    aria-labelledby="playground-output-label"
+                >{{ output }}</pre>
+            </section>
+
+            <div class="playground-note note">
+                <p>{{ pgNoteLabel }}</p>
+                <p class="playground-note__link"><a href="/wire">{{ pgWireLinkLabel }}</a></p>
+            </div>
+        </div>
+    </main>
+    <SiteFooter />
+</template>
+
+<script client>
+import {
+    pgEyebrow,
+    pgTitle,
+    pgLede,
+    pgPanelTitle,
+    pgInput,
+    pgInputPlaceholder,
+    pgRun,
+    pgClear,
+    pgOutput,
+    pgHint,
+    pgEmptyOutput,
+    pgRunOutput,
+    pgNote,
+    pgWireLink,
+} from "#locales/common";
+import { readLocaleId, withLocaleHint, watchDocumentLocale } from "../lib/locale-copy.ts";
+
+export default class PlaygroundPage {
+    queryText = "";
+    output = "";
+    pgEyebrowLabel = "";
+    pgTitleLabel = "";
+    pgLedeLabel = "";
+    pgPanelTitleLabel = "";
+    pgInputLabel = "";
+    pgInputPlaceholderLabel = "";
+    pgRunLabel = "";
+    pgClearLabel = "";
+    pgOutputLabel = "";
+    pgNoteLabel = "";
+    pgWireLinkLabel = "";
+    _outputMode = "hint";
+    _unwatchLocale = null;
+
+    onMount() {
+        this.applyLocaleCopy();
+        this._unwatchLocale = watchDocumentLocale((id) => this.applyLocaleCopy(id));
+    }
+
+    onDestroy() {
+        if (typeof this._unwatchLocale === "function") {
+            this._unwatchLocale();
+        }
+        this._unwatchLocale = null;
+    }
+
+    refreshCopy() {
+        this.pgEyebrowLabel = pgEyebrow();
+        this.pgTitleLabel = pgTitle();
+        this.pgLedeLabel = pgLede();
+        this.pgPanelTitleLabel = pgPanelTitle();
+        this.pgInputLabel = pgInput();
+        this.pgInputPlaceholderLabel = pgInputPlaceholder();
+        this.pgRunLabel = pgRun();
+        this.pgClearLabel = pgClear();
+        this.pgOutputLabel = pgOutput();
+        this.pgNoteLabel = pgNote();
+        this.pgWireLinkLabel = pgWireLink();
+        this.refreshOutput();
+    }
+
+    applyLocaleCopy(preferred) {
+        withLocaleHint(readLocaleId(preferred), () => this.refreshCopy());
+    }
+
+    refreshOutput() {
+        if (this._outputMode === "run") {
+            this.output = pgRunOutput();
+        } else if (this._outputMode === "empty") {
+            this.output = pgEmptyOutput();
+        } else {
+            this.output = pgHint();
+        }
+    }
+
+    onQueryInput(event) {
+        this.queryText = event?.target?.value ?? "";
+    }
+
+    run() {
+        this._outputMode = this.queryText.trim() ? "run" : "empty";
+        this.refreshOutput();
+    }
+
+    clear() {
+        this.queryText = "";
+        this._outputMode = "hint";
+        this.refreshOutput();
+    }
+}
+</script>
