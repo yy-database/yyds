@@ -540,6 +540,10 @@ pub fn type_cases() -> Vec<Case> {
             .rows(&[&[Int(3)], &[Int(1)], &[Int(2)]])
             .build(),
         case("limit and offset").sql("SELECT id FROM users ORDER BY id LIMIT 1 OFFSET 1").rows(&[&[Int(2)]]).build(),
+        case("standalone offset skips without a cap")
+            .sql("SELECT id FROM users ORDER BY id OFFSET 1")
+            .rows(&[&[Int(2)], &[Int(3)]])
+            .build(),
         case("limit zero returns no rows").sql("SELECT id FROM users ORDER BY id LIMIT 0").rows(&[]).build(),
         case("order by beyond f64 precision")
             .setup(&[

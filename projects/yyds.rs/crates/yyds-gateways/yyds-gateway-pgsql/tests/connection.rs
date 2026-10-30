@@ -347,6 +347,42 @@ fn chained_set_operations_merge_in_sql_precedence_order() {
     server.join().unwrap();
 }
 
+/// 文本协议上的 standalone `OFFSET`（无 `LIMIT`）：跳过 n 行返回其余全部，
+/// 不得被误读成行数上限；`LIMIT m OFFSET n` 行为回归不变。
+#[test]
+fn standalone_offset_skips_rows_over_the_text_protocol() {
+    let (mut client, server) = start_server_with_runtime();
+
+    for sql in [
+        "INSERT INTO users VALUES (1, 'alice')",
+        "INSERT INTO users VALUES (2, 'bob')",
+        "INSERT INTO users VALUES (3, 'carol')",
+    ] {
+        send_query(&mut client, sql);
+        assert_eq!(receive_until_ready(&mut client)[0].0, b'C');
+    }
+
+    send_query(&mut client, "SELECT id FROM users ORDER BY id OFFSET 1");
+    let skipped = receive_until_ready(&mut client);
+    assert_eq!(skipped[0].0, b'T', "a standalone OFFSET returns a result set");
+    let rows: Vec<Vec<Option<Vec<u8>>>> =
+        skipped.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(
+        rows,
+        vec![vec![Some(b"2".to_vec())], vec![Some(b"3".to_vec())]],
+        "OFFSET 1 must skip the first row and keep the rest of the result set"
+    );
+
+    send_query(&mut client, "SELECT id FROM users ORDER BY id LIMIT 1 OFFSET 1");
+    let paged = receive_until_ready(&mut client);
+    let paged_rows: Vec<Vec<Option<Vec<u8>>>> =
+        paged.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(paged_rows, vec![vec![Some(b"2".to_vec())]], "LIMIT 1 OFFSET 1 must take one row after skipping one");
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 带 SQL runtime 的服务端，用于验证 PostgreSQL 语法下 `@@` 必须被拒绝。
 fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;

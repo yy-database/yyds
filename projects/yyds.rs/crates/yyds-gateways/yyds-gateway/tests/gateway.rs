@@ -2943,6 +2943,27 @@ fn sql_offset_skips_rows_without_order_by_or_scan_pushdown() {
     assert!(source_less.rows.is_empty());
 }
 
+/// standalone `OFFSET`（无 `LIMIT`）：跳过前 n 行并返回其余全部，
+/// 跳过的行数不得被当成结果集的行数上限。
+#[test]
+fn sql_standalone_offset_skips_rows_without_capping() {
+    let (catalog, executor) = limit_fixture();
+
+    let skipped = run_sql(&executor, None, &catalog, "SELECT id FROM users OFFSET 1");
+    assert_eq!(skipped.rows, integer_rows(&[2, 3, 4]), "OFFSET 1 without LIMIT must return every remaining row");
+
+    let ordered = run_sql(&executor, None, &catalog, "SELECT id FROM users ORDER BY id DESC OFFSET 2");
+    assert_eq!(ordered.rows, integer_rows(&[2, 1]), "OFFSET without LIMIT keeps the sorted tail after skipping");
+
+    // 主键单点读最多一行，正的 OFFSET 同样只跳过、不截断。
+    let read = run_sql(&executor, None, &catalog, "SELECT id FROM users WHERE id = 1 OFFSET 1");
+    assert!(read.rows.is_empty(), "OFFSET 1 must drop the only row of a primary-key read");
+
+    // 跳过超过行数得到空集，而不是错误。
+    let beyond = run_sql(&executor, None, &catalog, "SELECT id FROM users OFFSET 10");
+    assert!(beyond.rows.is_empty(), "an OFFSET beyond the row count returns an empty result");
+}
+
 /// `LIMIT` / `OFFSET` 必须是常量非负整数：NULL、负数、非整数、溢出与除零都显式报错。
 #[test]
 fn sql_limit_and_offset_reject_invalid_counts() {
