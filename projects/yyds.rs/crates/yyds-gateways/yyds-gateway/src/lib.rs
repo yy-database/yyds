@@ -41,7 +41,7 @@ pub use crate::{
         SqlBoundBinaryOperator, SqlBoundConflict, SqlBoundConflictAction, SqlBoundCte, SqlBoundExpression, SqlBoundJoin,
         SqlBoundJoinKind, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperand, SqlBoundSetOperation,
         SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement, SqlBoundUnaryOperator, SqlDialect, SqlErrorKind,
-        SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope,
+        SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope, MYSQL_BLOB_CAPACITY,
     },
 };
 

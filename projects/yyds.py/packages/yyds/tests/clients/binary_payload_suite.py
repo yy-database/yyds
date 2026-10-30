@@ -60,7 +60,8 @@ HEX_PAYLOAD = PAYLOAD.hex().upper()
 # `mysql-connector` binds `bytes` as `STRING`, so its prepared path only
 # round trips payloads that are valid UTF-8. NUL is legal UTF-8.
 TEXT_SAFE_PAYLOAD = b"\x00abc"
-# One octet above `SqlFieldType::BYTES_CAPACITY` (`65535`).
+# One octet above the MySQL plain BLOB wire capacity (`65535`). PostgreSQL
+# `BYTEA` has no dialect-level cap, so this payload must round trip there.
 OVERSIZE_HEX = "00" * 65_536
 
 PG_DRIVER_BLOCKS = (("psycopg2", 300), ("psycopg3", 310))
@@ -240,10 +241,16 @@ def _case_pg_non_hex_literal(node: YydsNode, connect, driver: str, base: int) ->
         _expect_sqlstate(connection, PG_INSERT_CAST, "42601", (identifier, "ZZ"))
 
 
-def _case_pg_oversize_rejected(node: YydsNode, connect, driver: str, base: int) -> None:
+def _case_pg_oversize_roundtrip(node: YydsNode, connect, driver: str, base: int) -> None:
+    """`BYTEA` carries no dialect-level cap and must not inherit MySQL's BLOB limit."""
+
     identifier = base + 7
+    payload = bytes.fromhex(OVERSIZE_HEX)
     with _session(node, connect) as connection:
-        _expect_sqlstate(connection, PG_INSERT_CAST, "42804", (identifier, OVERSIZE_HEX))
+        _write_pg(connection, driver, identifier, payload)
+        rows = _fetch(connection, PG_SELECT, (identifier,))
+    check(len(rows) == 1, f"SELECT returned {len(rows)} rows, expected 1")
+    check(_octets(rows[0][0]) == payload, f"oversize payload came back as {_octets(rows[0][0])!r}")
 
 
 def _case_pg_binary_result_format(node: YydsNode, connect, driver: str, base: int) -> None:
@@ -266,7 +273,7 @@ PG_CASES = [
     ("length_and_metadata", _case_pg_length_and_metadata),
     ("text_format_rejected", _case_pg_text_format_rejected),
     ("error_non_hex_literal", _case_pg_non_hex_literal),
-    ("error_oversize_payload", _case_pg_oversize_rejected),
+    ("oversize_payload_roundtrip", _case_pg_oversize_roundtrip),
 ]
 
 PG_EXTRA_CASES = {"psycopg3": [("binary_result_format", _case_pg_binary_result_format)]}

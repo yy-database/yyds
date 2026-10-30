@@ -347,6 +347,14 @@ pub enum SqlBoundStatement {
     SetOperation(SqlBoundSetOperation),
 }
 
+/// MySQL's plain `BLOB` protocol type holds at most 65 535 octets.
+///
+/// This is a wire fact of the MySQL dialect, not a shared column-type
+/// constraint: PostgreSQL `BYTEA` carries no such limit and must not inherit
+/// it. Payloads above this size are rejected on the MySQL path instead of
+/// being silently widened into `MEDIUMBLOB` / `LONGBLOB`.
+pub const MYSQL_BLOB_CAPACITY: usize = 65_535;
+
 /// SQL dialect that owns protocol-visible ordering rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SqlDialect {
@@ -361,6 +369,20 @@ impl SqlDialect {
     /// Whether `NULL` values sort before every non-NULL value.
     pub fn nulls_sort_first(self) -> bool {
         matches!(self, Self::Mysql)
+    }
+
+    /// Octet capacity this dialect enforces on binary column writes, or `None`
+    /// when its wire type carries no dialect-level limit.
+    ///
+    /// MySQL describes a `bytes` column as a plain `BLOB` capped at
+    /// [`MYSQL_BLOB_CAPACITY`]; a longer payload is rejected at plan time.
+    /// PostgreSQL `BYTEA` has no such cap, so the shared planner must not
+    /// reject anything on its behalf.
+    pub fn bytes_capacity(self) -> Option<usize> {
+        match self {
+            Self::Mysql => Some(MYSQL_BLOB_CAPACITY),
+            Self::Postgres => None,
+        }
     }
 }
 

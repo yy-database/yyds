@@ -1388,7 +1388,7 @@ fn upsert_row(
         for assignment in assignments {
             let value = eval_expression(&assignment.value, &scope, &scope_types, dialect)?;
             let literal = value_to_literal(value);
-            check_write_literal(&literal, &assignment.field_type, &assignment.field_name)?;
+            check_write_literal(&literal, &assignment.field_type, &assignment.field_name, dialect)?;
             updates.push((assignment.field_id, sql_value_to_bytes(&literal)));
         }
         for (field_id, bytes) in updates {
@@ -1526,7 +1526,7 @@ fn execute_insert_select(
         let rowid = pk_literal_to_rowid(&literals[0])?;
         let mut fields = Vec::with_capacity(plan.fields.len());
         for (column, value) in plan.fields.iter().zip(literals) {
-            check_write_literal(&value, &column.field_type, &column.field_name)?;
+            check_write_literal(&value, &column.field_type, &column.field_name, dialect)?;
             fields.push(WriteField { field_id: column.field_id, value, field_type: column.field_type.clone() });
         }
         write_plans.push(WritePlan {

@@ -45,7 +45,7 @@ pub fn plan_statement_for_dialect(
     match statement {
         SqlCatalogBoundStatement::Select(select) => plan_select_for_dialect(select, catalog, dialect),
         SqlCatalogBoundStatement::Insert(insert) => plan_insert(insert, catalog, dialect),
-        SqlCatalogBoundStatement::Update(update) => plan_update(update, catalog),
+        SqlCatalogBoundStatement::Update(update) => plan_update(update, catalog, dialect),
         SqlCatalogBoundStatement::Delete(delete) => plan_delete(delete, catalog),
         SqlCatalogBoundStatement::SetOperation(set) => plan_set_operation(set, catalog, dialect),
     }
@@ -565,7 +565,7 @@ pub fn plan_insert(
         for (field, value) in target_fields.iter().zip(row_values.iter()) {
             let lit = literal_from_expression(value)?;
             let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
-            check_write_literal(&lit, &field_type, &field.field_name)?;
+            check_write_literal(&lit, &field_type, &field.field_name, dialect)?;
             write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
         }
         plans.push(WritePlan {
@@ -632,7 +632,7 @@ fn plan_on_conflict(
                 check_conflict_value(&expression)?;
                 // 字面量在计划期就能按列类型判定，引用列的形态要等实际值算出来。
                 if let SqlCatalogBoundExpression::Literal(lit) = &expression {
-                    check_write_literal(lit, &field_type, &column.field_name)?;
+                    check_write_literal(lit, &field_type, &column.field_name, dialect)?;
                 }
                 planned.push(ConflictAssignment {
                     field_id: column.field_id,
@@ -797,7 +797,11 @@ fn write_types_compatible(target: &crate::catalog_bind::SqlFieldType, source: &c
 }
 
 /// 计划一个 UPDATE。`pk = literal` 走单点路径；其他 WHERE 都退化为范围扫描逐行改写。
-pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Result<SqlExecutionPlan, SqlFrontendError> {
+pub fn plan_update(
+    update: SqlCatalogBoundUpdate,
+    catalog: &SqlCatalog,
+    dialect: SqlDialect,
+) -> Result<SqlExecutionPlan, SqlFrontendError> {
     let table = find_table(catalog, update.table.type_id)?;
     let namespace = format!("table:{}", table.type_id);
     let pk_field = primary_key_of(table)?;
@@ -808,7 +812,7 @@ pub fn plan_update(update: SqlCatalogBoundUpdate, catalog: &SqlCatalog) -> Resul
     for (field, value_expr) in &update.assignments {
         let lit = literal_from_expression(value_expr)?;
         let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
-        check_write_literal(&lit, &field_type, &field.field_name)?;
+        check_write_literal(&lit, &field_type, &field.field_name, dialect)?;
         write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
     }
 
@@ -887,25 +891,31 @@ pub fn plan_delete(delete: SqlCatalogBoundDelete, catalog: &SqlCatalog) -> Resul
 
 /// Rejects a write literal that the declared column type cannot represent, so a
 /// string never lands in an integer column and reads back as the wrong value.
+///
+/// Binary capacity is a dialect wire fact, checked via
+/// [`SqlDialect::bytes_capacity`]: the MySQL path rejects payloads above the
+/// plain `BLOB` limit, while PostgreSQL `BYTEA` carries no dialect-level cap.
 pub(crate) fn check_write_literal(
     literal: &SqlBoundLiteral,
     field_type: &SqlFieldType,
     column: &str,
+    dialect: SqlDialect,
 ) -> Result<(), SqlFrontendError> {
-    // `bytes` 列单独处理：容量诊断必须指名 octets 与声明上限，不能与普通类型不匹配混在一起。
+    // `bytes` 列单独处理：容量诊断必须指名 octets 与方言声明上限，不能与普通类型不匹配混在一起。
     if matches!(field_type.inner(), SqlFieldType::Bytes) {
         return match literal {
             // NULL 与文本字面量保持既有行为：文本按 UTF-8 写入，ASCII payload 无损。
             SqlBoundLiteral::Null | SqlBoundLiteral::String(_) => Ok(()),
-            SqlBoundLiteral::Bytes(bytes) if bytes.len() <= SqlFieldType::BYTES_CAPACITY => Ok(()),
-            SqlBoundLiteral::Bytes(bytes) => Err(SqlFrontendError::new(
-                SqlErrorKind::TypeMismatch,
-                format!(
-                    "binary payload of {} octets exceeds the declared capacity of {} for column `{column}`",
-                    bytes.len(),
-                    SqlFieldType::BYTES_CAPACITY
-                ),
-            )),
+            SqlBoundLiteral::Bytes(bytes) => match dialect.bytes_capacity() {
+                Some(capacity) if bytes.len() > capacity => Err(SqlFrontendError::new(
+                    SqlErrorKind::TypeMismatch,
+                    format!(
+                        "binary payload of {} octets exceeds the declared capacity of {capacity} for column `{column}`",
+                        bytes.len()
+                    ),
+                )),
+                Some(_) | None => Ok(()),
+            },
             _ => Err(SqlFrontendError::new(
                 SqlErrorKind::TypeMismatch,
                 format!("SQL value {:?} cannot be written to column `{column}`", literal),
