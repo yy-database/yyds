@@ -13,6 +13,7 @@
                     <li><a href="/welcome">{{ navWelcomeLabel }}</a></li>
                     <li><a href="/playground">{{ navPlaygroundLabel }}</a></li>
                     <li><a href="/d/">{{ footerDocsLabel }}</a></li>
+                    <li><a href="/install">{{ footerInstallLabel }}</a></li>
                     <li><a href="/wire">{{ navWireLabel }}</a></li>
                 </ul>
             </div>
@@ -35,6 +36,7 @@ import {
     footerBlurb,
     footerResources,
     footerOverviewDocs,
+    footerInstall,
     footerCopyright,
     footerMono,
 } from "#locales/common";
@@ -50,6 +52,7 @@ export default class SiteFooter {
     footerBlurbLabel = "";
     footerExploreLabel = "";
     footerDocsLabel = "";
+    footerInstallLabel = "";
     footerCopyrightLabel = "";
     footerCopyrightLine = "";
     footerMonoLabel = "";
@@ -78,6 +81,7 @@ export default class SiteFooter {
         this.footerBlurbLabel = footerBlurb();
         this.footerExploreLabel = footerResources();
         this.footerDocsLabel = footerOverviewDocs();
+        this.footerInstallLabel = footerInstall();
         this.footerCopyrightLabel = footerCopyright();
         this.footerCopyrightLine = `© ${this.yearLabel} ${this.footerCopyrightLabel}`;
         this.footerMonoLabel = footerMono();
