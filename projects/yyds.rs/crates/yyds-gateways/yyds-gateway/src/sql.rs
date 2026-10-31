@@ -1968,3 +1968,17 @@ fn bind_error(message: &str) -> SqlFrontendError {
 fn normalize_identifier(name: &str) -> String {
     name.trim().to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SqlDialect;
+
+    /// `bytes` 容量是方言 wire 事实：MySQL 裸 `BLOB` 封顶 65 535 octets，
+    /// PostgreSQL `BYTEA` 不继承该上限，共享规划层不得替它拒绝任何载荷。
+    #[test]
+    fn bytes_capacity_is_a_dialect_wire_fact() {
+        assert_eq!(super::MYSQL_BLOB_CAPACITY, 65_535);
+        assert_eq!(SqlDialect::Mysql.bytes_capacity(), Some(super::MYSQL_BLOB_CAPACITY));
+        assert_eq!(SqlDialect::Postgres.bytes_capacity(), None);
+    }
+}
