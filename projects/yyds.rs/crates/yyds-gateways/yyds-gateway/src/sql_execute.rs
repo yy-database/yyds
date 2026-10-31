@@ -1830,6 +1830,7 @@ fn execute_update(
         Some(handle) => handle
             .write_if_unchanged(put_cmd, Some(existing_bytes))
             .map_err(|e| write_error(format!("TransactionHandle.update failed: {e}"), &e))?,
+        // 单行 UPDATE 的自动提交只有一条命令，单命令即单提交点，无需再包一层批次。
         None => executor.execute(None, put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
     };
     let _ = put_result;
@@ -1882,6 +1883,7 @@ fn execute_delete(
         Some(handle) => handle
             .write_if_unchanged(command, pre_image)
             .map_err(|e| write_error(format!("TransactionHandle.delete failed: {e}"), &e))?,
+        // 单行 DELETE 的自动提交同样是一条命令、一个 durable 提交点。
         None => executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
     };
     let affected = match delete_result {
@@ -1891,9 +1893,70 @@ fn execute_delete(
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
 }
 
+/// 一条语句扫描加谓词求值后命中的一行：最终写入命令与扫描时看到的 pre-image。
+///
+/// `pre_image` 会作为 `CommitCondition::ValueEquals(Some(pre_image))` 交给提交边界复核，
+/// 因此读改写与删除共享同一套 OCC 语义，不随语句动词分叉。
+struct StatementChange {
+    /// 该行最终要提交的命令（`Put` 或 `Delete`）。
+    command: KeyValueCommand,
+    /// 扫描时读到的基存行值，提交时用作 OCC 条件。
+    pre_image: Vec<u8>,
+}
+
+/// 把一条 DML 语句的命中行提交到 durable 原子边界。
+///
+/// 无显式事务时，整条语句必须经一次 `KeyValueExecutor::commit_batch(None, batch)` 发布：
+/// 逐行 `execute` 会把同一条语句拆成多个 durable 提交点，中途存储失败或进程退出会留下
+/// 前几行已可见、后几行未写的半提交状态。每行携带
+/// `CommitCondition::ValueEquals(Some(pre_image))`，并发改写同一行时整批以 `CasConflict`
+/// 拒绝并上报 `SqlErrorKind::Conflict`，不静默重试，也不退回逐行写。
+///
+/// 有显式事务时各行进入 handle 缓冲，由 COMMIT 时同一条 `commit_batch` 边界发布，
+/// 这里不提前提交。空变更集不触碰提交边界，直接返回 0。
+fn apply_statement_changes(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    changes: Vec<StatementChange>,
+    namespace: &Namespace,
+    operation: &str,
+) -> Result<u64, SqlFrontendError> {
+    if changes.is_empty() {
+        return Ok(0);
+    }
+    let affected = changes.len() as u64;
+    match transaction {
+        Some(handle) => {
+            for change in changes {
+                handle
+                    .write_if_unchanged(change.command, Some(change.pre_image))
+                    .map_err(|e| write_error(format!("TransactionHandle.{operation} failed: {e}"), &e))?;
+            }
+        }
+        None => {
+            let batch: Vec<BufferedCommit> = changes
+                .into_iter()
+                .map(|change| BufferedCommit {
+                    command: change.command,
+                    condition: Some(CommitCondition::ValueEquals(Some(change.pre_image))),
+                })
+                .collect();
+            executor.commit_batch(None, batch).map_err(|error| match error {
+                yyds_types::Error::CasConflict { .. } => SqlFrontendError::new(
+                    SqlErrorKind::Conflict,
+                    format!("concurrent writes to {} prevented the {operation} batch commit", namespace.0),
+                ),
+                other => execute_error(&format!("KeyValueExecutor.commit_batch failed: {other}")),
+            })?;
+        }
+    }
+    Ok(affected)
+}
+
 /// 多行 UPDATE：扫描 rowid 区间，逐行判定 WHERE 后改写，返回真实影响行数。
 ///
-/// 事务内每行都把扫描到的 pre-image 交给 `write_if_unchanged`，保持上一轮的 OCC 语义。
+/// 命中行先累积成一条语句变更集，再统一走 [`apply_statement_changes`] 的提交边界；
+/// 自动提交下只产生一次 durable commit，事务内则交给 handle 缓冲到 COMMIT。
 fn execute_update_scan(
     executor: &dyn KeyValueExecutor,
     transaction: Option<&dyn TransactionHandle>,
@@ -1911,7 +1974,7 @@ fn execute_update_scan(
         0,
         "update_scan",
     )?;
-    let mut affected = 0;
+    let mut changes = Vec::with_capacity(scanned.len());
     for (rowid, pre_image) in scanned {
         let mut row = decode_row(&pre_image)?;
         if let Some(predicate) = &plan.predicate {
@@ -1926,22 +1989,22 @@ fn execute_update_scan(
                 None => row.remove(field.field_id),
             }
         }
-        let command =
-            KeyValueCommand { namespace: namespace.clone(), key: rowid, action: KeyValueAction::Put(encode_row(&row)) };
-        match transaction {
-            Some(handle) => handle
-                .write_if_unchanged(command, Some(pre_image))
-                .map_err(|e| write_error(format!("TransactionHandle.update_scan failed: {e}"), &e))?,
-            None => executor
-                .execute(None, command)
-                .map_err(|e| execute_error(&format!("KeyValueExecutor.update_scan failed: {e}")))?,
-        };
-        affected += 1;
+        changes.push(StatementChange {
+            command: KeyValueCommand {
+                namespace: namespace.clone(),
+                key: rowid,
+                action: KeyValueAction::Put(encode_row(&row)),
+            },
+            pre_image,
+        });
     }
+    let affected = apply_statement_changes(executor, transaction, changes, &namespace, "update_scan")?;
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
 }
 
 /// 多行 DELETE：扫描 rowid 区间，逐行判定 WHERE 后删除，返回真实影响行数。
+///
+/// 与多行 UPDATE 共用同一条语句变更集与提交边界，删除命中行在一次 durable commit 内发布。
 fn execute_delete_scan(
     executor: &dyn KeyValueExecutor,
     transaction: Option<&dyn TransactionHandle>,
@@ -1959,7 +2022,7 @@ fn execute_delete_scan(
         0,
         "delete_scan",
     )?;
-    let mut affected = 0;
+    let mut changes = Vec::with_capacity(scanned.len());
     for (rowid, pre_image) in scanned {
         if let Some(predicate) = &plan.predicate {
             let row = decode_row(&pre_image)?;
@@ -1968,20 +2031,12 @@ fn execute_delete_scan(
                 continue;
             }
         }
-        let command = KeyValueCommand { namespace: namespace.clone(), key: rowid, action: KeyValueAction::Delete };
-        let result = match transaction {
-            // 事务内逐行删除同样走 OCC：pre-image 被并发改写时 COMMIT 被拒绝。
-            Some(handle) => handle
-                .write_if_unchanged(command, Some(pre_image))
-                .map_err(|e| write_error(format!("TransactionHandle.delete_scan failed: {e}"), &e))?,
-            None => executor
-                .execute(None, command)
-                .map_err(|e| execute_error(&format!("KeyValueExecutor.delete_scan failed: {e}")))?,
-        };
-        if matches!(result, yyds_types::KeyValueResult::Delete { removed: true }) {
-            affected += 1;
-        }
+        changes.push(StatementChange {
+            command: KeyValueCommand { namespace: namespace.clone(), key: rowid, action: KeyValueAction::Delete },
+            pre_image,
+        });
     }
+    let affected = apply_statement_changes(executor, transaction, changes, &namespace, "delete_scan")?;
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: affected })
 }
 

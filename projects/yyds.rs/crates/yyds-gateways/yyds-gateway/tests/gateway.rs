@@ -693,7 +693,7 @@ fn sql_null_tests_and_not_predicate_use_three_valued_logic() {
 
 #[test]
 fn sql_scan_update_and_delete_rewrite_matching_rows() {
-    let (catalog, executor) = nullable_users();
+    let (catalog, executor, _directory) = file_nullable_users();
 
     // name IS NULL 只在 id=1 成立，扫描路径必须只改这一行。
     let updated = run_sql(&executor, None, &catalog, "UPDATE users SET age = 5 WHERE name IS NULL");
@@ -2611,6 +2611,41 @@ fn join_fixture() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yy
     (catalog, executor)
 }
 
+/// `join_fixture` 的 `FileShard` 版本：写入路径的语句级提交要求存储具备 durable
+/// atomic commit 能力，易失的 `MemoryShard` 会在提交边界被显式拒绝。
+fn file_join_fixture(
+) -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yyds_kv::FileShard>, boost_fs::temp::TempFolder) {
+    use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n");
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
+    let mut shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
+    let users: &[(&[u8], &[(u64, &[u8])])] = &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")])];
+    let orders: &[(&[u8], &[(u64, &[u8])])] = &[
+        (b"10", &[(3, b"10"), (4, b"1"), (5, b"100")]),
+        (b"11", &[(3, b"11"), (4, b"1"), (5, b"50")]),
+        (b"12", &[(3, b"12"), (4, b"2"), (5, b"70")]),
+        (b"13", &[(3, b"13"), (4, b"9"), (5, b"5")]),
+    ];
+    for (namespace, rows) in [("table:1", users), ("table:2", orders)] {
+        for (rowid, fields) in rows {
+            let mut values = yyds_gateway::RowFieldValues::new();
+            for (field_id, bytes) in *fields {
+                values.insert(*field_id, bytes.to_vec());
+            }
+            let row_bytes = yyds_gateway::encode_row(&values);
+            shard.put(Key::new(namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(row_bytes))).expect("put row");
+        }
+    }
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = yyds_execution::LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
+    (catalog, executor, directory)
+}
+
 #[test]
 fn sql_inner_join_projects_both_sides_with_where_and_order_by() {
     let (catalog, executor) = join_fixture();
@@ -3734,7 +3769,7 @@ fn sql_common_table_expression_reports_unflattenable_shapes() {
 
 #[test]
 fn sql_exists_predicates_evaluate_against_subquery_rows() {
-    let (catalog, executor) = join_fixture();
+    let (catalog, executor, _directory) = file_join_fixture();
     let ids = |sql: &str| run_sql(&executor, None, &catalog, sql).rows;
 
     // 子查询有行 → 谓词恒真，保留全部 users。
