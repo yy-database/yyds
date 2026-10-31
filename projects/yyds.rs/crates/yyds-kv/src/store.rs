@@ -227,6 +227,12 @@ impl KvStore for FileShard {
         // atomically replaces the shard. Memory is only published after this returns `Ok`,
         // so a crash or storage failure here leaves the previous snapshot both visible and
         // durable — never a half-applied batch.
+        //
+        // The one exception is a directory-sync failure after the rename already happened:
+        // that error means durability is unproven, not that nothing was committed. The on-disk
+        // snapshot may already be the post-commit one, so the in-memory state is deliberately
+        // not published and the caller must reopen the shard instead of assuming a clean
+        // rollback to the previous snapshot.
         write_snapshot_durable(&self.path, &bytes)?;
         self.records = staged_records;
         self.next_revision = staged_revision;
@@ -308,8 +314,14 @@ fn encode_snapshot(records: &BTreeMap<Key, Record>, next_revision: u64) -> Resul
     Ok(bytes)
 }
 
-/// Writes `bytes` to a temp file beside `path`, fsyncs it, then atomically replaces `path`.
+/// Writes `bytes` to a temp file beside `path`, fsyncs it, then atomically replaces `path`
+/// and makes the replacement itself durable.
 /// This is the durable commit point shared by single writes and batch commits.
+///
+/// A failure that happens after the rename already took effect (the parent-directory sync on
+/// Unix) reports "durability not proven", not "nothing was committed": the new snapshot may
+/// already be visible to a reader that reopens the shard, and the old snapshot is gone. Callers
+/// must not treat such an error as a clean rollback.
 fn write_snapshot_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     let temp = path.with_file_name(format!(
         ".{}.yykv-tmp-{}",
@@ -421,7 +433,12 @@ fn read_exact(cursor: &mut Cursor<&[u8]>, bytes: &mut [u8]) -> Result<()> {
 
 #[cfg(not(windows))]
 fn replace_file(temp: &Path, destination: &Path) -> Result<()> {
-    fs::rename(temp, destination).map_err(Error::Io)
+    fs::rename(temp, destination).map_err(Error::Io)?;
+    // `rename` 只让新的目录项在内存里可见，掉电后替换本身仍可能丢失。提交点必须再同步父目录，
+    // 让目录项落盘。rename 已经发生，这里失败表示「耐久性未证实」而不是「什么都没提交」，
+    // 不能假装还能完整回滚。
+    let parent = destination.parent().ok_or(Error::Unsupported("shard path has no parent directory"))?;
+    fs::File::open(parent)?.sync_all().map_err(Error::Io)
 }
 
 #[cfg(windows)]
