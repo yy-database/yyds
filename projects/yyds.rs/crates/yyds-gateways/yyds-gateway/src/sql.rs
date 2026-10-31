@@ -391,6 +391,9 @@ impl SqlDialect {
 pub struct SqlBoundCte {
     /// Name the CTE is referenced by in `FROM` / `JOIN`.
     pub name: String,
+    /// Explicit output column names written as `WITH name (a, b) AS (...)`. Empty
+    /// means the body's own output names apply.
+    pub columns: Vec<String>,
     /// Bound body of the CTE.
     pub query: Box<SqlBoundSelect>,
 }
@@ -1149,8 +1152,8 @@ pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
 ///
 /// Each body goes through the same [`bind_select_statement`] path as every other
 /// query, so a CTE can only carry shapes the gateway already binds. Oak rejects
-/// `WITH RECURSIVE` while parsing, and an explicit column list renames the CTE
-/// output — the flattened gateway source cannot express a rename.
+/// `WITH RECURSIVE` while parsing. An explicit column list renames the CTE output;
+/// it is carried here and applied to the flattened column scope at catalog bind time.
 fn bind_with_clause(clause: Option<&oak_sql::ast::WithClause>) -> Result<Vec<SqlBoundCte>, SqlFrontendError> {
     let Some(clause) = clause
     else {
@@ -1165,12 +1168,15 @@ fn bind_with_clause(clause: Option<&oak_sql::ast::WithClause>) -> Result<Vec<Sql
         if ctes.iter().any(|existing| existing.name == name) {
             return Err(bind_error(&format!("SQL common table expression `{name}` is defined more than once")));
         }
-        if !cte.columns.is_empty() {
-            return Err(SqlFrontendError::unsupported(format!(
-                "SQL common table expression `{name}` with an explicit column list is outside the gateway subset"
+        let columns: Vec<String> = cte.columns.iter().map(|column| normalize_identifier(column.name.as_ref())).collect();
+        if let Some(duplicate) =
+            columns.iter().enumerate().find_map(|(index, column)| columns[..index].contains(column).then_some(column.as_str()))
+        {
+            return Err(bind_error(&format!(
+                "SQL common table expression `{name}` lists output column `{duplicate}` more than once"
             )));
         }
-        ctes.push(SqlBoundCte { name, query: Box::new(bind_select_statement(&cte.query)?) });
+        ctes.push(SqlBoundCte { name, columns, query: Box::new(bind_select_statement(&cte.query)?) });
     }
     Ok(ctes)
 }

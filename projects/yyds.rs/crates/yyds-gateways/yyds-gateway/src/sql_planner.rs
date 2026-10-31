@@ -89,9 +89,10 @@ pub fn plan_select_for_dialect(
             SqlCatalogBoundProjection::Star(star_table) => {
                 has_non_aggregate = true;
                 let star_table = find_table(catalog, star_table.type_id)?;
-                for field in &star_table.fields {
+                for (index, field) in star_table.fields.iter().enumerate() {
                     reject_unknown_field(field)?;
-                    projection_fields.push((source.row_id(field.field_id), field.name.clone()));
+                    let name = source.visible_column_name(index, field);
+                    projection_fields.push((source.row_id(field.field_id), name));
                 }
             }
             SqlCatalogBoundProjection::Expression { expression, alias } => {
@@ -103,7 +104,7 @@ pub fn plan_select_for_dialect(
                 match expression {
                     SqlCatalogBoundExpression::Column(col) => {
                         has_non_aggregate = true;
-                        projection_fields.push((col.row_id, alias.clone().unwrap_or_else(|| col.field_name.clone())));
+                        projection_fields.push((col.row_id, alias.clone().unwrap_or_else(|| col.visible_name.clone())));
                     }
                     SqlCatalogBoundExpression::Function { window: Some(_), .. } => {
                         has_window = true;
@@ -400,14 +401,15 @@ fn plan_join_select(
         match projection {
             SqlCatalogBoundProjection::Star(table) => {
                 let catalog_table = find_table(catalog, table.type_id)?;
-                for field in &catalog_table.fields {
+                for (index, field) in catalog_table.fields.iter().enumerate() {
                     reject_unknown_field(field)?;
-                    projection_fields.push((table.row_id(field.field_id), field.name.clone()));
+                    let name = table.visible_column_name(index, field);
+                    projection_fields.push((table.row_id(field.field_id), name));
                 }
             }
             SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
                 SqlCatalogBoundExpression::Column(col) => {
-                    projection_fields.push((col.row_id, alias.unwrap_or_else(|| col.field_name.clone())));
+                    projection_fields.push((col.row_id, alias.unwrap_or_else(|| col.visible_name.clone())));
                 }
                 other => {
                     if expression_has_aggregate(&other) {
@@ -709,6 +711,7 @@ fn plan_returning(
                             row_id: field.field_id,
                             table_name: table.name.clone(),
                             field_name: field.name.clone(),
+                            visible_name: field.name.clone(),
                         }),
                         field.name.clone(),
                     ));
@@ -716,7 +719,7 @@ fn plan_returning(
             }
             SqlCatalogBoundProjection::Expression { expression, alias } => match expression {
                 SqlCatalogBoundExpression::Column(column) => {
-                    let label = alias.unwrap_or_else(|| column.field_name.clone());
+                    let label = alias.unwrap_or_else(|| column.visible_name.clone());
                     planned.push((SqlCatalogBoundExpression::Column(column), label));
                 }
                 other => {

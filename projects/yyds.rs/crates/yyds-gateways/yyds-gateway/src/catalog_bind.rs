@@ -239,6 +239,9 @@ pub struct SqlCatalogBoundTable {
     pub alias: Option<String>,
     /// Zero-based occurrence of this catalog table inside the query.
     pub row_slot: u64,
+    /// Visible column names aligned with the catalog field order when an explicit CTE
+    /// column list renamed this occurrence. `None` keeps every catalog field name.
+    pub column_names: Option<Vec<String>>,
 }
 
 impl SqlCatalogBoundTable {
@@ -250,6 +253,15 @@ impl SqlCatalogBoundTable {
     /// The row-value key for one catalog field of this occurrence.
     pub fn row_id(&self, field_id: u64) -> u64 {
         field_id + self.row_slot * ROW_ID_STRIDE
+    }
+
+    /// The name the column at `field_index` is addressed by in this occurrence.
+    ///
+    /// A CTE with an explicit column list renames its output positionally, so the
+    /// rename lives beside the catalog field order and leaves the catalog name,
+    /// `field_id` and row slot untouched.
+    pub fn visible_column_name(&self, field_index: usize, field: &SqlCatalogField) -> String {
+        self.column_names.as_ref().and_then(|names| names.get(field_index).cloned()).unwrap_or_else(|| field.name.clone())
     }
 }
 
@@ -266,6 +278,9 @@ pub struct SqlCatalogBoundColumn {
     pub table_name: String,
     /// Catalog field name.
     pub field_name: String,
+    /// Name the reference was written by in its column scope, which a CTE's explicit
+    /// column list can rename away from [`Self::field_name`].
+    pub visible_name: String,
 }
 
 /// A column of the directly enclosing query read by a correlated subquery.
@@ -694,6 +709,7 @@ fn bind_insert(
                         row_id: f.field_id,
                         table_name: table.name.clone(),
                         field_name: f.name.clone(),
+                        visible_name: f.name.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?
@@ -950,11 +966,13 @@ fn resolve_cte_scope(
 ) -> Result<Vec<SqlCatalogCte>, SqlFrontendError> {
     let mut ctes: Vec<SqlCatalogCte> = inherited.to_vec();
     for cte in own {
-        let definition = SqlCatalogCte { name: cte.name.clone(), query: *cte.query, visible: ctes.clone() };
+        let definition =
+            SqlCatalogCte { name: cte.name.clone(), columns: cte.columns, query: *cte.query, visible: ctes.clone() };
         let mut probe = std::collections::BTreeMap::new();
         flatten_body(
             &definition.query,
             &definition.name,
+            &definition.columns,
             "common table expression",
             &definition.visible,
             &scope.from_clause(&[]),
@@ -1326,6 +1344,8 @@ fn bind_window_spec(
 struct SqlCatalogCte {
     /// Name the CTE is referenced by.
     name: String,
+    /// Explicit output column names, applied positionally to the flattened table.
+    columns: Vec<String>,
     /// Bound body of the CTE.
     query: SqlBoundSelect,
     /// Definitions visible inside `query`, in source order.
@@ -1351,6 +1371,7 @@ fn bind_source(
             Some(cte) => flatten_body(
                 &cte.query,
                 alias.as_deref().unwrap_or(name),
+                &cte.columns,
                 "common table expression",
                 &cte.visible,
                 scope,
@@ -1365,7 +1386,8 @@ fn bind_source(
             }
         },
         SqlBoundSource::Derived { query, alias } => {
-            flatten_body(query, alias, "derived table", ctes, scope, catalog, variables, occurrences)
+            // 派生表没有显式列名，只沿用 body 自己的输出名。
+            flatten_body(query, alias, &[], "derived table", ctes, scope, catalog, variables, occurrences)
         }
     }
 }
@@ -1394,6 +1416,7 @@ fn assign_row_slot(
 fn flatten_body(
     query: &SqlBoundSelect,
     alias: &str,
+    columns: &[String],
     subject: &str,
     visible: &[SqlCatalogCte],
     scope: &SqlCorrelationScope,
@@ -1427,10 +1450,13 @@ fn flatten_body(
         return Err(unsupported_source(subject, "its inner query selects from another derived table"));
     };
     // 内层来源既可以是 catalog 表，也可以是更早定义的 CTE；非递归保证这条链必然终止。
+    // 更早 CTE 的显式列名同样作用于这里的内层展开，否则 `SELECT x FROM renamed_cte`
+    // 会在扁平化时按基表字段名解析失败。
     let (table, inner_predicate) = match visible.iter().rev().find(|cte| cte.name == *name) {
         Some(cte) => flatten_body(
             &cte.query,
             inner_alias.as_deref().unwrap_or(name),
+            &cte.columns,
             "common table expression",
             &cte.visible,
             scope,
@@ -1444,10 +1470,12 @@ fn flatten_body(
         }
     };
     // 行槽已在展开时确定，过滤条件必须绑定在这一份行值上：这样一条带过滤的 CTE
-    // 与同一张表的另一次出现共存时，过滤不会落到别的行槽上。
-    if !projects_every_column(&query.projections, std::slice::from_ref(&table), catalog)? {
+    // 与同一张表的另一次出现共存时，过滤不会落到别的行槽上。过滤使用 body 自己的
+    // 列名作用域，显式输出列名只改外层看到的列名。
+    let Some(field_indices) = projected_field_indices(&query.projections, std::slice::from_ref(&table), catalog)?
+    else {
         return Err(unsupported_source(subject, "its inner projection must be `*` or every column of the source table"));
-    }
+    };
     let predicate = query
         .predicate
         .clone()
@@ -1464,6 +1492,7 @@ fn flatten_body(
         .transpose()?;
     let mut table = table;
     table.alias = Some(alias.to_string());
+    table.column_names = renamed_column_names(&table, &field_indices, columns, alias, subject, catalog)?;
     Ok((table, merge_predicates(inner_predicate, predicate)))
 }
 
@@ -1483,43 +1512,90 @@ fn merge_predicates(
     }
 }
 
-/// Whether a derived table's projection exposes exactly every column of its
-/// source table, which is what lets the outer query address the source table
-/// directly. `*` qualifies, and so does one unaliased column reference per
-/// catalog field in any order.
-fn projects_every_column(
+/// The catalog field indices a flattened body's projection exposes, in projection
+/// order, when the projection names exactly every column of its source table.
+///
+/// `*` qualifies and yields the catalog field order; so does one unaliased column
+/// reference per catalog field, in any order. Any other shape returns `None`, which
+/// is what kept the outer query from addressing the source table directly.
+fn projected_field_indices(
     projections: &[SqlBoundProjection],
     source: &[SqlCatalogBoundTable],
     catalog: &SqlCatalog,
-) -> Result<bool, SqlFrontendError> {
-    if matches!(projections, [SqlBoundProjection::Star]) {
-        return Ok(true);
-    }
+) -> Result<Option<Vec<usize>>, SqlFrontendError> {
     let table = catalog
         .tables
         .iter()
         .find(|candidate| candidate.type_id == source[0].type_id)
         .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+    if matches!(projections, [SqlBoundProjection::Star]) {
+        return Ok(Some((0..table.fields.len()).collect()));
+    }
     let mut covered = Vec::with_capacity(projections.len());
     for projection in projections {
         let SqlBoundProjection::Expression { expression, alias: None } = projection
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let SqlBoundExpression::Identifier(name) = expression
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let Ok(column) = find_field(name, source, catalog)
         else {
-            return Ok(false);
+            return Ok(None);
         };
         if covered.contains(&column.field_id) {
-            return Ok(false);
+            return Ok(None);
         }
         covered.push(column.field_id);
     }
-    Ok(covered.len() == table.fields.len() && table.fields.iter().all(|field| covered.contains(&field.field_id)))
+    if covered.len() != table.fields.len() || !table.fields.iter().all(|field| covered.contains(&field.field_id)) {
+        return Ok(None);
+    }
+    let indices =
+        table.fields.iter().map(|field| covered.iter().position(|id| *id == field.field_id)).collect::<Option<Vec<_>>>();
+    Ok(indices)
+}
+
+/// Applies a CTE's explicit output column list to the flattened column scope.
+///
+/// The body already exposes every column of its single base table, so the written
+/// names replace the visible names of exactly those columns, positionally. The
+/// result stays aligned with the catalog field order: catalog names, `field_id`s
+/// and the row slot are untouched, only the names this occurrence answers to.
+fn renamed_column_names(
+    table: &SqlCatalogBoundTable,
+    field_indices: &[usize],
+    columns: &[String],
+    alias: &str,
+    subject: &str,
+    catalog: &SqlCatalog,
+) -> Result<Option<Vec<String>>, SqlFrontendError> {
+    if columns.is_empty() {
+        return Ok(table.column_names.clone());
+    }
+    let catalog_table = catalog
+        .tables
+        .iter()
+        .find(|candidate| candidate.type_id == table.type_id)
+        .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+    if columns.len() != field_indices.len() {
+        return Err(unsupported_source(
+            subject,
+            &format!(
+                "the explicit column list of `{alias}` names {} columns but its body outputs {}",
+                columns.len(),
+                field_indices.len()
+            ),
+        ));
+    }
+    let mut names: Vec<String> =
+        catalog_table.fields.iter().enumerate().map(|(index, field)| table.visible_column_name(index, field)).collect();
+    for (column, index) in columns.iter().zip(field_indices) {
+        names[*index] = column.clone();
+    }
+    Ok(Some(names))
 }
 
 fn unsupported_source(subject: &str, reason: &str) -> SqlFrontendError {
@@ -1530,7 +1606,13 @@ fn find_table(catalog: &SqlCatalog, name: &str) -> Result<SqlCatalogBoundTable, 
     let matches = catalog.tables.iter().filter(|table| table.name == name).collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Err(SqlFrontendError::new(SqlErrorKind::UnknownTable, format!("unknown SQL table: {name}"))),
-        [table] => Ok(SqlCatalogBoundTable { type_id: table.type_id, name: table.name.clone(), alias: None, row_slot: 0 }),
+        [table] => Ok(SqlCatalogBoundTable {
+            type_id: table.type_id,
+            name: table.name.clone(),
+            alias: None,
+            row_slot: 0,
+            column_names: None,
+        }),
         _ => Err(SqlFrontendError::new(SqlErrorKind::AmbiguousTable, format!("ambiguous SQL table: {name}"))),
     }
 }
@@ -1585,10 +1667,17 @@ fn find_field_in_table(
         .iter()
         .find(|candidate| candidate.type_id == source.type_id)
         .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
-    let matches = table.fields.iter().filter(|field| field.name == name).collect::<Vec<_>>();
+    // 显式列名把输出列改名后，本 occurrence 的可见作用域整体换名：按基表字段名
+    // 解析旧名会读到一个外层看不到的列，因此这里只认这一份可见名。
+    let matches = table
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(index, field)| source.visible_column_name(*index, field) == name)
+        .collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Ok(None),
-        [field] => {
+        [(index, field)] => {
             reject_unknown_field(field)?;
             Ok(Some(SqlCatalogBoundColumn {
                 type_id: table.type_id,
@@ -1596,6 +1685,7 @@ fn find_field_in_table(
                 row_id: source.row_id(field.field_id),
                 table_name: table.name.clone(),
                 field_name: field.name.clone(),
+                visible_name: source.visible_column_name(*index, field),
             }))
         }
         _ => Err(SqlFrontendError::new(SqlErrorKind::AmbiguousColumn, format!("ambiguous SQL column: {name}"))),

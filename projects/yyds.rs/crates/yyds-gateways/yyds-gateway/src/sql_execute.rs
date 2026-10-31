@@ -2478,8 +2478,7 @@ impl RangeAxis {
             Self::Integers(values) => {
                 let step = i128::try_from(offset).unwrap_or(i128::MAX);
                 let current = values[position].expect("offset bounds start from a non-NULL key");
-                let target =
-                    if following { current.saturating_add(step) } else { current.saturating_sub(step) };
+                let target = if following { current.saturating_add(step) } else { current.saturating_sub(step) };
                 offset_index(&values[run_start..run_end], run_start, values.len(), target, end, |value, target| {
                     value.cmp(&target)
                 })
@@ -2510,9 +2509,7 @@ fn offset_index<T: Copy>(
     // 两种 bound 都按「满足前缀」二分：起点用「小于目标」，终点用「不大于目标」，
     // 命中的第一个下标就是边界。
     let count = if end {
-        run.partition_point(|value| {
-            value.is_some_and(|value| compare(value, target) != std::cmp::Ordering::Greater)
-        })
+        run.partition_point(|value| value.is_some_and(|value| compare(value, target) != std::cmp::Ordering::Greater))
     }
     else {
         run.partition_point(|value| value.is_some_and(|value| compare(value, target) == std::cmp::Ordering::Less))
