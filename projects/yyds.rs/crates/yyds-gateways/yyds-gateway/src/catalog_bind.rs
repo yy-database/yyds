@@ -1778,6 +1778,41 @@ mod tests {
         }
     }
 
+    /// 谓词路径（`WHERE` / `ORDER BY`）与投影和写路径一样，列引用在绑定期
+    /// 就显式拒绝 `Unknown` 字段，不降级成运行时比较或静默排序。
+    #[test]
+    fn sql_predicate_paths_reject_composite_fields_with_vos_hint() {
+        let catalog = composite_field_catalog();
+        let err =
+            bind_sql_catalog("SELECT body FROM t WHERE photo IS NULL", &catalog, 1).expect_err("WHERE 应拒绝 Unknown 字段");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`photo`") && err.message.contains("`file`"), "{}", err.message);
+
+        let err = bind_sql_catalog("SELECT body FROM t ORDER BY vec", &catalog, 1).expect_err("ORDER BY 应拒绝 Unknown 字段");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`vec`"), "{}", err.message);
+    }
+
+    /// `JOIN ... ON` 引用 `file` 列必须在绑定期显式拒绝，而不是退化成运行时比较。
+    #[test]
+    fn sql_join_condition_rejects_composite_field() {
+        let mut catalog = composite_field_catalog();
+        catalog.tables.push(SqlCatalogTable {
+            type_id: 2,
+            name: "u".to_string(),
+            fields: vec![SqlCatalogField {
+                field_id: 4,
+                name: "body".to_string(),
+                field_type: SqlFieldType::Bytes,
+                vos_type_name: None,
+            }],
+        });
+        let err = bind_sql_catalog("SELECT t.body FROM t INNER JOIN u ON t.photo = u.body", &catalog, 1)
+            .expect_err("JOIN ON 应拒绝 Unknown 字段");
+        assert_eq!(err.kind, SqlErrorKind::Unsupported);
+        assert!(err.message.contains("`photo`") && err.message.contains("`file`"), "{}", err.message);
+    }
+
     #[test]
     fn project_resolved_type_classifies_file_vector_and_unmappable_scalars_explicitly() {
         // `file`（User path）与 `vector`（Generic path）走显式分支，不再是通配兜底。
