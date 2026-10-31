@@ -11,10 +11,140 @@ pub enum BindError {
     UnsupportedCommand,
     /// Argument count differs from the supported command shape.
     WrongArity,
+    /// The option list is not valid Redis syntax (conflicting, repeated or missing
+    /// arguments such as `NX XX` or a trailing `EX`).
+    Syntax,
     /// SET options require semantics that are not implemented yet.
     UnsupportedOptions,
-    /// Increment delta is not a canonical signed 64-bit integer.
+    /// Increment delta or expiry value is not a canonical integer.
     InvalidInteger,
+    /// `EX` / `PX` expiry is zero or negative.
+    InvalidExpire,
+}
+
+/// Condition requested by the `NX` / `XX` options of `SET`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SetCondition {
+    /// No condition: the write always applies.
+    #[default]
+    Always,
+    /// `NX`: store only when the key is absent.
+    IfAbsent,
+    /// `XX`: store only when the key already exists.
+    IfPresent,
+}
+
+/// Relative expiry requested by `SET ... EX <seconds>` / `PX <milliseconds>`.
+///
+/// Absolute forms (`EXAT` / `PXAT`) are deliberately absent: this gateway tracks
+/// expiry as a session-relative instant, so it cannot honour an absolute deadline
+/// without inventing clock semantics it does not verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetExpiry {
+    /// `EX <seconds>`
+    Seconds(u64),
+    /// `PX <milliseconds>`
+    Milliseconds(u64),
+}
+
+/// Parsed `SET key value [NX|XX] [EX <s>|PX <ms>] [KEEPTTL]` request.
+///
+/// The value of a `SET` is a plain KV write, while the expiry is connection state
+/// (`KeyValueAction` carries no TTL), so the connection layer consumes this
+/// structure instead of guessing from the argument count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetRequest {
+    /// Key bytes exactly as the client sent them.
+    pub key: Vec<u8>,
+    /// Value bytes exactly as the client sent them.
+    pub value: Vec<u8>,
+    /// `NX` / `XX` write condition.
+    pub condition: SetCondition,
+    /// Relative expiry, absent when the command carries no TTL option.
+    pub expiry: Option<SetExpiry>,
+    /// Whether the previous expiry must survive the overwrite.
+    pub keep_ttl: bool,
+}
+
+/// Parses the full `SET` option list.
+///
+/// Options are matched case-insensitively in any order, exactly as Redis does.
+/// Repeated or conflicting combinations (`NX XX`, `EX 1 EX 2`, `EX 1 KEEPTTL`,
+/// a trailing option without its argument) are syntax errors, and a non-positive
+/// or non-integer expiry is rejected before anything is written.
+pub fn bind_set(arguments: &[&[u8]]) -> Result<SetRequest, BindError> {
+    if arguments.len() < 3 {
+        return Err(BindError::WrongArity);
+    }
+    let mut condition = SetCondition::Always;
+    let mut expiry = None;
+    let mut keep_ttl = false;
+    let mut index = 3;
+    while index < arguments.len() {
+        let option = arguments[index];
+        if option.eq_ignore_ascii_case(b"NX") {
+            if condition != SetCondition::Always {
+                return Err(BindError::Syntax);
+            }
+            condition = SetCondition::IfAbsent;
+            index += 1;
+        }
+        else if option.eq_ignore_ascii_case(b"XX") {
+            if condition != SetCondition::Always {
+                return Err(BindError::Syntax);
+            }
+            condition = SetCondition::IfPresent;
+            index += 1;
+        }
+        else if option.eq_ignore_ascii_case(b"KEEPTTL") {
+            if keep_ttl || expiry.is_some() {
+                return Err(BindError::Syntax);
+            }
+            keep_ttl = true;
+            index += 1;
+        }
+        else if option.eq_ignore_ascii_case(b"EX") || option.eq_ignore_ascii_case(b"PX") {
+            if expiry.is_some() || keep_ttl {
+                return Err(BindError::Syntax);
+            }
+            let Some(raw) = arguments.get(index + 1)
+            else {
+                return Err(BindError::Syntax);
+            };
+            let Some(value) = parse_canonical_integer(raw)
+            else {
+                return Err(BindError::InvalidInteger);
+            };
+            if value <= 0 {
+                return Err(BindError::InvalidExpire);
+            }
+            let magnitude = value as u64;
+            expiry = Some(if option.eq_ignore_ascii_case(b"PX") {
+                SetExpiry::Milliseconds(magnitude)
+            }
+            else {
+                SetExpiry::Seconds(magnitude)
+            });
+            index += 2;
+        }
+        else {
+            // `EXAT` / `PXAT` / `GET` / `IDLE` and any other option would require
+            // semantics this gateway does not implement, so they are refused
+            // explicitly rather than dropped.
+            return Err(BindError::UnsupportedOptions);
+        }
+    }
+    Ok(SetRequest { key: arguments[1].to_vec(), value: arguments[2].to_vec(), condition, expiry, keep_ttl })
+}
+
+/// Redis rejects non-canonical integer spellings (`+1`, ` 1`, `01`).
+fn parse_canonical_integer(bytes: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let value = text.parse::<i64>().ok()?;
+    if value.to_string() != text {
+        return None;
+    }
+    Some(value)
 }
 
 /// Binds one binary Redis request into a protocol-neutral YYDS command.
@@ -45,20 +175,13 @@ pub fn bind(arguments: &[&[u8]], namespace: &Namespace) -> Result<KeyValueComman
         KeyValueAction::GetSet(arguments[2].to_vec())
     }
     else if command.eq_ignore_ascii_case(b"SET") {
-        if arguments.len() < 3 {
-            return Err(BindError::WrongArity);
-        }
-        if arguments.len() == 4 && arguments[3].eq_ignore_ascii_case(b"NX") {
-            KeyValueAction::PutIfAbsent(arguments[2].to_vec())
-        }
-        else if arguments.len() == 4 && arguments[3].eq_ignore_ascii_case(b"XX") {
-            KeyValueAction::PutIfPresent(arguments[2].to_vec())
-        }
-        else if arguments.len() > 3 {
-            return Err(BindError::UnsupportedOptions);
-        }
-        else {
-            KeyValueAction::Put(arguments[2].to_vec())
+        // Only the write condition reaches the executor: `KeyValueAction` has no
+        // expiry field, so TTL bookkeeping belongs to the connection layer.
+        let request = bind_set(arguments)?;
+        match request.condition {
+            SetCondition::Always => KeyValueAction::Put(request.value),
+            SetCondition::IfAbsent => KeyValueAction::PutIfAbsent(request.value),
+            SetCondition::IfPresent => KeyValueAction::PutIfPresent(request.value),
         }
     }
     else if command.eq_ignore_ascii_case(b"DEL") {

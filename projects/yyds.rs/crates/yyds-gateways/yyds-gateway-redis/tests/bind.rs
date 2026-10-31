@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
-use yyds_gateway_redis::bind::{bind, bind_mget, BindError};
+use yyds_gateway_redis::bind::{bind, bind_mget, bind_set, BindError, SetCondition, SetExpiry};
 use yyds_kv::MemoryShard;
 use yyds_types::{KeyValueResult, Namespace, ShardEpoch, ShardId, ShardMap};
 
@@ -99,8 +99,15 @@ fn unsupported_shapes_are_rejected_before_execution() {
         (vec![b"GETDEL".as_slice()], BindError::WrongArity),
         (vec![b"GETSET".as_slice(), b"key"], BindError::WrongArity),
         (vec![b"SET".as_slice(), b"key"], BindError::WrongArity),
-        (vec![b"SET".as_slice(), b"key", b"value", b"EX"], BindError::UnsupportedOptions),
+        // 缺少 `EX` 的取值是语法错误，而不是「未知选项」。
+        (vec![b"SET".as_slice(), b"key", b"value", b"EX"], BindError::Syntax),
         (vec![b"SET".as_slice(), b"key", b"value", b"NX", b"GET"], BindError::UnsupportedOptions),
+        (vec![b"SET".as_slice(), b"key", b"value", b"NX", b"XX"], BindError::Syntax),
+        (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"1", b"EX", b"2"], BindError::Syntax),
+        (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"1", b"KEEPTTL"], BindError::Syntax),
+        (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"abc"], BindError::InvalidInteger),
+        (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"-1"], BindError::InvalidExpire),
+        (vec![b"SET".as_slice(), b"key", b"value", b"EXAT", b"1"], BindError::UnsupportedOptions),
         (vec![b"DEL".as_slice(), b"one", b"two"], BindError::WrongArity),
         (vec![b"INCR".as_slice()], BindError::WrongArity),
         (vec![b"INCRBY".as_slice(), b"key", b"01"], BindError::InvalidInteger),
@@ -110,6 +117,35 @@ fn unsupported_shapes_are_rejected_before_execution() {
     ] {
         assert_eq!(bind(&arguments, &namespace), Err(expected));
     }
+}
+
+#[test]
+fn set_options_are_parsed_into_an_explicit_bind_structure() {
+    let plain = bind_set(&[b"SET", b"key", b"value"]).unwrap();
+    assert_eq!(plain.condition, SetCondition::Always);
+    assert_eq!(plain.expiry, None);
+    assert!(!plain.keep_ttl);
+    assert_eq!(plain.key, b"key");
+    assert_eq!(plain.value, b"value");
+
+    // 大小写不敏感，顺序任意。
+    let parsed = bind_set(&[b"set", b"key", b"value", b"ex", b"5", b"nx"]).unwrap();
+    assert_eq!(parsed.condition, SetCondition::IfAbsent);
+    assert_eq!(parsed.expiry, Some(SetExpiry::Seconds(5)));
+
+    let parsed = bind_set(&[b"SET", b"key", b"value", b"XX", b"PX", b"250"]).unwrap();
+    assert_eq!(parsed.condition, SetCondition::IfPresent);
+    assert_eq!(parsed.expiry, Some(SetExpiry::Milliseconds(250)));
+
+    let parsed = bind_set(&[b"SET", b"key", b"value", b"KEEPTTL"]).unwrap();
+    assert!(parsed.keep_ttl);
+    assert_eq!(parsed.expiry, None);
+
+    // 绑定层只携带写条件：TTL 属于连接层状态，不进入 `KeyValueAction`。
+    assert_eq!(
+        bind(&[b"SET", b"k", b"v", b"EX", b"5"], &Namespace("redis:0".into())).unwrap().action,
+        yyds_types::KeyValueAction::Put(b"v".to_vec())
+    );
 }
 
 #[test]

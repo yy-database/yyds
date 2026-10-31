@@ -332,6 +332,209 @@ fn multi_exec_command_syntax_error_is_rejected_at_queue_time() {
     assert_eq!(response, b"+OK\r\n-ERR wrong number of arguments\r\n*0\r\n");
 }
 
+// ---------- SET options / TTL ----------
+
+/// 把一条命令编码成 RESP2 数组并发送。
+fn send_command(client: &mut TcpStream, arguments: &[&str]) {
+    let mut frame = format!("*{}\r\n", arguments.len());
+    for argument in arguments {
+        frame.push_str(&format!("${}\r\n{}\r\n", argument.len(), argument));
+    }
+    client.write_all(frame.as_bytes()).unwrap();
+}
+
+/// 读一条 CRLF 结尾的回复行（保留行内容，去掉换行）。
+fn read_line(client: &mut TcpStream) -> String {
+    let mut line = Vec::new();
+    loop {
+        let mut byte = [0u8; 1];
+        client.read_exact(&mut byte).unwrap();
+        if byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0]);
+    }
+    String::from_utf8(line).expect("reply line is UTF-8")
+}
+
+fn read_integer(client: &mut TcpStream) -> i64 {
+    let line = read_line(client);
+    line[1..].trim_end().parse().unwrap_or_else(|_| panic!("not an integer reply: {line:?}"))
+}
+
+/// 读一条 bulk 回复；`$-1` 返回 `None`，空 bulk 返回 `Some(空)`。
+fn read_bulk(client: &mut TcpStream) -> Option<Vec<u8>> {
+    let header = read_line(client);
+    assert_eq!(header.as_bytes().first(), Some(&b'$'), "expected a bulk header, got {header:?}");
+    let length: i64 = header[1..].trim_end().parse().unwrap_or_else(|_| panic!("not a bulk header: {header:?}"));
+    if length < 0 {
+        return None;
+    }
+    let mut body = vec![0_u8; length as usize];
+    client.read_exact(&mut body).unwrap();
+    let mut terminator = [0_u8; 2];
+    client.read_exact(&mut terminator).unwrap();
+    assert_eq!(terminator, [b'\r', b'\n']);
+    Some(body)
+}
+
+fn finish(client: TcpStream, server: std::thread::JoinHandle<()>) {
+    client.shutdown(Shutdown::Write).unwrap();
+    server.join().unwrap();
+}
+
+/// `SET k v EX 5` 写入相对过期时间，`TTL` 读回近似值，到期后键消失。
+#[test]
+fn set_ex_sets_a_relative_ttl_and_expires_the_key() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "k1", "one", "EX", "5"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["TTL", "k1"]);
+    let ttl = read_integer(&mut client);
+    assert!((4..=5).contains(&ttl), "TTL right after `EX 5` must be about 5, got {ttl}");
+
+    send_command(&mut client, &["SET", "k1", "again", "EX", "1"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    std::thread::sleep(Duration::from_millis(1_500));
+    send_command(&mut client, &["GET", "k1"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["TTL", "k1"]);
+    assert_eq!(read_integer(&mut client), -2);
+    send_command(&mut client, &["EXISTS", "k1"]);
+    assert_eq!(read_integer(&mut client), 0);
+
+    finish(client, server);
+}
+
+/// `SET NX` / `SET XX` 的条件失败返回 nil，既不写入也不改动 TTL。
+#[test]
+fn set_nx_and_xx_conditions_control_the_write_and_keep_the_ttl() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "k2", "fresh", "NX"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["SET", "k2", "other", "NX"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["GET", "k2"]);
+    assert_eq!(read_bulk(&mut client), Some(b"fresh".to_vec()));
+
+    send_command(&mut client, &["SET", "missing", "value", "XX"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["SET", "k2", "updated", "XX"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+
+    // 条件失败不得清除已存在的过期时间。
+    send_command(&mut client, &["SET", "k3", "v", "EX", "5"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["TTL", "k3"]);
+    assert!((4..=5).contains(&read_integer(&mut client)));
+    send_command(&mut client, &["SET", "k3", "nope", "NX"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["TTL", "k3"]);
+    let ttl = read_integer(&mut client);
+    assert!((0..=5).contains(&ttl), "a failed `NX` must leave the TTL untouched, got {ttl}");
+
+    finish(client, server);
+}
+
+/// `KEEPTTL` 保留旧过期时间，无 TTL 选项的覆盖写与 `GETSET` / `DEL` 清除它。
+#[test]
+fn set_keep_ttl_and_plain_overwrite_follow_expiry_rules() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "k4", "v", "EX", "5"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["TTL", "k4"]);
+    assert!((4..=5).contains(&read_integer(&mut client)));
+
+    send_command(&mut client, &["SET", "k4", "v2", "KEEPTTL"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["TTL", "k4"]);
+    let kept = read_integer(&mut client);
+    assert!((0..=5).contains(&kept), "`KEEPTTL` must keep the expiry, got {kept}");
+
+    send_command(&mut client, &["SET", "k4", "v3"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["TTL", "k4"]);
+    assert_eq!(read_integer(&mut client), -1, "an overwrite without TTL options must clear the expiry");
+
+    // `GETSET` 同样清除 TTL。
+    send_command(&mut client, &["SET", "k5", "v", "EX", "30"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["GETSET", "k5", "replaced"]);
+    assert_eq!(read_bulk(&mut client), Some(b"v".to_vec()));
+    send_command(&mut client, &["TTL", "k5"]);
+    assert_eq!(read_integer(&mut client), -1);
+
+    // `DEL` 之后 `KEEPTTL` 无过期时间可保留，证明 DEL 清除了过期表记录。
+    send_command(&mut client, &["SET", "k6", "v", "EX", "30"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["DEL", "k6"]);
+    assert_eq!(read_integer(&mut client), 1);
+    send_command(&mut client, &["SET", "k6", "v", "KEEPTTL"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["TTL", "k6"]);
+    assert_eq!(read_integer(&mut client), -1);
+
+    finish(client, server);
+}
+
+/// 非法 `SET` 选项按 Redis 错误拒绝，且每条命令仍是单包单响应。
+#[test]
+fn invalid_set_options_report_redis_errors_and_keep_the_stream_aligned() {
+    let (mut client, server) = executor_server();
+    let cases: &[(&[&str], &str)] = &[
+        (&["SET", "bad", "v", "NX", "XX"], "-ERR syntax error\r"),
+        (&["SET", "bad", "v", "EX"], "-ERR syntax error\r"),
+        (&["SET", "bad", "v", "EX", "abc"], "-ERR value is not an integer or out of range\r"),
+        (&["SET", "bad", "v", "EX", "0"], "-ERR invalid expire time in 'set' command\r"),
+        (&["SET", "bad", "v", "EX", "-1"], "-ERR invalid expire time in 'set' command\r"),
+        (&["SET", "bad", "v", "EX", "1", "KEEPTTL"], "-ERR syntax error\r"),
+        (&["SET", "bad", "v", "EXAT", "1700000000"], "-ERR unsupported SET option\r"),
+    ];
+    for (arguments, expected) in cases {
+        send_command(&mut client, arguments);
+        assert_eq!(read_line(&mut client), *expected, "unexpected reply for {arguments:?}");
+    }
+    // 失败的命令没有留下写入，后续命令仍正常解析。
+    send_command(&mut client, &["GET", "bad"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["PING"]);
+    assert_eq!(read_line(&mut client), "+PONG\r");
+
+    finish(client, server);
+}
+
+/// `CLIENT SETINFO` / `SETNAME` / `GETNAME` 是连接池握手用到的最小集合。
+#[test]
+fn client_setname_getname_and_setinfo_are_session_local() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["CLIENT", "GETNAME"]);
+    assert_eq!(read_bulk(&mut client), Some(Vec::new()), "an unset name is an empty bulk string");
+
+    send_command(&mut client, &["CLIENT", "SETNAME", "pool-1"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["CLIENT", "GETNAME"]);
+    assert_eq!(read_bulk(&mut client), Some(b"pool-1".to_vec()));
+
+    send_command(&mut client, &["CLIENT", "SETINFO", "LIB-NAME", "redis-py"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["CLIENT", "SETINFO", "LIB-VER", "5.0.1"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+
+    // 未知属性与其他子命令继续显式拒绝。
+    send_command(&mut client, &["CLIENT", "SETINFO", "FOO", "x"]);
+    assert_eq!(read_line(&mut client), "-ERR Unrecognized option 'FOO'\r");
+    send_command(&mut client, &["CLIENT", "ID"]);
+    assert_eq!(read_line(&mut client), "-ERR Unknown subcommand or wrong number of arguments for 'ID'. Try CLIENT HELP.\r");
+
+    // `SETINFO` 不覆盖名字，`GETNAME` 仍返回 SETNAME 设置的值。
+    send_command(&mut client, &["CLIENT", "GETNAME"]);
+    assert_eq!(read_bulk(&mut client), Some(b"pool-1".to_vec()));
+    send_command(&mut client, &["PING"]);
+    assert_eq!(read_line(&mut client), "+PONG\r");
+
+    finish(client, server);
+}
+
 // ---------- EXPIRE / TTL / PTTL ----------
 
 #[test]

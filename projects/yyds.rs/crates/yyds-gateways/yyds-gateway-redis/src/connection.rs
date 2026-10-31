@@ -15,7 +15,7 @@ use yyds_execution::KeyValueExecutor;
 use yyds_types::{KeyValueResult, Namespace};
 
 use crate::{
-    bind::{bind, bind_mget, BindError},
+    bind::{bind, bind_mget, bind_set, BindError, SetCondition, SetExpiry},
     resp::{decode_request, Request, RequestLimits},
 };
 
@@ -41,6 +41,12 @@ struct QueuedCommand {
 }
 
 /// Per-connection state carried across RESP2 frames.
+///
+/// Known limitation: `expiries` is session-scoped, while real Redis stores a TTL
+/// as a key property that every connection can observe and that the server keeps
+/// after the client disconnects. Sharing it globally would require a key
+/// metadata plane the KV contract does not expose yet, so a TTL set on one
+/// connection is not visible on another and is not persisted.
 #[derive(Debug, Default)]
 struct ConnectionState {
     /// Whether the connection is currently inside a `MULTI` block.
@@ -49,6 +55,9 @@ struct ConnectionState {
     queue: Vec<QueuedCommand>,
     /// Key expiry: `(namespace, key_bytes) -> expiry_instant`.
     expiries: HashMap<(String, Vec<u8>), Instant>,
+    /// Name assigned by the most recent `CLIENT SETNAME`, reported by
+    /// `CLIENT GETNAME`. Session-scoped, like the upstream client name.
+    client_name: Option<Vec<u8>>,
 }
 
 impl ConnectionState {
@@ -197,6 +206,141 @@ fn purge_if_expired(state: &mut ConnectionState, executor: Option<&dyn KeyValueE
     false
 }
 
+/// Writes the Redis-shaped reply for a rejected `SET` option list.
+fn write_set_error(stream: &mut dyn Write, error: BindError) -> io::Result<()> {
+    match error {
+        BindError::WrongArity => stream.write_all(b"-ERR wrong number of arguments for 'set' command\r\n"),
+        BindError::Syntax => stream.write_all(b"-ERR syntax error\r\n"),
+        BindError::InvalidInteger => stream.write_all(b"-ERR value is not an integer or out of range\r\n"),
+        BindError::InvalidExpire => stream.write_all(b"-ERR invalid expire time in 'set' command\r\n"),
+        BindError::UnsupportedOptions => stream.write_all(b"-ERR unsupported SET option\r\n"),
+        BindError::EmptyCommand => stream.write_all(b"-ERR empty command\r\n"),
+        BindError::UnsupportedCommand => stream.write_all(b"-ERR unsupported command\r\n"),
+    }
+}
+
+/// Executes `SET key value [NX|XX] [EX <s>|PX <ms>] [KEEPTTL]`.
+///
+/// The write still goes through [`KeyValueExecutor`]: the conditional variants map
+/// onto the executor's atomic `PutIfAbsent` / `PutIfPresent` actions, so a failed
+/// `NX` / `XX` neither writes the value nor changes the stored TTL. On success the
+/// expiry table follows Redis rules — an explicit `EX` / `PX` replaces it, `KEEPTTL`
+/// keeps it and a plain overwrite clears it.
+fn handle_set(
+    stream: &mut dyn Write,
+    request: &Request<'_>,
+    executor: Option<&dyn KeyValueExecutor>,
+    namespace: &Namespace,
+    state: &mut ConnectionState,
+) -> io::Result<()> {
+    let Some(executor) = executor
+    else {
+        stream.write_all(b"-ERR unsupported command\r\n")?;
+        return Ok(());
+    };
+    let parsed = match bind_set(&request.arguments) {
+        Ok(parsed) => parsed,
+        Err(error) => return write_set_error(stream, error),
+    };
+    let _ = purge_if_expired(state, Some(executor), &namespace.0, &parsed.key);
+    let ns_key = (namespace.0.clone(), parsed.key.clone());
+    let action = match parsed.condition {
+        SetCondition::Always => yyds_types::KeyValueAction::Put(parsed.value),
+        SetCondition::IfAbsent => yyds_types::KeyValueAction::PutIfAbsent(parsed.value),
+        SetCondition::IfPresent => yyds_types::KeyValueAction::PutIfPresent(parsed.value),
+    };
+    let result = executor.execute(None, yyds_types::KeyValueCommand { namespace: namespace.clone(), key: parsed.key, action });
+    let stored = match result {
+        Ok(KeyValueResult::Put { .. }) => true,
+        Ok(KeyValueResult::PutIfAbsent { revision }) | Ok(KeyValueResult::PutIfPresent { revision }) => revision.is_some(),
+        Ok(_) => {
+            write_error(stream, "SET executor returned unexpected result")?;
+            return Ok(());
+        }
+        Err(error) => {
+            write_error(stream, &error.to_string())?;
+            return Ok(());
+        }
+    };
+    if !stored {
+        // The condition failed: no write happened, so the expiry must survive.
+        stream.write_all(b"$-1\r\n")?;
+        return Ok(());
+    }
+    if !parsed.keep_ttl {
+        match parsed.expiry {
+            Some(SetExpiry::Seconds(seconds)) => {
+                state.expiries.insert(ns_key, Instant::now() + Duration::from_secs(seconds));
+            }
+            Some(SetExpiry::Milliseconds(milliseconds)) => {
+                state.expiries.insert(ns_key, Instant::now() + Duration::from_millis(milliseconds));
+            }
+            None => {
+                state.expiries.remove(&ns_key);
+            }
+        }
+    }
+    stream.write_all(b"+OK\r\n")
+}
+
+/// `CLIENT SETNAME` / `CLIENT GETNAME` / `CLIENT SETINFO`.
+///
+/// Only the subcommands connection pools send while opening a connection are
+/// implemented. `SETINFO` is Redis 7.2 library metadata: the server keeps it for
+/// `CLIENT LIST` output, which this gateway does not render, so it is accepted as
+/// a non-persisted no-op. Everything else (`CLIENT ID`, `CLIENT KILL`,
+/// `CLIENT NO-EVICT`, ...) stays explicitly unsupported.
+fn handle_client(stream: &mut dyn Write, request: &Request<'_>, state: &mut ConnectionState) -> io::Result<()> {
+    let Some(subcommand) = request.arguments.get(1)
+    else {
+        write_error(stream, "Unknown subcommand or wrong number of arguments for 'CLIENT'. Try CLIENT HELP.")?;
+        return Ok(());
+    };
+    let count = request.arguments.len();
+    if subcommand.eq_ignore_ascii_case(b"SETINFO") {
+        if count != 4 {
+            write_error(stream, "wrong number of arguments for 'client|setinfo' command")?;
+            return Ok(());
+        }
+        let attribute = request.arguments[2];
+        if attribute.eq_ignore_ascii_case(b"LIB-NAME") || attribute.eq_ignore_ascii_case(b"LIB-VER") {
+            // Deliberately not stored: no `CLIENT LIST` projection exists yet.
+            stream.write_all(b"+OK\r\n")?;
+        }
+        else {
+            write_error(stream, &format!("Unrecognized option '{}'", String::from_utf8_lossy(attribute)))?;
+        }
+        return Ok(());
+    }
+    if subcommand.eq_ignore_ascii_case(b"SETNAME") {
+        if count != 3 {
+            write_error(stream, "wrong number of arguments for 'client|setname' command")?;
+            return Ok(());
+        }
+        state.client_name = Some(request.arguments[2].to_vec());
+        stream.write_all(b"+OK\r\n")?;
+        return Ok(());
+    }
+    if subcommand.eq_ignore_ascii_case(b"GETNAME") {
+        if count != 2 {
+            write_error(stream, "wrong number of arguments for 'client|getname' command")?;
+            return Ok(());
+        }
+        // Redis answers an empty bulk string, not a null bulk, when no name was set.
+        return match &state.client_name {
+            Some(name) => write_bulk(stream, name),
+            None => stream.write_all(b"$0\r\n\r\n"),
+        };
+    }
+    write_error(
+        stream,
+        &format!(
+            "Unknown subcommand or wrong number of arguments for '{}'. Try CLIENT HELP.",
+            String::from_utf8_lossy(subcommand)
+        ),
+    )
+}
+
 fn respond(
     stream: &mut dyn Write,
     request: &Request<'_>,
@@ -291,6 +435,9 @@ fn respond(
             return Ok(false);
         }
         stream.write_all(b"-ERR wrong number of arguments for 'quit' command\r\n")?;
+    }
+    else if command.eq_ignore_ascii_case(b"CLIENT") {
+        handle_client(stream, request, state)?;
     }
     else if command.eq_ignore_ascii_case(b"SELECT") && executor.is_some() {
         if count != 2 {
@@ -607,34 +754,61 @@ fn respond(
             }
         }
     }
+    else if command.eq_ignore_ascii_case(b"SET") {
+        handle_set(stream, request, executor, namespace, state)?;
+    }
     else if let Some(executor) = executor {
-        // --- Generic bind()-backed commands (GET, SET, DEL, INCR, DECR, GETDEL, GETSET).
+        // --- Generic bind()-backed commands (GET, DEL, INCR, DECR, GETDEL, GETSET).
         // We first purge the key if its expiry has elapsed so the executor sees a clean state.
         let bind_key = command_to_bind_key(command, &request.arguments);
         if let Some(key) = bind_key {
             let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
         }
         match bind(&request.arguments, &namespace) {
-            Ok(command) => match executor.execute(None, command) {
-                Ok(KeyValueResult::Get(Some(value))) => write_bulk(stream, &value)?,
-                Ok(KeyValueResult::Get(None)) => stream.write_all(b"$-1\r\n")?,
-                Ok(KeyValueResult::Exists(exists)) => stream.write_all(if exists { b":1\r\n" } else { b":0\r\n" })?,
-                Ok(KeyValueResult::GetDelete(Some(value))) => write_bulk(stream, &value)?,
-                Ok(KeyValueResult::GetDelete(None)) => stream.write_all(b"$-1\r\n")?,
-                Ok(KeyValueResult::GetSet(Some(value))) => write_bulk(stream, &value)?,
-                Ok(KeyValueResult::GetSet(None)) => stream.write_all(b"$-1\r\n")?,
-                Ok(KeyValueResult::Put { .. }) => stream.write_all(b"+OK\r\n")?,
-                Ok(KeyValueResult::PutIfAbsent { revision: Some(_) }) => stream.write_all(b"+OK\r\n")?,
-                Ok(KeyValueResult::PutIfAbsent { revision: None }) => stream.write_all(b"$-1\r\n")?,
-                Ok(KeyValueResult::PutIfPresent { revision: Some(_) }) => stream.write_all(b"+OK\r\n")?,
-                Ok(KeyValueResult::PutIfPresent { revision: None }) => stream.write_all(b"$-1\r\n")?,
-                Ok(KeyValueResult::Increment { value }) => write!(stream, ":{value}\r\n")?,
-                Ok(KeyValueResult::Delete { removed }) => stream.write_all(if removed { b":1\r\n" } else { b":0\r\n" })?,
-                Err(error) => write_error(stream, &error.to_string())?,
-            },
+            Ok(command) => {
+                // A delete or a read-and-replace drops the key's TTL in Redis. The
+                // conditional puts are unreachable here because `SET` is handled
+                // above, but the plain `Put` arm keeps the rule explicit.
+                let clears_expiry = matches!(
+                    command.action,
+                    yyds_types::KeyValueAction::Delete
+                        | yyds_types::KeyValueAction::GetDelete
+                        | yyds_types::KeyValueAction::GetSet(_)
+                        | yyds_types::KeyValueAction::Put(_)
+                );
+                let key_bytes = request.arguments[1].to_vec();
+                match executor.execute(None, command) {
+                    Ok(result) => {
+                        if clears_expiry {
+                            state.expiries.remove(&(namespace.0.clone(), key_bytes));
+                        }
+                        match result {
+                            KeyValueResult::Get(Some(value)) => write_bulk(stream, &value)?,
+                            KeyValueResult::Get(None) => stream.write_all(b"$-1\r\n")?,
+                            KeyValueResult::Exists(exists) => stream.write_all(if exists { b":1\r\n" } else { b":0\r\n" })?,
+                            KeyValueResult::GetDelete(Some(value)) => write_bulk(stream, &value)?,
+                            KeyValueResult::GetDelete(None) => stream.write_all(b"$-1\r\n")?,
+                            KeyValueResult::GetSet(Some(value)) => write_bulk(stream, &value)?,
+                            KeyValueResult::GetSet(None) => stream.write_all(b"$-1\r\n")?,
+                            KeyValueResult::Put { .. } => stream.write_all(b"+OK\r\n")?,
+                            KeyValueResult::PutIfAbsent { revision: Some(_) } => stream.write_all(b"+OK\r\n")?,
+                            KeyValueResult::PutIfAbsent { revision: None } => stream.write_all(b"$-1\r\n")?,
+                            KeyValueResult::PutIfPresent { revision: Some(_) } => stream.write_all(b"+OK\r\n")?,
+                            KeyValueResult::PutIfPresent { revision: None } => stream.write_all(b"$-1\r\n")?,
+                            KeyValueResult::Increment { value } => write!(stream, ":{value}\r\n")?,
+                            KeyValueResult::Delete { removed } => {
+                                stream.write_all(if removed { b":1\r\n" } else { b":0\r\n" })?
+                            }
+                        }
+                    }
+                    Err(error) => write_error(stream, &error.to_string())?,
+                }
+            }
             Err(BindError::WrongArity) => stream.write_all(b"-ERR wrong number of arguments\r\n")?,
+            Err(BindError::Syntax) => stream.write_all(b"-ERR syntax error\r\n")?,
             Err(BindError::UnsupportedOptions) => stream.write_all(b"-ERR unsupported SET options\r\n")?,
             Err(BindError::InvalidInteger) => stream.write_all(b"-ERR value is not an integer or out of range\r\n")?,
+            Err(BindError::InvalidExpire) => stream.write_all(b"-ERR invalid expire time in 'set' command\r\n")?,
             Err(BindError::EmptyCommand) => stream.write_all(b"-ERR empty command\r\n")?,
             Err(BindError::UnsupportedCommand) => stream.write_all(b"-ERR unsupported command\r\n")?,
         }
@@ -785,12 +959,42 @@ fn validate_command_for_queue(
         }
         return Ok(());
     }
+    // CLIENT: only the session-local subcommands are queueable.
+    if command.eq_ignore_ascii_case(b"CLIENT") {
+        let Some(subcommand) = arguments.get(1)
+        else {
+            return Err(b"-ERR Unknown subcommand or wrong number of arguments for 'CLIENT'. Try CLIENT HELP.\r\n".to_vec());
+        };
+        if subcommand.eq_ignore_ascii_case(b"SETINFO") {
+            let valid =
+                count == 4 && (arguments[2].eq_ignore_ascii_case(b"LIB-NAME") || arguments[2].eq_ignore_ascii_case(b"LIB-VER"));
+            if !valid {
+                return Err(b"-ERR wrong number of arguments for 'client|setinfo' command\r\n".to_vec());
+            }
+            return Ok(());
+        }
+        if subcommand.eq_ignore_ascii_case(b"SETNAME") {
+            if count != 3 {
+                return Err(b"-ERR wrong number of arguments for 'client|setname' command\r\n".to_vec());
+            }
+            return Ok(());
+        }
+        if subcommand.eq_ignore_ascii_case(b"GETNAME") {
+            if count != 2 {
+                return Err(b"-ERR wrong number of arguments for 'client|getname' command\r\n".to_vec());
+            }
+            return Ok(());
+        }
+        return Err(b"-ERR unsupported command\r\n".to_vec());
+    }
     // Fall back to bind()'s own syntax checks.
     match bind(arguments, namespace) {
         Ok(_) => Ok(()),
         Err(BindError::WrongArity) => Err(b"-ERR wrong number of arguments\r\n".to_vec()),
+        Err(BindError::Syntax) => Err(b"-ERR syntax error\r\n".to_vec()),
         Err(BindError::UnsupportedOptions) => Err(b"-ERR unsupported SET options\r\n".to_vec()),
         Err(BindError::InvalidInteger) => Err(b"-ERR value is not an integer or out of range\r\n".to_vec()),
+        Err(BindError::InvalidExpire) => Err(b"-ERR invalid expire time in 'set' command\r\n".to_vec()),
         Err(BindError::EmptyCommand) => Err(b"-ERR empty command\r\n".to_vec()),
         Err(BindError::UnsupportedCommand) => Err(b"-ERR unsupported command\r\n".to_vec()),
     }
@@ -804,7 +1008,6 @@ fn command_to_bind_key<'a>(command: &[u8], arguments: &[&'a [u8]]) -> Option<&'a
     }
     // All bind()-backed commands put the key at arguments[1].
     if command.eq_ignore_ascii_case(b"GET")
-        || command.eq_ignore_ascii_case(b"SET")
         || command.eq_ignore_ascii_case(b"DEL")
         || command.eq_ignore_ascii_case(b"INCR")
         || command.eq_ignore_ascii_case(b"INCRBY")
