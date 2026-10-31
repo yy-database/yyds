@@ -831,23 +831,6 @@ fn fencing_guards_execute_read_batch() {
 }
 
 #[test]
-fn fencing_guards_execute_batch() {
-    let shard_id = ShardId("s1".into());
-    let node_b = ReplicaNodeId("node-b".to_owned());
-    let owners = vec![OwnerEntry { shard_id, node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
-    let (executor, _directory) = make_fence_test_executor(owners);
-
-    let stale_fence =
-        Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
-    let batch = vec![command(KeyValueAction::Put(b"x1".to_vec()), b"k1"), command(KeyValueAction::Put(b"x2".to_vec()), b"k2")];
-    let err = executor.execute_batch(stale_fence.as_ref(), batch).unwrap_err();
-    assert!(matches!(err, yyds_types::Error::FencingRejected { .. }));
-
-    // 确保没有东西被写入（fence 在 batch 执行前被拒绝）
-    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k1")).unwrap(), KeyValueResult::Get(None));
-}
-
-#[test]
 fn fencing_guards_execute_scan() {
     let node_b = ReplicaNodeId("node-b".to_owned());
     let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
@@ -927,7 +910,7 @@ fn commit_batch_occ_conflict_leaves_no_partial_apply() {
 }
 
 // ────────────────────────────────────────────────────────────────
-// 默认接口合同测试：无原子批写/OCC 提交能力的 executor 必须显式拒绝
+// 默认接口合同测试：无 OCC 提交能力的 executor 必须显式拒绝
 // ────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -936,16 +919,6 @@ struct MinimalExecutor;
 impl KeyValueExecutor for MinimalExecutor {
     fn execute(&self, _fence: Option<&FenceToken>, _command: KeyValueCommand) -> yyds_types::Result<KeyValueResult> {
         Ok(KeyValueResult::Get(None))
-    }
-}
-
-#[test]
-fn default_execute_batch_contract_returns_unsupported() {
-    let executor = MinimalExecutor;
-    let err = executor.execute_batch(None, vec![command(KeyValueAction::Put(b"v".to_vec()), b"k")]).unwrap_err();
-    match err {
-        yyds_types::Error::Unsupported(feature) => assert!(feature.contains("atomic batch writes"), "got {feature}"),
-        other => panic!("expected Unsupported, got {other:?}"),
     }
 }
 
