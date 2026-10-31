@@ -1355,6 +1355,9 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
         "INSERT INTO users VALUES (1, 'zoe', 99, 1.5, TRUE, 'x') \
          ON CONFLICT (id) DO UPDATE SET age = (SELECT MAX(age) FROM users)",
     ),
+    // CTE 输出列改名：Oak AST 能表示 `name (col, ...)`，但网关的扁平化行源按基表
+    // 字段名解析列，无法表达位置改名，绑定期带原因显式拒绝。
+    ("CTE explicit column list", "WITH u (id, name) AS (SELECT * FROM users) SELECT id FROM u"),
     // 相关子查询只放开单层，且外层列只能出现在子查询的行级表达式里：再嵌套一层、
     // 出现在派生表或排序键、被写语句的赋值右值引用，都在绑定期带原因拒绝。
     (
