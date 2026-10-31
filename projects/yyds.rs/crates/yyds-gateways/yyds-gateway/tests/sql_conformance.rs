@@ -838,7 +838,7 @@ fn sql_conformance_transaction_commit_and_rollback() {
     for sql in SEED {
         fixture.execute(None, sql).expect("seed");
     }
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&fixture.executor)));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&fixture.executor), None));
 
     // 事务内写入与扫描：本事务可见，事务外不可见。
     let inserted = fixture
@@ -865,7 +865,7 @@ fn sql_conformance_transaction_commit_and_rollback() {
     );
 
     // 回滚丢弃全部写入与更新，状态回到提交后的快照。
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&fixture.executor)));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&fixture.executor), None));
     let updated = fixture.execute(Some(handle.as_ref()), "UPDATE users SET age = 99 WHERE id = 1").expect("transaction update");
     assert_eq!(updated.affected_rows, 1);
     let deleted = fixture.execute(Some(handle.as_ref()), "DELETE FROM users WHERE id = 2").expect("transaction delete");

@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
-use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
+use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, describe_plan, encode_hex, execute_plan, neutralized_sql_parameters, nulled_sql_parameters,
     parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral,
@@ -284,14 +284,19 @@ fn handle_simple_query(
             SqlTransactionAction::Begin => {
                 match runtime {
                     Some(rt) => {
-                        // The gateway constructs the handle directly because the generic
-                        // `KeyValueExecutor::begin_transaction` default returns `Unsupported`.
-                        let executor = rt.executor.clone();
-                        let handle = LocalTransactionHandle::new(executor.clone());
-                        session.executor = Some(executor);
-                        session.handle = Some(Box::new(handle));
-                        session.protocol_only_transaction = false;
-                        session.failed = false;
+                        // The executor owns the transaction contract: `begin_transaction` captures
+                        // the ownership context (single-node gateways pass `None` explicitly) and
+                        // the returned handle replays it at the commit boundary.
+                        match Arc::clone(&rt.executor).begin_transaction(None) {
+                            Ok(handle) => {
+                                session.executor = Some(rt.executor.clone());
+                                session.handle = Some(handle);
+                                session.protocol_only_transaction = false;
+                                session.failed = false;
+                                write_command_complete(stream, "BEGIN")
+                            }
+                            Err(err) => write_error_response(stream, "0A000", &format!("BEGIN failed: {err}")),
+                        }
                     }
                     None => {
                         // No runtime — stay in protocol-only mode. execute_plan will receive
@@ -300,9 +305,9 @@ fn handle_simple_query(
                         session.handle = None;
                         session.protocol_only_transaction = true;
                         session.failed = false;
+                        write_command_complete(stream, "BEGIN")
                     }
                 }
-                write_command_complete(stream, "BEGIN")
             }
             SqlTransactionAction::Commit if session.failed => {
                 if let Some(handle) = session.handle.take() {

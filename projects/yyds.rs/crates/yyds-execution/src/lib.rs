@@ -81,17 +81,30 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// catalog-published owner of every routed shard. `None` keeps the single-node local mode
     /// (no owner context). Executors without an atomic OCC-validated commit contract must
     /// return `Error::Unsupported` (the default) instead of replaying commands one by one.
+    ///
+    /// The committed batch must route to exactly one shard: the single-node atomic commit scope
+    /// is a single shard, and a batch whose writes spread across shards is rejected with a
+    /// stable `Error::Unsupported` before anything is applied.
     fn commit_batch(&self, fence: Option<&FenceToken>, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
         let _ = (fence, batch);
         Err(Error::Unsupported("atomic OCC-validated batch commits are not implemented by this executor"))
     }
 
-    /// Opens a local transaction handle bound to this executor.
+    /// Opens a local transaction handle bound to this executor and the caller's ownership context.
     ///
     /// The handle lets callers issue commands through a transaction boundary so that a gateway
-    /// can bind `BEGIN` / `COMMIT` / `ROLLBACK` protocol verbs to a real typed object. Executors
-    /// without transaction support return `Error::Unsupported`.
-    fn begin_transaction(&self) -> yyds_types::Result<Box<dyn TransactionHandle>> {
+    /// can bind `BEGIN` / `COMMIT` / `ROLLBACK` protocol verbs to a real typed object. The
+    /// `fence` (routing epoch + leader term + owner node) is captured at begin time and carried
+    /// verbatim into [`KeyValueExecutor::commit_batch`] at commit time: a transaction opened by a
+    /// coordinator that loses its lease later must fail at the commit boundary instead of
+    /// committing under a default `None`. Single-node gateways pass `None` explicitly.
+    ///
+    /// The atomic scope of a committed transaction is **one shard** in this product phase:
+    /// buffered writes that route to different shards are rejected with a stable
+    /// `Error::Unsupported` at commit time and nothing is applied. Cross-shard (distributed)
+    /// transactions are not disguised as ordinary local transactions. Executors without
+    /// transaction support return `Error::Unsupported`.
+    fn begin_transaction(self: Arc<Self>, _fence: Option<&FenceToken>) -> yyds_types::Result<Box<dyn TransactionHandle>> {
         Err(Error::Unsupported("this executor does not support local transactions"))
     }
 }
@@ -394,14 +407,21 @@ enum BufferedState {
 #[derive(Debug)]
 pub struct LocalTransactionHandle {
     executor: Arc<dyn KeyValueExecutor>,
+    /// Ownership context captured at `begin_transaction` time and replayed into the commit
+    /// boundary. `None` is the explicit single-node local mode, never a silent default.
+    fence: Option<FenceToken>,
     buffer: Mutex<HashMap<(String, Vec<u8>), BufferedState>>,
     savepoints: Mutex<Vec<(String, HashMap<(String, Vec<u8>), BufferedState>)>>,
 }
 
 impl LocalTransactionHandle {
-    /// Creates a new handle bound to an executor via a shared Arc.
-    pub fn new(executor: Arc<dyn KeyValueExecutor>) -> Self {
-        Self { executor, buffer: Mutex::new(HashMap::new()), savepoints: Mutex::new(Vec::new()) }
+    /// Creates a new handle bound to an executor via a shared Arc and the caller's fence context.
+    ///
+    /// Gateways should go through [`KeyValueExecutor::begin_transaction`] so the executor can
+    /// enforce its transaction capability contract; this constructor backs that path and unit
+    /// tests of the buffering semantics.
+    pub fn new(executor: Arc<dyn KeyValueExecutor>, fence: Option<FenceToken>) -> Self {
+        Self { executor, fence, buffer: Mutex::new(HashMap::new()), savepoints: Mutex::new(Vec::new()) }
     }
 
     /// Resolves the current observable value for `(namespace, key)` by merging the buffer
@@ -579,9 +599,9 @@ impl TransactionHandle for LocalTransactionHandle {
         let buffer = self.buffer.into_inner().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
 
         // 组装 commit_batch 参数：最终 replay command + 可选 OCC 条件。
-        // validate + batch apply 都在 executor.commit_batch 内部的同一全局锁里完成。
-        // handle 本身没有 owner 上下文（begin_transaction 不携带 fence），所以这里传 None，
-        // 即单节点本地模式；executor 侧对 None 的放行语义与 execute 路径一致。
+        // validate + batch apply 都在 executor.commit_batch 内部的同一提交锁区间里完成。
+        // fence 是 begin_transaction 时捕获的事务上下文：owner 在事务期间切换时，
+        // commit 边界必须用这个 token 拒绝半提交，而不是回落到默认 None 的无主提交。
         let mut batch = Vec::with_capacity(buffer.len());
         for ((namespace, key), state) in buffer {
             let (action, condition) = match state {
@@ -591,7 +611,7 @@ impl TransactionHandle for LocalTransactionHandle {
             batch.push(BufferedCommit { command: KeyValueCommand { namespace: Namespace(namespace), key, action }, condition });
         }
 
-        self.executor.commit_batch(None, batch)
+        self.executor.commit_batch(self.fence.as_ref(), batch)
     }
 
     fn rollback(self: Box<Self>) {
@@ -637,7 +657,7 @@ impl TransactionHandle for LocalTransactionHandle {
 
 impl<S> KeyValueExecutor for LocalExecutor<S>
 where
-    S: KvStore + Send + Debug,
+    S: KvStore + Send + Debug + 'static,
 {
     fn execute_read_batch(
         &self,
@@ -740,11 +760,26 @@ where
         // holding interval; otherwise a concurrent `PutIfAbsent` from another transaction could
         // sneak between our re-check and our own replay and we would silently overwrite it.
         Self::with_global_lock(|| {
-            // Ownership must be proven at the boundary where the writes are applied: every
-            // routed shard of the batch has to still belong to the fence's leader and term.
+            // Single-shard atomic scope: the whole batch must route to one shard. A batch that
+            // spreads across shards is a distributed transaction, which this phase does not
+            // support; reject with a stable error before anything is applied.
+            let mut batch_shard: Option<ShardId> = None;
             for entry in &batch {
                 let decision = self.routing.route(&entry.command.namespace.0, &entry.command.key);
-                self.check_fence(fence, &decision.shard)?;
+                match &batch_shard {
+                    None => batch_shard = Some(decision.shard),
+                    Some(scope) if *scope != decision.shard => {
+                        return Err(Error::Unsupported(
+                            "cross-shard batch commits are not supported; the atomic commit scope is a single shard",
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            // Ownership must be proven at the boundary where the writes are applied: the routed
+            // shard of the batch has to still belong to the fence's leader and term.
+            if let Some(shard) = &batch_shard {
+                self.check_fence(fence, shard)?;
             }
             for entry in &batch {
                 if let Some(condition) = &entry.condition {
@@ -783,6 +818,14 @@ where
             }
             Ok(())
         })
+    }
+
+    fn begin_transaction(self: Arc<Self>, fence: Option<&FenceToken>) -> yyds_types::Result<Box<dyn TransactionHandle>> {
+        // The local executor provides an atomic OCC-validated commit path, so it can open a
+        // transaction. The caller's fence (routing epoch + leader term + owner node) is captured
+        // into the handle and replayed verbatim at commit time; a single-node gateway passes
+        // `None` explicitly rather than letting the handle default to an unowned commit.
+        Ok(Box::new(LocalTransactionHandle::new(self, fence.cloned())))
     }
 }
 

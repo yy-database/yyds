@@ -667,7 +667,7 @@ fn sql_scan_update_and_delete_inside_transaction_roll_back() {
 
     let (catalog, executor) = nullable_users();
     let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(executor);
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
 
     let updated =
         run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "UPDATE users SET age = 99 WHERE name IS NOT NULL");
@@ -693,8 +693,8 @@ fn sql_scan_update_conflict_is_rejected_at_commit() {
 
     let (catalog, executor) = nullable_users();
     let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(executor);
-    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
-    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
 
     let first = run_sql(executor.as_ref(), Some(t1.as_ref()), &catalog, "UPDATE users SET age = 1 WHERE age IS NOT NULL");
     assert_eq!(first.affected_rows, 2);
@@ -969,7 +969,7 @@ fn sql_insert_select_inside_transaction_rolls_back() {
 
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
     let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(empty_executor());
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
 
     run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (1, 'alice')");
     let inserted =
@@ -3462,7 +3462,7 @@ fn sql_transaction_scan_observes_uncommitted_writes() {
 
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(empty_executor());
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
 
     run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (1, 'alice')");
     run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (2, 'bob')");
@@ -3493,7 +3493,7 @@ fn sql_transaction_rollback_discards_insert_update_and_delete() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor: Arc<dyn yyds_execution::KeyValueExecutor> =
         Arc::new(make_executor_with_rows("table:1", &[(b"1", &[(1, b"1"), (2, b"original")])]));
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
 
     run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "UPDATE users SET name = 'txn' WHERE id = 1");
     run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, "INSERT INTO users VALUES (2, 'pending')");
@@ -3528,8 +3528,8 @@ fn sql_transaction_concurrent_update_conflict_is_rejected_at_commit() {
         Arc::new(make_executor_with_rows("table:1", &[(b"1", &[(1, b"1"), (2, b"original")])]));
 
     // 两个事务都读到同一 pre-image，然后各自做 read-modify-write。
-    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
-    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
     let first = run_sql(executor.as_ref(), Some(t1.as_ref()), &catalog, "UPDATE users SET name = 't1' WHERE id = 1");
     assert_eq!(first.affected_rows, 1);
     let second = run_sql(executor.as_ref(), Some(t2.as_ref()), &catalog, "UPDATE users SET name = 't2' WHERE id = 1");
@@ -3619,7 +3619,7 @@ fn catalog_types_drive_decode_on_read_scan_and_transaction_paths() {
 
     // 事务内扫描走同一套 catalog 类型解码，结果必须与事务外一致。
     let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(executor);
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor)));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
     let txn_scan =
         run_sql(executor.as_ref(), Some(handle.as_ref()), &catalog, &format!("SELECT {columns} FROM metrics ORDER BY id"));
     assert_eq!(txn_scan.rows, scan.rows);
