@@ -18,6 +18,7 @@ yyds-execution = { workspace = true }
 yyds-types = { workspace = true }
 
 [dev-dependencies]
+boost-fs = { workspace = true }
 serde_json = { workspace = true }
 yyds-gateway-conformance = { workspace = true }
 yyds-kv = { workspace = true }

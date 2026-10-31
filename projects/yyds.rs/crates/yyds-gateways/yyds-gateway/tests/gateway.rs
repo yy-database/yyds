@@ -360,6 +360,64 @@ fn nullable_users() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<
     (catalog, executor)
 }
 
+/// `empty_executor` 的 `FileShard` 版本：真正走 commit 的事务测试要求存储具备
+/// durable atomic commit 能力，易失的 `MemoryShard` 会在提交边界被显式拒绝。
+fn file_empty_executor(directory: &std::path::Path) -> yyds_execution::LocalExecutor<yyds_kv::FileShard> {
+    use yyds_kv::FileShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, FileShard::open(directory.join("s1.yykv")).expect("open file shard"));
+    yyds_execution::LocalExecutor::new(routing, shards, Vec::new()).expect("executor")
+}
+
+/// `nullable_users` 的 `FileShard` 版本，附带必须与 executor 一同存活的 `TempFolder`。
+fn file_nullable_users(
+) -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<yyds_kv::FileShard>, boost_fs::temp::TempFolder) {
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let catalog = catalog("table users { @@id: i64, name: utf8?, age: i64? }\n");
+    let executor = file_empty_executor(directory.path());
+    for sql in [
+        "INSERT INTO users VALUES (1, NULL, NULL)",
+        "INSERT INTO users VALUES (2, '', 0)",
+        "INSERT INTO users VALUES (3, 'x', 10)",
+    ] {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("insert bind");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("insert plan");
+        yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert nullable row");
+    }
+    (catalog, executor, directory)
+}
+
+/// `make_executor_with_rows` 的 `FileShard` 版本。
+fn make_file_executor_with_rows(
+    directory: &std::path::Path,
+    namespace: &str,
+    rows: &[(&[u8], &[(u64, &[u8])])],
+) -> yyds_execution::LocalExecutor<yyds_kv::FileShard> {
+    use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
+
+    let mut shard = FileShard::open(directory.join("s1.yykv")).expect("open file shard");
+    for (rowid, fields) in rows {
+        let mut values = yyds_gateway::RowFieldValues::new();
+        for (field_id, bytes) in *fields {
+            values.insert(*field_id, bytes.to_vec());
+        }
+        let row_bytes = yyds_gateway::encode_row(&values);
+        shard.put(Key::new(namespace, rowid.to_vec()), StoredValue::Inline(InlineValue(row_bytes))).expect("put row");
+    }
+
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    yyds_execution::LocalExecutor::new(routing, shards, Vec::new()).expect("executor")
+}
+
 fn make_executor_with_rows(
     namespace: &str,
     rows: &[(&[u8], &[(u64, &[u8])])],
@@ -691,7 +749,7 @@ fn sql_scan_update_conflict_is_rejected_at_commit() {
     use std::sync::Arc;
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let (catalog, executor) = nullable_users();
+    let (catalog, executor, _directory) = file_nullable_users();
     let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(executor);
     let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
     let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
@@ -3523,9 +3581,13 @@ fn sql_transaction_concurrent_update_conflict_is_rejected_at_commit() {
     use std::sync::Arc;
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let executor: Arc<dyn yyds_execution::KeyValueExecutor> =
-        Arc::new(make_executor_with_rows("table:1", &[(b"1", &[(1, b"1"), (2, b"original")])]));
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(make_file_executor_with_rows(
+        directory.path(),
+        "table:1",
+        &[(b"1", &[(1, b"1"), (2, b"original")]),],
+    ));
 
     // 两个事务都读到同一 pre-image，然后各自做 read-modify-write。
     let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));

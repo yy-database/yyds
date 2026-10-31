@@ -11,6 +11,23 @@ use crate::{Key, Record, StoredValue};
 
 const MAGIC: &[u8] = b"YYKV\x01";
 
+/// One mutation inside a shard-level atomic commit.
+#[derive(Debug, Clone)]
+pub enum ShardChange {
+    /// Insert or replace a key with `value` at the next shard revision.
+    Put {
+        /// The key to insert or replace.
+        key: Key,
+        /// The post-commit value.
+        value: StoredValue,
+    },
+    /// Remove a key when present.
+    Delete {
+        /// The key to remove.
+        key: Key,
+    },
+}
+
 /// Shard-local KV surface. Implementations back one `.yykv` shard.
 pub trait KvStore {
     /// Returns the latest record for `key`, if present.
@@ -21,6 +38,32 @@ pub trait KvStore {
 
     /// Deletes `key` when present. Returns whether a record was removed.
     fn delete(&mut self, key: &Key) -> Result<bool>;
+
+    /// Applies the whole change set as one atomic commit step.
+    ///
+    /// The contract is a single commit boundary: the changes are staged first (the complete
+    /// post-commit state is produced and written durably), then applied atomically, and only
+    /// then published to readers. Either every change in `changes` is committed and durable
+    /// when this returns `Ok`, or nothing is when it returns `Err`. A sequential fold over
+    /// [`Self::put`] / [`Self::delete`] is not an acceptable implementation because a crash
+    /// between two persists leaves a half-committed batch on disk.
+    ///
+    /// Stores without a durable atomic commit boundary must return `Error::Unsupported`
+    /// (the default) instead of degrading to per-change execution.
+    fn commit_changes(&mut self, changes: Vec<ShardChange>) -> Result<()> {
+        let _ = changes;
+        Err(Error::Unsupported("store does not provide a durable atomic commit boundary"))
+    }
+
+    /// Whether [`Self::commit_changes`] survives process exit.
+    ///
+    /// Executors may only open transactions against stores that answer `true`; a store whose
+    /// commit boundary is process-volatile (e.g. an in-memory shard) must keep the default
+    /// `false` so transactions are rejected instead of being disguised by an executor-side
+    /// mutex.
+    fn durable_atomic_commit(&self) -> bool {
+        false
+    }
 
     /// Ordered prefix scan within one namespace.
     ///
@@ -119,23 +162,8 @@ impl FileShard {
     }
 
     fn persist(&self) -> Result<()> {
-        let bytes = encode(self)?;
-        let temp = self.path.with_file_name(format!(
-            ".{}.yykv-tmp-{}",
-            self.path.file_name().and_then(|name| name.to_str()).unwrap_or("shard"),
-            std::process::id()
-        ));
-        let result = (|| -> Result<()> {
-            let mut file = OpenOptions::new().create(true).truncate(true).write(true).open(&temp)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
-            replace_file(&temp, &self.path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temp);
-        }
-        result
+        let bytes = encode_snapshot(&self.records, self.next_revision)?;
+        write_snapshot_durable(&self.path, &bytes)
     }
 }
 
@@ -174,6 +202,38 @@ impl KvStore for FileShard {
             return Err(error);
         }
         Ok(true)
+    }
+
+    fn commit_changes(&mut self, changes: Vec<ShardChange>) -> Result<()> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut staged_records = self.records.clone();
+        let mut staged_revision = self.next_revision;
+        for change in &changes {
+            match change {
+                ShardChange::Put { key, value } => {
+                    staged_revision = staged_revision.checked_add(1).ok_or(Error::Corrupt("shard revision exhausted"))?;
+                    staged_records.insert(key.clone(), Record { key: key.clone(), value: value.clone(), revision: staged_revision });
+                }
+                ShardChange::Delete { key } => {
+                    staged_records.remove(key);
+                }
+            }
+        }
+        let bytes = encode_snapshot(&staged_records, staged_revision)?;
+        // Durable commit point: the full post-commit snapshot is fsynced to a temp file and
+        // atomically replaces the shard. Memory is only published after this returns `Ok`,
+        // so a crash or storage failure here leaves the previous snapshot both visible and
+        // durable — never a half-applied batch.
+        write_snapshot_durable(&self.path, &bytes)?;
+        self.records = staged_records;
+        self.next_revision = staged_revision;
+        Ok(())
+    }
+
+    fn durable_atomic_commit(&self) -> bool {
+        true
     }
 
     fn scan(
@@ -223,13 +283,13 @@ fn collect_scan(
     out
 }
 
-fn encode(shard: &FileShard) -> Result<Vec<u8>> {
+fn encode_snapshot(records: &BTreeMap<Key, Record>, next_revision: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.write_all(MAGIC)?;
-    bytes.write_all(&shard.next_revision.to_le_bytes())?;
-    write_count(&mut bytes, shard.records.len())?;
+    bytes.write_all(&next_revision.to_le_bytes())?;
+    write_count(&mut bytes, records.len())?;
     // BTreeMap iteration already yields namespace-then-bytes order — no manual sort needed.
-    for record in shard.records.values() {
+    for record in records.values() {
         write_bytes(&mut bytes, record.key.namespace.0.as_bytes())?;
         write_bytes(&mut bytes, &record.key.bytes)?;
         bytes.write_all(&record.revision.to_le_bytes())?;
@@ -245,6 +305,27 @@ fn encode(shard: &FileShard) -> Result<Vec<u8>> {
         }
     }
     Ok(bytes)
+}
+
+/// Writes `bytes` to a temp file beside `path`, fsyncs it, then atomically replaces `path`.
+/// This is the durable commit point shared by single writes and batch commits.
+fn write_snapshot_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temp = path.with_file_name(format!(
+        ".{}.yykv-tmp-{}",
+        path.file_name().and_then(|name| name.to_str()).unwrap_or("shard"),
+        std::process::id()
+    ));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new().create(true).truncate(true).write(true).open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
 }
 
 fn decode(path: &Path, bytes: &[u8]) -> Result<FileShard> {

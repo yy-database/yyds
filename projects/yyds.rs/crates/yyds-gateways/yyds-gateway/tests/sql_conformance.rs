@@ -17,12 +17,15 @@ use yyds_gateway_conformance::{
     order_cases, returning_cases, rows, seed_state, set_operation_cases, string_function_cases, type_cases, upsert_cases,
     window_cases, Case, Driver, Lit, DEFAULT_STATE_COLUMNS, REJECTED_SQL, SCHEMA_VERSION, SEED, USERS_SCHEMA,
 };
-use yyds_kv::MemoryShard;
+use yyds_kv::FileShard;
 
 struct Fixture {
     catalog: SqlCatalog,
     executor: Arc<dyn KeyValueExecutor>,
     dialect: SqlDialect,
+    /// SQL 事务 commit 要求 durable atomic commit 边界，fixture 挂载 `FileShard`
+    /// 并持有其临时目录直到测试结束。
+    _directory: boost_fs::temp::TempFolder,
 }
 
 impl Fixture {
@@ -31,13 +34,14 @@ impl Fixture {
     }
 
     fn with_dialect(dialect: SqlDialect) -> Self {
+        let directory = boost_fs::temp::create_folder().expect("temp folder");
         let catalog = catalog(USERS_SCHEMA);
         let shard_id = yyds_types::ShardId("s1".into());
         let routing = yyds_types::ShardMap::new(yyds_types::ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
         let mut shards = std::collections::HashMap::new();
-        shards.insert(shard_id, MemoryShard::new());
+        shards.insert(shard_id, FileShard::open(directory.path().join("s1.yykv")).expect("open file shard"));
         let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
-        Self { catalog, executor: Arc::new(executor), dialect }
+        Self { catalog, executor: Arc::new(executor), dialect, _directory: directory }
     }
 
     fn execute(&self, transaction: Option<&dyn TransactionHandle>, sql: &str) -> Result<SqlResult, String> {

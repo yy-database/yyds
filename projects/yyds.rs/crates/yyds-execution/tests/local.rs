@@ -307,23 +307,26 @@ fn transaction_handle_exposes_begin_commit_and_rollback_contract() {
     rollback_handle.rollback();
 }
 
-fn make_executor() -> std::sync::Arc<LocalExecutor<MemoryShard>> {
-    let shard_id = ShardId("txn-mem".into());
-    std::sync::Arc::new(
-        LocalExecutor::new(
-            ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
-            HashMap::from([(shard_id, MemoryShard::new())]),
-            Vec::new(),
-        )
-        .unwrap(),
+/// Durable transaction fixture: a real commit requires a store with a durable atomic commit
+/// boundary, so the buffered-transaction tests mount a `FileShard`. The returned `TempFolder`
+/// must be kept alive together with the executor.
+fn make_executor() -> (std::sync::Arc<LocalExecutor<FileShard>>, boost_fs::temp::TempFolder) {
+    let directory = create_folder().unwrap();
+    let shard_id = ShardId("txn".into());
+    let executor = LocalExecutor::new(
+        ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+        HashMap::from([(shard_id, FileShard::open(directory.path().join("txn.yykv")).unwrap())]),
+        Vec::new(),
     )
+    .unwrap();
+    (std::sync::Arc::new(executor), directory)
 }
 
 #[test]
 fn rollback_discards_insert() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Get, b"foo")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -337,7 +340,7 @@ fn rollback_discards_insert() {
 fn rollback_discards_update_keeping_original() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"original".to_vec()), b"key")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -354,7 +357,7 @@ fn rollback_discards_update_keeping_original() {
 fn commit_persists_insert() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"hello".to_vec()), b"foo")).unwrap();
@@ -370,7 +373,7 @@ fn commit_persists_insert() {
 fn commit_persists_update() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"old".to_vec()), b"key")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -387,7 +390,7 @@ fn commit_persists_update() {
 fn transaction_sees_own_writes_before_commit() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"pending".to_vec()), b"temp")).unwrap();
@@ -405,7 +408,7 @@ fn transaction_sees_own_writes_before_commit() {
 fn transaction_read_batch_merges_snapshot_view() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"original".to_vec()), b"k1")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -423,7 +426,7 @@ fn transaction_read_batch_merges_snapshot_view() {
 fn transaction_delete_is_undone_by_rollback() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"alive".to_vec()), b"k")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -445,7 +448,7 @@ fn transaction_delete_is_undone_by_rollback() {
 fn transaction_scan_merges_buffered_writes_over_base() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"base".to_vec()), b"a")).unwrap();
     executor.execute(None, command(KeyValueAction::Put(b"base".to_vec()), b"c")).unwrap();
 
@@ -468,7 +471,7 @@ fn transaction_scan_merges_buffered_writes_over_base() {
 fn transaction_scan_applies_prefix_and_bounds_to_buffered_writes() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     for key in [b"p-1".as_slice(), b"p-2".as_slice(), b"q-1".as_slice()] {
         handle.execute(command(KeyValueAction::Put(b"v".to_vec()), key)).unwrap();
@@ -493,7 +496,7 @@ fn write_if_unchanged_occ_rejects_stale_pre_image_at_commit() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
     use yyds_types::Error;
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
 
     // Both transactions read the same pre-image, then both try a read-modify-write Put.
@@ -514,7 +517,7 @@ fn write_if_unchanged_delete_rejects_recreated_key_at_commit() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
     use yyds_types::Error;
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -532,7 +535,7 @@ fn write_if_unchanged_delete_rejects_recreated_key_at_commit() {
 fn transaction_increment_rollback_leaves_base_untouched() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"10".to_vec()), b"counter")).unwrap();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -556,7 +559,7 @@ fn concurrent_put_if_absent_occ_rejects_late_commit() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
     use yyds_types::Error;
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
 
     // 两个事务同时开始。resolve 在事务执行期间都看到 base 里 key 不存在。
     let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -586,7 +589,7 @@ fn put_if_absent_vs_external_put_occ() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
     use yyds_types::Error;
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::PutIfAbsent(b"txn-val".to_vec()), b"k")).unwrap();
@@ -616,7 +619,7 @@ fn put_if_absent_vs_external_put_occ() {
 fn unconditional_put_overrides_prior_conditional_in_buffer() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
     // base: k 不存在
 
     let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
@@ -639,7 +642,7 @@ fn single_occ_failure_aborts_entire_batch() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
     use yyds_types::Error;
 
-    let executor = make_executor();
+    let (executor, _directory) = make_executor();
 
     // base: "a" 不存在, "b" 不存在
     // T1: Put("a"), PutIfAbsent("b")
@@ -673,7 +676,8 @@ fn global_lock_serialises_concurrent_commits() {
     use std::sync::{Arc, Barrier};
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
-    let executor: Arc<dyn KeyValueExecutor> = make_executor();
+    let (concrete_executor, _directory) = make_executor();
+    let executor: Arc<dyn KeyValueExecutor> = concrete_executor;
     const N: usize = 4;
     let barrier = Arc::new(Barrier::new(N));
 
@@ -711,11 +715,15 @@ fn global_lock_serialises_concurrent_commits() {
 
 use yyds_types::{FenceToken, LeaderTerm, OwnerEntry, ReplicaNodeId};
 
-fn make_fence_test_executor(owners: Vec<OwnerEntry>) -> LocalExecutor<MemoryShard> {
+/// Durable-shard fence fixture: the batch-commit path requires a store with a durable
+/// atomic commit boundary, so every fencing executor mounts a `FileShard`. The returned
+/// `TempFolder` must be kept alive together with the executor.
+fn make_fence_test_executor(owners: Vec<OwnerEntry>) -> (LocalExecutor<FileShard>, boost_fs::temp::TempFolder) {
+    let directory = create_folder().unwrap();
     let shard_id = ShardId("s1".into());
     let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap();
-    let shards = HashMap::from([(shard_id, MemoryShard::new())]);
-    LocalExecutor::new(routing, shards, owners).unwrap()
+    let shards = HashMap::from([(shard_id, FileShard::open(directory.path().join("s1.yykv")).unwrap())]);
+    (LocalExecutor::new(routing, shards, owners).unwrap(), directory)
 }
 
 #[test]
@@ -725,7 +733,7 @@ fn fencing_pass_when_token_matches_catalog_owner() {
     let term = LeaderTerm(3);
 
     let owners = vec![OwnerEntry { shard_id: shard_id.clone(), node_id: node_a.clone(), leader_term: term }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     let fence = Some(FenceToken { epoch: ShardEpoch(1), term, leader: node_a });
     let result = executor.execute(fence.as_ref(), command(KeyValueAction::Put(b"hello".to_vec()), b"k")).unwrap();
@@ -745,7 +753,7 @@ fn fencing_rejects_when_node_id_has_switched() {
 
     // catalog 已发布 owner 切换到 node-b / term=5
     let owners = vec![OwnerEntry { shard_id: shard_id.clone(), node_id: node_b.clone(), leader_term: term_b }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     // 旧 leader（node-a / term=3）携带过期 fence 发起请求
     let stale_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: node_a });
@@ -767,7 +775,7 @@ fn fencing_rejects_when_term_only_mismatches() {
     let shard_id = ShardId("s1".into());
     let node_a = ReplicaNodeId("node-a".to_owned());
     let owners = vec![OwnerEntry { shard_id, node_id: node_a.clone(), leader_term: LeaderTerm(7) }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     // 同一个 node，但是 term 过期了
     let stale_fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(5), leader: node_a });
@@ -779,7 +787,7 @@ fn fencing_rejects_when_term_only_mismatches() {
 #[test]
 fn fencing_rejects_when_shard_has_no_published_owner() {
     // 空 owners 快照 — coordinator 过早调用 fence
-    let executor = make_fence_test_executor(Vec::new());
+    let (executor, _directory) = make_fence_test_executor(Vec::new());
 
     let fence = Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(1), leader: ReplicaNodeId("node-a".to_owned()) });
     let err = executor.execute(fence.as_ref(), command(KeyValueAction::Put(b"x".to_vec()), b"k")).unwrap_err();
@@ -792,7 +800,7 @@ fn fencing_is_skipped_when_none() {
     let shard_id = ShardId("s1".into());
     let node_a = ReplicaNodeId("node-a".to_owned());
     let owners = vec![OwnerEntry { shard_id, node_id: node_a.clone(), leader_term: LeaderTerm(1) }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     // None fence 应该无条件通过 — 这是单节点 gateway 的正常路径
     let result = executor.execute(None, command(KeyValueAction::Put(b"gateway".to_vec()), b"k")).unwrap();
@@ -806,7 +814,7 @@ fn fencing_guards_execute_read_batch() {
     let shard_id = ShardId("s1".into());
     let node_b = ReplicaNodeId("node-b".to_owned());
     let owners = vec![OwnerEntry { shard_id, node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     // 先通过 fence=None 写入一些数据
     executor.execute(None, command(KeyValueAction::Put(b"v1".to_vec()), b"k")).unwrap();
@@ -827,7 +835,7 @@ fn fencing_guards_execute_batch() {
     let shard_id = ShardId("s1".into());
     let node_b = ReplicaNodeId("node-b".to_owned());
     let owners = vec![OwnerEntry { shard_id, node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     let stale_fence =
         Some(FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: ReplicaNodeId("node-a".to_owned()) });
@@ -843,7 +851,7 @@ fn fencing_guards_execute_batch() {
 fn fencing_guards_execute_scan() {
     let node_b = ReplicaNodeId("node-b".to_owned());
     let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     // 先通过 fence=None 写入数据（单节点本地路径）
     executor.execute(None, command(KeyValueAction::Put(b"v1".to_vec()), b"k")).unwrap();
@@ -866,7 +874,7 @@ fn fencing_guards_execute_scan() {
 fn commit_batch_rejects_stale_fence() {
     let node_b = ReplicaNodeId("node-b".to_owned());
     let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
-    let executor = make_fence_test_executor(owners);
+    let (executor, _directory) = make_fence_test_executor(owners);
 
     let batch = vec![
         yyds_execution::BufferedCommit { command: command(KeyValueAction::Put(b"x1".to_vec()), b"k1"), condition: None },
@@ -891,7 +899,7 @@ fn commit_batch_rejects_stale_fence() {
 
 #[test]
 fn commit_batch_occ_conflict_leaves_no_partial_apply() {
-    let executor = make_fence_test_executor(Vec::new());
+    let (executor, _directory) = make_fence_test_executor(Vec::new());
 
     // 第二个条目的 PutIfAbsent 条件在 base 已存在时会冲突；第一个条目是无条件 Put。
     // OCC 预检必须在应用任何写入之前扫描完整批次，因此冲突时整批不应用（无半提交）。
@@ -961,21 +969,24 @@ fn default_commit_batch_contract_returns_unsupported() {
 // 事务上下文绑定 fence 与单 shard 原子范围
 // ────────────────────────────────────────────────────────────────
 
-fn make_two_shard_executor() -> std::sync::Arc<LocalExecutor<MemoryShard>> {
+fn make_two_shard_executor() -> (std::sync::Arc<LocalExecutor<FileShard>>, boost_fs::temp::TempFolder) {
+    let directory = create_folder().unwrap();
     let first = ShardId("s1".into());
     let second = ShardId("s2".into());
     let routing = ShardMap::new(ShardEpoch(1), vec![first.clone(), second.clone()]).unwrap();
-    std::sync::Arc::new(
-        LocalExecutor::new(
-            routing,
-            HashMap::from([(first, MemoryShard::new()), (second, MemoryShard::new())]),
-            Vec::new(),
-        )
-        .unwrap(),
+    let executor = LocalExecutor::new(
+        routing,
+        HashMap::from([
+            (first, FileShard::open(directory.path().join("s1.yykv")).unwrap()),
+            (second, FileShard::open(directory.path().join("s2.yykv")).unwrap()),
+        ]),
+        Vec::new(),
     )
+    .unwrap();
+    (std::sync::Arc::new(executor), directory)
 }
 
-fn key_routing_to(executor: &LocalExecutor<MemoryShard>, shard: &ShardId) -> Vec<u8> {
+fn key_routing_to(executor: &LocalExecutor<FileShard>, shard: &ShardId) -> Vec<u8> {
     (0..1000)
         .map(|index| format!("scope-key-{index}").into_bytes())
         .find(|key| executor.routing().route("redis:0", key).shard == *shard)
@@ -996,7 +1007,7 @@ fn default_begin_transaction_contract_returns_unsupported() {
 /// 第一阶段原子范围 = 单 shard：跨 shard 批次在应用任何写入前以稳定错误拒绝。
 #[test]
 fn commit_batch_rejects_cross_shard_scope() {
-    let executor = make_two_shard_executor();
+    let (executor, _directory) = make_two_shard_executor();
     let first = ShardId("s1".into());
     let second = ShardId("s2".into());
     let key_a = key_routing_to(&executor, &first);
@@ -1021,12 +1032,11 @@ fn commit_batch_rejects_cross_shard_scope() {
 /// owner 已切换时提交被 FencingRejected，base 不留痕迹。
 #[test]
 fn transaction_handle_commit_rejects_stale_bound_fence() {
-    use yyds_execution::TransactionHandle;
-
     let node_a = ReplicaNodeId("node-a".to_owned());
     let node_b = ReplicaNodeId("node-b".to_owned());
     let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b, leader_term: LeaderTerm(5) }];
-    let executor = std::sync::Arc::new(make_fence_test_executor(owners));
+    let (executor, _directory) = make_fence_test_executor(owners);
+    let executor = std::sync::Arc::new(executor);
 
     let bound_fence = FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: node_a };
     let handle = std::sync::Arc::clone(&executor).begin_transaction(Some(&bound_fence)).unwrap();
@@ -1039,11 +1049,10 @@ fn transaction_handle_commit_rejects_stale_bound_fence() {
 /// 匹配的 fence 绑定到 handle 后提交成功——fence 不是摆设，而是可携带可通过的上下文。
 #[test]
 fn transaction_handle_commit_replays_matching_bound_fence() {
-    use yyds_execution::TransactionHandle;
-
     let node_b = ReplicaNodeId("node-b".to_owned());
     let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
-    let executor = std::sync::Arc::new(make_fence_test_executor(owners));
+    let (executor, _directory) = make_fence_test_executor(owners);
+    let executor = std::sync::Arc::new(executor);
 
     let fresh_fence = FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(5), leader: node_b };
     let handle = std::sync::Arc::clone(&executor).begin_transaction(Some(&fresh_fence)).unwrap();
@@ -1055,9 +1064,7 @@ fn transaction_handle_commit_replays_matching_bound_fence() {
 /// 经 handle 走完整事务路径时，跨 shard 写入同样被稳定错误拒绝且不伪装成普通事务。
 #[test]
 fn transaction_handle_commit_rejects_cross_shard_writes() {
-    use yyds_execution::TransactionHandle;
-
-    let executor = make_two_shard_executor();
+    let (executor, _directory) = make_two_shard_executor();
     let first = ShardId("s1".into());
     let second = ShardId("s2".into());
     let key_a = key_routing_to(&executor, &first);
@@ -1075,4 +1082,142 @@ fn transaction_handle_commit_rejects_cross_shard_writes() {
     }
     assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key_a)).unwrap(), KeyValueResult::Get(None));
     assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key_b)).unwrap(), KeyValueResult::Get(None));
+}
+
+// ────────────────────────────────────────────────────────────────
+// 持久化提交边界：无 durable 能力的 executor 必须拒绝事务，故障注入结果必须确定
+// ────────────────────────────────────────────────────────────────
+
+/// `MemoryShard` 不具备 durable atomic commit 能力：`begin_transaction` 与 `commit_batch`
+/// 都必须显式拒绝，而不是靠 executor 全局锁把易失提交伪装成原子提交。
+#[test]
+fn volatile_store_rejects_transactions_and_batch_commits() {
+    use yyds_execution::BufferedCommit;
+
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap();
+    let executor = std::sync::Arc::new(LocalExecutor::new(routing, HashMap::from([(shard_id, MemoryShard::new())]), Vec::new()).unwrap());
+
+    let err = std::sync::Arc::clone(&executor).begin_transaction(None).unwrap_err();
+    match err {
+        yyds_types::Error::Unsupported(feature) => {
+            assert!(feature.contains("durable atomic commit boundary"), "got {feature}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+
+    let batch = vec![BufferedCommit { command: command(KeyValueAction::Put(b"v".to_vec()), b"k"), condition: None }];
+    let err = executor.commit_batch(None, batch).unwrap_err();
+    match err {
+        yyds_types::Error::Unsupported(feature) => {
+            assert!(feature.contains("durable atomic commit boundary"), "got {feature}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+
+    // 拒绝事务不影响普通单条写路径。
+    executor.execute(None, command(KeyValueAction::Put(b"single".to_vec()), b"k")).unwrap();
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"single".to_vec())));
+}
+
+/// 故障注入①存储失败：提交边界落盘失败时整批拒绝，内存与磁盘都停留在提交前状态，
+/// 绝不出现「部分写入已可见、部分未提交」。
+#[test]
+fn commit_batch_storage_failure_leaves_no_partial_state() {
+    use yyds_execution::BufferedCommit;
+
+    let (executor, directory) = make_fence_test_executor(Vec::new());
+    // 基线：先成功提交一批，建立「提交前」的可见状态。
+    let baseline = vec![BufferedCommit { command: command(KeyValueAction::Put(b"base".to_vec()), b"base-key"), condition: None }];
+    executor.commit_batch(None, baseline).unwrap();
+
+    // 注入存储故障：移除 shard 目录，使提交边界的落盘必然失败。
+    std::fs::remove_dir_all(directory.path()).unwrap();
+
+    let batch = vec![
+        BufferedCommit { command: command(KeyValueAction::Put(b"one".to_vec()), b"key-one"), condition: None },
+        BufferedCommit { command: command(KeyValueAction::Put(b"two".to_vec()), b"key-two"), condition: None },
+    ];
+    let err = executor.commit_batch(None, batch).unwrap_err();
+    assert!(matches!(err, yyds_types::Error::Io(_)), "expected an Io storage failure, got {err:?}");
+
+    // 确定结果：基线仍可见，两条新写入都不存在——整批未应用。
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"base-key")).unwrap(),
+        KeyValueResult::Get(Some(b"base".to_vec()))
+    );
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"key-one")).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"key-two")).unwrap(), KeyValueResult::Get(None));
+}
+
+/// 故障注入②提交时进程退出：已提交批次在提交边界返回后必然完整落盘，
+/// 丢弃全部内存状态重开文件后不存在半提交。
+#[test]
+fn committed_batch_survives_process_exit_without_half_commit() {
+    use yyds_execution::BufferedCommit;
+
+    let directory = create_folder().unwrap();
+    let path = directory.path().join("crash.yykv");
+    let shard_id = ShardId("crash".into());
+    let executor = LocalExecutor::new(
+        ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+        HashMap::from([(shard_id, FileShard::open(&path).unwrap())]),
+        Vec::new(),
+    )
+    .unwrap();
+    executor.execute(None, command(KeyValueAction::Put(b"old".to_vec()), b"stale-key")).unwrap();
+
+    // 一批三条（两个 Put + 一个 Delete）经单一提交边界一次生效。
+    let batch = vec![
+        BufferedCommit { command: command(KeyValueAction::Put(b"new-one".to_vec()), b"key-one"), condition: None },
+        BufferedCommit { command: command(KeyValueAction::Put(b"new-two".to_vec()), b"key-two"), condition: None },
+        BufferedCommit { command: command(KeyValueAction::Delete, b"stale-key"), condition: None },
+    ];
+    executor.commit_batch(None, batch).unwrap();
+
+    // 模拟进程退出：丢弃全部内存状态，只从磁盘重开。
+    drop(executor);
+    let reopened = FileShard::open(&path).unwrap();
+    let stored = |name: &[u8]| reopened.get(&Key::new("redis:0", name.to_vec())).unwrap().map(|record| record.value);
+    assert_eq!(stored(b"key-one"), Some(StoredValue::Inline(InlineValue(b"new-one".to_vec()))));
+    assert_eq!(stored(b"key-two"), Some(StoredValue::Inline(InlineValue(b"new-two".to_vec()))));
+    assert_eq!(stored(b"stale-key"), None);
+}
+
+/// 故障注入③owner 切换：catalog 已发布新 owner 后，旧 owner 绑定的 fence 在提交边界被
+/// FencingRejected，磁盘上不存在该事务的任何痕迹（重开文件仍是提交前状态）。
+#[test]
+fn owner_switch_rejects_commit_and_leaves_disk_untouched() {
+    let node_a = ReplicaNodeId("node-a".to_owned());
+    let node_b = ReplicaNodeId("node-b".to_owned());
+    let directory = create_folder().unwrap();
+    let path = directory.path().join("owner-switch.yykv");
+    let shard_id = ShardId("s1".into());
+    // owners 快照代表切换后的 catalog：shard 现属 node-b / term=5。
+    let owners = vec![OwnerEntry { shard_id: shard_id.clone(), node_id: node_b, leader_term: LeaderTerm(5) }];
+    let executor = std::sync::Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+            HashMap::from([(shard_id, FileShard::open(&path).unwrap())]),
+            owners,
+        )
+        .unwrap(),
+    );
+    executor.execute(None, command(KeyValueAction::Put(b"committed-before".to_vec()), b"before-key")).unwrap();
+
+    // 旧 leader（node-a / term=3）时代打开的事务在切换后提交。
+    let stale_fence = FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: node_a };
+    let handle = std::sync::Arc::clone(&executor).begin_transaction(Some(&stale_fence)).unwrap();
+    handle.execute(command(KeyValueAction::Put(b"ghost".to_vec()), b"guarded")).unwrap();
+    let err = handle.commit().unwrap_err();
+    assert!(matches!(err, yyds_types::Error::FencingRejected { .. }), "expected FencingRejected, got {err:?}");
+
+    // 确定结果：重开文件只有提交前基线，事务写入从未落盘。
+    drop(executor);
+    let reopened = FileShard::open(&path).unwrap();
+    assert_eq!(
+        reopened.get(&Key::new("redis:0", b"before-key")).unwrap().map(|record| record.value),
+        Some(StoredValue::Inline(InlineValue(b"committed-before".to_vec())))
+    );
+    assert_eq!(reopened.get(&Key::new("redis:0", b"guarded")).unwrap(), None);
 }
