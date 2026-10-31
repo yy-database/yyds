@@ -214,7 +214,8 @@ impl KvStore for FileShard {
             match change {
                 ShardChange::Put { key, value } => {
                     staged_revision = staged_revision.checked_add(1).ok_or(Error::Corrupt("shard revision exhausted"))?;
-                    staged_records.insert(key.clone(), Record { key: key.clone(), value: value.clone(), revision: staged_revision });
+                    staged_records
+                        .insert(key.clone(), Record { key: key.clone(), value: value.clone(), revision: staged_revision });
                 }
                 ShardChange::Delete { key } => {
                     staged_records.remove(key);

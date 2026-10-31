@@ -1031,7 +1031,10 @@ fn transaction_handle_commit_replays_matching_bound_fence() {
     let handle = std::sync::Arc::clone(&executor).begin_transaction(Some(&fresh_fence)).unwrap();
     handle.execute(command(KeyValueAction::Put(b"owned".to_vec()), b"guarded")).unwrap();
     handle.commit().unwrap();
-    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"guarded")).unwrap(), KeyValueResult::Get(Some(b"owned".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"guarded")).unwrap(),
+        KeyValueResult::Get(Some(b"owned".to_vec()))
+    );
 }
 
 /// 经 handle 走完整事务路径时，跨 shard 写入同样被稳定错误拒绝且不伪装成普通事务。
@@ -1069,7 +1072,8 @@ fn volatile_store_rejects_transactions_and_batch_commits() {
 
     let shard_id = ShardId("s1".into());
     let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap();
-    let executor = std::sync::Arc::new(LocalExecutor::new(routing, HashMap::from([(shard_id, MemoryShard::new())]), Vec::new()).unwrap());
+    let executor =
+        std::sync::Arc::new(LocalExecutor::new(routing, HashMap::from([(shard_id, MemoryShard::new())]), Vec::new()).unwrap());
 
     let err = std::sync::Arc::clone(&executor).begin_transaction(None).unwrap_err();
     match err {
@@ -1090,7 +1094,10 @@ fn volatile_store_rejects_transactions_and_batch_commits() {
 
     // 拒绝事务不影响普通单条写路径。
     executor.execute(None, command(KeyValueAction::Put(b"single".to_vec()), b"k")).unwrap();
-    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(), KeyValueResult::Get(Some(b"single".to_vec())));
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"k")).unwrap(),
+        KeyValueResult::Get(Some(b"single".to_vec()))
+    );
 }
 
 /// 故障注入①存储失败：提交边界落盘失败时整批拒绝，内存与磁盘都停留在提交前状态，
@@ -1101,7 +1108,8 @@ fn commit_batch_storage_failure_leaves_no_partial_state() {
 
     let (executor, directory) = make_fence_test_executor(Vec::new());
     // 基线：先成功提交一批，建立「提交前」的可见状态。
-    let baseline = vec![BufferedCommit { command: command(KeyValueAction::Put(b"base".to_vec()), b"base-key"), condition: None }];
+    let baseline =
+        vec![BufferedCommit { command: command(KeyValueAction::Put(b"base".to_vec()), b"base-key"), condition: None }];
     executor.commit_batch(None, baseline).unwrap();
 
     // 注入存储故障：移除 shard 目录，使提交边界的落盘必然失败。
