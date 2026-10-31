@@ -771,9 +771,7 @@ where
             // atomic commit into a sequence of individually-visible writes.
             let store = self.shards.get(shard_id).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
             if !store.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?.durable_atomic_commit() {
-                return Err(Error::Unsupported(
-                    "batch commits require a store with a durable atomic commit boundary",
-                ));
+                return Err(Error::Unsupported("batch commits require a store with a durable atomic commit boundary"));
             }
             for entry in &batch {
                 if let Some(condition) = &entry.condition {
@@ -814,7 +812,9 @@ where
             for entry in batch {
                 let key = Key::new(entry.command.namespace.0, entry.command.key);
                 match entry.command.action {
-                    KeyValueAction::Put(value) => changes.push(ShardChange::Put { key, value: StoredValue::Inline(InlineValue(value)) }),
+                    KeyValueAction::Put(value) => {
+                        changes.push(ShardChange::Put { key, value: StoredValue::Inline(InlineValue(value)) })
+                    }
                     KeyValueAction::Delete => changes.push(ShardChange::Delete { key }),
                     _ => {
                         return Err(Error::Unsupported("batch commits accept only Put and Delete commands"));
@@ -835,7 +835,9 @@ where
         // mutex; reject at begin time instead.
         for shard in self.shards.values() {
             if !shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?.durable_atomic_commit() {
-                return Err(Error::Unsupported("transactions require every mounted shard to provide a durable atomic commit boundary"));
+                return Err(Error::Unsupported(
+                    "transactions require every mounted shard to provide a durable atomic commit boundary",
+                ));
             }
         }
         // The caller's fence (routing epoch + leader term + owner node) is captured into the
