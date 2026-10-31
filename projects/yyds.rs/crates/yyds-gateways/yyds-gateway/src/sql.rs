@@ -1499,16 +1499,17 @@ fn bind_window_spec(spec: &oak_sql::ast::WindowSpec) -> Result<SqlBoundWindowSpe
     let frame = spec.frame.as_ref().map(bind_window_frame).transpose()?;
     if let Some(frame) = frame.as_ref() {
         if frame.unit == SqlBoundWindowFrameUnit::Range {
-            // `RANGE` 比较 `ORDER BY` 的值：没有排序列就没有可比较的值，整个 frame
-            // 无从定义；数值偏移 bound 只放开单列排序，多列的「值距离」没有唯一依据。
-            if order_by.is_empty() {
-                return Err(SqlFrontendError::unsupported(
-                    "SQL window `RANGE` frames require an ORDER BY inside the OVER (...) clause",
-                ));
-            }
+            // `RANGE` 比较 `ORDER BY` 的值：数值偏移 bound 的「值距离」只在恰好一列
+            // 排序上有唯一依据，零列与多列都显式拒绝，不退化成 `ROWS`。没有偏移的
+            // `RANGE` 帧只用到 peer 边界，仍然需要一层排序。
             if frame.has_value_offset() && order_by.len() != 1 {
                 return Err(SqlFrontendError::unsupported(
                     "SQL window `RANGE` frame offsets require exactly one ORDER BY column inside the OVER (...) clause",
+                ));
+            }
+            if order_by.is_empty() {
+                return Err(SqlFrontendError::unsupported(
+                    "SQL window `RANGE` frames require an ORDER BY inside the OVER (...) clause",
                 ));
             }
         }
