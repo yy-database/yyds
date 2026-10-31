@@ -1,6 +1,6 @@
 {
     "name": "@yydb/yyds",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "description": "Node.js facade, CLI, and native bindings for local YYDS nodes.",
     "license": "MPL-2.0",
     "type": "module",
