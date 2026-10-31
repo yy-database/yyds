@@ -648,6 +648,12 @@ fn respond(
 /// Runs every queued command under a fresh per-command `ConnectionState` so that MULTI
 /// control frames cannot nest into the transaction. Each command's RESP output is captured
 /// into a buffer and then emitted wrapped in a Redis multi-bulk array header.
+///
+/// This is a per-command replay over [`KeyValueExecutor::execute`], not an atomic commit
+/// boundary: each queued command is applied on its own, a mid-transaction failure does not
+/// roll back the commands already applied, and the executor's durable `commit_batch` path is
+/// deliberately not used. Upstream Redis queues and executes commands sequentially the same
+/// way, so no all-or-nothing durability is promised on this surface.
 fn execute_transaction(
     stream: &mut dyn Write,
     executor: Option<&dyn KeyValueExecutor>,

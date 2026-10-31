@@ -52,22 +52,6 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
         Err(Error::Unsupported("scan is not implemented by this executor"))
     }
 
-    /// Applies multiple commands as an atomic batch.
-    ///
-    /// Implementors must guarantee that the whole batch either applies completely or does not
-    /// apply at all; a sequential fold over [`KeyValueExecutor::execute`] is not an acceptable
-    /// implementation because it can leave a half-committed batch behind after a mid-batch
-    /// failure. Executors without an atomic write contract must return `Error::Unsupported`
-    /// (the default) instead of degrading to per-command execution.
-    fn execute_batch(
-        &self,
-        fence: Option<&FenceToken>,
-        commands: Vec<KeyValueCommand>,
-    ) -> yyds_types::Result<Vec<KeyValueResult>> {
-        let _ = (fence, commands);
-        Err(Error::Unsupported("atomic batch writes are not implemented by this executor"))
-    }
-
     /// Commits a buffered transaction with OCC validation under the caller's ownership context.
     ///
     /// Each element of `batch` carries the write command together with the original conditional
@@ -213,7 +197,7 @@ pub trait TransactionHandle: Debug {
 }
 
 /// Executor-wide mutex that serialises every [`LocalExecutor::execute`] and
-/// [`LocalExecutor::execute_batch`] call so that batched writes appear atomic to the rest of
+/// [`LocalExecutor::commit_batch`] call so that committed batches appear atomic to the rest of
 /// the process.
 static EXECUTOR_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 
@@ -750,19 +734,6 @@ where
         let decision = self.routing.route(&command.namespace.0, &command.key);
         self.check_fence(fence, &decision.shard)?;
         Self::with_global_lock(|| self.execute_single_locked(command))
-    }
-
-    fn execute_batch(
-        &self,
-        fence: Option<&FenceToken>,
-        commands: Vec<KeyValueCommand>,
-    ) -> yyds_types::Result<Vec<KeyValueResult>> {
-        // Fence check every command against its routed shard up-front.
-        for command in &commands {
-            let decision = self.routing.route(&command.namespace.0, &command.key);
-            self.check_fence(fence, &decision.shard)?;
-        }
-        Self::with_global_lock(|| commands.into_iter().map(|command| self.execute_single_locked(command)).collect())
     }
 
     fn commit_batch(&self, fence: Option<&FenceToken>, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
