@@ -3598,10 +3598,7 @@ fn sql_window_range_frames_reject_undefined_value_semantics() {
     // `RANGE` 没有 `ORDER BY` 就没有可比较的值；数值偏移要求恰好一列排序，
     // 零列与多列都在绑定期显式拒绝，不退化成 `ROWS`。
     for (sql, reason) in [
-        (
-            "SELECT id, SUM(age) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
-            "require an ORDER BY",
-        ),
+        ("SELECT id, SUM(age) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users", "require an ORDER BY"),
         ("SELECT id, SUM(age) OVER (RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users", "exactly one ORDER BY"),
         (
             "SELECT id, SUM(age) OVER (ORDER BY age, score RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM users",
@@ -3856,11 +3853,7 @@ fn sql_common_table_expression_reports_unflattenable_shapes() {
     let forward = reject("WITH a AS (SELECT * FROM b), b AS (SELECT * FROM users) SELECT * FROM a");
     assert_eq!(forward.kind, yyds_gateway::SqlErrorKind::UnknownTable, "{}", forward.message);
 
-    // 显式列名会重命名 CTE 输出，扁平化后的基表无法表达。
-    let renamed = reject("WITH u (id, name) AS (SELECT * FROM users) SELECT * FROM u");
-    assert_eq!(renamed.kind, yyds_gateway::SqlErrorKind::Unsupported, "{}", renamed.message);
-    assert!(renamed.message.contains("explicit column list"), "{}", renamed.message);
-
+    // 显式列名会重命名 CTE 输出，由重命名测试单独覆盖；这里只保留不可扁平化的体。
     let duplicate = reject("WITH u AS (SELECT * FROM users), u AS (SELECT * FROM users) SELECT * FROM u");
     assert_eq!(duplicate.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", duplicate.message);
     assert!(duplicate.message.contains("more than once"), "{}", duplicate.message);
@@ -3869,6 +3862,94 @@ fn sql_common_table_expression_reports_unflattenable_shapes() {
     let recursive = reject("WITH RECURSIVE u AS (SELECT * FROM users) SELECT * FROM u");
     assert_eq!(recursive.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", recursive.message);
     assert!(recursive.message.contains("recursive"), "{}", recursive.message);
+}
+
+#[test]
+fn sql_common_table_expression_applies_an_explicit_output_column_list() {
+    use yyds_gateway::SqlValue;
+
+    let (catalog, executor) = join_fixture();
+    let run = |sql: &str| run_sql(&executor, None, &catalog, sql);
+
+    // `*` body：显式列名按 catalog 字段顺序替换输出名，底层行值不动。
+    let star = run("WITH u(a, b) AS (SELECT * FROM users) SELECT * FROM u ORDER BY a");
+    assert_eq!(star.columns, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(
+        star.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::String("alice".into())],
+            vec![SqlValue::Integer(2), SqlValue::String("bob".into())],
+        ]
+    );
+
+    // 裸标识符 body：重命名按书写顺序落到对应字段，而不是 catalog 字段顺序。
+    let written = run("WITH u(no, who) AS (SELECT name, id FROM users) SELECT no, who FROM u ORDER BY who");
+    assert_eq!(written.columns, vec!["no".to_string(), "who".to_string()]);
+    assert_eq!(
+        written.rows,
+        vec![
+            vec![SqlValue::String("alice".into()), SqlValue::Integer(1)],
+            vec![SqlValue::String("bob".into()), SqlValue::Integer(2)],
+        ]
+    );
+
+    // body 的过滤仍按 body 自己的列名绑定，显式列名只改外层看到的名字。
+    let filtered = run("WITH u(a, b) AS (SELECT * FROM users WHERE name = 'bob') SELECT * FROM u");
+    assert_eq!(filtered.columns, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(filtered.rows, vec![vec![SqlValue::Integer(2), SqlValue::String("bob".into())]]);
+
+    // 旧列名不再属于这个 CTE 的作用域。
+    let stale = yyds_gateway::bind_sql_catalog("WITH u(no, who) AS (SELECT name, id FROM users) SELECT id FROM u", &catalog, 7)
+        .expect_err("the explicit column list hides the catalog names");
+    assert_eq!(stale.kind, yyds_gateway::SqlErrorKind::UnknownColumn, "{}", stale.message);
+
+    // 同表另一份未重命名的引用仍按原名解析，两个 occurrence 的行槽互不覆盖。
+    let joined = run(
+        "WITH u(no, who) AS (SELECT name, id FROM users) SELECT x.id, u.no FROM users x JOIN u ON x.id = u.who ORDER BY x.id",
+    );
+    assert_eq!(joined.columns, vec!["id".to_string(), "no".to_string()]);
+    assert_eq!(
+        joined.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::String("alice".into())],
+            vec![SqlValue::Integer(2), SqlValue::String("bob".into())],
+        ]
+    );
+
+    // 引用更早的已重命名 CTE 时，递归展开同样带上更早的列名。
+    let chained = run("WITH a(x, y) AS (SELECT * FROM users), b(p, q) AS (SELECT x, y FROM a) SELECT * FROM b ORDER BY p");
+    assert_eq!(chained.columns, vec!["p".to_string(), "q".to_string()]);
+    assert_eq!(
+        chained.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::String("alice".into())],
+            vec![SqlValue::Integer(2), SqlValue::String("bob".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_common_table_expression_rejects_unmappable_explicit_column_lists() {
+    let (catalog, _executor) = join_fixture();
+    let reject = |sql: &str| {
+        yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect_err(&format!("`{sql}` must stay outside the gateway subset"))
+    };
+
+    // 显式列名按位置替换 body 的输出列，数量必须与投影一一对应。
+    for sql in [
+        "WITH u(a) AS (SELECT * FROM users) SELECT * FROM u",
+        "WITH u(a, b, c) AS (SELECT id, name FROM users) SELECT * FROM u",
+    ] {
+        let error = reject(sql);
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}: {}", error.message);
+        assert!(error.message.contains("explicit column list"), "{sql}: {}", error.message);
+        assert!(error.message.contains("body outputs"), "{sql}: {}", error.message);
+    }
+
+    // 同一 CTE 的显式列名重复会让输出两列同名，绑定期就拒绝。
+    let duplicate = reject("WITH u(a, a) AS (SELECT * FROM users) SELECT * FROM u");
+    assert_eq!(duplicate.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", duplicate.message);
+    assert!(duplicate.message.contains("more than once"), "{}", duplicate.message);
 }
 
 #[test]
