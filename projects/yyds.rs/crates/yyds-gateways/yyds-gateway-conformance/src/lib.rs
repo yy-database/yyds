@@ -895,13 +895,13 @@ pub fn aggregate_empty_cases() -> Vec<Case> {
 
 /// Window functions: ranking and `NTILE` buckets over a partition and order,
 /// `LAG` / `LEAD` value access across ordered rows, aggregate windows over
-/// the default frame, explicit `ROWS` frames, and dialect-dependent `NULL`
-/// placement of the window `ORDER BY`.
+/// the default frame, explicit `ROWS` / `RANGE` frames, and dialect-dependent
+/// `NULL` placement of the window `ORDER BY`.
 ///
 /// The default frame is the SQL one: an ordered aggregate window accumulates
 /// through the peer group of the current row, an unordered one covers the whole
-/// partition. `ROWS` frames count physical rows instead, so the two must not be
-/// confused.
+/// partition. `ROWS` frames count physical rows, `RANGE` frames compare the
+/// `ORDER BY` value distance, so the two must not be confused.
 pub fn window_cases() -> Vec<Case> {
     use Lit::{Float, Int, Null, Text};
 
@@ -1047,6 +1047,47 @@ pub fn window_cases() -> Vec<Case> {
             .state(DEFAULT_STATE_COLUMNS, order_state())
             .sql("SELECT id, LEAD(age, 1, -1) OVER (ORDER BY age DESC, id) FROM users ORDER BY id")
             .rows(&[&[Int(1), Int(30)], &[Int(2), Int(-1)], &[Int(3), Int(30)], &[Int(4), Int(20)]])
+            .build(),
+        // `RANGE` 帧按 `ORDER BY` 的值距离取行：peer 组整组同进同出，与 `ROWS`
+        // 的物理行计数必须给出不同结果。`age` 排序下 id1/id4 是 30 的 peer。
+        case("window range frame ten preceding")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (ORDER BY age RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(80)], &[Int(2), Int(20)], &[Int(3), Int(100)], &[Int(4), Int(80)]])
+            .build(),
+        case("window range frame current row and five following")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (ORDER BY age RANGE BETWEEN CURRENT ROW AND 5 FOLLOWING) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(60)], &[Int(2), Int(20)], &[Int(3), Int(40)], &[Int(4), Int(60)]])
+            .build(),
+        case("window range frame current row peers only")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (ORDER BY age RANGE BETWEEN CURRENT ROW AND CURRENT ROW) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(60)], &[Int(2), Int(20)], &[Int(3), Int(40)], &[Int(4), Int(60)]])
+            .build(),
+        case("window range frame unbounded preceding matches the default frame")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (ORDER BY age RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(80)], &[Int(2), Int(20)], &[Int(3), Int(120)], &[Int(4), Int(80)]])
+            .build(),
+        // `DESC` 下「之前」是更大的值：取负统一到升序轴后语义与 `ASC` 对偶。
+        case("window range frame descending ten preceding")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(age) OVER (ORDER BY age DESC RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(100)], &[Int(2), Int(80)], &[Int(3), Int(40)], &[Int(4), Int(100)]])
+            .build(),
+        // 浮点排序列走 `f64` 值轴：整数偏移 `1 PRECEDING` 在 0.5/1.5/2.5/3.25 上
+        // 分别框出 {0.5}、{0.5,1.5}、{1.5,2.5}、{2.5,3.25}。
+        case("window range frame over a floating order column")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, SUM(score) OVER (ORDER BY score RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Float(2.0)], &[Int(2), Float(4.0)], &[Int(3), Float(5.75)], &[Int(4), Float(0.5)]])
             .build(),
     ]
 }
@@ -1287,7 +1328,6 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("aggregate inside an aggregate", "SELECT SUM(AVG(age)) FROM users"),
     ("unsupported function inside an aggregate", "SELECT SUM(EXTRACT(age)) FROM users"),
     // 窗口函数只实现有依据的子集：其余形式显式拒绝，不做近似求值。
-    ("window RANGE frame", "SELECT id, SUM(age) OVER (ORDER BY age RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users"),
     ("window GROUPS frame", "SELECT id, SUM(age) OVER (ORDER BY age GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users"),
     (
         "window frame EXCLUDE",

@@ -171,8 +171,8 @@ fn sql_conformance_aggregates_over_empty_input() {
     run_cases(&aggregate_empty_cases());
 }
 
-/// 窗口函数：分区 + 排序的排名、默认 frame 的累计/整分区聚合、显式 `ROWS` frame
-/// 与方言 `NULL` 位置。排名函数和聚合窗口都在执行层真实计算，不返回近似值。
+/// 窗口函数：分区 + 排序的排名、默认 frame 的累计/整分区聚合、显式 `ROWS` / `RANGE`
+/// frame 与方言 `NULL` 位置。排名函数和聚合窗口都在执行层真实计算，不返回近似值。
 #[test]
 fn sql_conformance_windows() {
     run_cases(&window_cases());

@@ -22,8 +22,8 @@ use crate::{
     },
     sql::{
         SqlAggregateFunction, SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundOrderDirection, SqlBoundSetOperator,
-        SqlBoundUnaryOperator, SqlBoundWindowFrameBound, SqlDialect, SqlErrorKind, SqlFrontendError, SqlNullsOrder,
-        SqlScalarFunction, SqlWindowFunction,
+        SqlBoundUnaryOperator, SqlBoundWindowFrame, SqlBoundWindowFrameBound, SqlBoundWindowFrameUnit, SqlDialect,
+        SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction, SqlWindowFunction,
     },
     sql_planner::{
         check_write_literal, pk_literal_to_rowid, ConflictAssignment, ConflictPolicy, DeletePlan, DeleteScanPlan,
@@ -2184,6 +2184,16 @@ fn eval_window_projection(
         }
 
         let ordered_rows: Vec<RowFieldValues> = keyed.iter().map(|(_, index)| rows[*index].clone()).collect();
+        // RANGE 帧的数值偏移按单列 ORDER BY 的值比较；`DESC` 取负把值轴统一到升序，
+        // 只含 `UNBOUNDED` / `CURRENT ROW` 的 RANGE 帧与 ROWS 共用 peer 边界，不需要值轴。
+        let range_axis = match spec.frame.as_ref() {
+            Some(frame) if frame.unit == SqlBoundWindowFrameUnit::Range && frame.has_value_offset() => {
+                let descending =
+                    matches!(spec.order_by.first().map(|item| &item.direction), Some(SqlBoundOrderDirection::Desc));
+                Some(RangeAxis::build(&keyed, descending)?)
+            }
+            _ => None,
+        };
         for (position, (_, index)) in keyed.iter().enumerate() {
             let value = match ranking {
                 Some(SqlWindowFunction::RowNumber) => SqlValue::Integer(i64::try_from(position + 1).unwrap_or(i64::MAX)),
@@ -2216,7 +2226,14 @@ fn eval_window_projection(
                     }
                 }
                 None => {
-                    let (frame_start, frame_end) = window_frame_bounds(spec, position, peer_end[position], ordered_rows.len());
+                    let (frame_start, frame_end) = window_frame_bounds(
+                        spec,
+                        position,
+                        peer_start[position],
+                        peer_end[position],
+                        ordered_rows.len(),
+                        range_axis.as_ref(),
+                    )?;
                     let frame =
                         if frame_start < frame_end { &ordered_rows[frame_start..frame_end] } else { &ordered_rows[0..0] };
                     eval_aggregate(expr, frame, field_types, dialect)?
@@ -2232,18 +2249,135 @@ fn eval_window_projection(
 ///
 /// 没有显式 frame 时按 SQL 默认：有 `ORDER BY` 的聚合窗口累计到当前行的 peer 组末尾
 /// （`RANGE UNBOUNDED PRECEDING TO CURRENT ROW`），没有 `ORDER BY` 时覆盖整个分区。
-fn window_frame_bounds(spec: &SqlCatalogBoundWindowSpec, position: usize, peer_end: usize, len: usize) -> (usize, usize) {
+/// `ROWS` 按物理行位置换算；`RANGE` 按单列 `ORDER BY` 的值距离换算，值轴由调用方
+/// 预构建后传入。
+fn window_frame_bounds(
+    spec: &SqlCatalogBoundWindowSpec,
+    position: usize,
+    peer_start: usize,
+    peer_end: usize,
+    len: usize,
+    range_axis: Option<&RangeAxis>,
+) -> Result<(usize, usize), SqlFrontendError> {
     let Some(frame) = spec.frame.as_ref()
     else {
-        return if spec.order_by.is_empty() { (0, len) } else { (0, peer_end) };
+        return Ok(if spec.order_by.is_empty() { (0, len) } else { (0, peer_end) });
     };
+    if frame.unit == SqlBoundWindowFrameUnit::Range {
+        return range_frame_bounds(frame, range_axis, position, peer_start, peer_end, len);
+    }
     let limit = i64::try_from(len).unwrap_or(i64::MAX);
     let start = frame_bound_position(frame.start, position).clamp(0, limit) as usize;
     let end_exclusive = match frame.end {
         Some(bound) => frame_bound_position(bound, position).clamp(-1, limit).saturating_add(1),
         None => frame_bound_position(SqlBoundWindowFrameBound::CurrentRow, position).saturating_add(1),
     };
-    (start, end_exclusive.clamp(0, limit) as usize)
+    Ok((start, end_exclusive.clamp(0, limit) as usize))
+}
+
+/// `RANGE` 帧的边界换算：`CURRENT ROW` 落在当前 peer 组边界，`UNBOUNDED` 落在分区
+/// 两端，数值偏移在升序值轴上二分。反向的畸形帧与 `ROWS` 同样退化为空区间，不报错。
+fn range_frame_bounds(
+    frame: &SqlBoundWindowFrame,
+    range_axis: Option<&RangeAxis>,
+    position: usize,
+    peer_start: usize,
+    peer_end: usize,
+    len: usize,
+) -> Result<(usize, usize), SqlFrontendError> {
+    let missing_axis = || execute_error("window RANGE frame is missing its ORDER BY value axis");
+    let resolve = |bound: SqlBoundWindowFrameBound, end: bool| -> Result<usize, SqlFrontendError> {
+        Ok(match bound {
+            SqlBoundWindowFrameBound::UnboundedPreceding => 0,
+            SqlBoundWindowFrameBound::UnboundedFollowing => len,
+            SqlBoundWindowFrameBound::CurrentRow => {
+                if end {
+                    peer_end
+                }
+                else {
+                    peer_start
+                }
+            }
+            SqlBoundWindowFrameBound::Preceding(offset) => {
+                range_axis.ok_or_else(missing_axis)?.offset_bound(position, offset, false, end)
+            }
+            SqlBoundWindowFrameBound::Following(offset) => {
+                range_axis.ok_or_else(missing_axis)?.offset_bound(position, offset, true, end)
+            }
+        })
+    };
+    let start = resolve(frame.start, false)?;
+    let end = resolve(frame.end.unwrap_or(SqlBoundWindowFrameBound::CurrentRow), true)?;
+    Ok((start, end))
+}
+
+/// `RANGE` 帧数值偏移的比较轴：分区内单列 `ORDER BY` 的值按排序顺序排列，`DESC`
+/// 取负后统一成升序。整数列用 `i128` 精确轴，含浮点值时用 `f64` 轴。
+enum RangeAxis {
+    Integers(Vec<i128>),
+    Numbers(Vec<f64>),
+}
+
+impl RangeAxis {
+    /// 从分区排序键构建值轴。`RANGE` 偏移要求排序值存在 SQL 定义的值距离：
+    /// `NULL` 与非数值排序值在这里显式拒绝，不做静默跳过。
+    fn build(keyed: &[(Vec<Option<SqlValue>>, usize)], descending: bool) -> Result<Self, SqlFrontendError> {
+        let mut integers = Vec::with_capacity(keyed.len());
+        let mut numbers = Vec::with_capacity(keyed.len());
+        let mut saw_number = false;
+        for (keys, _) in keyed {
+            match keys.first().and_then(|value| value.as_ref()) {
+                Some(SqlValue::Integer(value)) => {
+                    let value = i128::from(*value);
+                    let value = if descending { -value } else { value };
+                    integers.push(value);
+                    numbers.push(value as f64);
+                }
+                Some(SqlValue::Number(value)) => {
+                    saw_number = true;
+                    numbers.push(if descending { -*value } else { *value });
+                }
+                Some(_) => return Err(execute_error("window RANGE frame offsets require the ORDER BY column to be numeric")),
+                None => {
+                    return Err(execute_error("window RANGE frame offsets do not accept NULL values in the ORDER BY column"))
+                }
+            }
+        }
+        if saw_number {
+            Ok(Self::Numbers(numbers))
+        }
+        else {
+            Ok(Self::Integers(integers))
+        }
+    }
+
+    /// 把 `n PRECEDING` / `n FOLLOWING` 换算成帧边界：起点 bound 返回第一个值不小于
+    /// 目标的行下标，终点 bound 返回最后一个值不大于目标的行的下一位（开区间上界）。
+    fn offset_bound(&self, position: usize, offset: u64, following: bool, end: bool) -> usize {
+        match self {
+            Self::Integers(values) => {
+                let step = i128::try_from(offset).unwrap_or(i128::MAX);
+                let target =
+                    if following { values[position].saturating_add(step) } else { values[position].saturating_sub(step) };
+                if end {
+                    values.partition_point(|value| *value <= target)
+                }
+                else {
+                    values.partition_point(|value| *value < target)
+                }
+            }
+            Self::Numbers(values) => {
+                let step = offset as f64;
+                let target = if following { values[position] + step } else { values[position] - step };
+                if end {
+                    values.partition_point(|value| value.total_cmp(&target) != std::cmp::Ordering::Greater)
+                }
+                else {
+                    values.partition_point(|value| value.total_cmp(&target) == std::cmp::Ordering::Less)
+                }
+            }
+        }
+    }
 }
 
 /// 把一个 frame bound 换算成当前行上的绝对行位置。
