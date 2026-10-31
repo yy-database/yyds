@@ -287,7 +287,7 @@ fn transaction_handle_exposes_begin_commit_and_rollback_contract() {
     );
 
     // Grab a typed handle first to confirm it delegates through the trait method.
-    let typed_handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let typed_handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     typed_handle.execute(command(KeyValueAction::Put(b"hello".to_vec()), b"val")).unwrap();
     typed_handle.commit().unwrap();
 
@@ -295,14 +295,14 @@ fn transaction_handle_exposes_begin_commit_and_rollback_contract() {
     assert_eq!(result, KeyValueResult::Get(Some(b"hello".to_vec())));
 
     // Second handle proves multiple transactions can be opened from the same executor.
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::IncrementBy(41), b"counter")).unwrap();
     handle.commit().unwrap();
     let counter = executor.execute(None, command(KeyValueAction::IncrementBy(1), b"counter")).unwrap();
     assert_eq!(counter, KeyValueResult::Increment { value: 42 });
 
     // Rollback is a valid terminal action.
-    let rollback_handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let rollback_handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     rollback_handle.execute(command(KeyValueAction::Put(b"pending".to_vec()), b"temp")).unwrap();
     rollback_handle.rollback();
 }
@@ -326,7 +326,7 @@ fn rollback_discards_insert() {
     let executor = make_executor();
     executor.execute(None, command(KeyValueAction::Get, b"foo")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"bar".to_vec()), b"foo")).unwrap();
     handle.rollback();
 
@@ -340,7 +340,7 @@ fn rollback_discards_update_keeping_original() {
     let executor = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"original".to_vec()), b"key")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"key")).unwrap();
     handle.rollback();
 
@@ -356,7 +356,7 @@ fn commit_persists_insert() {
 
     let executor = make_executor();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"hello".to_vec()), b"foo")).unwrap();
     handle.commit().unwrap();
 
@@ -373,7 +373,7 @@ fn commit_persists_update() {
     let executor = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"old".to_vec()), b"key")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"key")).unwrap();
     handle.commit().unwrap();
 
@@ -389,7 +389,7 @@ fn transaction_sees_own_writes_before_commit() {
 
     let executor = make_executor();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"pending".to_vec()), b"temp")).unwrap();
 
     // Inside the transaction we read our own write.
@@ -408,7 +408,7 @@ fn transaction_read_batch_merges_snapshot_view() {
     let executor = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"original".to_vec()), b"k1")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"txn-v".to_vec()), b"k1")).unwrap();
     handle.execute(command(KeyValueAction::Put(b"new".to_vec()), b"k2")).unwrap();
 
@@ -426,7 +426,7 @@ fn transaction_delete_is_undone_by_rollback() {
     let executor = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"alive".to_vec()), b"k")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     assert_eq!(handle.execute(command(KeyValueAction::Delete, b"k")).unwrap(), KeyValueResult::Delete { removed: true });
 
     // Inside the transaction the key is gone.
@@ -449,7 +449,7 @@ fn transaction_scan_merges_buffered_writes_over_base() {
     executor.execute(None, command(KeyValueAction::Put(b"base".to_vec()), b"a")).unwrap();
     executor.execute(None, command(KeyValueAction::Put(b"base".to_vec()), b"c")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::Put(b"txn".to_vec()), b"b")).unwrap();
     handle.execute(command(KeyValueAction::Put(b"txn".to_vec()), b"a")).unwrap();
     handle.execute(command(KeyValueAction::Delete, b"c")).unwrap();
@@ -469,7 +469,7 @@ fn transaction_scan_applies_prefix_and_bounds_to_buffered_writes() {
     use yyds_execution::{LocalTransactionHandle, TransactionHandle};
 
     let executor = make_executor();
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     for key in [b"p-1".as_slice(), b"p-2".as_slice(), b"q-1".as_slice()] {
         handle.execute(command(KeyValueAction::Put(b"v".to_vec()), key)).unwrap();
     }
@@ -497,8 +497,8 @@ fn write_if_unchanged_occ_rejects_stale_pre_image_at_commit() {
     executor.execute(None, command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
 
     // Both transactions read the same pre-image, then both try a read-modify-write Put.
-    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
-    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     t1.write_if_unchanged(command(KeyValueAction::Put(b"t1".to_vec()), b"k"), Some(b"pre".to_vec())).unwrap();
     t2.write_if_unchanged(command(KeyValueAction::Put(b"t2".to_vec()), b"k"), Some(b"pre".to_vec())).unwrap();
 
@@ -517,7 +517,7 @@ fn write_if_unchanged_delete_rejects_recreated_key_at_commit() {
     let executor = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"pre".to_vec()), b"k")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.write_if_unchanged(command(KeyValueAction::Delete, b"k"), Some(b"pre".to_vec())).unwrap();
 
     // Concurrent writer replaces the pre-image before the delete commits.
@@ -535,7 +535,7 @@ fn transaction_increment_rollback_leaves_base_untouched() {
     let executor = make_executor();
     executor.execute(None, command(KeyValueAction::Put(b"10".to_vec()), b"counter")).unwrap();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::IncrementBy(5), b"counter")).unwrap();
     handle.rollback();
 
@@ -559,8 +559,8 @@ fn concurrent_put_if_absent_occ_rejects_late_commit() {
     let executor = make_executor();
 
     // 两个事务同时开始。resolve 在事务执行期间都看到 base 里 key 不存在。
-    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
-    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
+    let t2: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
 
     t1.execute(command(KeyValueAction::PutIfAbsent(b"first".to_vec()), b"race-key")).unwrap();
     t2.execute(command(KeyValueAction::PutIfAbsent(b"second".to_vec()), b"race-key")).unwrap();
@@ -588,7 +588,7 @@ fn put_if_absent_vs_external_put_occ() {
 
     let executor = make_executor();
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     handle.execute(command(KeyValueAction::PutIfAbsent(b"txn-val".to_vec()), b"k")).unwrap();
 
     // 外部在事务 commit 之前先无条件 Put 同一个 key
@@ -619,7 +619,7 @@ fn unconditional_put_overrides_prior_conditional_in_buffer() {
     let executor = make_executor();
     // base: k 不存在
 
-    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     // PutIfAbsent → 事务内看到 k 不存在 → 成功进 buffer，带 PutIfAbsent 条件
     handle.execute(command(KeyValueAction::PutIfAbsent(b"ifabsent".to_vec()), b"k")).unwrap();
     // 然后无条件 Put 覆盖同一个 key → buffer 条件被清掉
@@ -646,7 +646,7 @@ fn single_occ_failure_aborts_entire_batch() {
     // 外部先 Put("b")
     // T1 commit: OCC re-check base "b" → 存在 → CasConflict
     //           → "a" 和 "b" 都不应被写入
-    let txn: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone()));
+    let txn: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor.clone(), None));
     txn.execute(command(KeyValueAction::Put(b"t1-a".to_vec()), b"a")).unwrap();
     txn.execute(command(KeyValueAction::PutIfAbsent(b"t1-b".to_vec()), b"b")).unwrap();
 
@@ -682,7 +682,7 @@ fn global_lock_serialises_concurrent_commits() {
         let executor = Arc::clone(&executor);
         let barrier = Arc::clone(&barrier);
         workers.push(std::thread::spawn(move || {
-            let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor));
+            let handle: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(executor, None));
             // resolve: base 里 shared 不存在 → 进 buffer，带 PutIfAbsent 条件
             handle.execute(command(KeyValueAction::PutIfAbsent(b"winner".to_vec()), b"shared")).unwrap();
             // 所有线程都 resolve 完再一起开始 commit
@@ -955,4 +955,124 @@ fn default_commit_batch_contract_returns_unsupported() {
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
+}
+
+// ────────────────────────────────────────────────────────────────
+// 事务上下文绑定 fence 与单 shard 原子范围
+// ────────────────────────────────────────────────────────────────
+
+fn make_two_shard_executor() -> std::sync::Arc<LocalExecutor<MemoryShard>> {
+    let first = ShardId("s1".into());
+    let second = ShardId("s2".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![first.clone(), second.clone()]).unwrap();
+    std::sync::Arc::new(
+        LocalExecutor::new(
+            routing,
+            HashMap::from([(first, MemoryShard::new()), (second, MemoryShard::new())]),
+            Vec::new(),
+        )
+        .unwrap(),
+    )
+}
+
+fn key_routing_to(executor: &LocalExecutor<MemoryShard>, shard: &ShardId) -> Vec<u8> {
+    (0..1000)
+        .map(|index| format!("scope-key-{index}").into_bytes())
+        .find(|key| executor.routing().route("redis:0", key).shard == *shard)
+        .expect("routing must place probe keys on both shards")
+}
+
+/// 不提供事务能力的 executor 必须让 `begin_transaction` 显式拒绝，而不是发一个无主 handle。
+#[test]
+fn default_begin_transaction_contract_returns_unsupported() {
+    let executor = std::sync::Arc::new(MinimalExecutor);
+    let err = executor.begin_transaction(None).unwrap_err();
+    match err {
+        yyds_types::Error::Unsupported(feature) => assert!(feature.contains("local transactions"), "got {feature}"),
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+/// 第一阶段原子范围 = 单 shard：跨 shard 批次在应用任何写入前以稳定错误拒绝。
+#[test]
+fn commit_batch_rejects_cross_shard_scope() {
+    let executor = make_two_shard_executor();
+    let first = ShardId("s1".into());
+    let second = ShardId("s2".into());
+    let key_a = key_routing_to(&executor, &first);
+    let key_b = key_routing_to(&executor, &second);
+    let batch = vec![
+        yyds_execution::BufferedCommit { command: command(KeyValueAction::Put(b"one".to_vec()), &key_a), condition: None },
+        yyds_execution::BufferedCommit { command: command(KeyValueAction::Put(b"two".to_vec()), &key_b), condition: None },
+    ];
+    let err = executor.commit_batch(None, batch).unwrap_err();
+    match err {
+        yyds_types::Error::Unsupported(feature) => {
+            assert!(feature.contains("cross-shard batch commits are not supported"), "got {feature}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    // 范围被拒绝时不允许留下任何半提交
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key_a)).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key_b)).unwrap(), KeyValueResult::Get(None));
+}
+
+/// 事务 handle 在 begin 时捕获 fence，commit 边界必须原样携带它：
+/// owner 已切换时提交被 FencingRejected，base 不留痕迹。
+#[test]
+fn transaction_handle_commit_rejects_stale_bound_fence() {
+    use yyds_execution::TransactionHandle;
+
+    let node_a = ReplicaNodeId("node-a".to_owned());
+    let node_b = ReplicaNodeId("node-b".to_owned());
+    let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b, leader_term: LeaderTerm(5) }];
+    let executor = std::sync::Arc::new(make_fence_test_executor(owners));
+
+    let bound_fence = FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(3), leader: node_a };
+    let handle = std::sync::Arc::clone(&executor).begin_transaction(Some(&bound_fence)).unwrap();
+    handle.execute(command(KeyValueAction::Put(b"stale".to_vec()), b"guarded")).unwrap();
+    let err = handle.commit().unwrap_err();
+    assert!(matches!(err, yyds_types::Error::FencingRejected { .. }), "expected FencingRejected, got {err:?}");
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"guarded")).unwrap(), KeyValueResult::Get(None));
+}
+
+/// 匹配的 fence 绑定到 handle 后提交成功——fence 不是摆设，而是可携带可通过的上下文。
+#[test]
+fn transaction_handle_commit_replays_matching_bound_fence() {
+    use yyds_execution::TransactionHandle;
+
+    let node_b = ReplicaNodeId("node-b".to_owned());
+    let owners = vec![OwnerEntry { shard_id: ShardId("s1".into()), node_id: node_b.clone(), leader_term: LeaderTerm(5) }];
+    let executor = std::sync::Arc::new(make_fence_test_executor(owners));
+
+    let fresh_fence = FenceToken { epoch: ShardEpoch(1), term: LeaderTerm(5), leader: node_b };
+    let handle = std::sync::Arc::clone(&executor).begin_transaction(Some(&fresh_fence)).unwrap();
+    handle.execute(command(KeyValueAction::Put(b"owned".to_vec()), b"guarded")).unwrap();
+    handle.commit().unwrap();
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, b"guarded")).unwrap(), KeyValueResult::Get(Some(b"owned".to_vec())));
+}
+
+/// 经 handle 走完整事务路径时，跨 shard 写入同样被稳定错误拒绝且不伪装成普通事务。
+#[test]
+fn transaction_handle_commit_rejects_cross_shard_writes() {
+    use yyds_execution::TransactionHandle;
+
+    let executor = make_two_shard_executor();
+    let first = ShardId("s1".into());
+    let second = ShardId("s2".into());
+    let key_a = key_routing_to(&executor, &first);
+    let key_b = key_routing_to(&executor, &second);
+
+    let handle = std::sync::Arc::clone(&executor).begin_transaction(None).unwrap();
+    handle.execute(command(KeyValueAction::Put(b"one".to_vec()), &key_a)).unwrap();
+    handle.execute(command(KeyValueAction::Put(b"two".to_vec()), &key_b)).unwrap();
+    let err = handle.commit().unwrap_err();
+    match err {
+        yyds_types::Error::Unsupported(feature) => {
+            assert!(feature.contains("cross-shard batch commits are not supported"), "got {feature}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key_a)).unwrap(), KeyValueResult::Get(None));
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, &key_b)).unwrap(), KeyValueResult::Get(None));
 }

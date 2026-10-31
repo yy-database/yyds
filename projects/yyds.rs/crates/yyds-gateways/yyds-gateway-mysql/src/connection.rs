@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use yyds_execution::{KeyValueExecutor, LocalTransactionHandle, TransactionHandle};
+use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
     plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
@@ -372,12 +372,27 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                                 write_error(&mut stream, sequence.wrapping_add(1), 1235, "42000", "no SQL runtime")?;
                                 continue;
                             };
-                            let executor = rt.executor.clone();
-                            let handle = LocalTransactionHandle::new(executor.clone());
-                            session.executor = Some(executor);
-                            session.handle = Some(Box::new(handle));
-                            session.failed = false;
-                            write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_IN_TRANS)?;
+                            // The executor owns the transaction capability contract: BEGIN goes
+                            // through `begin_transaction` so an executor without a durable atomic
+                            // commit path rejects the verb at its boundary. The single-node
+                            // gateway passes `None` explicitly — there is no coordinator fence yet.
+                            match Arc::clone(&rt.executor).begin_transaction(None) {
+                                Ok(handle) => {
+                                    session.executor = Some(rt.executor.clone());
+                                    session.handle = Some(handle);
+                                    session.failed = false;
+                                    write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_IN_TRANS)?;
+                                }
+                                Err(err) => {
+                                    write_error(
+                                        &mut stream,
+                                        sequence.wrapping_add(1),
+                                        1235,
+                                        "42000",
+                                        &format!("BEGIN failed: {err}"),
+                                    )?;
+                                }
+                            }
                         }
                         SqlTransactionAction::Commit if session.failed => {
                             if let Some(handle) = session.handle.take() {
