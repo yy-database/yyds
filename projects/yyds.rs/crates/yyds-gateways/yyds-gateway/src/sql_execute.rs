@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use yyds_execution::{KeyValueExecutor, TransactionHandle};
+use yyds_execution::{BufferedCommit, CommitCondition, KeyValueExecutor, TransactionHandle};
 use yyds_types::{KeyValueAction, KeyValueCommand, Namespace};
 
 use crate::{
@@ -1366,37 +1366,13 @@ fn upsert_row(
             }
             continue;
         };
-        let mut row = decode_row(&existing_bytes)?;
-        if let Some(predicate) = predicate {
-            let value = eval_expression(predicate, &row, &plan.field_types, dialect)?;
-            if !truthy(&value) {
-                return returning_result(&plan.returning, &plan.field_types, Vec::new(), 0, dialect);
-            }
-        }
+        let existing_row = decode_row(&existing_bytes)?;
         // 赋值右值同时看到既有行（槽 0）与提议写入的 `EXCLUDED` 行（槽 1，列带上
-        // `ROW_ID_STRIDE` 偏移）。两侧合并后再求值，等价于 PostgreSQL 的「同时赋值」语义。
-        let mut scope = row.clone();
-        let mut scope_types = plan.field_types.clone();
-        for field in &plan.fields {
-            let excluded_row_id = field.field_id + ROW_ID_STRIDE;
-            if let Some(bytes) = sql_value_to_bytes(&field.value) {
-                scope.insert(excluded_row_id, bytes);
-            }
-            scope_types.insert(excluded_row_id, field.field_type.clone());
-        }
-        let mut updates = Vec::with_capacity(assignments.len());
-        for assignment in assignments {
-            let value = eval_expression(&assignment.value, &scope, &scope_types, dialect)?;
-            let literal = value_to_literal(value);
-            check_write_literal(&literal, &assignment.field_type, &assignment.field_name, dialect)?;
-            updates.push((assignment.field_id, sql_value_to_bytes(&literal)));
-        }
-        for (field_id, bytes) in updates {
-            match bytes {
-                Some(bytes) => row.insert(field_id, bytes),
-                None => row.remove(field_id),
-            }
-        }
+        // `ROW_ID_STRIDE` 偏移），求值与应用由 `conflict_updated_row` 统一承担。
+        let Some(row) = conflict_updated_row(&existing_row, plan, assignments, predicate, dialect)?
+        else {
+            return returning_result(&plan.returning, &plan.field_types, Vec::new(), 0, dialect);
+        };
         let encoded = encode_row(&row);
         let command =
             KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
@@ -1493,6 +1469,12 @@ fn execute_multi_insert(
     plans: &[WritePlan],
     dialect: SqlDialect,
 ) -> Result<SqlResult, SqlFrontendError> {
+    // 两条以上写入且没有显式事务时，整条语句必须经执行器的 durable 原子提交边界一次发布；
+    // 逐条 `execute` 会让崩溃停在语句中途、只落库一半的行。单行语句本身就是一条命令，
+    // 保持既有路径。事务路径由 handle 缓冲、COMMIT 时走同一 `commit_batch` 边界，无需改写。
+    if transaction.is_none() && plans.len() > 1 {
+        return execute_multi_insert_atomic(executor, plans, dialect);
+    }
     let columns = plans.first().and_then(|plan| plan.returning.as_ref()).map(returning_column_labels).unwrap_or_default();
     let mut rows = Vec::new();
     let mut total_affected = 0u64;
@@ -1502,6 +1484,218 @@ fn execute_multi_insert(
         total_affected = total_affected.saturating_add(single.affected_rows);
     }
     Ok(SqlResult { columns, rows, affected_rows: total_affected })
+}
+
+/// 批次里一行的折叠结果：最终行值、是否产生写入、以及针对基存 pre-image 的 OCC 条件。
+struct BatchedRow {
+    /// 折叠后的当前行值。`None` 表示该行在基存中不存在且尚未有赋值折叠进来。
+    current: Option<RowFieldValues>,
+    /// 是否把一次写入提交进批次（`DO NOTHING` 跳过行与谓词不成立的改写行都是 `false`）。
+    applied: bool,
+    /// 提交边界内复核的 pre-image 条件。
+    condition: CommitCondition,
+}
+
+/// 非事务多行 INSERT 的原子发布：按语句顺序把每行折叠成最终值与 OCC 条件，整批交给
+/// `KeyValueExecutor::commit_batch` 的单分片 durable 原子边界。
+///
+/// 冲突策略在提交前折叠：`DO NOTHING` 跳过基存已存在的行（语句内重复主键同样按跳过），
+/// `DO UPDATE` 基于 pre-image 求值谓词与赋值（语句内重复主键顺序折叠到同一行，与逐行语义
+/// 一致），无策略时语句内重复主键直接报唯一约束错误。预读与提交之间存在并发窗口，条件被
+/// 并发提交打断时整批拒绝并用最新快照重排一次；无策略的并发主键冲突则直接上报唯一约束错误。
+fn execute_multi_insert_atomic(
+    executor: &dyn KeyValueExecutor,
+    plans: &[WritePlan],
+    dialect: SqlDialect,
+) -> Result<SqlResult, SqlFrontendError> {
+    let first = plans.first().expect("atomic multi-insert requires at least one plan");
+    let namespace = Namespace(first.namespace.clone());
+    let unique_conflict = || {
+        SqlFrontendError::new(
+            SqlErrorKind::UniqueViolation,
+            format!("duplicate key value violates unique constraint: {}", first.namespace),
+        )
+    };
+    let needs_preimage = plans.iter().any(|plan| plan.conflict.is_some());
+    for attempt in 0..2 {
+        // 冲突策略需要先看到基存 pre-image 才能决定跳过还是改写；无策略的行交给提交边界的
+        // OCC 条件复核，不做多余预读。
+        let mut preimages: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
+        if needs_preimage {
+            let mut rowids: Vec<Vec<u8>> = Vec::new();
+            let mut seen = BTreeSet::new();
+            for plan in plans {
+                if seen.insert(plan.rowid.clone()) {
+                    rowids.push(plan.rowid.clone());
+                }
+            }
+            let commands: Vec<KeyValueCommand> = rowids
+                .iter()
+                .map(|rowid| KeyValueCommand { namespace: namespace.clone(), key: rowid.clone(), action: KeyValueAction::Get })
+                .collect();
+            let results = executor
+                .execute_read_batch(None, &commands)
+                .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
+            for (rowid, result) in rowids.iter().zip(results) {
+                let bytes = match result {
+                    yyds_types::KeyValueResult::Get(bytes) => bytes,
+                    other => return Err(execute_error(&format!("unexpected storage result for pre-read: {other:?}"))),
+                };
+                preimages.insert(rowid.clone(), bytes);
+            }
+        }
+
+        // 按语句首次出现的顺序折叠每个 rowid 的最终行值与 OCC 条件。
+        let mut order: Vec<Vec<u8>> = Vec::new();
+        let mut folded: BTreeMap<Vec<u8>, BatchedRow> = BTreeMap::new();
+        for plan in plans {
+            match &plan.conflict {
+                None => {
+                    if folded.contains_key(&plan.rowid) {
+                        return Err(unique_conflict());
+                    }
+                    order.push(plan.rowid.clone());
+                    folded.insert(
+                        plan.rowid.clone(),
+                        BatchedRow {
+                            current: Some(write_plan_to_row(plan)),
+                            applied: true,
+                            condition: CommitCondition::PutIfAbsent,
+                        },
+                    );
+                }
+                Some(ConflictPolicy::DoNothing) => {
+                    if folded.contains_key(&plan.rowid) {
+                        continue;
+                    }
+                    let existing = preimages.get(&plan.rowid).cloned().flatten();
+                    let (current, applied) = match &existing {
+                        Some(bytes) => (Some(decode_row(bytes)?), false),
+                        None => (Some(write_plan_to_row(plan)), true),
+                    };
+                    order.push(plan.rowid.clone());
+                    folded.insert(plan.rowid.clone(), BatchedRow { current, applied, condition: CommitCondition::PutIfAbsent });
+                }
+                Some(ConflictPolicy::DoUpdate { assignments, predicate }) => {
+                    if !folded.contains_key(&plan.rowid) {
+                        let existing = preimages.get(&plan.rowid).cloned().flatten();
+                        let condition = match &existing {
+                            Some(bytes) => CommitCondition::ValueEquals(Some(bytes.clone())),
+                            None => CommitCondition::PutIfAbsent,
+                        };
+                        let current = match &existing {
+                            Some(bytes) => Some(decode_row(bytes)?),
+                            None => None,
+                        };
+                        order.push(plan.rowid.clone());
+                        folded.insert(plan.rowid.clone(), BatchedRow { current, applied: false, condition });
+                    }
+                    let entry = folded.get_mut(&plan.rowid).expect("entry inserted above");
+                    match &entry.current {
+                        None => {
+                            entry.current = Some(write_plan_to_row(plan));
+                            entry.applied = true;
+                        }
+                        Some(existing_row) => {
+                            if let Some(updated) =
+                                conflict_updated_row(existing_row, plan, assignments, predicate.as_ref(), dialect)?
+                            {
+                                entry.current = Some(updated);
+                                entry.applied = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let batch: Vec<BufferedCommit> = order
+            .iter()
+            .filter_map(|rowid| {
+                let entry = &folded[rowid];
+                entry.applied.then(|| BufferedCommit {
+                    command: KeyValueCommand {
+                        namespace: namespace.clone(),
+                        key: rowid.clone(),
+                        action: KeyValueAction::Put(encode_row(entry.current.as_ref().expect("applied entry carries a row"))),
+                    },
+                    condition: Some(entry.condition.clone()),
+                })
+            })
+            .collect();
+        match executor.commit_batch(None, batch) {
+            Ok(()) => {
+                let written: Vec<RowFieldValues> = order
+                    .iter()
+                    .filter_map(|rowid| {
+                        let entry = &folded[rowid];
+                        entry.applied.then(|| entry.current.clone().expect("applied entry carries a row"))
+                    })
+                    .collect();
+                let affected = written.len() as u64;
+                return returning_result(&first.returning, &first.field_types, written, affected, dialect);
+            }
+            Err(yyds_types::Error::CasConflict { .. }) if needs_preimage && attempt == 0 => continue,
+            Err(yyds_types::Error::CasConflict { .. }) if needs_preimage => {
+                return Err(SqlFrontendError::new(
+                    SqlErrorKind::Conflict,
+                    format!("concurrent writes to {} prevented the batch commit", first.namespace),
+                ));
+            }
+            Err(yyds_types::Error::CasConflict { .. }) => return Err(unique_conflict()),
+            Err(error) => {
+                return Err(execute_error(&format!("KeyValueExecutor.commit_batch failed: {error}")));
+            }
+        }
+    }
+    Err(SqlFrontendError::new(
+        SqlErrorKind::Conflict,
+        format!("concurrent writes to {} prevented the batch commit", first.namespace),
+    ))
+}
+
+/// 计算 `ON CONFLICT DO UPDATE` 命中既有行后的最终行值。
+///
+/// 谓词只对既有行求值，不成立时返回 `None` 表示跳过；赋值在既有行与 `EXCLUDED` 行合并后的
+/// 作用域里求值（列带 `ROW_ID_STRIDE` 偏移），再统一应用，等价于 PostgreSQL 的「同时赋值」语义。
+/// 单行 `upsert_row` 与批量 `execute_multi_insert_atomic` 共用本函数，冲突语义只有一份。
+fn conflict_updated_row(
+    existing: &RowFieldValues,
+    plan: &WritePlan,
+    assignments: &[ConflictAssignment],
+    predicate: Option<&SqlCatalogBoundExpression>,
+    dialect: SqlDialect,
+) -> Result<Option<RowFieldValues>, SqlFrontendError> {
+    if let Some(predicate) = predicate {
+        let value = eval_expression(predicate, existing, &plan.field_types, dialect)?;
+        if !truthy(&value) {
+            return Ok(None);
+        }
+    }
+    let mut scope = existing.clone();
+    let mut scope_types = plan.field_types.clone();
+    for field in &plan.fields {
+        let excluded_row_id = field.field_id + ROW_ID_STRIDE;
+        if let Some(bytes) = sql_value_to_bytes(&field.value) {
+            scope.insert(excluded_row_id, bytes);
+        }
+        scope_types.insert(excluded_row_id, field.field_type.clone());
+    }
+    let mut updates = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        let value = eval_expression(&assignment.value, &scope, &scope_types, dialect)?;
+        let literal = value_to_literal(value);
+        check_write_literal(&literal, &assignment.field_type, &assignment.field_name, dialect)?;
+        updates.push((assignment.field_id, sql_value_to_bytes(&literal)));
+    }
+    let mut row = existing.clone();
+    for (field_id, bytes) in updates {
+        match bytes {
+            Some(bytes) => row.insert(field_id, bytes),
+            None => row.remove(field_id),
+        }
+    }
+    Ok(Some(row))
 }
 
 /// 执行 `INSERT ... SELECT`：源查询走既有读路径，全部行通过宽度、类型与主键唯一性

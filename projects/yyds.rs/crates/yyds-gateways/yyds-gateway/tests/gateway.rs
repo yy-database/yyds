@@ -964,7 +964,9 @@ fn sql_insert_select_from_constants_writes_rows() {
 #[test]
 fn sql_insert_select_copies_filtered_rows_from_a_table() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
-    let executor = make_executor_with_rows(
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = make_file_executor_with_rows(
+        directory.path(),
         "table:1",
         &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
@@ -1071,7 +1073,9 @@ fn sql_on_conflict_do_nothing_skips_existing_rows() {
 #[test]
 fn sql_on_conflict_do_nothing_skips_conflicting_insert_select_rows() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
-    let executor = make_executor_with_rows(
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = make_file_executor_with_rows(
+        directory.path(),
         "table:1",
         &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
@@ -1184,7 +1188,8 @@ fn sql_on_conflict_do_update_where_false_leaves_the_row_untouched() {
 #[test]
 fn sql_on_conflict_do_update_applies_to_every_values_row() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let executor = empty_executor();
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = file_empty_executor(directory.path());
     run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice'), (2, 'bob')");
 
     // 第一行命中改写、第二行未命中照常插入，影响行数统计两行。
@@ -1210,8 +1215,12 @@ fn sql_on_conflict_do_update_applies_to_every_values_row() {
 #[test]
 fn sql_on_conflict_do_update_applies_to_insert_select_rows() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
-    let executor =
-        make_executor_with_rows("table:1", &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")])]);
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = make_file_executor_with_rows(
+        directory.path(),
+        "table:1",
+        &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")])],
+    );
     run_sql(&executor, None, &catalog, "INSERT INTO admins VALUES (2, 'stale')");
 
     let upserted = run_sql(
@@ -1479,13 +1488,137 @@ fn sql_insert_returning_reports_the_written_row() {
 #[test]
 fn sql_multi_row_insert_returning_reports_every_row() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let executor = empty_executor();
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = file_empty_executor(directory.path());
 
     let inserted =
         run_sql(&executor, None, &catalog, "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob') RETURNING id");
     assert_eq!(inserted.columns, vec!["id".to_string()]);
     assert_eq!(inserted.rows, vec![vec![yyds_gateway::SqlValue::Integer(1)], vec![yyds_gateway::SqlValue::Integer(2)]]);
     assert_eq!(inserted.affected_rows, 2);
+}
+
+fn try_run_sql(
+    executor: &dyn yyds_execution::KeyValueExecutor,
+    catalog: &yyds_gateway::SqlCatalog,
+    sql: &str,
+) -> Result<yyds_gateway::SqlResult, yyds_gateway::SqlFrontendError> {
+    let bound = yyds_gateway::bind_sql_catalog(sql, catalog, 7).expect("catalog bind");
+    let plan = yyds_gateway::plan_statement(bound, catalog).expect("plan");
+    yyds_gateway::execute_plan(executor, None, &plan, SqlDialect::Postgres)
+}
+
+#[test]
+fn sql_multi_row_insert_publishes_every_row_through_one_durable_boundary() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = file_empty_executor(directory.path());
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+    drop(executor);
+
+    // 重新打开落盘快照：整批三行必须一起可见，不存在半语句。
+    let reopened = file_empty_executor(directory.path());
+    let rows = run_sql(&reopened, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("a".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("b".into())],
+            vec![yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::String("c".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_multi_row_insert_rejects_intra_statement_duplicate_rowid_without_publishing_any_row() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = file_empty_executor(directory.path());
+
+    let error = try_run_sql(&executor, &catalog, "INSERT INTO users VALUES (1, 'first'), (1, 'second')")
+        .expect_err("duplicate primary key inside one statement");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
+
+    // 旧逐条路径会把第一行留在基存里；原子边界必须让整条语句一行都不发布。
+    drop(executor);
+    let reopened = file_empty_executor(directory.path());
+    let rows = run_sql(&reopened, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert!(rows.rows.is_empty(), "half-statement rows leaked: {:?}", rows.rows);
+}
+
+#[test]
+fn sql_multi_row_insert_rejects_existing_row_without_publishing_later_rows() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = file_empty_executor(directory.path());
+    run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
+
+    let error = try_run_sql(&executor, &catalog, "INSERT INTO users VALUES (2, 'bob'), (1, 'zed')")
+        .expect_err("second row collides with the stored row");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
+
+    drop(executor);
+    let reopened = file_empty_executor(directory.path());
+    let rows = run_sql(&reopened, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(
+        rows.rows,
+        vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("alice".into())]],
+        "the failed statement must not publish its first row"
+    );
+}
+
+#[test]
+fn sql_multi_row_insert_rejects_a_store_without_durable_atomic_commit() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let executor = empty_executor();
+
+    // 易失的 MemoryShard 没有 durable 提交边界，多行语句必须显式拒绝而不是退回逐条发布。
+    let error = try_run_sql(&executor, &catalog, "INSERT INTO users VALUES (1, 'a'), (2, 'b')").expect_err("volatile store");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution);
+    assert!(error.message.contains("durable atomic commit"), "unexpected message: {}", error.message);
+}
+
+#[test]
+fn sql_multi_row_insert_on_conflict_do_nothing_skips_intra_statement_duplicates() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = file_empty_executor(directory.path());
+
+    let inserted = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'first'), (1, 'second'), (2, 'other') ON CONFLICT (id) DO NOTHING",
+    );
+    assert_eq!(inserted.affected_rows, 2, "first occurrence wins, the duplicate is skipped");
+
+    let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(
+        rows.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("first".into())],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::String("other".into())],
+        ]
+    );
+}
+
+#[test]
+fn sql_multi_row_insert_on_conflict_do_update_folds_duplicate_rowids_sequentially() {
+    let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let executor = file_empty_executor(directory.path());
+
+    // 语句内重复主键按出现顺序折叠：先插入，再基于折叠后的行改写，与逐行语义一致。
+    let upserted = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "INSERT INTO users (id, name) VALUES (1, 'first'), (1, 'second') ON CONFLICT (id) DO UPDATE SET name = excluded.name",
+    );
+    assert_eq!(upserted.affected_rows, 1);
+
+    let rows = run_sql(&executor, None, &catalog, "SELECT id, name FROM users ORDER BY id");
+    assert_eq!(rows.rows, vec![vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::String("second".into())]]);
 }
 
 #[test]
@@ -3583,11 +3716,8 @@ fn sql_transaction_concurrent_update_conflict_is_rejected_at_commit() {
 
     let directory = boost_fs::temp::create_folder().expect("temp folder");
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let executor: Arc<dyn yyds_execution::KeyValueExecutor> = Arc::new(make_file_executor_with_rows(
-        directory.path(),
-        "table:1",
-        &[(b"1", &[(1, b"1"), (2, b"original")]),],
-    ));
+    let executor: Arc<dyn yyds_execution::KeyValueExecutor> =
+        Arc::new(make_file_executor_with_rows(directory.path(), "table:1", &[(b"1", &[(1, b"1"), (2, b"original")])]));
 
     // 两个事务都读到同一 pre-image，然后各自做 read-modify-write。
     let t1: Box<dyn TransactionHandle> = Box::new(LocalTransactionHandle::new(Arc::clone(&executor), None));
