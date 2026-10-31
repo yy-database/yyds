@@ -3595,15 +3595,24 @@ fn sql_window_ntile_lag_lead_reject_invalid_shapes_at_bind_time() {
 fn sql_window_range_frames_reject_undefined_value_semantics() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }\n");
 
-    // `RANGE` 没有 `ORDER BY` 就没有可比较的值；数值偏移只放开单列排序。
-    for sql in [
-        "SELECT id, SUM(age) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
-        "SELECT id, SUM(age) OVER (ORDER BY age, score RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM users",
+    // `RANGE` 没有 `ORDER BY` 就没有可比较的值；数值偏移要求恰好一列排序，
+    // 零列与多列都在绑定期显式拒绝，不退化成 `ROWS`。
+    for (sql, reason) in [
+        (
+            "SELECT id, SUM(age) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
+            "require an ORDER BY",
+        ),
+        ("SELECT id, SUM(age) OVER (RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users", "exactly one ORDER BY"),
+        (
+            "SELECT id, SUM(age) OVER (ORDER BY age, score RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM users",
+            "exactly one ORDER BY",
+        ),
     ] {
         let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
             .err()
             .unwrap_or_else(|| panic!("`{sql}` must be rejected at bind time"));
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}: {}", error.message);
+        assert!(error.message.contains(reason), "{sql}: {}", error.message);
     }
 
     // 无偏移的 `RANGE` 帧只用到 peer 边界，多列 `ORDER BY` 合法。
@@ -3627,7 +3636,7 @@ fn sql_window_range_frame_offsets_reject_ordering_values_without_value_distance(
         run_sql(&executor, None, &catalog, sql);
     }
 
-    // 非数值排序列与 NULL 排序值都没有 SQL 定义的值距离，执行期显式拒绝。
+    // 非数值排序键没有 SQL 定义的值距离，执行期显式拒绝；`NULL` 排序键不再拒绝。
     for sql in [
         "SELECT id, SUM(age) OVER (ORDER BY name RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users",
         "SELECT id, SUM(age) OVER (ORDER BY tag RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users",
@@ -3637,6 +3646,101 @@ fn sql_window_range_frame_offsets_reject_ordering_values_without_value_distance(
         let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("value axis must fail");
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution, "{sql}: {}", error.message);
     }
+}
+
+#[test]
+fn sql_window_range_frame_offsets_keep_null_ordering_keys_off_the_value_axis() {
+    use yyds_gateway::SqlValue;
+
+    let catalog = catalog("table users { @@id: i64, age: i64?, amount: i64 }\n");
+    let executor = empty_executor();
+    for sql in [
+        "INSERT INTO users VALUES (1, NULL, 5)",
+        "INSERT INTO users VALUES (2, 10, 10)",
+        "INSERT INTO users VALUES (3, 11, 20)",
+        "INSERT INTO users VALUES (4, 30, 30)",
+        "INSERT INTO users VALUES (5, NULL, 40)",
+    ] {
+        run_sql(&executor, None, &catalog, sql);
+    }
+
+    // `NULL` 排序键没有值距离：偏移帧只落在当前行自己的非 `NULL` 连续段上，
+    // 前缀或后缀的 `NULL` 段都不进入帧。ASC 下两个 `NULL` 行按 `NULLS FIRST`
+    // 排在数值段之前，因此 id=2 的 `1 PRECEDING AND 1 FOLLOWING` 帧只含 10 与 11，
+    // 不会把 NULL 行与 age=30 的行卷进来。
+    let ascending = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT id, SUM(amount) OVER (ORDER BY age NULLS FIRST RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM users ORDER BY id",
+    );
+    assert_eq!(
+        ascending.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(45)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(4), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(5), SqlValue::Integer(45)],
+        ]
+    );
+
+    // 当前行为 `NULL` 时偏移 bound 折回当前 peer 组：两个 `NULL` 行只累计彼此的
+    // 取值（5 + 40），不读取任何非 `NULL` 行。
+    // `DESC` 把值轴取负统一到升序，`NULL` 在 Postgres 默认排在最前，两个方向
+    // 得到同一套数字。
+    let descending = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT id, SUM(amount) OVER (ORDER BY age DESC RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM users ORDER BY id",
+    );
+    assert_eq!(
+        descending.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(45)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(4), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(5), SqlValue::Integer(45)],
+        ]
+    );
+
+    // 只写起点偏移：`ASC` 从值轴下方累计到当前 peer 组末尾。
+    let ascending_preceding = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT id, SUM(amount) OVER (ORDER BY age NULLS FIRST RANGE BETWEEN 15 PRECEDING AND CURRENT ROW) FROM users ORDER BY id",
+    );
+    assert_eq!(
+        ascending_preceding.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(45)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(10)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(4), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(5), SqlValue::Integer(45)],
+        ]
+    );
+
+    // `DESC` 下「15 之前」沿排序方向朝更大的值走：30 单独一段，11 与 10 同段。
+    let descending_preceding = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT id, SUM(amount) OVER (ORDER BY age DESC RANGE BETWEEN 15 PRECEDING AND CURRENT ROW) FROM users ORDER BY id",
+    );
+    assert_eq!(
+        descending_preceding.rows,
+        vec![
+            vec![SqlValue::Integer(1), SqlValue::Integer(45)],
+            vec![SqlValue::Integer(2), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(3), SqlValue::Integer(20)],
+            vec![SqlValue::Integer(4), SqlValue::Integer(30)],
+            vec![SqlValue::Integer(5), SqlValue::Integer(45)],
+        ]
+    );
 }
 
 #[test]

@@ -2245,7 +2245,7 @@ fn eval_window_projection(
             Some(frame) if frame.unit == SqlBoundWindowFrameUnit::Range && frame.has_value_offset() => {
                 let descending =
                     matches!(spec.order_by.first().map(|item| &item.direction), Some(SqlBoundOrderDirection::Desc));
-                Some(RangeAxis::build(&keyed, descending)?)
+                Some(RangeAxis::build(&keyed, descending, spec.order_by.len())?)
             }
             _ => None,
         };
@@ -2331,7 +2331,9 @@ fn window_frame_bounds(
 }
 
 /// `RANGE` 帧的边界换算：`CURRENT ROW` 落在当前 peer 组边界，`UNBOUNDED` 落在分区
-/// 两端，数值偏移在升序值轴上二分。反向的畸形帧与 `ROWS` 同样退化为空区间，不报错。
+/// 两端，数值偏移在升序值轴上二分。`NULL` 排序键没有值距离：当前行为 `NULL` 时偏移
+/// bound 折回当前 peer 组，非 `NULL` 行的偏移帧只落在自己的非 `NULL` 连续段上，
+/// 其他 `NULL` 行不进入带偏移的帧。反向的畸形帧与 `ROWS` 同样退化为空区间，不报错。
 fn range_frame_bounds(
     frame: &SqlBoundWindowFrame,
     range_axis: Option<&RangeAxis>,
@@ -2354,10 +2356,32 @@ fn range_frame_bounds(
                 }
             }
             SqlBoundWindowFrameBound::Preceding(offset) => {
-                range_axis.ok_or_else(missing_axis)?.offset_bound(position, offset, false, end)
+                let axis = range_axis.ok_or_else(missing_axis)?;
+                if axis.is_null(position) {
+                    if end {
+                        peer_end
+                    }
+                    else {
+                        peer_start
+                    }
+                }
+                else {
+                    axis.offset_bound(position, offset, false, end)
+                }
             }
             SqlBoundWindowFrameBound::Following(offset) => {
-                range_axis.ok_or_else(missing_axis)?.offset_bound(position, offset, true, end)
+                let axis = range_axis.ok_or_else(missing_axis)?;
+                if axis.is_null(position) {
+                    if end {
+                        peer_end
+                    }
+                    else {
+                        peer_start
+                    }
+                }
+                else {
+                    axis.offset_bound(position, offset, true, end)
+                }
             }
         })
     };
@@ -2367,16 +2391,27 @@ fn range_frame_bounds(
 }
 
 /// `RANGE` 帧数值偏移的比较轴：分区内单列 `ORDER BY` 的值按排序顺序排列，`DESC`
-/// 取负后统一成升序。整数列用 `i128` 精确轴，含浮点值时用 `f64` 轴。
+/// 取负后统一成升序。整数列用 `i128` 精确轴，含浮点值时用 `f64` 轴。`NULL` 保留为
+/// `None`：它没有值距离，但在偏移比较之外仍是一个正常排序值。
 enum RangeAxis {
-    Integers(Vec<i128>),
-    Numbers(Vec<f64>),
+    Integers(Vec<Option<i128>>),
+    Numbers(Vec<Option<f64>>),
 }
 
 impl RangeAxis {
-    /// 从分区排序键构建值轴。`RANGE` 偏移要求排序值存在 SQL 定义的值距离：
-    /// `NULL` 与非数值排序值在这里显式拒绝，不做静默跳过。
-    fn build(keyed: &[(Vec<Option<SqlValue>>, usize)], descending: bool) -> Result<Self, SqlFrontendError> {
+    /// 从分区排序键构建值轴。带偏移的 `RANGE` 帧按值比较，值距离只有单列
+    /// `ORDER BY` 才有唯一依据；`NULL` 键不产生距离，但仍可参与排序，因此保留
+    /// `None` 而不是拒绝整个分区。
+    fn build(
+        keyed: &[(Vec<Option<SqlValue>>, usize)],
+        descending: bool,
+        order_columns: usize,
+    ) -> Result<Self, SqlFrontendError> {
+        if order_columns != 1 {
+            return Err(SqlFrontendError::unsupported(
+                "window RANGE frame with an offset requires exactly one ORDER BY column",
+            ));
+        }
         let mut integers = Vec::with_capacity(keyed.len());
         let mut numbers = Vec::with_capacity(keyed.len());
         let mut saw_number = false;
@@ -2385,17 +2420,18 @@ impl RangeAxis {
                 Some(SqlValue::Integer(value)) => {
                     let value = i128::from(*value);
                     let value = if descending { -value } else { value };
-                    integers.push(value);
-                    numbers.push(value as f64);
+                    integers.push(Some(value));
+                    numbers.push(Some(value as f64));
                 }
                 Some(SqlValue::Number(value)) => {
                     saw_number = true;
-                    numbers.push(if descending { -*value } else { *value });
+                    numbers.push(Some(if descending { -*value } else { *value }));
+                }
+                Some(SqlValue::Null) | None => {
+                    integers.push(None);
+                    numbers.push(None);
                 }
                 Some(_) => return Err(execute_error("window RANGE frame offsets require the ORDER BY column to be numeric")),
-                None => {
-                    return Err(execute_error("window RANGE frame offsets do not accept NULL values in the ORDER BY column"))
-                }
             }
         }
         if saw_number {
@@ -2406,33 +2442,90 @@ impl RangeAxis {
         }
     }
 
-    /// 把 `n PRECEDING` / `n FOLLOWING` 换算成帧边界：起点 bound 返回第一个值不小于
-    /// 目标的行下标，终点 bound 返回最后一个值不大于目标的行的下一位（开区间上界）。
+    /// 某一行的 `ORDER BY` 排序键是否为 `NULL`。
+    fn is_null(&self, position: usize) -> bool {
+        match self {
+            Self::Integers(values) => values[position].is_none(),
+            Self::Numbers(values) => values[position].is_none(),
+        }
+    }
+
+    /// 当前行所在的那一段非 `NULL` 排序键的 `[start, end)`。偏移比较只在同一段
+    /// 内有意义：`NULL` 段可能按方言排在前缀或后缀，但始终与数值轴分离。
+    fn numeric_run(&self, position: usize) -> (usize, usize) {
+        let len = match self {
+            Self::Integers(values) => values.len(),
+            Self::Numbers(values) => values.len(),
+        };
+        let mut start = position;
+        while start > 0 && !self.is_null(start - 1) {
+            start -= 1;
+        }
+        let mut end = position + 1;
+        while end < len && !self.is_null(end) {
+            end += 1;
+        }
+        (start, end)
+    }
+
+    /// 把 `n PRECEDING` / `n FOLLOWING` 换算成帧边界：起点 bound 返回第一段内第一个
+    /// 值不小于目标的行下标，终点 bound 返回最后一个值不大于目标的行的下一位
+    /// （开区间上界）。目标越出整段时该 bound 不满足任何行：起点落在分区尾，
+    /// 终点落在分区头，两者都退化成空帧。
     fn offset_bound(&self, position: usize, offset: u64, following: bool, end: bool) -> usize {
+        let (run_start, run_end) = self.numeric_run(position);
         match self {
             Self::Integers(values) => {
                 let step = i128::try_from(offset).unwrap_or(i128::MAX);
+                let current = values[position].expect("offset bounds start from a non-NULL key");
                 let target =
-                    if following { values[position].saturating_add(step) } else { values[position].saturating_sub(step) };
-                if end {
-                    values.partition_point(|value| *value <= target)
-                }
-                else {
-                    values.partition_point(|value| *value < target)
-                }
+                    if following { current.saturating_add(step) } else { current.saturating_sub(step) };
+                offset_index(&values[run_start..run_end], run_start, values.len(), target, end, |value, target| {
+                    value.cmp(&target)
+                })
             }
             Self::Numbers(values) => {
                 let step = offset as f64;
-                let target = if following { values[position] + step } else { values[position] - step };
-                if end {
-                    values.partition_point(|value| value.total_cmp(&target) != std::cmp::Ordering::Greater)
-                }
-                else {
-                    values.partition_point(|value| value.total_cmp(&target) == std::cmp::Ordering::Less)
-                }
+                let current = values[position].expect("offset bounds start from a non-NULL key");
+                let target = if following { current + step } else { current - step };
+                offset_index(&values[run_start..run_end], run_start, values.len(), target, end, |value, target| {
+                    value.total_cmp(&target)
+                })
             }
         }
     }
+}
+
+/// 在一段升序、无 `NULL` 的排序键里定位偏移目标：起点 bound 取第一个不小于目标的
+/// 行，终点 bound 取第一个大于目标的行（开区间上界）。段内没有命中时起终点分别
+/// 退到分区两端，让调用方得到空帧。
+fn offset_index<T: Copy>(
+    run: &[Option<T>],
+    run_start: usize,
+    len: usize,
+    target: T,
+    end: bool,
+    compare: impl Fn(T, T) -> std::cmp::Ordering,
+) -> usize {
+    // 两种 bound 都按「满足前缀」二分：起点用「小于目标」，终点用「不大于目标」，
+    // 命中的第一个下标就是边界。
+    let count = if end {
+        run.partition_point(|value| {
+            value.is_some_and(|value| compare(value, target) != std::cmp::Ordering::Greater)
+        })
+    }
+    else {
+        run.partition_point(|value| value.is_some_and(|value| compare(value, target) == std::cmp::Ordering::Less))
+    };
+    if end && count == 0 {
+        // 没有任何行落在目标以内：终点退到分区头。
+        return 0;
+    }
+    if !end && count == run.len() {
+        // 没有任何行达到目标：起点退到分区尾。
+        return len;
+    }
+    run_start + count
 }
 
 /// 把一个 frame bound 换算成当前行上的绝对行位置。
