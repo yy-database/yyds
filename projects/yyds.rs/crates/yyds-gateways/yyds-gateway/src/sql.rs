@@ -129,6 +129,13 @@ pub enum SqlSessionCommand {
         /// Optional assigned value.
         value: Option<SqlBoundExpression>,
     },
+    /// `RESET <parameter>` / `RESET ALL` — restore GUC defaults.
+    ResetVariables {
+        /// Parameter to reset, `None` for `RESET ALL`.
+        name: Option<String>,
+    },
+    /// `DISCARD <target>` — release session-scoped caches.
+    Discard(DiscardTarget),
 }
 
 /// One of the three savepoint verbs the gateway recognises.
@@ -144,6 +151,22 @@ pub enum SavepointIntent {
     RollbackTo { name: String },
     /// `RELEASE SAVEPOINT <name>` — remove the savepoint without rolling back.
     Release { name: String },
+}
+
+/// Target of a PostgreSQL `DISCARD` statement.
+///
+/// Like [`SavepointIntent`], Oak's SQL AST does not project `DISCARD` yet, so the
+/// gateway lowers the verb itself before Oak runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardTarget {
+    /// `DISCARD ALL` — full session reset.
+    All,
+    /// `DISCARD PLANS` — release cached plans.
+    Plans,
+    /// `DISCARD SEQUENCES` — release cached sequence state.
+    Sequences,
+    /// `DISCARD TEMPORARY` / `DISCARD TEMP` — drop temporary tables.
+    Temporary,
 }
 
 /// Scope prefix carried by `SET` and `SHOW` session statements.
@@ -194,6 +217,9 @@ pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError
 pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, SqlFrontendError> {
     if let Some(intent) = detect_savepoint_statement(source) {
         return Ok(Some(SqlSessionCommand::Savepoint(intent)));
+    }
+    if let Some(command) = detect_session_reset_statement(source) {
+        return Ok(Some(command));
     }
     let normalized = normalize_start_transaction(source).or_else(|| normalize_quoted_set_names(source));
     let root = parse_sql(normalized.as_deref().unwrap_or(source))?;
@@ -276,6 +302,71 @@ pub fn detect_savepoint_statement(source: &str) -> Option<SavepointIntent> {
         return Some(SavepointIntent::RollbackTo { name: name.to_string() });
     }
     None
+}
+
+/// Matches PostgreSQL `RESET <parameter>` / `RESET ALL` and
+/// `DISCARD ALL|PLANS|SEQUENCES|TEMPORARY|TEMP` at the text level, the same way
+/// [`detect_savepoint_statement`] covers the savepoint verbs Oak does not project.
+///
+/// The match is deliberately lexical and case-insensitive: only a complete
+/// statement made of a bare identifier (no quoting, no extra tokens) is claimed.
+/// Anything else falls through to Oak, which reports its own syntax error, so a
+/// mis-shaped statement can never be silently treated as a session reset.
+pub fn detect_session_reset_statement(source: &str) -> Option<SqlSessionCommand> {
+    let trimmed = source.trim();
+    let trimmed = trimmed.strip_suffix(';').unwrap_or(trimmed).trim_end();
+    let mut words = trimmed.split_whitespace();
+    let first = words.next()?;
+    if first.eq_ignore_ascii_case("RESET") {
+        let name = words.next()?;
+        if words.next().is_some() || !is_bare_session_identifier(name) {
+            return None;
+        }
+        return Some(if name.eq_ignore_ascii_case("ALL") {
+            SqlSessionCommand::ResetVariables { name: None }
+        }
+        else {
+            SqlSessionCommand::ResetVariables { name: Some(name.to_string()) }
+        });
+    }
+    if first.eq_ignore_ascii_case("DISCARD") {
+        let target = words.next()?;
+        if words.next().is_some() {
+            return None;
+        }
+        let target = if target.eq_ignore_ascii_case("ALL") {
+            DiscardTarget::All
+        }
+        else if target.eq_ignore_ascii_case("PLANS") {
+            DiscardTarget::Plans
+        }
+        else if target.eq_ignore_ascii_case("SEQUENCES") {
+            DiscardTarget::Sequences
+        }
+        else if target.eq_ignore_ascii_case("TEMPORARY") || target.eq_ignore_ascii_case("TEMP") {
+            DiscardTarget::Temporary
+        }
+        else {
+            return None;
+        };
+        return Some(SqlSessionCommand::Discard(target));
+    }
+    None
+}
+
+/// Whether `token` is an unquoted SQL identifier: `$`/`_`/letters first, then
+/// `$`/`_`/letters/digits. Quoted or punctuated spellings stay outside the
+/// pre-filter and are left to Oak.
+fn is_bare_session_identifier(token: &str) -> bool {
+    let mut characters = token.chars();
+    let Some(first) = characters.next()
+    else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    characters.all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
 }
 
 /// MySQL and PostgreSQL clients may spell the opening boundary as `START

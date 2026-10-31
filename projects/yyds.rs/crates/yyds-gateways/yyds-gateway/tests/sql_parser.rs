@@ -355,6 +355,30 @@ fn oak_session_statements_are_projected_without_gateway_parsing() {
 }
 
 #[test]
+fn postgres_reset_and_discard_verbs_are_projected_before_oak() {
+    use yyds_gateway::{detect_session_reset_statement, parse_session_command, DiscardTarget, SqlSessionCommand};
+
+    assert_eq!(
+        parse_session_command("RESET search_path").unwrap(),
+        Some(SqlSessionCommand::ResetVariables { name: Some("search_path".into()) })
+    );
+    assert_eq!(parse_session_command("reset ALL;").unwrap(), Some(SqlSessionCommand::ResetVariables { name: None }));
+    assert_eq!(parse_session_command("DISCARD ALL").unwrap(), Some(SqlSessionCommand::Discard(DiscardTarget::All)));
+    assert_eq!(parse_session_command("discard plans").unwrap(), Some(SqlSessionCommand::Discard(DiscardTarget::Plans)));
+    assert_eq!(parse_session_command("DISCARD SEQUENCES").unwrap(), Some(SqlSessionCommand::Discard(DiscardTarget::Sequences)));
+    assert_eq!(parse_session_command("DISCARD TEMP").unwrap(), Some(SqlSessionCommand::Discard(DiscardTarget::Temporary)));
+
+    // 只认领完整语句：多余 token、引号标识符、缺失目标都落回 Oak 的语法路径。
+    assert_eq!(detect_session_reset_statement("RESET"), None);
+    assert_eq!(detect_session_reset_statement("RESET search_path extra"), None);
+    assert_eq!(detect_session_reset_statement("RESET \"search_path\""), None);
+    assert_eq!(detect_session_reset_statement("DISCARD ALL extra"), None);
+    assert_eq!(detect_session_reset_statement("DISCARD"), None);
+    assert_eq!(detect_session_reset_statement("SET search_path = 'public'"), None);
+    assert_eq!(detect_session_reset_statement("SELECT reset FROM users"), None);
+}
+
+#[test]
 fn oak_session_variable_statements_are_projected() {
     use yyds_gateway::{parse_session_command, SqlBoundExpression, SqlBoundLiteral, SqlSessionCommand, SqlVariableScope};
 

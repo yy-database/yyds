@@ -1097,6 +1097,131 @@ fn pgsql_transaction_error_recovery_after_division_by_zero() {
     server.join().unwrap();
 }
 
+/// `RESET <param>` / `RESET ALL` 恢复会话 GUC 默认值，未知参数报 `42704`，
+/// 未实现的其他 `DISCARD` 目标显式拒绝。
+#[test]
+fn reset_and_discard_restore_session_defaults() {
+    let (mut client, server) = start_server();
+
+    send_query(&mut client, "SET search_path = 'public'");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"SET\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    send_query(&mut client, "RESET search_path");
+    let reset = receive_until_ready(&mut client);
+    assert_eq!(reset[0], (b'C', b"RESET\0".to_vec()));
+    assert_eq!(reset.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    assert_eq!(shown[1].0, b'D');
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("$user") && text.contains("public"), "`RESET search_path` must restore the default, got {text}");
+
+    // 未知参数必须明确报未识别。
+    send_query(&mut client, "RESET nope_param");
+    let unknown = receive_until_ready(&mut client);
+    assert_eq!(unknown[0].0, b'E');
+    assert!(unknown[0].1.windows(5).any(|window| window == b"42704"));
+    assert_eq!(unknown.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // `RESET ALL` 同样回到默认值。
+    send_query(&mut client, "SET search_path = 'public'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+    send_query(&mut client, "RESET ALL");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"RESET\0".to_vec()), (b'Z', b"I".to_vec())]);
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("$user") && text.contains("public"), "`RESET ALL` must restore the default, got {text}");
+
+    // 未实现的 DISCARD 目标必须显式拒绝，不能假装完成清理。
+    send_query(&mut client, "DISCARD PLANS");
+    let plans = receive_until_ready(&mut client);
+    assert_eq!(plans[0].0, b'E');
+    assert!(plans[0].1.windows(5).any(|window| window == b"0A000"));
+    assert_eq!(plans.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// `DISCARD ALL` 回滚打开的未提交事务、恢复默认 GUC，并丢弃 prepared statement。
+#[test]
+fn discard_all_rolls_back_open_transaction_and_clears_caches() {
+    let (mut client, server) = start_server_with_runtime();
+
+    // 先登记一条命名 prepared statement。
+    let mut parse = cstring("d1");
+    parse.extend_from_slice(&cstring("SELECT id FROM users WHERE id = 1"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'S', &[]);
+    let parsed = receive_until_ready(&mut client);
+    assert!(parsed.iter().any(|(tag, _)| *tag == b'1'), "Parse must complete: {parsed:?}");
+
+    send_query(&mut client, "SET search_path = 'public'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "INSERT INTO users VALUES (1, 'alice')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+
+    send_query(&mut client, "DISCARD ALL");
+    let discarded = receive_until_ready(&mut client);
+    assert_eq!(discarded[0], (b'C', b"DISCARD ALL\0".to_vec()));
+    assert_eq!(discarded.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    // 未提交写入已被回滚，而不是提交。
+    send_query(&mut client, "SELECT COUNT(*) FROM users");
+    let counted = receive_until_ready(&mut client);
+    assert_eq!(parse_data_row(&counted[1].1), vec![Some(b"0".to_vec())]);
+
+    // 默认 `search_path` 已恢复。
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("$user") && text.contains("public"), "`DISCARD ALL` must restore the default, got {text}");
+
+    // prepared statement 缓存已丢弃，绑定名字必须报 26000。
+    let mut bind = cstring("p1");
+    bind.extend_from_slice(&cstring("d1"));
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    send_message(&mut client, b'S', &[]);
+    let rejected = receive_until_ready(&mut client);
+    let error = rejected.iter().find(|(tag, _)| *tag == b'E').expect("`DISCARD ALL` must drop the statement");
+    assert!(error.1.windows(5).any(|window| window == b"26000"), "{}", String::from_utf8_lossy(&error.1));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 失败事务内 `RESET` / `DISCARD` 与普通语句一样被 `25P02` 拒绝。
+#[test]
+fn reset_and_discard_are_rejected_in_an_aborted_transaction() {
+    let (mut client, server) = start_server();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    // 无 runtime 的 SELECT 让事务进入 aborted 状态。
+    send_query(&mut client, "SELECT 1");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"E".to_vec()));
+
+    assert_sqlstate_in_tx(&mut client, "RESET search_path", b"25P02");
+    assert_sqlstate_in_tx(&mut client, "RESET ALL", b"25P02");
+    assert_sqlstate_in_tx(&mut client, "DISCARD ALL", b"25P02");
+
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"ROLLBACK\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// PostgreSQL Bind 参数的 boolean OID 必须接受 `on`/`off`/`yes`/`no`/`y`/`n`
 /// 等 PG 扩展字面量，大小写不敏感。
 #[test]

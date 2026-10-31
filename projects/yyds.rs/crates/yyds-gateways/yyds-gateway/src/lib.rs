@@ -37,11 +37,12 @@ pub use crate::{
     config::GatewayConfig,
     kind::{GatewayKind, ALL_GATEWAY_KINDS},
     sql::{
-        bind_sql, detect_savepoint_statement, encode_hex, parse_session_command, parse_sql, SavepointIntent,
-        SqlBoundBinaryOperator, SqlBoundConflict, SqlBoundConflictAction, SqlBoundCte, SqlBoundExpression, SqlBoundJoin,
-        SqlBoundJoinKind, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperand, SqlBoundSetOperation,
-        SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement, SqlBoundUnaryOperator, SqlDialect, SqlErrorKind,
-        SqlFrontendError, SqlSessionCommand, SqlTransactionAction, SqlVariableScope, MYSQL_BLOB_CAPACITY,
+        bind_sql, detect_savepoint_statement, detect_session_reset_statement, encode_hex, parse_session_command, parse_sql,
+        DiscardTarget, SavepointIntent, SqlBoundBinaryOperator, SqlBoundConflict, SqlBoundConflictAction, SqlBoundCte,
+        SqlBoundExpression, SqlBoundJoin, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundProjection, SqlBoundSelect,
+        SqlBoundSetOperand, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource, SqlBoundStatement,
+        SqlBoundUnaryOperator, SqlDialect, SqlErrorKind, SqlFrontendError, SqlSessionCommand, SqlTransactionAction,
+        SqlVariableScope, MYSQL_BLOB_CAPACITY,
     },
 };
 
