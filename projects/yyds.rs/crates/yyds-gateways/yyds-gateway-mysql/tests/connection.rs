@@ -107,7 +107,7 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use yyds_execution::LocalExecutor;
     use yyds_gateway::SqlCatalog;
     use yyds_gateway_mysql::connection::{serve_connection, MysqlSqlRuntime};
-    use yyds_kv::{InlineValue, Key, KvStore, MemoryShard, StoredValue};
+    use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
     let source = "table users { @@id: i64, name: utf8, age: i64 }\n";
@@ -128,7 +128,8 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
 
-    let mut shard = MemoryShard::new();
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let mut shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
     // 预置 row: id=42, name=alice, age=30
     let mut values = yyds_gateway::RowFieldValues::new();
     values.insert(1, b"42".to_vec());
@@ -145,16 +146,19 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
     let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
-    spawn_runtime_server(runtime)
+    spawn_runtime_server(runtime, directory)
 }
 
 fn spawn_runtime_server(
     runtime: std::sync::Arc<yyds_gateway_mysql::connection::MysqlSqlRuntime>,
+    directory: boost_fs::temp::TempFolder,
 ) -> (TcpStream, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let rt = runtime;
     let server = thread::spawn(move || {
+        // 保活 TempFolder：shard 文件必须在服务线程存活期间保持可用。
+        let _directory = directory;
         let (stream, _) = listener.accept().unwrap();
         serve_connection(stream, Some(rt)).unwrap();
     });
@@ -164,7 +168,7 @@ fn spawn_runtime_server(
 }
 
 /// 向 shard 写入一整行（TLV 编码），供多表 fixture 共用。
-fn put_row(shard: &mut yyds_kv::MemoryShard, namespace: &str, rowid: &[u8], fields: &[(u64, &[u8])]) {
+fn put_row(shard: &mut dyn yyds_kv::KvStore, namespace: &str, rowid: &[u8], fields: &[(u64, &[u8])]) {
     use yyds_kv::{InlineValue, Key, KvStore, StoredValue};
     let mut values = yyds_gateway::RowFieldValues::new();
     for (field_id, bytes) in fields {
@@ -181,7 +185,7 @@ fn start_server_with_join_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use yyds_execution::LocalExecutor;
     use yyds_gateway::SqlCatalog;
     use yyds_gateway_mysql::connection::MysqlSqlRuntime;
-    use yyds_kv::MemoryShard;
+    use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
     let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n";
@@ -213,7 +217,8 @@ fn start_server_with_join_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
 
-    let mut shard = MemoryShard::new();
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let mut shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
     put_row(&mut shard, "table:1", b"1", &[(1, b"1"), (2, b"alice")]);
     put_row(&mut shard, "table:1", b"2", &[(1, b"2"), (2, b"bob")]);
     put_row(&mut shard, "table:2", b"10", &[(3, b"10"), (4, b"1"), (5, b"100")]);
@@ -227,7 +232,7 @@ fn start_server_with_join_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
     let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
-    spawn_runtime_server(runtime)
+    spawn_runtime_server(runtime, directory)
 }
 
 fn read_packet_full(stream: &mut TcpStream) -> (u8, Vec<u8>) {
@@ -841,7 +846,7 @@ fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
     use yyds_execution::LocalExecutor;
     use yyds_gateway::SqlCatalog;
     use yyds_gateway_mysql::connection::MysqlSqlRuntime;
-    use yyds_kv::MemoryShard;
+    use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
     let source = "table users { @@id: i64, name: utf8 }\n";
@@ -861,7 +866,8 @@ fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
 
-    let mut shard = MemoryShard::new();
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let mut shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
     put_row(&mut shard, "table:1", b"42", &[(1, b"42"), (2, b"alice")]);
 
     let epoch = ShardEpoch(1);
@@ -875,6 +881,8 @@ fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
+        // 保活 TempFolder：shard 文件必须在两个服务线程结束后才可删除。
+        let _directory = directory;
         let (first, _) = listener.accept().unwrap();
         let (second, _) = listener.accept().unwrap();
         let runtime_a = Arc::clone(&runtime);
@@ -1269,7 +1277,7 @@ fn start_server_with_payload_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use yyds_execution::LocalExecutor;
     use yyds_gateway::SqlCatalog;
     use yyds_gateway_mysql::connection::MysqlSqlRuntime;
-    use yyds_kv::MemoryShard;
+    use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
     let source = "table payloads { @@id: i64, blob: bytes? }\n";
@@ -1289,7 +1297,8 @@ fn start_server_with_payload_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
 
-    let shard = MemoryShard::new();
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
     let epoch = ShardEpoch(1);
     let shard_id = ShardId("s1".into());
     let routing = ShardMap::new(epoch, vec![shard_id.clone()]).expect("routing");
@@ -1298,7 +1307,7 @@ fn start_server_with_payload_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
     let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
-    spawn_runtime_server(runtime)
+    spawn_runtime_server(runtime, directory)
 }
 
 /// `bytes` 列在二进制协议（`COM_STMT_EXECUTE`）上原样往返 NUL、非 UTF-8 与空载荷，

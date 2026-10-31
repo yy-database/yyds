@@ -389,7 +389,7 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use yyds_execution::LocalExecutor;
     use yyds_gateway::SqlCatalog;
     use yyds_gateway_pgsql::connection::{serve_connection, PgsqlSqlRuntime};
-    use yyds_kv::MemoryShard;
+    use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
 
     let source = "table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64 }\ntable metrics { @@id: i64, score: f64, active: bool, blob: bytes, small: i32 }\n";
@@ -432,7 +432,8 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let contract = vos::resolve_contract(&projection, &manifest).expect("resolved contract");
     let catalog = SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog");
 
-    let shard = MemoryShard::new();
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
     let shard_id = ShardId("s1".into());
     let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
     let mut shards = std::collections::HashMap::new();
@@ -443,6 +444,8 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
+        // 保活 TempFolder：shard 文件必须在服务线程存活期间保持可用。
+        let _directory = directory;
         let (stream, _) = listener.accept().unwrap();
         serve_connection(stream, Some(runtime)).unwrap();
     });

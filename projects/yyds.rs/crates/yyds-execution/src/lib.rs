@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
+use yyds_kv::{FileShard, InlineValue, Key, KvStore, ShardChange, StoredValue};
 use yyds_types::{
     Error, FenceToken, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, OwnerEntry, ShardId, ShardMap,
 };
@@ -73,14 +73,19 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// Each element of `batch` carries the write command together with the original conditional
     /// (if any). Implementations must hold an exclusive executor-wide lock while re-checking
     /// every `BufferedCommit::condition` against the base store and then applying the writes
-    /// atomically, so that a concurrent transaction cannot slip between validate and apply and a
-    /// rejected condition never leaves a half-committed batch.
+    /// through a single durable atomic commit boundary, so that a concurrent transaction cannot
+    /// slip between validate and apply and a rejected condition — or a mid-commit storage
+    /// failure — never leaves a half-committed batch. A sequential per-command replay is not an
+    /// acceptable implementation: a process exit between two applies would persist a partial
+    /// batch.
     ///
     /// `fence` is validated at the boundary where the writes are applied: when `Some(token)` is
     /// supplied the implementation must reject the commit if the token no longer matches the
     /// catalog-published owner of every routed shard. `None` keeps the single-node local mode
     /// (no owner context). Executors without an atomic OCC-validated commit contract must
-    /// return `Error::Unsupported` (the default) instead of replaying commands one by one.
+    /// return `Error::Unsupported` (the default) instead of replaying commands one by one, and
+    /// an executor whose routed store lacks a durable atomic commit boundary must reject the
+    /// commit rather than fall back to an in-process lock.
     ///
     /// The committed batch must route to exactly one shard: the single-node atomic commit scope
     /// is a single shard, and a batch whose writes spread across shards is rejected with a
@@ -104,6 +109,11 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// `Error::Unsupported` at commit time and nothing is applied. Cross-shard (distributed)
     /// transactions are not disguised as ordinary local transactions. Executors without
     /// transaction support return `Error::Unsupported`.
+    ///
+    /// A transaction may only be opened when every mounted shard provides a durable atomic
+    /// commit boundary (see `yyds_kv::KvStore::durable_atomic_commit`). A store whose state
+    /// does not survive process exit must have its transactions rejected at begin time — an
+    /// executor-side mutex does not make a volatile commit durable.
     fn begin_transaction(self: Arc<Self>, _fence: Option<&FenceToken>) -> yyds_types::Result<Box<dyn TransactionHandle>> {
         Err(Error::Unsupported("this executor does not support local transactions"))
     }
@@ -756,9 +766,11 @@ where
     }
 
     fn commit_batch(&self, fence: Option<&FenceToken>, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {
-        // The entire fence validation, OCC pre-check and replay must sit inside one global-lock
-        // holding interval; otherwise a concurrent `PutIfAbsent` from another transaction could
-        // sneak between our re-check and our own replay and we would silently overwrite it.
+        // The entire fence validation, OCC pre-check and commit boundary must sit inside one
+        // global-lock holding interval; otherwise a concurrent `PutIfAbsent` from another
+        // transaction could sneak between our re-check and our own commit and we would silently
+        // overwrite it. The global lock only serialises committers: the crash-atomicity of the
+        // batch comes from the store's durable commit boundary below, not from this mutex.
         Self::with_global_lock(|| {
             // Single-shard atomic scope: the whole batch must route to one shard. A batch that
             // spreads across shards is a distributed transaction, which this phase does not
@@ -776,10 +788,21 @@ where
                     Some(_) => {}
                 }
             }
+            let Some(shard_id) = &batch_shard
+            else {
+                return Ok(());
+            };
             // Ownership must be proven at the boundary where the writes are applied: the routed
             // shard of the batch has to still belong to the fence's leader and term.
-            if let Some(shard) = &batch_shard {
-                self.check_fence(fence, shard)?;
+            self.check_fence(fence, shard_id)?;
+            // Durability gate: only a store with a durable atomic commit boundary may accept a
+            // batch commit. Reject before any validation so a volatile store never degrades an
+            // atomic commit into a sequence of individually-visible writes.
+            let store = self.shards.get(shard_id).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
+            if !store.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?.durable_atomic_commit() {
+                return Err(Error::Unsupported(
+                    "batch commits require a store with a durable atomic commit boundary",
+                ));
             }
             for entry in &batch {
                 if let Some(condition) = &entry.condition {
@@ -813,18 +836,40 @@ where
                     }
                 }
             }
+            // Map the validated batch onto one shard-level change set. Buffered transaction
+            // writes are only ever Put / Delete; anything else is rejected explicitly instead
+            // of being replayed command by command.
+            let mut changes = Vec::with_capacity(batch.len());
             for entry in batch {
-                self.execute_single_locked(entry.command)?;
+                let key = Key::new(entry.command.namespace.0, entry.command.key);
+                match entry.command.action {
+                    KeyValueAction::Put(value) => changes.push(ShardChange::Put { key, value: StoredValue::Inline(InlineValue(value)) }),
+                    KeyValueAction::Delete => changes.push(ShardChange::Delete { key }),
+                    _ => {
+                        return Err(Error::Unsupported("batch commits accept only Put and Delete commands"));
+                    }
+                }
             }
-            Ok(())
+            // Single durable commit boundary: the store stages the complete post-commit
+            // snapshot, writes it durably, and only then publishes it. Either every change is
+            // committed and survives process exit, or none is.
+            store.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?.commit_changes(changes)
         })
     }
 
     fn begin_transaction(self: Arc<Self>, fence: Option<&FenceToken>) -> yyds_types::Result<Box<dyn TransactionHandle>> {
-        // The local executor provides an atomic OCC-validated commit path, so it can open a
-        // transaction. The caller's fence (routing epoch + leader term + owner node) is captured
-        // into the handle and replayed verbatim at commit time; a single-node gateway passes
-        // `None` explicitly rather than letting the handle default to an unowned commit.
+        // Durability gate: a transaction may only be opened when every mounted shard can commit
+        // through a durable atomic boundary. An in-memory shard's commit does not survive
+        // process exit, so accepting it would disguise volatility behind the executor-wide
+        // mutex; reject at begin time instead.
+        for shard in self.shards.values() {
+            if !shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?.durable_atomic_commit() {
+                return Err(Error::Unsupported("transactions require every mounted shard to provide a durable atomic commit boundary"));
+            }
+        }
+        // The caller's fence (routing epoch + leader term + owner node) is captured into the
+        // handle and replayed verbatim at commit time; a single-node gateway passes `None`
+        // explicitly rather than letting the handle default to an unowned commit.
         Ok(Box::new(LocalTransactionHandle::new(self, fence.cloned())))
     }
 }

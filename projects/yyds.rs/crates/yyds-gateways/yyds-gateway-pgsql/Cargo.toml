@@ -17,6 +17,7 @@ yyds-control = { workspace = true }
 yyds-execution = { workspace = true }
 
 [dev-dependencies]
+boost-fs = { workspace = true }
 yyds-gateway-conformance = { workspace = true }
 vos = { workspace = true }
 yyds-execution = { workspace = true }
