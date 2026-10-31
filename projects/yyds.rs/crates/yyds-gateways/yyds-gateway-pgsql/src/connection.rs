@@ -15,9 +15,9 @@ use crate::wire::{decode_message, decode_startup, encode_message, FrameError, St
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, describe_plan, encode_hex, execute_plan, neutralized_sql_parameters, nulled_sql_parameters,
-    parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral,
-    SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle,
-    SqlSessionCommand, SqlTransactionAction, SqlValue,
+    parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, DiscardTarget, SqlBoundExpression,
+    SqlBoundLiteral, SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
+    SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -43,6 +43,10 @@ const CANCEL_REQUEST: u32 = 80_877_102;
 const MAX_STARTUP_FRAME: usize = 64 * 1024;
 const MAX_MESSAGE_FRAME: usize = 16 * 1024 * 1024;
 static NEXT_SECRET: AtomicU32 = AtomicU32::new(1);
+
+/// PostgreSQL's default `search_path`, also the value `RESET search_path` and
+/// `DISCARD ALL` restore.
+const DEFAULT_SEARCH_PATH: &str = "$user, public";
 
 /// Injects YYDS SQL execution into PostgreSQL SimpleQuery.
 #[derive(Debug)]
@@ -147,7 +151,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
                     session.fail();
                 }
                 else if let Ok(sql) = std::str::from_utf8(sql_bytes) {
-                    handle_simple_query(&mut stream, sql, &mut session, runtime.as_ref())?;
+                    handle_simple_query(&mut stream, sql, &mut session, &mut extended, runtime.as_ref())?;
                 }
                 else {
                     write_error_response(&mut stream, "22021", "query is not valid UTF-8")?;
@@ -217,8 +221,31 @@ impl TransactionSession {
             handle: None,
             protocol_only_transaction: false,
             failed: false,
-            search_path: "$user, public".to_string(),
+            search_path: DEFAULT_SEARCH_PATH.to_string(),
         }
+    }
+
+    /// `RESET` / `RESET ALL`: every emulated GUC returns to its default.
+    ///
+    /// The gateway keeps no override for GUCs other than `search_path` (their
+    /// `SET` is accepted as a no-op and `SHOW` answers the default table), so
+    /// restoring them is already satisfied by the static default table.
+    fn reset_parameters(&mut self) {
+        self.search_path = DEFAULT_SEARCH_PATH.to_string();
+    }
+
+    /// `DISCARD ALL`: full session cleanup. An open transaction is rolled back —
+    /// never committed — the aborted flag clears and all emulated GUCs return to
+    /// their defaults. Prepared statements and portals live in
+    /// [`ExtendedSession`] and are dropped by the caller.
+    fn discard_all(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.rollback();
+        }
+        self.executor = None;
+        self.protocol_only_transaction = false;
+        self.failed = false;
+        self.reset_parameters();
     }
 
     fn as_status(&self) -> TransactionStatus {
@@ -268,6 +295,7 @@ fn handle_simple_query(
     stream: &mut impl Write,
     sql: &str,
     session: &mut TransactionSession,
+    extended: &mut ExtendedSession,
     runtime: Option<&Arc<PgsqlSqlRuntime>>,
 ) -> io::Result<()> {
     match parse_session_command(sql) {
@@ -472,6 +500,75 @@ fn handle_simple_query(
         Ok(Some(SqlSessionCommand::Pragma { .. })) => {
             session.fail();
             write_error_response(stream, "42601", "PRAGMA is not PostgreSQL syntax")
+        }
+        Ok(Some(SqlSessionCommand::ResetVariables { name })) => {
+            // `RESET` is an ordinary utility statement, so an aborted transaction
+            // rejects it exactly like any other command (PostgreSQL `25P02`).
+            if session.failed {
+                return write_error_response(
+                    stream,
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block",
+                );
+            }
+            match name.as_deref() {
+                // `RESET ALL` restores every emulated GUC to its default value.
+                None => session.reset_parameters(),
+                Some(name) => {
+                    if pg_parameter(name).is_none() {
+                        session.fail();
+                        return write_error_response(
+                            stream,
+                            "42704",
+                            &format!("unrecognized configuration parameter \"{name}\""),
+                        );
+                    }
+                    // The default table is the RESET value, and `search_path` is the
+                    // only parameter the session actually overrides.
+                    if name.trim().eq_ignore_ascii_case("search_path") {
+                        session.reset_parameters();
+                    }
+                }
+            }
+            write_command_complete(stream, "RESET")
+        }
+        Ok(Some(SqlSessionCommand::Discard(target))) => {
+            if session.failed {
+                return write_error_response(
+                    stream,
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block",
+                );
+            }
+            match target {
+                // PostgreSQL refuses `DISCARD ALL` inside a transaction block. The
+                // gateway instead applies it as the documented session cleanup that
+                // connection pools expect: any open transaction is rolled back rather
+                // than committed, emulated GUCs return to their defaults and the
+                // prepared-statement/portal caches are dropped. Temporary tables and
+                // advisory locks are outside the gateway subset, so nothing else is
+                // released here.
+                DiscardTarget::All => {
+                    session.discard_all();
+                    extended.statements.clear();
+                    extended.portals.clear();
+                    write_command_complete(stream, "DISCARD ALL")
+                }
+                // The remaining targets only release caches this gateway does not keep
+                // (`PLANS`, `SEQUENCES`) or objects it does not create (`TEMPORARY`).
+                // They stay explicitly unsupported instead of silently pretending to
+                // perform a cleanup.
+                other => {
+                    let label = match other {
+                        DiscardTarget::Plans => "DISCARD PLANS",
+                        DiscardTarget::Sequences => "DISCARD SEQUENCES",
+                        DiscardTarget::Temporary => "DISCARD TEMPORARY",
+                        DiscardTarget::All => unreachable!("`DISCARD ALL` is handled above"),
+                    };
+                    session.fail();
+                    write_error_response(stream, "0A000", &format!("{label} is not supported by the gateway"))
+                }
+            }
         }
         Ok(Some(SqlSessionCommand::SetNames { .. })) | Ok(None) => {
             if session.failed {
@@ -1169,7 +1266,7 @@ const PG_PARAMETERS: &[(&str, &str)] = &[
     ("intervalstyle", "postgres"),
     ("server_encoding", "UTF8"),
     ("server_version", PG_SERVER_VERSION),
-    ("search_path", "$user, public"),
+    ("search_path", DEFAULT_SEARCH_PATH),
     ("standard_conforming_strings", "on"),
     ("timezone", "UTC"),
     ("transaction_isolation", "read committed"),

@@ -595,6 +595,18 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         session.fail();
                         write_error(&mut stream, sequence.wrapping_add(1), 1064, "42000", "PRAGMA is not MySQL syntax")?;
                     }
+                    Ok(Some(SqlSessionCommand::ResetVariables { .. })) | Ok(Some(SqlSessionCommand::Discard(_))) => {
+                        // `RESET ...` / `DISCARD ...` are PostgreSQL session verbs. MySQL has no
+                        // equivalent statement in the gateway subset, so answer with its normal
+                        // syntax error instead of pretending to reset state.
+                        write_error(
+                            &mut stream,
+                            sequence.wrapping_add(1),
+                            1064,
+                            "42000",
+                            "RESET / DISCARD session statements are PostgreSQL syntax",
+                        )?;
+                    }
                     Err(_) => {
                         // 语法错误与“未接入执行器”必须是不同错误，否则没有 runtime 时
                         // 客户端会把语法错误误判为不支持的能力。
