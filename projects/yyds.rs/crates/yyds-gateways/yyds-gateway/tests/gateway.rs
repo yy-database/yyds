@@ -3450,6 +3450,113 @@ fn sql_common_table_expression_flattens_onto_its_base_table() {
 }
 
 #[test]
+fn sql_window_ntile_lag_lead_evaluate_over_partitioned_ordering() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }\n");
+    let executor = empty_executor();
+    for sql in [
+        "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
+        "INSERT INTO users VALUES (2, 'bob', 20, 2.5, FALSE, NULL)",
+        "INSERT INTO users VALUES (3, 'carol', 40, 3.25, TRUE, '')",
+        "INSERT INTO users VALUES (4, 'dave', 30, 0.5, FALSE, 'y')",
+    ] {
+        run_sql(&executor, None, &catalog, sql);
+    }
+
+    // `NTILE(3)` 按 age 排序分 4 行为 3 桶：余数分给前面的桶（1,1,2,3）。
+    let ntile = run_sql(&executor, None, &catalog, "SELECT id, NTILE(3) OVER (ORDER BY age) FROM users ORDER BY id");
+    assert_eq!(
+        ntile.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Integer(1)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Integer(1)],
+            vec![yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::Integer(3)],
+            vec![yyds_gateway::SqlValue::Integer(4), yyds_gateway::SqlValue::Integer(2)],
+        ]
+    );
+
+    // `LAG` 取排序前一行，越出分区是 NULL；`LEAD` 取排序后一行。
+    let values = run_sql(
+        &executor,
+        None,
+        &catalog,
+        "SELECT id, LAG(name) OVER (ORDER BY age), LEAD(age) OVER (ORDER BY age) FROM users ORDER BY id",
+    );
+    assert_eq!(
+        values.rows,
+        vec![
+            vec![
+                yyds_gateway::SqlValue::Integer(1),
+                yyds_gateway::SqlValue::String("bob".into()),
+                yyds_gateway::SqlValue::Integer(30)
+            ],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Null, yyds_gateway::SqlValue::Integer(30)],
+            vec![
+                yyds_gateway::SqlValue::Integer(3),
+                yyds_gateway::SqlValue::String("dave".into()),
+                yyds_gateway::SqlValue::Null
+            ],
+            vec![
+                yyds_gateway::SqlValue::Integer(4),
+                yyds_gateway::SqlValue::String("alice".into()),
+                yyds_gateway::SqlValue::Integer(40)
+            ],
+        ]
+    );
+
+    // 显式偏移与默认值：越出分区时按当前行求值默认表达式。
+    let defaulted =
+        run_sql(&executor, None, &catalog, "SELECT id, LAG(score, 2, 0.0) OVER (ORDER BY age) FROM users ORDER BY id");
+    assert_eq!(
+        defaulted.rows,
+        vec![
+            vec![yyds_gateway::SqlValue::Integer(1), yyds_gateway::SqlValue::Number(0.0)],
+            vec![yyds_gateway::SqlValue::Integer(2), yyds_gateway::SqlValue::Number(0.0)],
+            vec![yyds_gateway::SqlValue::Integer(3), yyds_gateway::SqlValue::Number(1.5)],
+            vec![yyds_gateway::SqlValue::Integer(4), yyds_gateway::SqlValue::Number(2.5)],
+        ]
+    );
+}
+
+#[test]
+fn sql_window_ntile_lag_lead_reject_invalid_shapes_at_bind_time() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }\n");
+
+    // 参数个数、常量形状、ORDER BY、DISTINCT、嵌套聚合与显式 frame 全部在绑定期显式拒绝。
+    for sql in [
+        "SELECT NTILE() OVER (ORDER BY age) FROM users",
+        "SELECT NTILE(2, 3) OVER (ORDER BY age) FROM users",
+        "SELECT NTILE(age) OVER (ORDER BY age) FROM users",
+        "SELECT NTILE(0) OVER (ORDER BY age) FROM users",
+        "SELECT NTILE(-1) OVER (ORDER BY age) FROM users",
+        "SELECT NTILE(2) OVER (PARTITION BY active) FROM users",
+        "SELECT NTILE(2) OVER (ORDER BY age ROWS BETWEEN CURRENT ROW AND CURRENT ROW) FROM users",
+        "SELECT NTILE(2) OVER (ORDER BY age RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
+        "SELECT LAG(name) OVER (PARTITION BY active) FROM users",
+        "SELECT LAG(name, -1) OVER (ORDER BY age) FROM users",
+        "SELECT LAG(name, age) OVER (ORDER BY age) FROM users",
+        "SELECT LAG(DISTINCT name) OVER (ORDER BY age) FROM users",
+        "SELECT LEAD(name, 1, 2, 3) OVER (ORDER BY age) FROM users",
+        "SELECT LEAD(SUM(age)) OVER (ORDER BY age) FROM users",
+        "SELECT LAG(name) OVER (ORDER BY age ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
+        "SELECT ROW_NUMBER(1) OVER (ORDER BY age) FROM users",
+        "SELECT NTILE(2) FROM users",
+        "SELECT LAG(name) FROM users",
+    ] {
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+            .err()
+            .unwrap_or_else(|| panic!("`{sql}` must be rejected at bind time"));
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}: {}", error.message);
+    }
+
+    // 未知窗口名保持窗口语境诊断，与不支持参数形状的诊断分离。
+    let unknown = yyds_gateway::bind_sql_catalog("SELECT FIRST_VALUE(name) OVER (ORDER BY age) FROM users", &catalog, 7)
+        .err()
+        .expect("FIRST_VALUE is outside the gateway subset");
+    assert_eq!(unknown.kind, yyds_gateway::SqlErrorKind::Unsupported, "{}", unknown.message);
+    assert!(unknown.message.contains("window function"), "{}", unknown.message);
+}
+
+#[test]
 fn sql_subqueries_inherit_the_enclosing_cte_scope() {
     use yyds_gateway::SqlValue;
 

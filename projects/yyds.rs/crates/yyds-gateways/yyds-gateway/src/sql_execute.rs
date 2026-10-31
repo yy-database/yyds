@@ -2084,8 +2084,8 @@ fn eval_window_projection(
     nulls_first: bool,
     dialect: SqlDialect,
 ) -> Result<Vec<SqlValue>, SqlFrontendError> {
-    let (name, spec) = match expr {
-        SqlCatalogBoundExpression::Function { name, window: Some(spec), .. } => (name, spec),
+    let (name, args, spec) = match expr {
+        SqlCatalogBoundExpression::Function { name, args, window: Some(spec), .. } => (name, args, spec),
         _ => return Err(execute_error(&format!("window evaluation requires a window function call: {expr:?}"))),
     };
     let ranking = SqlWindowFunction::from_name(name);
@@ -2093,6 +2093,33 @@ fn eval_window_projection(
     if ranking.is_none() && aggregate.is_none() {
         return Err(execute_error(&format!("unknown window function: {name}")));
     }
+    // binder 已固定 `NTILE` / `LAG` / `LEAD` 的参数形状，这里按同一形状防御性提取，
+    // 供分区循环复用；形状不符说明绑定链被绕过，显式报错而不是猜测。
+    let ntile_buckets = match ranking {
+        Some(SqlWindowFunction::Ntile) => match args.first() {
+            Some(SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Integer(buckets))) if *buckets >= 1 => Some(*buckets),
+            _ => return Err(execute_error("window function NTILE() requires the bucket count to be an integer literal >= 1")),
+        },
+        _ => None,
+    };
+    let lag_lead = match ranking {
+        Some(SqlWindowFunction::Lag) | Some(SqlWindowFunction::Lead) => {
+            let value = args
+                .first()
+                .ok_or_else(|| execute_error(&format!("window function {name}() is missing its value argument")))?;
+            let offset = match args.get(1) {
+                Some(SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Integer(offset))) if *offset >= 0 => *offset,
+                Some(_) => {
+                    return Err(execute_error(&format!(
+                        "window function {name}() requires the row offset to be an integer literal >= 0"
+                    )))
+                }
+                None => 1,
+            };
+            Some((value, offset, args.get(2)))
+        }
+        _ => None,
+    };
 
     // 分区 key 复用 GROUP BY 的稳定序列化：两个 NULL 落在同一分区，而 `1` 与 `'1'`
     // 不会混在一起。
@@ -2162,7 +2189,33 @@ fn eval_window_projection(
                 Some(SqlWindowFunction::RowNumber) => SqlValue::Integer(i64::try_from(position + 1).unwrap_or(i64::MAX)),
                 Some(SqlWindowFunction::Rank) => SqlValue::Integer(i64::try_from(peer_start[position] + 1).unwrap_or(i64::MAX)),
                 Some(SqlWindowFunction::DenseRank) => SqlValue::Integer(dense_rank[position]),
-                _ => {
+                Some(SqlWindowFunction::Ntile) => {
+                    // 标准公式 `floor(position * buckets / len) + 1`（position 从 0 起），
+                    // 余数分给前面的桶，与 MySQL / PostgreSQL 一致；i128 中间值防溢出。
+                    let buckets =
+                        ntile_buckets.ok_or_else(|| execute_error("window function NTILE() is missing its bucket count"))?;
+                    let bucket = position as i128 * buckets as i128 / ordered_rows.len() as i128 + 1;
+                    SqlValue::Integer(i64::try_from(bucket).unwrap_or(i64::MAX))
+                }
+                Some(SqlWindowFunction::Lag) | Some(SqlWindowFunction::Lead) => {
+                    let (value_expr, offset, default) =
+                        lag_lead.ok_or_else(|| execute_error(&format!("window function {name}() is missing its arguments")))?;
+                    let target = if matches!(ranking, Some(SqlWindowFunction::Lag)) {
+                        position as i128 - offset as i128
+                    }
+                    else {
+                        position as i128 + offset as i128
+                    };
+                    match usize::try_from(target).ok().filter(|target| *target < ordered_rows.len()) {
+                        Some(target) => eval_expression(value_expr, &ordered_rows[target], field_types, dialect)?,
+                        // 越出分区：有默认值就按当前行求值，否则 SQL NULL。
+                        None => match default {
+                            Some(default) => eval_expression(default, &rows[*index], field_types, dialect)?,
+                            None => SqlValue::Null,
+                        },
+                    }
+                }
+                None => {
                     let (frame_start, frame_end) = window_frame_bounds(spec, position, peer_end[position], ordered_rows.len());
                     let frame =
                         if frame_start < frame_end { &ordered_rows[frame_start..frame_end] } else { &ordered_rows[0..0] };

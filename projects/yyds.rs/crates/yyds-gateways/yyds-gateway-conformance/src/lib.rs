@@ -893,7 +893,8 @@ pub fn aggregate_empty_cases() -> Vec<Case> {
     ]
 }
 
-/// Window functions: ranking over a partition and order, aggregate windows over
+/// Window functions: ranking and `NTILE` buckets over a partition and order,
+/// `LAG` / `LEAD` value access across ordered rows, aggregate windows over
 /// the default frame, explicit `ROWS` frames, and dialect-dependent `NULL`
 /// placement of the window `ORDER BY`.
 ///
@@ -902,7 +903,7 @@ pub fn aggregate_empty_cases() -> Vec<Case> {
 /// partition. `ROWS` frames count physical rows instead, so the two must not be
 /// confused.
 pub fn window_cases() -> Vec<Case> {
-    use Lit::{Float, Int, Null};
+    use Lit::{Float, Int, Null, Text};
 
     vec![
         case("window row number over partition and order")
@@ -1011,6 +1012,41 @@ pub fn window_cases() -> Vec<Case> {
                  SUM(age) OVER (ORDER BY age ROWS BETWEEN 2 FOLLOWING AND 3 FOLLOWING) FROM users ORDER BY id",
             )
             .rows(&[&[Int(1), Int(1), Int(40)], &[Int(2), Int(2), Int(70)], &[Int(3), Int(0), Null], &[Int(4), Int(0), Null]])
+            .build(),
+        case("window ntile three buckets over four rows")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, NTILE(3) OVER (ORDER BY age) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(1)], &[Int(2), Int(1)], &[Int(3), Int(3)], &[Int(4), Int(2)]])
+            .build(),
+        case("window ntile two buckets per partition")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, NTILE(2) OVER (PARTITION BY active ORDER BY age) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(1)], &[Int(2), Int(1)], &[Int(3), Int(2)], &[Int(4), Int(2)]])
+            .build(),
+        case("window lag and lead with the default offset")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, LAG(name) OVER (ORDER BY age), LEAD(age) OVER (ORDER BY age) FROM users ORDER BY id")
+            .rows(&[
+                &[Int(1), Text("bob"), Int(30)],
+                &[Int(2), Null, Int(30)],
+                &[Int(3), Text("dave"), Null],
+                &[Int(4), Text("alice"), Int(40)],
+            ])
+            .build(),
+        case("window lag with explicit offset and default")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, LAG(score, 2, 0.0) OVER (ORDER BY age) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Float(0.0)], &[Int(2), Float(0.0)], &[Int(3), Float(1.5)], &[Int(4), Float(2.5)]])
+            .build(),
+        case("window lead over descending order with default")
+            .setup(ORDER_SEED)
+            .state(DEFAULT_STATE_COLUMNS, order_state())
+            .sql("SELECT id, LEAD(age, 1, -1) OVER (ORDER BY age DESC, id) FROM users ORDER BY id")
+            .rows(&[&[Int(1), Int(30)], &[Int(2), Int(-1)], &[Int(3), Int(30)], &[Int(4), Int(20)]])
             .build(),
     ]
 }
@@ -1263,8 +1299,6 @@ pub const REJECTED_SQL: &[(&str, &str)] = &[
     ("window function with GROUP BY", "SELECT age, ROW_NUMBER() OVER (ORDER BY age) FROM users GROUP BY age"),
     ("window function inside a larger expression", "SELECT id, ROW_NUMBER() OVER (ORDER BY age) + 1 FROM users"),
     ("window function inside an aggregate argument", "SELECT SUM(ROW_NUMBER() OVER (ORDER BY age)) FROM users"),
-    ("unimplemented window function", "SELECT id, NTILE(2) OVER (ORDER BY age) FROM users"),
-    ("unimplemented offset window function", "SELECT id, LAG(age) OVER (ORDER BY age) FROM users"),
     ("named window", "SELECT id, ROW_NUMBER() OVER w FROM users WINDOW w AS (ORDER BY age)"),
     // `DO UPDATE SET` 只放开数值表达式；`CASE`、函数调用与子查询继续显式拒绝，不做近似执行。
     (

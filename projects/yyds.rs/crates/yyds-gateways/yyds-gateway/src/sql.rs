@@ -763,8 +763,9 @@ impl SqlAggregateFunction {
 
 /// SQL window-only function identity recognized by the gateway.
 ///
-/// These are ranking functions: they take no argument and always require an
-/// `OVER (...)` clause.
+/// Ranking functions take no argument; `NTILE` takes one integer bucket count;
+/// `LAG` / `LEAD` take a value expression plus an optional integer row offset
+/// and default. Every one of them requires an `OVER (...)` clause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlWindowFunction {
     /// `ROW_NUMBER()` — 1-based position inside the window ordering.
@@ -773,6 +774,12 @@ pub enum SqlWindowFunction {
     Rank,
     /// `DENSE_RANK()` — peer group ordinal without gaps.
     DenseRank,
+    /// `NTILE(n)` — 1-based ordinal of the evenly sized bucket the row falls into.
+    Ntile,
+    /// `LAG(expr[, offset[, default]])` — value from `offset` rows before the current one.
+    Lag,
+    /// `LEAD(expr[, offset[, default]])` — value from `offset` rows after the current one.
+    Lead,
 }
 
 impl SqlWindowFunction {
@@ -781,6 +788,9 @@ impl SqlWindowFunction {
             "ROW_NUMBER" => Some(Self::RowNumber),
             "RANK" => Some(Self::Rank),
             "DENSE_RANK" => Some(Self::DenseRank),
+            "NTILE" => Some(Self::Ntile),
+            "LAG" => Some(Self::Lag),
+            "LEAD" => Some(Self::Lead),
             _ => None,
         }
     }
@@ -789,6 +799,9 @@ impl SqlWindowFunction {
             Self::RowNumber => "ROW_NUMBER",
             Self::Rank => "RANK",
             Self::DenseRank => "DENSE_RANK",
+            Self::Ntile => "NTILE",
+            Self::Lag => "LAG",
+            Self::Lead => "LEAD",
         }
     }
 }
@@ -1503,6 +1516,27 @@ fn bind_window_frame_bound(bound: oak_sql::ast::WindowFrameBound) -> SqlBoundWin
     }
 }
 
+/// 提取窗口函数的整数常量参数：必须是整数字面量且不小于 `minimum`。
+/// `NTILE` 的分桶数与 `LAG` / `LEAD` 的行偏移在绑定期就固定为常量，执行层只按
+/// 同一形状防御性读取，不接受列引用或计算表达式。
+fn window_integer_argument(
+    argument: &SqlBoundExpression,
+    display: &str,
+    role: &str,
+    minimum: i64,
+) -> Result<i64, SqlFrontendError> {
+    let SqlBoundExpression::Literal(SqlBoundLiteral::Integer(value)) = argument
+    else {
+        return Err(SqlFrontendError::unsupported(format!(
+            "{display}() requires the {role} to be an integer literal, not a computed expression"
+        )));
+    };
+    if *value < minimum {
+        return Err(SqlFrontendError::unsupported(format!("{display}() requires the {role} to be >= {minimum}, got {value}")));
+    }
+    Ok(*value)
+}
+
 /// Binds an Oak `FROM` / `JOIN` source into a catalog table reference or a
 /// derived table. A derived table is a full nested `SELECT`, so it is bound
 /// through the same [`bind_select_statement`] path as every other query.
@@ -1638,25 +1672,73 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             let bound_args = args.iter().map(bind_expression).collect::<Result<Vec<_>, _>>()?;
             let bound_window = window.as_ref().map(bind_window_spec).transpose()?;
 
-            // 排名函数只存在于窗口上下文，且不接受参数与 DISTINCT。
-            if SqlWindowFunction::from_name(&fname).is_some() {
-                if bound_window.is_none() {
+            // 窗口函数只存在于窗口上下文，且不接受 DISTINCT；参数形状按函数逐个校验。
+            if let Some(function) = SqlWindowFunction::from_name(&fname) {
+                let Some(spec) = bound_window.as_ref()
+                else {
                     return Err(SqlFrontendError::unsupported(format!(
                         "{display}() is a window function and requires an OVER (...) clause"
                     )));
-                }
-                if !bound_args.is_empty() {
-                    return Err(SqlFrontendError::unsupported(format!("{display}() takes no arguments")));
-                }
+                };
                 if *distinct {
                     return Err(SqlFrontendError::unsupported(format!("{display}() does not accept the DISTINCT quantifier")));
                 }
-                return Ok(SqlBoundExpression::Function {
-                    name: fname,
-                    args: Vec::new(),
-                    distinct: false,
-                    window: bound_window,
-                });
+                if let Some(nested) = bound_args.iter().find_map(find_aggregate_call) {
+                    return Err(SqlFrontendError::unsupported(format!(
+                        "window function {display}() cannot take the aggregate {nested}() as its argument"
+                    )));
+                }
+                let args = match function {
+                    SqlWindowFunction::RowNumber | SqlWindowFunction::Rank | SqlWindowFunction::DenseRank => {
+                        if !bound_args.is_empty() {
+                            return Err(SqlFrontendError::unsupported(format!("{display}() takes no arguments")));
+                        }
+                        Vec::new()
+                    }
+                    SqlWindowFunction::Ntile => {
+                        if bound_args.len() != 1 {
+                            return Err(SqlFrontendError::unsupported(format!(
+                                "{display}() expects exactly 1 argument (bucket count), got {}",
+                                bound_args.len()
+                            )));
+                        }
+                        if spec.order_by.is_empty() {
+                            return Err(SqlFrontendError::unsupported(format!(
+                                "{display}() requires an ORDER BY inside the OVER (...) clause"
+                            )));
+                        }
+                        if spec.frame.is_some() {
+                            return Err(SqlFrontendError::unsupported(format!(
+                                "{display}() does not accept an explicit window frame"
+                            )));
+                        }
+                        window_integer_argument(&bound_args[0], &display, "bucket count", 1)?;
+                        bound_args
+                    }
+                    SqlWindowFunction::Lag | SqlWindowFunction::Lead => {
+                        if bound_args.is_empty() || bound_args.len() > 3 {
+                            return Err(SqlFrontendError::unsupported(format!(
+                                "{display}() expects 1 to 3 arguments (value, offset, default), got {}",
+                                bound_args.len()
+                            )));
+                        }
+                        if spec.order_by.is_empty() {
+                            return Err(SqlFrontendError::unsupported(format!(
+                                "{display}() requires an ORDER BY inside the OVER (...) clause"
+                            )));
+                        }
+                        if spec.frame.is_some() {
+                            return Err(SqlFrontendError::unsupported(format!(
+                                "{display}() does not accept an explicit window frame"
+                            )));
+                        }
+                        if bound_args.len() >= 2 {
+                            window_integer_argument(&bound_args[1], &display, "row offset", 0)?;
+                        }
+                        bound_args
+                    }
+                };
+                return Ok(SqlBoundExpression::Function { name: fname, args, distinct: false, window: bound_window });
             }
 
             // 聚合函数与标量内建函数是两类；未知名称在绑定期直接拒绝。
@@ -1685,7 +1767,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
             let Some(scalar) = SqlScalarFunction::from_name(&fname)
             else {
                 // `OVER (...)` 只挂在已知的窗口/聚合函数上；其余名字既不是标量函数
-                // 也没有窗口语义（`NTILE` / `LAG` / `LEAD` / `FIRST_VALUE` / ...）。
+                // 也没有窗口语义（`FIRST_VALUE` / `NTH_VALUE` / ...）。
                 return Err(if bound_window.is_some() {
                     SqlFrontendError::unsupported(format!("SQL window function is not supported by the gateway: {display}"))
                 }
