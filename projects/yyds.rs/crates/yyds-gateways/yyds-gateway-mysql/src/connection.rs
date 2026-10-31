@@ -42,6 +42,12 @@ const COM_STMT_PREPARE: u8 = 0x16;
 const COM_STMT_EXECUTE: u8 = 0x17;
 const COM_STMT_CLOSE: u8 = 0x19;
 const COM_STMT_RESET: u8 = 0x1A;
+const COM_RESET_CONNECTION: u8 = 0x1F;
+
+/// `ER_UNKNOWN_COM_ERROR` — returned for every command byte the gateway does not
+/// implement so the client sees a real MySQL error instead of a desynchronised
+/// stream.
+const ER_UNKNOWN_COM_ERROR: u16 = 1047;
 
 /// `MYSQL_TYPE_*` codes carried by parameter and column definitions.
 const MYSQL_TYPE_DECIMAL: u8 = 0x00;
@@ -235,6 +241,22 @@ impl Default for MysqlTransactionSession {
     }
 }
 
+/// `COM_RESET_CONNECTION` (0x1F): the session must look like a brand-new
+/// connection without re-authenticating or rebuilding the socket. Any open
+/// explicit transaction is rolled back — never committed — because the gateway
+/// keeps one commit point per command, autocommit returns to its default ON,
+/// the aborted flag clears and every prepared statement handle is dropped
+/// (real MySQL also invalidates them on reset).
+fn reset_connection_session(session: &mut MysqlTransactionSession, statements: &mut PreparedStatements) {
+    if let Some(handle) = session.handle.take() {
+        handle.rollback();
+    }
+    session.executor = None;
+    session.failed = false;
+    session.autocommit = true;
+    statements.entries.clear();
+}
+
 /// A prepared statement as advertised by `COM_STMT_PREPARE`: the SQL text, the
 /// catalog-derived result shape and the parameter types the client last bound.
 struct PreparedStatement {
@@ -306,8 +328,17 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
             COM_QUIT => return Ok(()),
             // Drivers issue COM_PING to prove liveness before creating a cursor
             // and COM_INIT_DB when switching schema. The gateway keeps a single
-            // catalog, so both are answered with the protocol OK packet.
+            // catalog, so `COM_INIT_DB` only acknowledges the new default schema
+            // and must not reset any session state, while `COM_PING` is a
+            // no-op. Both are answered with the protocol OK packet.
             COM_PING | COM_INIT_DB => write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?,
+            // Connection pools (mysql-connector, SQLAlchemy `reset`) use this to
+            // return an idle connection to its initial state. The socket and the
+            // authentication stay untouched; only session state is reset.
+            COM_RESET_CONNECTION => {
+                reset_connection_session(&mut session, &mut statements);
+                write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
+            }
             COM_STMT_PREPARE => handle_prepare(
                 &mut stream,
                 sequence.wrapping_add(1),
@@ -602,7 +633,18 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                     }
                 }
             }
-            _ => write_error(&mut stream, sequence.wrapping_add(1), 1047, "08S01", "unsupported MySQL command")?,
+            // Every other command byte is either a real MySQL command this
+            // gateway does not implement (`COM_CHANGE_USER`, `COM_STMT_FETCH`,
+            // `COM_BINLOG_DUMP`, ...) or not a command at all. Answering with
+            // `ER_UNKNOWN_COM_ERROR` keeps one request in, one response out: the
+            // next packet still starts a new command, so the stream never shifts.
+            command => write_error(
+                &mut stream,
+                sequence.wrapping_add(1),
+                ER_UNKNOWN_COM_ERROR,
+                "HY000",
+                &format!("Unknown command {command:#04X}"),
+            )?,
         }
     }
 }

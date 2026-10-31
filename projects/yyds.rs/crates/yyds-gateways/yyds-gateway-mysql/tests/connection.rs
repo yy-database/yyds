@@ -766,6 +766,12 @@ fn exchange(client: &mut TcpStream, sql: &str) -> (u8, Vec<u8>) {
     read_packet_full(client)
 }
 
+/// 发送一条只有命令字节的原始命令（例如 `COM_RESET_CONNECTION`）。
+fn exchange_command(client: &mut TcpStream, payload: &[u8]) -> (u8, Vec<u8>) {
+    client.write_all(&encode_packet(0, payload).unwrap()).unwrap();
+    read_packet_full(client)
+}
+
 /// 发送一条语句并断言 OK 包。
 fn expect_ok(client: &mut TcpStream, sql: &str) {
     let (_, packet) = exchange(client, sql);
@@ -1425,6 +1431,81 @@ fn blob_columns_round_trip_raw_octets_and_reject_text_only_paths() {
     let oversized = "00".repeat(yyds_gateway::MYSQL_BLOB_CAPACITY + 1);
     let oversized_sql = format!("INSERT INTO payloads (id, blob) VALUES (5, CAST('{oversized}' AS BLOB))");
     assert_eq!(expect_error(&mut client, &oversized_sql), (1366, "HY000".into()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// `COM_RESET_CONNECTION`（0x1F）必须把连接带回新会话：未提交事务回滚、
+/// autocommit 恢复 ON、失败态清除、prepared statement 句柄全部失效。
+#[test]
+fn reset_connection_returns_the_session_to_fresh_state() {
+    let (mut client, server) = start_server_with_join_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    let (statement_id, _, _, _, _) = prepare(&mut client, "SELECT id FROM users WHERE id = ?");
+
+    // 打开显式事务并写入未提交行。
+    expect_ok(&mut client, "BEGIN");
+    expect_ok(&mut client, "INSERT INTO users (id, name) VALUES (3, 'carol')");
+    assert_eq!(expect_single_value(&mut client, "SELECT COUNT(*) FROM users"), b"3".to_vec());
+
+    let (_, ok) = exchange_command(&mut client, &[0x1F]);
+    assert_eq!(ok[0], 0x00, "reset must answer OK: {ok:?}");
+    let flags = u16::from_le_bytes([ok[3], ok[4]]);
+    assert_eq!(flags & 0x0002, 0x0002, "autocommit must be back ON");
+    assert_eq!(flags & 0x0001, 0, "reset must not leave `SERVER_STATUS_IN_TRANS` set");
+
+    // 未提交写入必须已被回滚，而不是提交。
+    assert_eq!(expect_single_value(&mut client, "SELECT COUNT(*) FROM users"), b"2".to_vec());
+
+    // 重置后旧 prepared statement 句柄不可再执行（1243）。
+    let id_value = 42_i64.to_le_bytes();
+    let payload = execute_payload(statement_id, &[], &[Some(&id_value)], false);
+    let (_, error) = execute(&mut client, &payload);
+    assert_eq!(error[0], 0xFF, "reset statement handle must be rejected: {error:?}");
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1243);
+
+    // `SET autocommit = 0` 之后的 OK 包不带 autocommit 位，重置后必须恢复默认 ON。
+    let (_, ok) = exchange(&mut client, "SET autocommit = 0");
+    assert_eq!(u16::from_le_bytes([ok[3], ok[4]]) & 0x0002, 0);
+    let (_, ok) = exchange_command(&mut client, &[0x1F]);
+    assert_ne!(u16::from_le_bytes([ok[3], ok[4]]) & 0x0002, 0, "reset must restore default autocommit");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 真实存在但网关未实现的命令必须返回 `ER_UNKNOWN_COM_ERROR`（1047 / HY000），
+/// 并且之后的下一条命令仍按正常命令解析（协议没有错位）。
+#[test]
+fn unknown_commands_report_1047_and_keep_the_protocol_aligned() {
+    let (mut client, server) = start_server();
+    let _ = read_packet(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet(&mut client), (2, vec![0, 0, 0, 2, 0, 0, 0]));
+
+    // `COM_CHANGE_USER`（0x11）
+    let (sequence, error) = exchange_command(&mut client, &[0x11]);
+    assert_eq!(sequence, 1);
+    assert_eq!(error[0], 0xFF);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1047);
+    assert_eq!(&error[3..9], b"#HY000");
+
+    // `COM_STMT_FETCH`（0x1C）带参数体，仍按单包单响应处理。
+    let mut fetch = vec![0x1C];
+    fetch.extend_from_slice(&1_u32.to_le_bytes());
+    fetch.extend_from_slice(&1_u32.to_le_bytes());
+    let (sequence, error) = exchange_command(&mut client, &fetch);
+    assert_eq!(sequence, 1);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1047);
+
+    // 未知命令之后 `COM_PING`（0x0E）必须照常返回 OK 包。
+    let (_, ok) = exchange_command(&mut client, &[0x0E]);
+    assert_eq!(ok, vec![0, 0, 0, 2, 0, 0, 0], "PING after unknown commands must still answer OK");
 
     drop(client);
     server.join().unwrap();
