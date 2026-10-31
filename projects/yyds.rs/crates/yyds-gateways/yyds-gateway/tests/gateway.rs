@@ -3557,6 +3557,54 @@ fn sql_window_ntile_lag_lead_reject_invalid_shapes_at_bind_time() {
 }
 
 #[test]
+fn sql_window_range_frames_reject_undefined_value_semantics() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }\n");
+
+    // `RANGE` 没有 `ORDER BY` 就没有可比较的值；数值偏移只放开单列排序。
+    for sql in [
+        "SELECT id, SUM(age) OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
+        "SELECT id, SUM(age) OVER (ORDER BY age, score RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) FROM users",
+    ] {
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+            .err()
+            .unwrap_or_else(|| panic!("`{sql}` must be rejected at bind time"));
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}: {}", error.message);
+    }
+
+    // 无偏移的 `RANGE` 帧只用到 peer 边界，多列 `ORDER BY` 合法。
+    yyds_gateway::bind_sql_catalog(
+        "SELECT id, SUM(age) OVER (ORDER BY age, score RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
+        &catalog,
+        7,
+    )
+    .expect("peer-bounded RANGE frame over multiple ORDER BY columns binds");
+}
+
+#[test]
+fn sql_window_range_frame_offsets_reject_ordering_values_without_value_distance() {
+    let catalog = catalog("table users { @@id: i64, name: utf8, age: i64, score: f64, active: bool, tag: utf8? }\n");
+    let executor = empty_executor();
+    for sql in [
+        "INSERT INTO users VALUES (1, 'alice', 30, 1.5, TRUE, 'x')",
+        "INSERT INTO users VALUES (2, 'bob', 20, 2.5, FALSE, NULL)",
+        "INSERT INTO users VALUES (3, 'carol', 40, 3.25, TRUE, '')",
+    ] {
+        run_sql(&executor, None, &catalog, sql);
+    }
+
+    // 非数值排序列与 NULL 排序值都没有 SQL 定义的值距离，执行期显式拒绝。
+    for sql in [
+        "SELECT id, SUM(age) OVER (ORDER BY name RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users",
+        "SELECT id, SUM(age) OVER (ORDER BY tag RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users",
+    ] {
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("shape binds");
+        let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
+        let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("value axis must fail");
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution, "{sql}: {}", error.message);
+    }
+}
+
+#[test]
 fn sql_subqueries_inherit_the_enclosing_cte_scope() {
     use yyds_gateway::SqlValue;
 

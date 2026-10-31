@@ -490,22 +490,21 @@ pub enum SqlNullsOrder {
 }
 
 /// One `OVER (...)` clause attached to a window function call.
-///
-/// `RANGE` frames are rejected while binding, so this type never carries a
-/// frame unit: an explicit frame here is always a `ROWS` frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundWindowSpec {
     /// `PARTITION BY` expressions, in source order.
     pub partition_by: Vec<SqlBoundExpression>,
     /// Window `ORDER BY` items, in source order.
     pub order_by: Vec<SqlBoundOrderByItem>,
-    /// Explicit `ROWS ...` frame, when one was written.
+    /// Explicit `ROWS` / `RANGE` frame, when one was written.
     pub frame: Option<SqlBoundWindowFrame>,
 }
 
 /// Explicit window frame bounds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SqlBoundWindowFrame {
+    /// Whether the frame counts physical rows or compares the single `ORDER BY` value.
+    pub unit: SqlBoundWindowFrameUnit,
     /// The bound the frame starts at.
     pub start: SqlBoundWindowFrameBound,
     /// The bound the frame ends at. The single-bound spelling is normalized to
@@ -513,7 +512,26 @@ pub struct SqlBoundWindowFrame {
     pub end: Option<SqlBoundWindowFrameBound>,
 }
 
-/// One bound of an explicit `ROWS` frame.
+/// Frame unit of an explicit window frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqlBoundWindowFrameUnit {
+    /// `ROWS` — physical row positions.
+    Rows,
+    /// `RANGE` — value distances over the single `ORDER BY` column.
+    Range,
+}
+
+impl SqlBoundWindowFrame {
+    /// Whether the frame carries a numeric offset bound (`n PRECEDING` / `n FOLLOWING`).
+    pub fn has_value_offset(&self) -> bool {
+        let offset_bound = |bound: SqlBoundWindowFrameBound| {
+            matches!(bound, SqlBoundWindowFrameBound::Preceding(_) | SqlBoundWindowFrameBound::Following(_))
+        };
+        offset_bound(self.start) || self.end.is_some_and(offset_bound)
+    }
+}
+
+/// One bound of an explicit `ROWS` / `RANGE` frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlBoundWindowFrameBound {
     /// `UNBOUNDED PRECEDING`.
@@ -1463,7 +1481,7 @@ fn bind_window_spec(spec: &oak_sql::ast::WindowSpec) -> Result<SqlBoundWindowSpe
         .iter()
         .map(|column| SqlBoundExpression::Identifier(normalize_identifier(column.name.as_ref())))
         .collect();
-    let order_by = spec
+    let order_by: Vec<SqlBoundOrderByItem> = spec
         .order_by
         .iter()
         .map(|item| SqlBoundOrderByItem {
@@ -1479,18 +1497,35 @@ fn bind_window_spec(spec: &oak_sql::ast::WindowSpec) -> Result<SqlBoundWindowSpe
         })
         .collect();
     let frame = spec.frame.as_ref().map(bind_window_frame).transpose()?;
+    if let Some(frame) = frame.as_ref() {
+        if frame.unit == SqlBoundWindowFrameUnit::Range {
+            // `RANGE` 比较 `ORDER BY` 的值：没有排序列就没有可比较的值，整个 frame
+            // 无从定义；数值偏移 bound 只放开单列排序，多列的「值距离」没有唯一依据。
+            if order_by.is_empty() {
+                return Err(SqlFrontendError::unsupported(
+                    "SQL window `RANGE` frames require an ORDER BY inside the OVER (...) clause",
+                ));
+            }
+            if frame.has_value_offset() && order_by.len() != 1 {
+                return Err(SqlFrontendError::unsupported(
+                    "SQL window `RANGE` frame offsets require exactly one ORDER BY column inside the OVER (...) clause",
+                ));
+            }
+        }
+    }
     Ok(SqlBoundWindowSpec { partition_by, order_by, frame })
 }
 
-/// Binds an explicit window frame. Only `ROWS` frames are in the gateway
-/// subset: `RANGE` compares values instead of row positions and would need a
-/// separate lowering, so it is rejected rather than approximated as `ROWS`.
+/// Binds an explicit window frame. `ROWS` counts physical row positions;
+/// `RANGE` compares values on the window `ORDER BY`, so it requires an
+/// `ORDER BY` and, for value offsets, exactly one ordering column. `GROUPS`
+/// never reaches this point: the Oak AST has no `GROUPS` unit and the parser
+/// rejects the spelling before binding.
 fn bind_window_frame(frame: &oak_sql::ast::WindowFrame) -> Result<SqlBoundWindowFrame, SqlFrontendError> {
-    if let oak_sql::ast::WindowFrameUnit::Range = frame.unit {
-        return Err(SqlFrontendError::unsupported(
-            "SQL window `RANGE` frames are not supported by the gateway, write the frame with `ROWS`",
-        ));
-    }
+    let unit = match frame.unit {
+        oak_sql::ast::WindowFrameUnit::Rows => SqlBoundWindowFrameUnit::Rows,
+        oak_sql::ast::WindowFrameUnit::Range => SqlBoundWindowFrameUnit::Range,
+    };
     let start = bind_window_frame_bound(frame.start);
     let end = match frame.end {
         Some(end) => Some(bind_window_frame_bound(end)),
@@ -1503,7 +1538,7 @@ fn bind_window_frame(frame: &oak_sql::ast::WindowFrame) -> Result<SqlBoundWindow
             Some(SqlBoundWindowFrameBound::CurrentRow)
         }
     };
-    Ok(SqlBoundWindowFrame { start, end })
+    Ok(SqlBoundWindowFrame { unit, start, end })
 }
 
 fn bind_window_frame_bound(bound: oak_sql::ast::WindowFrameBound) -> SqlBoundWindowFrameBound {
