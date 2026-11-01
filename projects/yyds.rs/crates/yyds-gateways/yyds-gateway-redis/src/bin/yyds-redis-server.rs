@@ -7,7 +7,11 @@ use std::{
     },
 };
 
-use yyds_gateway_redis::{connection::serve_connection, resp::RequestLimits, DEFAULT_PORT};
+use yyds_gateway_redis::{
+    connection::{KeyExpiryTable, serve_connection},
+    resp::RequestLimits,
+    DEFAULT_PORT,
+};
 
 fn main() -> io::Result<()> {
     let mut arguments = std::env::args().skip(1);
@@ -25,6 +29,8 @@ fn main() -> io::Result<()> {
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))?;
     eprintln!("YYDS RESP2 probe listening on {} (PING/ECHO/QUIT only)", listener.local_addr()?);
     let active = Arc::new(AtomicUsize::new(0));
+    // Shared across every accepted connection: key TTLs are probe-wide state, not per-session.
+    let expiries = Arc::new(KeyExpiryTable::default());
     for connection in listener.incoming() {
         let mut stream = connection?;
         if active.fetch_add(1, Ordering::AcqRel) >= 64 {
@@ -34,9 +40,10 @@ fn main() -> io::Result<()> {
             continue;
         }
         let permit = ConnectionPermit(Arc::clone(&active));
+        let connection_expiries = Arc::clone(&expiries);
         std::thread::Builder::new().spawn(move || {
             let _permit = permit;
-            if let Err(error) = serve_connection(stream, RequestLimits::default()) {
+            if let Err(error) = serve_connection(stream, RequestLimits::default(), connection_expiries) {
                 eprintln!("RESP2 connection closed: {error}");
             }
         })?;

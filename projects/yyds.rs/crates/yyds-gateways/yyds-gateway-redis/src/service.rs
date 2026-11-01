@@ -16,7 +16,7 @@ use yyds_control::NodeLease;
 use yyds_execution::KeyValueExecutor;
 
 use crate::{
-    connection::{serve_cancellable, serve_cancellable_with_executor},
+    connection::{KeyExpiryTable, serve_cancellable, serve_cancellable_with_executor},
     resp::RequestLimits,
 };
 
@@ -64,9 +64,12 @@ impl RedisService {
         let address = listener.local_addr()?;
         let stopping = Arc::new(AtomicBool::new(false));
         let signal = Arc::clone(&stopping);
+        // One expiry table per listener, shared with every accepted connection so key
+        // TTLs are service state rather than per-session state.
+        let expiries = Arc::new(KeyExpiryTable::default());
         let worker = thread::Builder::new().name("yyds-redis-listener".into()).spawn(move || {
             let _owner = owner;
-            listen(listener, signal, limits, executor)
+            listen(listener, signal, limits, executor, expiries)
         })?;
         Ok(Self { address, stopping, worker: Some(worker) })
     }
@@ -136,6 +139,7 @@ fn listen(
     stopping: Arc<AtomicBool>,
     limits: RequestLimits,
     executor: Option<Arc<dyn KeyValueExecutor>>,
+    expiries: Arc<KeyExpiryTable>,
 ) -> io::Result<()> {
     let mut clients = Clients { workers: Vec::new(), stopping: Arc::clone(&stopping) };
     while !stopping.load(Ordering::Acquire) {
@@ -153,10 +157,13 @@ fn listen(
                 }
                 let cancellation = Arc::clone(&stopping);
                 let connection_executor = executor.clone();
+                let connection_expiries = Arc::clone(&expiries);
                 let worker = thread::Builder::new().name("yyds-redis-client".into()).spawn(move || {
                     let _ = match connection_executor {
-                        Some(executor) => serve_cancellable_with_executor(stream, limits, cancellation, executor),
-                        None => serve_cancellable(stream, limits, cancellation),
+                        Some(executor) => {
+                            serve_cancellable_with_executor(stream, limits, cancellation, executor, connection_expiries)
+                        }
+                        None => serve_cancellable(stream, limits, cancellation, connection_expiries),
                     };
                 })?;
                 clients.workers.push(worker);

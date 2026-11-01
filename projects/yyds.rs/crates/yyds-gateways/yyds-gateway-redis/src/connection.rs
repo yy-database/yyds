@@ -1,4 +1,4 @@
-//! RESP2 protocol probe with transaction queueing and key expiry support.
+//! RESP2 protocol probe with transaction queueing and service-level key expiry.
 
 use std::{
     collections::HashMap,
@@ -6,7 +6,7 @@ use std::{
     net::TcpStream,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -40,21 +40,59 @@ struct QueuedCommand {
     request: OwnedRequest,
 }
 
+/// Service-level key expiry bookkeeping shared by every connection of one listener.
+///
+/// `KeyValueAction` carries no TTL, so expiry is tracked here instead of inside the KV
+/// executor. The table is keyed by `(namespace, key)` like the Redis key space: a TTL set
+/// on one connection is visible on every other connection of the same listener and
+/// survives the writer disconnecting. Known gaps versus real Redis: expiry is enforced
+/// lazily on access (no background active collection), deadlines are monotonic-clock
+/// instants (no absolute wall-clock `EXAT` / `PXAT` semantics), and nothing persists
+/// across a listener restart.
+#[derive(Debug, Default)]
+pub struct KeyExpiryTable {
+    entries: Mutex<HashMap<(String, Vec<u8>), Instant>>,
+}
+
+impl KeyExpiryTable {
+    /// Records `due` as the expiry deadline of `(namespace, key)`, replacing any previous one.
+    fn set(&self, namespace: &str, key: &[u8], due: Instant) {
+        self.entries.lock().expect("redis expiry table poisoned").insert((namespace.to_owned(), key.to_owned()), due);
+    }
+
+    /// Drops the expiry deadline of `(namespace, key)`, if it has one.
+    fn clear(&self, namespace: &str, key: &[u8]) {
+        self.entries.lock().expect("redis expiry table poisoned").remove(&(namespace.to_owned(), key.to_owned()));
+    }
+
+    /// The stored expiry deadline of `(namespace, key)`, when it has one.
+    fn deadline(&self, namespace: &str, key: &[u8]) -> Option<Instant> {
+        self.entries.lock().expect("redis expiry table poisoned").get(&(namespace.to_owned(), key.to_owned())).copied()
+    }
+
+    /// Removes and reports the deadline when it has elapsed; keeps it when still in force.
+    fn take_if_elapsed(&self, namespace: &str, key: &[u8]) -> bool {
+        let mut entries = self.entries.lock().expect("redis expiry table poisoned");
+        let lookup = (namespace.to_owned(), key.to_owned());
+        if entries.get(&lookup).is_some_and(|due| Instant::now() >= *due) {
+            entries.remove(&lookup);
+            return true;
+        }
+        false
+    }
+}
+
 /// Per-connection state carried across RESP2 frames.
 ///
-/// Known limitation: `expiries` is session-scoped, while real Redis stores a TTL
-/// as a key property that every connection can observe and that the server keeps
-/// after the client disconnects. Sharing it globally would require a key
-/// metadata plane the KV contract does not expose yet, so a TTL set on one
-/// connection is not visible on another and is not persisted.
+/// Session-scoped by design: transaction queueing and the client name belong to a single
+/// connection. Key expiry is *not* here — it is service-level state shared through
+/// [`KeyExpiryTable`].
 #[derive(Debug, Default)]
 struct ConnectionState {
     /// Whether the connection is currently inside a `MULTI` block.
     in_multi: bool,
     /// Commands queued inside the active `MULTI` block.
     queue: Vec<QueuedCommand>,
-    /// Key expiry: `(namespace, key_bytes) -> expiry_instant`.
-    expiries: HashMap<(String, Vec<u8>), Instant>,
     /// Name assigned by the most recent `CLIENT SETNAME`, reported by
     /// `CLIENT GETNAME`. Session-scoped, like the upstream client name.
     client_name: Option<Vec<u8>>,
@@ -68,17 +106,23 @@ impl ConnectionState {
 
 /// Serves one bounded RESP2 connection with a 30-second I/O timeout.
 /// Only PING, ECHO and QUIT are supported. Database commands require a binder.
-pub fn serve_connection(stream: TcpStream, limits: RequestLimits) -> io::Result<()> {
+/// `expiries` is the listener-level expiry table shared by every served connection.
+pub fn serve_connection(stream: TcpStream, limits: RequestLimits, expiries: Arc<KeyExpiryTable>) -> io::Result<()> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    serve_io(stream, limits, None)
+    serve_io(stream, limits, None, expiries)
 }
 
 /// Serves a node-owned connection with cooperative cancellation of all socket I/O.
-pub fn serve_cancellable(stream: TcpStream, limits: RequestLimits, stopping: Arc<AtomicBool>) -> io::Result<()> {
+pub fn serve_cancellable(
+    stream: TcpStream,
+    limits: RequestLimits,
+    stopping: Arc<AtomicBool>,
+    expiries: Arc<KeyExpiryTable>,
+) -> io::Result<()> {
     stream.set_nonblocking(true)?;
-    serve_io(CancellableSocket { stream, stopping }, limits, None)
+    serve_io(CancellableSocket { stream, stopping }, limits, None, expiries)
 }
 
 /// Serves a node-owned RESP2 connection using the YYDS key/value execution contract.
@@ -87,9 +131,10 @@ pub fn serve_cancellable_with_executor(
     limits: RequestLimits,
     stopping: Arc<AtomicBool>,
     executor: Arc<dyn KeyValueExecutor>,
+    expiries: Arc<KeyExpiryTable>,
 ) -> io::Result<()> {
     stream.set_nonblocking(true)?;
-    serve_io(CancellableSocket { stream, stopping }, limits, Some(executor))
+    serve_io(CancellableSocket { stream, stopping }, limits, Some(executor), expiries)
 }
 
 struct CancellableSocket {
@@ -138,6 +183,7 @@ fn serve_io(
     mut stream: impl Read + Write,
     limits: RequestLimits,
     executor: Option<Arc<dyn KeyValueExecutor>>,
+    expiries: Arc<KeyExpiryTable>,
 ) -> io::Result<()> {
     let mut pending = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -148,8 +194,14 @@ fn serve_io(
             match decode_request(&pending, limits) {
                 Ok(Some(request)) => {
                     let consumed = request.consumed;
-                    let result =
-                        respond(&mut stream as &mut dyn Write, &request, executor.as_deref(), &mut namespace, &mut state);
+                    let result = respond(
+                        &mut stream as &mut dyn Write,
+                        &request,
+                        executor.as_deref(),
+                        &mut namespace,
+                        &mut state,
+                        &expiries,
+                    );
                     if !result? {
                         return Ok(());
                     }
@@ -182,26 +234,28 @@ fn serve_io(
     }
 }
 
-/// Checks whether `(namespace, key)` has a stored expiry that has elapsed. When so, the
-/// expiry record is removed and the underlying KV entry is deleted via the executor (if one
-/// is available). Returns `true` when the key was expired-and-purged by this call.
-fn purge_if_expired(state: &mut ConnectionState, executor: Option<&dyn KeyValueExecutor>, namespace: &str, key: &[u8]) -> bool {
-    let ns_key = (namespace.to_owned(), key.to_vec());
-    if let Some(due) = state.expiries.get(&ns_key) {
-        if Instant::now() >= *due {
-            state.expiries.remove(&ns_key);
-            if let Some(executor) = executor {
-                let _ = executor.execute(
-                    None,
-                    yyds_types::KeyValueCommand {
-                        namespace: Namespace(namespace.to_owned()),
-                        key: key.to_vec(),
-                        action: yyds_types::KeyValueAction::Delete,
-                    },
-                );
-            }
-            return true;
+/// Checks whether `(namespace, key)` has a shared expiry that has elapsed. When so, the
+/// expiry record is removed from the service-level table and the underlying KV entry is
+/// deleted via the executor (if one is available). Returns `true` when the key was
+/// expired-and-purged by this call.
+fn purge_if_expired(
+    expiries: &KeyExpiryTable,
+    executor: Option<&dyn KeyValueExecutor>,
+    namespace: &str,
+    key: &[u8],
+) -> bool {
+    if expiries.take_if_elapsed(namespace, key) {
+        if let Some(executor) = executor {
+            let _ = executor.execute(
+                None,
+                yyds_types::KeyValueCommand {
+                    namespace: Namespace(namespace.to_owned()),
+                    key: key.to_vec(),
+                    action: yyds_types::KeyValueAction::Delete,
+                },
+            );
         }
+        return true;
     }
     false
 }
@@ -231,7 +285,7 @@ fn handle_set(
     request: &Request<'_>,
     executor: Option<&dyn KeyValueExecutor>,
     namespace: &Namespace,
-    state: &mut ConnectionState,
+    expiries: &KeyExpiryTable,
 ) -> io::Result<()> {
     let Some(executor) = executor
     else {
@@ -242,8 +296,8 @@ fn handle_set(
         Ok(parsed) => parsed,
         Err(error) => return write_set_error(stream, error),
     };
-    let _ = purge_if_expired(state, Some(executor), &namespace.0, &parsed.key);
-    let ns_key = (namespace.0.clone(), parsed.key.clone());
+    let _ = purge_if_expired(expiries, Some(executor), &namespace.0, &parsed.key);
+    let key = parsed.key.clone();
     let action = match parsed.condition {
         SetCondition::Always => yyds_types::KeyValueAction::Put(parsed.value),
         SetCondition::IfAbsent => yyds_types::KeyValueAction::PutIfAbsent(parsed.value),
@@ -270,13 +324,13 @@ fn handle_set(
     if !parsed.keep_ttl {
         match parsed.expiry {
             Some(SetExpiry::Seconds(seconds)) => {
-                state.expiries.insert(ns_key, Instant::now() + Duration::from_secs(seconds));
+                expiries.set(&namespace.0, &key, Instant::now() + Duration::from_secs(seconds));
             }
             Some(SetExpiry::Milliseconds(milliseconds)) => {
-                state.expiries.insert(ns_key, Instant::now() + Duration::from_millis(milliseconds));
+                expiries.set(&namespace.0, &key, Instant::now() + Duration::from_millis(milliseconds));
             }
             None => {
-                state.expiries.remove(&ns_key);
+                expiries.clear(&namespace.0, &key);
             }
         }
     }
@@ -347,6 +401,7 @@ fn respond(
     executor: Option<&dyn KeyValueExecutor>,
     namespace: &mut Namespace,
     state: &mut ConnectionState,
+    expiries: &KeyExpiryTable,
 ) -> io::Result<bool> {
     let command = request.arguments[0];
     let count = request.arguments.len();
@@ -378,7 +433,7 @@ fn respond(
             stream.write_all(b"-ERR EXEC without MULTI\r\n")?;
             return Ok(true);
         }
-        execute_transaction(stream, executor, namespace, state)?;
+        execute_transaction(stream, executor, namespace, state, expiries)?;
         return Ok(true);
     }
 
@@ -470,10 +525,9 @@ fn respond(
             }
         };
         let key_owned = key.to_vec();
-        let ns_key = (namespace.0.clone(), key_owned.clone());
 
         // Check the key actually exists (and hasn't just been purged by an expiry).
-        let exists = purge_if_expired(state, Some(executor), &namespace.0, key)
+        let exists = purge_if_expired(expiries, Some(executor), &namespace.0, key)
             || matches!(
                 executor.execute(
                     None,
@@ -493,7 +547,7 @@ fn respond(
 
         if seconds <= 0 {
             // Redis: EXPIRE key 0 behaves like DEL. Remove expiry + key.
-            state.expiries.remove(&ns_key);
+            expiries.clear(&namespace.0, key);
             let _ = executor.execute(
                 None,
                 yyds_types::KeyValueCommand {
@@ -512,7 +566,7 @@ fn respond(
         else {
             Duration::from_secs(seconds as u64)
         };
-        state.expiries.insert(ns_key, Instant::now() + ttl);
+        expiries.set(&namespace.0, key, Instant::now() + ttl);
         stream.write_all(b":1\r\n")?;
     }
     else if command.eq_ignore_ascii_case(b"MGET") {
@@ -525,7 +579,7 @@ fn respond(
             Ok(commands) => {
                 // Purge any expired keys first so MGET correctly returns nil.
                 for cmd in &commands {
-                    let _ = purge_if_expired(state, Some(executor), &cmd.namespace.0, &cmd.key);
+                    let _ = purge_if_expired(expiries, Some(executor), &cmd.namespace.0, &cmd.key);
                 }
                 match executor.execute_read_batch(None, &commands) {
                     Ok(results) => {
@@ -565,7 +619,7 @@ fn respond(
         }
         let mut present: i64 = 0;
         for key in &request.arguments[1..] {
-            let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
+            let _ = purge_if_expired(expiries, Some(executor), &namespace.0, key);
             let result = executor.execute(
                 None,
                 yyds_types::KeyValueCommand {
@@ -602,8 +656,7 @@ fn respond(
         let key = request.arguments[1];
         let key_owned = key.to_vec();
         // Expired first: if the expiry fires, the key is treated as absent (-2).
-        if purge_if_expired(state, Some(executor), &namespace.0, key) {
-            let _ = state.expiries.remove(&(namespace.0.clone(), key_owned));
+        if purge_if_expired(expiries, Some(executor), &namespace.0, key) {
             stream.write_all(b":-2\r\n")?;
             return Ok(true);
         }
@@ -623,7 +676,7 @@ fn respond(
             return Ok(true);
         }
         // Key exists — return remaining time or -1 (no expiry).
-        let value = match state.expiries.get(&(namespace.0.clone(), key_owned)) {
+        let value = match expiries.deadline(&namespace.0, key) {
             Some(due) => {
                 let remaining = due.saturating_duration_since(Instant::now());
                 if command.eq_ignore_ascii_case(b"PTTL") {
@@ -648,7 +701,7 @@ fn respond(
             return Ok(true);
         }
         let key = request.arguments[1];
-        let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
+        let _ = purge_if_expired(expiries, Some(executor), &namespace.0, key);
         let exists = matches!(
             executor.execute(
                 None,
@@ -678,7 +731,7 @@ fn respond(
             return Ok(true);
         }
         let key = request.arguments[1];
-        let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
+        let _ = purge_if_expired(expiries, Some(executor), &namespace.0, key);
         let value = match executor.execute(
             None,
             yyds_types::KeyValueCommand {
@@ -712,7 +765,7 @@ fn respond(
         }
         let key = request.arguments[1];
         let append = request.arguments[2];
-        let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
+        let _ = purge_if_expired(expiries, Some(executor), &namespace.0, key);
         let current = match executor.execute(
             None,
             yyds_types::KeyValueCommand {
@@ -755,14 +808,14 @@ fn respond(
         }
     }
     else if command.eq_ignore_ascii_case(b"SET") {
-        handle_set(stream, request, executor, namespace, state)?;
+        handle_set(stream, request, executor, namespace, expiries)?;
     }
     else if let Some(executor) = executor {
         // --- Generic bind()-backed commands (GET, DEL, INCR, DECR, GETDEL, GETSET).
         // We first purge the key if its expiry has elapsed so the executor sees a clean state.
         let bind_key = command_to_bind_key(command, &request.arguments);
         if let Some(key) = bind_key {
-            let _ = purge_if_expired(state, Some(executor), &namespace.0, key);
+            let _ = purge_if_expired(expiries, Some(executor), &namespace.0, key);
         }
         match bind(&request.arguments, &namespace) {
             Ok(command) => {
@@ -780,7 +833,7 @@ fn respond(
                 match executor.execute(None, command) {
                     Ok(result) => {
                         if clears_expiry {
-                            state.expiries.remove(&(namespace.0.clone(), key_bytes));
+                            expiries.clear(&namespace.0, &key_bytes);
                         }
                         match result {
                             KeyValueResult::Get(Some(value)) => write_bulk(stream, &value)?,
@@ -833,6 +886,7 @@ fn execute_transaction(
     executor: Option<&dyn KeyValueExecutor>,
     namespace: &mut Namespace,
     state: &mut ConnectionState,
+    expiries: &KeyExpiryTable,
 ) -> io::Result<()> {
     let count = state.queue.len();
     let queued = std::mem::take(&mut state.queue);
@@ -846,13 +900,11 @@ fn execute_transaction(
         let mut buf = Vec::<u8>::new();
         let mut inner_namespace = namespace.clone();
         // Give each queued command a fresh state so nested MULTI/EXEC/DISCARD semantics
-        // do not pollute the parent transaction.
+        // do not pollute the parent transaction. Key expiry is service-level state, so
+        // queued commands read and write the shared table directly.
         let mut inner_state = ConnectionState::new();
-        // Carry over expiries so EXEC sees any key-level TTL context.
-        inner_state.expiries = state.expiries.clone();
-        let _ = respond(&mut buf as &mut dyn Write, &inner_request, executor, &mut inner_namespace, &mut inner_state);
-        // Reconcile any expiries the inner command may have created or removed.
-        state.expiries = inner_state.expiries;
+        let _ =
+            respond(&mut buf as &mut dyn Write, &inner_request, executor, &mut inner_namespace, &mut inner_state, expiries);
         stream.write_all(&buf)?;
     }
     Ok(())
