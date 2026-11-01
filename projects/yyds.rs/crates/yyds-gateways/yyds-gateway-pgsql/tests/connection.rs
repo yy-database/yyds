@@ -1128,7 +1128,7 @@ fn reset_and_discard_restore_session_defaults() {
     send_query(&mut client, "SET search_path = 'public'");
     assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
     send_query(&mut client, "RESET ALL");
-    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"RESET\0".to_vec()), (b'Z', b"I".to_vec())]);
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"RESET ALL\0".to_vec()), (b'Z', b"I".to_vec())]);
     send_query(&mut client, "SHOW search_path");
     let shown = receive_until_ready(&mut client);
     let text = String::from_utf8_lossy(&shown[1].1);
@@ -1145,9 +1145,9 @@ fn reset_and_discard_restore_session_defaults() {
     server.join().unwrap();
 }
 
-/// `DISCARD ALL` 回滚打开的未提交事务、恢复默认 GUC，并丢弃 prepared statement。
+/// 事务块外 `DISCARD ALL` 恢复默认 GUC 并丢弃 prepared statement 缓存。
 #[test]
-fn discard_all_rolls_back_open_transaction_and_clears_caches() {
+fn discard_all_outside_transaction_resets_session_and_clears_caches() {
     let (mut client, server) = start_server_with_runtime();
 
     // 先登记一条命名 prepared statement。
@@ -1162,17 +1162,20 @@ fn discard_all_rolls_back_open_transaction_and_clears_caches() {
     send_query(&mut client, "SET search_path = 'public'");
     assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
 
+    // PostgreSQL 只允许事务块外执行 `DISCARD ALL`，先正常结束事务块。
     send_query(&mut client, "BEGIN");
     assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
     send_query(&mut client, "INSERT INTO users VALUES (1, 'alice')");
     assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
 
     send_query(&mut client, "DISCARD ALL");
     let discarded = receive_until_ready(&mut client);
     assert_eq!(discarded[0], (b'C', b"DISCARD ALL\0".to_vec()));
     assert_eq!(discarded.last().unwrap(), &(b'Z', b"I".to_vec()));
 
-    // 未提交写入已被回滚，而不是提交。
+    // 未提交写入由 `ROLLBACK` 丢弃，`SELECT` 会话仍然可用。
     send_query(&mut client, "SELECT COUNT(*) FROM users");
     let counted = receive_until_ready(&mut client);
     assert_eq!(parse_data_row(&counted[1].1), vec![Some(b"0".to_vec())]);
@@ -1199,6 +1202,101 @@ fn discard_all_rolls_back_open_transaction_and_clears_caches() {
     server.join().unwrap();
 }
 
+/// 事务块内 `DISCARD ALL` 按 PostgreSQL 报 `25001`：不复位任何会话状态
+/// （GUC 与 prepared statement 都不动），但错误同普通语句一样中止事务块
+/// （ReadyForQuery 为 `E`），后续普通命令报 `25P02`，`ROLLBACK` 后恢复正常。
+#[test]
+fn discard_all_inside_transaction_block_is_rejected_without_touching_session() {
+    let (mut client, server) = start_server_with_runtime();
+
+    // 登记一条命名 prepared statement，被拒绝的 `DISCARD ALL` 不得清除它。
+    let mut parse = cstring("d1");
+    parse.extend_from_slice(&cstring("SELECT id FROM users WHERE id = 1"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'S', &[]);
+    let parsed = receive_until_ready(&mut client);
+    assert!(parsed.iter().any(|(tag, _)| *tag == b'1'), "Parse must complete: {parsed:?}");
+
+    send_query(&mut client, "SET search_path = 'custom'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "INSERT INTO users VALUES (1, 'alice')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+
+    send_query(&mut client, "DISCARD ALL");
+    let rejected = receive_until_ready(&mut client);
+    assert_eq!(rejected[0].0, b'E', "DISCARD ALL inside a transaction block must fail: {rejected:?}");
+    assert!(rejected[0].1.windows(5).any(|window| window == b"25001"), "{}", String::from_utf8_lossy(&rejected[0].1));
+    assert!(
+        String::from_utf8_lossy(&rejected[0].1).contains("DISCARD ALL cannot run inside a transaction block"),
+        "message must match PostgreSQL, got {}",
+        String::from_utf8_lossy(&rejected[0].1)
+    );
+    // 错误中止事务块：ReadyForQuery 为 `E`。
+    assert_eq!(rejected.last().unwrap(), &(b'Z', b"E".to_vec()));
+
+    // 中止事务内的普通命令一律被 `25P02` 拒绝。
+    assert_sqlstate_in_tx(&mut client, "SELECT 1", b"25P02");
+
+    // `ROLLBACK` 结束中止的事务块，会话恢复正常。
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"ROLLBACK\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    // 被拒绝的 `DISCARD ALL` 未做任何复位：GUC 仍是 SET 后的值。
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("custom"), "rejected `DISCARD ALL` must not reset the GUC, got {text}");
+
+    // prepared statement 缓存未被清除。
+    let mut bind = cstring("p1");
+    bind.extend_from_slice(&cstring("d1"));
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    send_message(&mut client, b'S', &[]);
+    let rebound = receive_until_ready(&mut client);
+    assert!(rebound.iter().any(|(tag, _)| *tag == b'2'), "statement must survive the rejected DISCARD ALL: {rebound:?}");
+
+    // 未提交写入由 `ROLLBACK` 丢弃。
+    send_query(&mut client, "SELECT COUNT(*) FROM users");
+    let counted = receive_until_ready(&mut client);
+    assert_eq!(parse_data_row(&counted[1].1), vec![Some(b"0".to_vec())]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// `RESET` / `RESET ALL` 是 PostgreSQL 允许在事务块内执行的 utility 语句，
+/// 不结束事务块。
+#[test]
+fn reset_commands_are_allowed_inside_transaction_block() {
+    let (mut client, server) = start_server();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    send_query(&mut client, "SET search_path = 'custom'");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"SET\0".to_vec()), (b'Z', b"T".to_vec())]);
+    send_query(&mut client, "RESET search_path");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"RESET\0".to_vec()), (b'Z', b"T".to_vec())]);
+
+    send_query(&mut client, "SET search_path = 'custom'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+    send_query(&mut client, "RESET ALL");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"RESET ALL\0".to_vec()), (b'Z', b"T".to_vec())]);
+
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"ROLLBACK\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 失败事务内 `RESET` / `DISCARD` 与普通语句一样被 `25P02` 拒绝。
 #[test]
 fn reset_and_discard_are_rejected_in_an_aborted_transaction() {
@@ -1217,6 +1315,179 @@ fn reset_and_discard_are_rejected_in_an_aborted_transaction() {
 
     send_query(&mut client, "ROLLBACK");
     assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"ROLLBACK\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 跑一轮完整的扩展协议 Parse/Bind/Describe('S')/Execute/Sync，返回服务端消息。
+fn extended_utility_round(client: &mut TcpStream, statement: &str, sql: &str, portal: &str) -> Vec<(u8, Vec<u8>)> {
+    let mut parse = cstring(statement);
+    parse.extend_from_slice(&cstring(sql));
+    parse.extend_from_slice(&0_i16.to_be_bytes()); // parameter_count = 0
+    send_message(client, b'P', &parse);
+
+    let mut bind = cstring(portal);
+    bind.extend_from_slice(&cstring(statement));
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 0 parameter format codes
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 0 parameters
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 0 result format codes
+    send_message(client, b'B', &bind);
+
+    let mut describe = vec![b'S'];
+    describe.extend_from_slice(&cstring(statement));
+    send_message(client, b'D', &describe);
+
+    let mut execute = cstring(portal);
+    execute.extend_from_slice(&0_i32.to_be_bytes()); // no row limit
+    send_message(client, b'E', &execute);
+
+    send_message(client, b'S', &[]);
+    receive_until_ready(client)
+}
+
+/// 扩展协议识别 `RESET` / `DISCARD ALL` 为会话命令：Parse/Bind 成功，
+/// Describe 回 `NoData`，Execute 只回 `CommandComplete`，执行副作用与
+/// SimpleQuery 一致；匿名与命名 statement 都要能走通，`Close` 不受影响。
+#[test]
+fn extended_protocol_runs_session_reset_and_discard_commands() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "SET search_path = 'custom'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+
+    // 命名 prepared statement 上的 `RESET ALL`。
+    let reset_all = extended_utility_round(&mut client, "ra", "RESET ALL", "pa");
+    assert_eq!(
+        reset_all.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        vec![b'1', b'2', b't', b'n', b'C', b'Z'],
+        "RESET ALL round must be ParseComplete/BindComplete/NoData/CommandComplete: {reset_all:?}"
+    );
+    assert_eq!(reset_all[4], (b'C', b"RESET ALL\0".to_vec()));
+    assert_eq!(reset_all.last().unwrap(), &(b'Z', b"I".to_vec()));
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("$user") && text.contains("public"), "extended `RESET ALL` must restore the default, got {text}");
+
+    // `Close` 语义不受影响：会话命令的命名 statement 也能显式关闭。
+    let mut close = vec![b'S'];
+    close.extend_from_slice(&cstring("ra"));
+    send_message(&mut client, b'C', &close);
+    send_message(&mut client, b'S', &[]);
+    let closed = receive_until_ready(&mut client);
+    assert_eq!(closed[0].0, b'3', "CloseComplete expected: {closed:?}");
+
+    // 匿名 prepared statement 上的 `RESET search_path`。
+    send_query(&mut client, "SET search_path = 'custom'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+    let reset_one = extended_utility_round(&mut client, "", "RESET search_path", "");
+    assert_eq!(
+        reset_one.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        vec![b'1', b'2', b't', b'n', b'C', b'Z'],
+        "RESET search_path round: {reset_one:?}"
+    );
+    assert_eq!(reset_one[4], (b'C', b"RESET\0".to_vec()));
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("$user") && text.contains("public"), "extended `RESET search_path` must restore the default, got {text}");
+
+    // `DISCARD ALL` 还要清掉扩展协议 prepared statement 缓存。
+    let mut parse = cstring("keep");
+    parse.extend_from_slice(&cstring("SELECT id FROM users WHERE id = 1"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'S', &[]);
+    assert!(receive_until_ready(&mut client).iter().any(|(tag, _)| *tag == b'1'));
+
+    send_query(&mut client, "SET search_path = 'custom'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+    let discard = extended_utility_round(&mut client, "da", "DISCARD ALL", "pd");
+    assert_eq!(
+        discard.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        vec![b'1', b'2', b't', b'n', b'C', b'Z'],
+        "DISCARD ALL round: {discard:?}"
+    );
+    assert_eq!(discard[4], (b'C', b"DISCARD ALL\0".to_vec()));
+    assert_eq!(discard.last().unwrap(), &(b'Z', b"I".to_vec()));
+
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("$user") && text.contains("public"), "extended `DISCARD ALL` must restore the default, got {text}");
+
+    let mut bind = cstring("pp");
+    bind.extend_from_slice(&cstring("keep"));
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    send_message(&mut client, b'S', &[]);
+    let rejected = receive_until_ready(&mut client);
+    let error = rejected.iter().find(|(tag, _)| *tag == b'E').expect("extended `DISCARD ALL` must drop the statement");
+    assert!(error.1.windows(5).any(|window| window == b"26000"), "{}", String::from_utf8_lossy(&error.1));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 扩展协议事务块内 `DISCARD ALL` 报 `25001`：出错后按 discard-until-Sync
+/// 丢弃同批次后续消息，错误中止事务块（Sync 后 ReadyForQuery 为 `E`），
+/// 会话状态不被复位。
+#[test]
+fn extended_protocol_discard_all_inside_transaction_block_is_rejected() {
+    let (mut client, server) = start_server_with_runtime();
+
+    send_query(&mut client, "SET search_path = 'custom'");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"SET\0".to_vec()));
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    // 一批 Parse/Bind/Describe/Execute 之后、Sync 之前再发一个 Bind：必须被丢弃。
+    let mut parse = cstring("da");
+    parse.extend_from_slice(&cstring("DISCARD ALL"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    let mut bind = cstring("pd");
+    bind.extend_from_slice(&cstring("da"));
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+    let mut describe = vec![b'S'];
+    describe.extend_from_slice(&cstring("da"));
+    send_message(&mut client, b'D', &describe);
+    let mut execute = cstring("pd");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'B', &bind);
+    send_message(&mut client, b'S', &[]);
+
+    let responses = receive_until_ready(&mut client);
+    assert_eq!(
+        responses.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+        vec![b'1', b'2', b't', b'n', b'E', b'Z'],
+        "the second Bind must be discarded until Sync: {responses:?}"
+    );
+    assert!(responses[4].1.windows(5).any(|window| window == b"25001"), "{}", String::from_utf8_lossy(&responses[4].1));
+    assert!(
+        String::from_utf8_lossy(&responses[4].1).contains("DISCARD ALL cannot run inside a transaction block"),
+        "message must match PostgreSQL, got {}",
+        String::from_utf8_lossy(&responses[4].1)
+    );
+    // 错误中止事务块：Sync 后 ReadyForQuery 为 `E`。
+    assert_eq!(responses.last().unwrap(), &(b'Z', b"E".to_vec()));
+
+    // `ROLLBACK` 结束中止的事务块。
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"ROLLBACK\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    // 被拒绝的 `DISCARD ALL` 未做任何复位。
+    send_query(&mut client, "SHOW search_path");
+    let shown = receive_until_ready(&mut client);
+    let text = String::from_utf8_lossy(&shown[1].1);
+    assert!(text.contains("custom"), "rejected `DISCARD ALL` must not reset the GUC, got {text}");
 
     drop(client);
     server.join().unwrap();
