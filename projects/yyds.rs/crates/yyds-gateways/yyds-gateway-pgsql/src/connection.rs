@@ -14,10 +14,10 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, describe_plan, encode_hex, execute_plan, neutralized_sql_parameters, nulled_sql_parameters,
-    parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, DiscardTarget, SqlBoundExpression,
-    SqlBoundLiteral, SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
-    SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    bind_sql_catalog, describe_plan, detect_session_reset_statement, encode_hex, execute_plan, neutralized_sql_parameters,
+    nulled_sql_parameters, parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, DiscardTarget,
+    SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType,
+    SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -177,9 +177,12 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
                     }
                     _ => Ok(ExtendedStep::Continue),
                 }?;
-                if step == ExtendedStep::Failed {
-                    extended_failed = true;
-                    session.fail();
+                match step {
+                    ExtendedStep::Continue => {}
+                    ExtendedStep::Failed => {
+                        extended_failed = true;
+                        session.fail();
+                    }
                 }
             }
             _ => {
@@ -234,9 +237,11 @@ impl TransactionSession {
         self.search_path = DEFAULT_SEARCH_PATH.to_string();
     }
 
-    /// `DISCARD ALL`: full session cleanup. An open transaction is rolled back —
-    /// never committed — the aborted flag clears and all emulated GUCs return to
-    /// their defaults. Prepared statements and portals live in
+    /// `DISCARD ALL`: full session cleanup. PostgreSQL only lets the statement run
+    /// outside a transaction block; the caller rejects the in-block case with
+    /// `25001` before this runs, so any transaction state here is a leftover. It
+    /// is rolled back — never committed — emulated GUCs return to their defaults
+    /// and the aborted flag clears. Prepared statements and portals live in
     /// [`ExtendedSession`] and are dropped by the caller.
     fn discard_all(&mut self) {
         if let Some(handle) = self.handle.take() {
@@ -288,6 +293,105 @@ impl TransactionStatus {
             Self::InTransaction => b'T',
             Self::Failed => b'E',
         }
+    }
+}
+
+/// How a rejected `RESET` / `DISCARD` session command affects the session. Both
+/// wire paths (SimpleQuery and the extended protocol) report the same SQLSTATE
+/// and abort an open transaction block the same way, so the decision lives here
+/// and cannot diverge.
+enum SessionCommandError {
+    /// The command was refused before it performed any cleanup (no GUC reset,
+    /// no prepared-statement or portal drop, no transaction handle change), but
+    /// PostgreSQL raises the guard as a plain error, so an open transaction
+    /// block aborts exactly like it would for any other statement failure.
+    /// This is `DISCARD ALL` inside a transaction block (`25001`).
+    Rejected { code: &'static str, message: &'static str },
+    /// The command failed against the session; the caller must abort any open
+    /// transaction (`25P02` from an aborted block, `42704` for an unknown GUC,
+    /// `0A000` for an unsupported `DISCARD` target).
+    Failed { code: String, message: String },
+}
+
+/// Executes a `RESET <parameter>` / `RESET ALL` / `DISCARD <target>` session
+/// command against the session. Shared by SimpleQuery and the extended protocol
+/// so both paths run the same side effects ([`TransactionSession::reset_parameters`]
+/// and [`TransactionSession::discard_all`]) with the same error mapping.
+///
+/// `Ok` carries the CommandComplete tag PostgreSQL reports for the statement.
+fn run_session_command(
+    command: &SqlSessionCommand,
+    session: &mut TransactionSession,
+    extended: &mut ExtendedSession,
+) -> Result<&'static str, SessionCommandError> {
+    // `RESET` and `DISCARD` are ordinary utility statements, so an aborted
+    // transaction rejects them exactly like any other command (`25P02`).
+    if session.failed {
+        return Err(SessionCommandError::Failed {
+            code: "25P02".to_string(),
+            message: "current transaction is aborted, commands ignored until end of transaction block".to_string(),
+        });
+    }
+    match command {
+        SqlSessionCommand::ResetVariables { name } => {
+            match name.as_deref() {
+                // `RESET ALL` restores every emulated GUC to its default value.
+                None => session.reset_parameters(),
+                Some(name) => {
+                    if pg_parameter(name).is_none() {
+                        return Err(SessionCommandError::Failed {
+                            code: "42704".to_string(),
+                            message: format!("unrecognized configuration parameter \"{name}\""),
+                        });
+                    }
+                    // The default table is the RESET value, and `search_path` is the
+                    // only parameter the session actually overrides.
+                    if name.trim().eq_ignore_ascii_case("search_path") {
+                        session.reset_parameters();
+                    }
+                }
+            }
+            Ok(if name.is_none() { "RESET ALL" } else { "RESET" })
+        }
+        SqlSessionCommand::Discard(target) => match target {
+            // PostgreSQL refuses `DISCARD ALL` inside a transaction block with
+            // `25001` and performs no cleanup at all; the raised error still
+            // aborts the block like any other statement failure.
+            // Outside a block it applies the full session reset connection pools
+            // expect: emulated GUCs return to their defaults and the
+            // prepared-statement/portal caches are dropped. Temporary tables and
+            // advisory locks are outside the gateway subset, so nothing else is
+            // released here.
+            DiscardTarget::All => {
+                if session.in_transaction() {
+                    return Err(SessionCommandError::Rejected {
+                        code: "25001",
+                        message: "DISCARD ALL cannot run inside a transaction block",
+                    });
+                }
+                session.discard_all();
+                extended.statements.clear();
+                extended.portals.clear();
+                Ok("DISCARD ALL")
+            }
+            // The remaining targets only release caches this gateway does not keep
+            // (`PLANS`, `SEQUENCES`) or objects it does not create (`TEMPORARY`).
+            // They stay explicitly unsupported instead of silently pretending to
+            // perform a cleanup.
+            other => {
+                let label = match other {
+                    DiscardTarget::Plans => "DISCARD PLANS",
+                    DiscardTarget::Sequences => "DISCARD SEQUENCES",
+                    DiscardTarget::Temporary => "DISCARD TEMPORARY",
+                    DiscardTarget::All => unreachable!("`DISCARD ALL` is handled above"),
+                };
+                Err(SessionCommandError::Failed {
+                    code: "0A000".to_string(),
+                    message: format!("{label} is not supported by the gateway"),
+                })
+            }
+        },
+        _ => unreachable!("only `RESET` and `DISCARD` reach the session command executor"),
     }
 }
 
@@ -501,72 +605,16 @@ fn handle_simple_query(
             session.fail();
             write_error_response(stream, "42601", "PRAGMA is not PostgreSQL syntax")
         }
-        Ok(Some(SqlSessionCommand::ResetVariables { name })) => {
-            // `RESET` is an ordinary utility statement, so an aborted transaction
-            // rejects it exactly like any other command (PostgreSQL `25P02`).
-            if session.failed {
-                return write_error_response(
-                    stream,
-                    "25P02",
-                    "current transaction is aborted, commands ignored until end of transaction block",
-                );
-            }
-            match name.as_deref() {
-                // `RESET ALL` restores every emulated GUC to its default value.
-                None => session.reset_parameters(),
-                Some(name) => {
-                    if pg_parameter(name).is_none() {
-                        session.fail();
-                        return write_error_response(
-                            stream,
-                            "42704",
-                            &format!("unrecognized configuration parameter \"{name}\""),
-                        );
-                    }
-                    // The default table is the RESET value, and `search_path` is the
-                    // only parameter the session actually overrides.
-                    if name.trim().eq_ignore_ascii_case("search_path") {
-                        session.reset_parameters();
-                    }
-                }
-            }
-            write_command_complete(stream, "RESET")
-        }
-        Ok(Some(SqlSessionCommand::Discard(target))) => {
-            if session.failed {
-                return write_error_response(
-                    stream,
-                    "25P02",
-                    "current transaction is aborted, commands ignored until end of transaction block",
-                );
-            }
-            match target {
-                // PostgreSQL refuses `DISCARD ALL` inside a transaction block. The
-                // gateway instead applies it as the documented session cleanup that
-                // connection pools expect: any open transaction is rolled back rather
-                // than committed, emulated GUCs return to their defaults and the
-                // prepared-statement/portal caches are dropped. Temporary tables and
-                // advisory locks are outside the gateway subset, so nothing else is
-                // released here.
-                DiscardTarget::All => {
-                    session.discard_all();
-                    extended.statements.clear();
-                    extended.portals.clear();
-                    write_command_complete(stream, "DISCARD ALL")
-                }
-                // The remaining targets only release caches this gateway does not keep
-                // (`PLANS`, `SEQUENCES`) or objects it does not create (`TEMPORARY`).
-                // They stay explicitly unsupported instead of silently pretending to
-                // perform a cleanup.
-                other => {
-                    let label = match other {
-                        DiscardTarget::Plans => "DISCARD PLANS",
-                        DiscardTarget::Sequences => "DISCARD SEQUENCES",
-                        DiscardTarget::Temporary => "DISCARD TEMPORARY",
-                        DiscardTarget::All => unreachable!("`DISCARD ALL` is handled above"),
-                    };
+        Ok(Some(command @ (SqlSessionCommand::ResetVariables { .. } | SqlSessionCommand::Discard(_)))) => {
+            match run_session_command(&command, session, extended) {
+                Ok(tag) => write_command_complete(stream, tag),
+                Err(SessionCommandError::Rejected { code, message }) => {
                     session.fail();
-                    write_error_response(stream, "0A000", &format!("{label} is not supported by the gateway"))
+                    write_error_response(stream, code, message)
+                }
+                Err(SessionCommandError::Failed { code, message }) => {
+                    session.fail();
+                    write_error_response(stream, &code, &message)
                 }
             }
         }
@@ -723,6 +771,9 @@ fn write_execution_outcome(stream: &mut impl Write, outcome: &ExecutionOutcome) 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExtendedStep {
     Continue,
+    /// The error suspends the message queue until Sync and aborts the session
+    /// transaction, matching PostgreSQL for every extended-protocol failure,
+    /// including the `DISCARD ALL` transaction-block guard (`25001`).
     Failed,
 }
 
@@ -739,6 +790,11 @@ struct PreparedStatement {
     /// Catalog-derived result shape, computed once on the first `Describe(S)`
     /// or `Bind`. Writes describe to an empty shape.
     description: Option<Vec<SqlColumn>>,
+    /// Session utility command (`RESET` / `DISCARD`) recognised by the shared
+    /// lexical pre-filter at Parse time. Utility statements have no catalog
+    /// shape: they describe as `NoData` and execute through
+    /// [`run_session_command`] instead of the bind → plan → execute path.
+    session_command: Option<SqlSessionCommand>,
 }
 
 struct Portal {
@@ -751,6 +807,9 @@ struct Portal {
     /// Requested result formats: empty means all text, one entry applies to all
     /// columns, otherwise one entry per described column.
     result_formats: Vec<i16>,
+    /// Copied from the bound statement: utility statements execute as session
+    /// side effects with no rows.
+    session_command: Option<SqlSessionCommand>,
     outcome: Option<Result<ExecutionOutcome, (String, String)>>,
     sent_rows: usize,
 }
@@ -776,7 +835,15 @@ fn handle_parse(stream: &mut impl Write, payload: &[u8], extended: &mut Extended
         };
         parameter_oids.push(oid);
     }
-    extended.statements.insert(name.to_string(), PreparedStatement { sql: sql.to_string(), parameter_oids, description: None });
+    // The extended protocol recognises the same session utility statements as
+    // SimpleQuery through the one shared lexical pre-filter, so a `RESET` /
+    // `DISCARD` Parse is stored as a session command instead of being deferred
+    // to the catalog binder, which would reject it as a syntax error.
+    let session_command = detect_session_reset_statement(sql);
+    extended.statements.insert(
+        name.to_string(),
+        PreparedStatement { sql: sql.to_string(), parameter_oids, description: None, session_command },
+    );
     write_message(stream, b'1', &[])?;
     Ok(ExtendedStep::Continue)
 }
@@ -865,10 +932,18 @@ fn handle_bind(
         result_formats.push(format);
     }
 
+    let session_command = statement.session_command.clone();
     if statement.description.is_none() {
-        match statement_description(&sql, runtime, Some(&parameters)) {
-            Ok(description) => statement.description = Some(description),
-            Err((code, message)) => return extended_protocol_error(stream, &code, &message),
+        if session_command.is_some() {
+            // Utility statements have no catalog result shape; they describe as
+            // `NoData` exactly like PostgreSQL utility statements do.
+            statement.description = Some(Vec::new());
+        }
+        else {
+            match statement_description(&sql, runtime, Some(&parameters)) {
+                Ok(description) => statement.description = Some(description),
+                Err((code, message)) => return extended_protocol_error(stream, &code, &message),
+            }
         }
     }
     let description = statement.description.clone().unwrap_or_default();
@@ -884,6 +959,7 @@ fn handle_bind(
             parameters,
             description,
             result_formats,
+            session_command,
             outcome: None,
             sent_rows: 0,
         },
@@ -915,7 +991,9 @@ fn handle_describe(
                 return extended_protocol_error(stream, "26000", &format!("prepared statement \"{name}\" does not exist"));
             };
             let parameters = statement_parameter_description(&statement.sql, &statement.parameter_oids);
-            if statement.description.is_none() {
+            // Session utility statements have no catalog shape; the empty
+            // description below answers them with `NoData`, like PostgreSQL.
+            if statement.description.is_none() && statement.session_command.is_none() {
                 match statement_description(&statement.sql, runtime, None) {
                     Ok(description) => statement.description = Some(description),
                     Err((code, message)) => {
@@ -1035,6 +1113,25 @@ fn handle_execute(
     else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Execute row limit");
     };
+    // Session utility statements run the same shared side effects as SimpleQuery
+    // and answer with a lone CommandComplete: no DataRow, no RowDescription.
+    let session_command = extended.portals.get(name).and_then(|portal| portal.session_command.clone());
+    if let Some(command) = session_command {
+        return match run_session_command(&command, session, extended) {
+            Ok(tag) => {
+                write_command_complete(stream, tag)?;
+                Ok(ExtendedStep::Continue)
+            }
+            Err(SessionCommandError::Rejected { code, message }) => {
+                write_error_response(stream, code, message)?;
+                Ok(ExtendedStep::Failed)
+            }
+            Err(SessionCommandError::Failed { code, message }) => {
+                write_error_response(stream, &code, &message)?;
+                Ok(ExtendedStep::Failed)
+            }
+        };
+    }
     let Some(portal) = extended.portals.get_mut(name)
     else {
         return extended_protocol_error(stream, "34000", &format!("portal \"{name}\" does not exist"));
