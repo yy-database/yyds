@@ -37,8 +37,9 @@ pub enum SetCondition {
 /// Relative expiry requested by `SET ... EX <seconds>` / `PX <milliseconds>`.
 ///
 /// Absolute forms (`EXAT` / `PXAT`) are deliberately absent: this gateway tracks
-/// expiry as a session-relative instant, so it cannot honour an absolute deadline
-/// without inventing clock semantics it does not verify.
+/// expiry as a monotonic-clock deadline shared across connections, so it cannot
+/// honour an absolute wall-clock deadline without inventing clock semantics it does
+/// not verify.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetExpiry {
     /// `EX <seconds>`
@@ -49,8 +50,8 @@ pub enum SetExpiry {
 
 /// Parsed `SET key value [NX|XX] [EX <s>|PX <ms>] [KEEPTTL]` request.
 ///
-/// The value of a `SET` is a plain KV write, while the expiry is connection state
-/// (`KeyValueAction` carries no TTL), so the connection layer consumes this
+/// The value of a `SET` is a plain KV write, while the expiry is gateway key-space
+/// state (`KeyValueAction` carries no TTL), so the connection layer consumes this
 /// structure instead of guessing from the argument count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetRequest {
