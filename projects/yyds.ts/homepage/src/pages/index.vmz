@@ -1,116 +1,112 @@
 <template>
     <SiteHeader />
-    <main class="main">
-        <div class="home">
-            <section class="home__hero">
-                <div>
-                    <p class="home__eyebrow">{{ homeEyebrowLabel }}</p>
-                    <h1 class="home__brand">{{ brandShortLabel }}</h1>
-                    <p>{{ brandFullLabel }}</p>
-                    <p class="home__lede">{{ homeLedeLabel }}</p>
-                    <div class="home__actions">
-                        <Button type="button" @click="goInstall">{{ homeActionInstallLabel }}</Button>
-                        <Button type="button" variant="secondary" @click="goDocs">{{ homeActionDocsLabel }}</Button>
+    <main class="landing landing--service" id="main">
+        <section class="landing-hero">
+            <div class="landing-wrap landing-hero__grid">
+                <div class="landing-hero__copy">
+                    <p class="overline"><span class="status-seed"></span>{{ homeEyebrowLabel }}</p>
+                    <h1><span>{{ homeHeroLine1Label }}</span><span class="hero-title-accent">{{ homeHeroLine2Label }}</span></h1>
+                    <p class="landing-hero__lede">{{ homeLedeLabel }}</p>
+                    <div class="landing-actions">
+                        <a class="action action--primary" href="/install">{{ homeActionInstallLabel }}<span aria-hidden="true">↗</span></a>
+                        <a class="action action--text" href="/d/">{{ homeActionDocsLabel }}<span aria-hidden="true">→</span></a>
                     </div>
                 </div>
-                <div class="home__card">
-                    <code>@yydb/yyds</code>
-                    <p>{{ homeTaglineLabel }}</p>
-                    <Button type="button" variant="secondary" @click="goWire">{{ homeWireLinkLabel }}</Button>
+                <figure class="landing-hero__figure">
+                    <svg class="architecture-svg service-map" viewBox="0 0 1000 360" role="img" aria-label="YYDS protocol access architecture illustration">
+<defs><pattern id="service-grid" width="25" height="25" patternUnits="userSpaceOnUse"><path d="M25 0H0V25" fill="none" stroke="#a9cf9f" stroke-width="0.5" opacity="0.4"/></pattern></defs>
+<rect width="1000" height="360" fill="url(#service-grid)"/>
+<ellipse class="map-field" cx="500" cy="182" rx="216" ry="136"/>
+<ellipse class="map-orbit" cx="500" cy="182" rx="180" ry="110"/>
+<path class="map-track" d="M212 98H310Q334 98 334 122V158Q334 182 360 182H424"/><path class="map-signal signal-0" d="M212 98H310Q334 98 334 122V158Q334 182 360 182H424"/>
+<path class="map-track" d="M212 262H310Q334 262 334 238V206Q334 182 360 182H424"/><path class="map-signal signal-1" d="M212 262H310Q334 262 334 238V206Q334 182 360 182H424"/>
+<path class="map-track" d="M576 182H664Q690 182 690 158V122Q690 98 716 98H788"/><path class="map-signal signal-2" d="M576 182H664Q690 182 690 158V122Q690 98 716 98H788"/>
+<path class="map-track" d="M576 182H664Q690 182 690 206V238Q690 262 716 262H788"/><path class="map-signal signal-3" d="M576 182H664Q690 182 690 206V238Q690 262 716 262H788"/>
+<g class="map-endpoint"><rect x="64" y="62" width="148" height="72" rx="4"/><circle class="endpoint-dot" cx="82" cy="84" r="3.5"/><text class="map-node-label" x="96" y="88">PostgreSQL</text><text class="map-meta" x="82" y="112">SQL ACCESS</text></g>
+<g class="map-endpoint"><rect x="64" y="226" width="148" height="72" rx="4"/><circle class="endpoint-dot endpoint-dot--late" cx="82" cy="248" r="3.5"/><text class="map-node-label" x="96" y="252">MySQL</text><text class="map-meta" x="82" y="276">SQL ACCESS</text></g>
+<g class="map-endpoint"><rect x="788" y="62" width="148" height="72" rx="4"/><circle class="endpoint-dot endpoint-dot--late" cx="806" cy="84" r="3.5"/><text class="map-node-label" x="820" y="88">Redis / MongoDB</text><text class="map-meta" x="806" y="112">CLIENT ACCESS</text></g>
+<g class="map-endpoint"><rect x="788" y="226" width="148" height="72" rx="4"/><circle class="endpoint-dot" cx="806" cy="248" r="3.5"/><text class="map-node-label" x="820" y="252">YY Wire</text><text class="map-meta" x="806" y="276">NATIVE ACCESS</text></g>
+<g class="map-hub"><circle class="hub-pulse" cx="500" cy="182" r="96"/><rect x="424" y="106" width="152" height="152" rx="16"/><rect class="map-hub-inset" x="437" y="119" width="126" height="126" rx="10"/><path d="M470 148l30-16 30 16-30 16zM470 162l30 16 30-16M470 176l30 16 30-16" fill="none" stroke="#b5f637" stroke-width="1.4" stroke-linejoin="round"/><text x="500" y="230" text-anchor="middle" class="map-hub-label">YYDS</text></g>
+<text class="map-meta" x="500" y="30" text-anchor="middle">VOS + CATALOG</text>
+<path class="map-track map-stem" d="M500 42v44M500 264v34"/>
+<text class="map-meta" x="500" y="322" text-anchor="middle">A DEFINED PATH FOR EVERY CONNECTION</text>
+</svg>
+<svg class="architecture-svg service-map-mobile" viewBox="0 0 400 300" role="img" aria-label="YYDS protocol access architecture illustration">
+<circle cx="200" cy="148" r="106" fill="#d6ff9d" stroke="#7fca6a" stroke-width="0.8"/>
+<circle class="map-orbit" cx="200" cy="148" r="82"/>
+<path class="map-track" d="M117 75h27q16 0 16 16v42q0 16 16 16h48q16 0 16-16V91q0-16 16-16h27"/>
+<path class="map-track" d="M117 221h27q16 0 16-16v-42q0-16 16-16h48q16 0 16 16v42q0 16 16 16h27"/>
+<path class="map-signal" d="M117 75h27q16 0 16 16v42q0 16 16 16h48q16 0 16-16V91q0-16 16-16h27"/>
+<path class="map-signal signal-2" d="M117 221h27q16 0 16-16v-42q0-16 16-16h48q16 0 16 16v42q0 16 16 16h27"/>
+<g class="map-endpoint"><rect x="10" y="52" width="107" height="46" rx="4"/><circle class="endpoint-dot" cx="22" cy="68" r="3"/><text class="map-node-label" x="32" y="72">PostgreSQL</text><text class="map-meta" x="22" y="88">SQL ACCESS</text></g>
+<g class="map-endpoint"><rect x="10" y="198" width="107" height="46" rx="4"/><circle class="endpoint-dot endpoint-dot--late" cx="22" cy="214" r="3"/><text class="map-node-label" x="32" y="218">MySQL</text><text class="map-meta" x="22" y="234">SQL ACCESS</text></g>
+<g class="map-endpoint"><rect x="283" y="52" width="107" height="46" rx="4"/><circle class="endpoint-dot endpoint-dot--late" cx="295" cy="68" r="3"/><text class="map-node-label" x="305" y="72">Redis / MongoDB</text><text class="map-meta" x="295" y="88">CLIENT ACCESS</text></g>
+<g class="map-endpoint"><rect x="283" y="198" width="107" height="46" rx="4"/><circle class="endpoint-dot" cx="295" cy="214" r="3"/><text class="map-node-label" x="305" y="218">YY Wire</text><text class="map-meta" x="295" y="234">NATIVE ACCESS</text></g>
+<g class="map-hub"><circle class="hub-pulse" cx="200" cy="148" r="58"/><rect x="162" y="110" width="76" height="76" rx="14"/><rect class="map-hub-inset" x="171" y="119" width="58" height="58" rx="9"/><path d="M185 134l15-8 15 8-15 8zM185 142l15 8 15-8" fill="none" stroke="#b5f637" stroke-width="1.1" stroke-linejoin="round"/><text x="200" y="171" text-anchor="middle" class="map-hub-label">YYDS</text></g>
+<text class="map-meta" x="200" y="18" text-anchor="middle">VOS + CATALOG</text>
+<text class="map-meta" x="200" y="291" text-anchor="middle">PROTOCOL ACCESS / CONCEPTUAL VIEW</text>
+</svg>
+                    <figcaption><span>{{ homeDiagramCaptionLabel }}</span><span aria-hidden="true">FIG. 01</span></figcaption>
+                </figure>
+            </div>
+            <div class="landing-wrap hero-baseline">
+                <div><span class="install-glyph" aria-hidden="true">⌘</span><code>npm install @yydb/yyds</code><span class="install-description">{{ homeInstallHintLabel }}</span></div>
+                <span class="edition-label">{{ homeEditionLabel }}</span>
+            </div>
+        </section>
+        <section class="principles landing-wrap" aria-label="Product principles">
+            <div><span class="principle-index">01</span><h2>{{ homePrinciple1TitleLabel }}</h2><p>{{ homePrinciple1BodyLabel }}</p></div>
+            <div><span class="principle-index">02</span><h2>{{ homePrinciple2TitleLabel }}</h2><p>{{ homePrinciple2BodyLabel }}</p></div>
+            <div><span class="principle-index">03</span><h2>{{ homePrinciple3TitleLabel }}</h2><p>{{ homePrinciple3BodyLabel }}</p></div>
+        </section>
+        <section class="architecture-section">
+            <div class="landing-wrap architecture-section__grid">
+                <div><p class="overline">01 — CONNECT YOUR APPLICATION</p><h2>{{ homeArchitectureTitleLabel }}</h2><p class="section-description">{{ homeArchitectureBodyLabel }}</p><a class="inline-link" href="/wire">{{ homeArchitectureLinkLabel }}<span aria-hidden="true">→</span></a></div>
+                <div class="access-panel">
+                    <div class="access-panel__top"><span>YYDS / ACCESS</span><span>VOS + CATALOG</span></div>
+                    <a href="/d/"><span class="access-panel__index">01</span><strong>PostgreSQL / MySQL</strong><span>SQL ↗</span></a>
+                    <a href="/d/"><span class="access-panel__index">02</span><strong>Redis / MongoDB</strong><span>CLIENT ↗</span></a>
+                    <a href="/wire"><span class="access-panel__index">03</span><strong>YY Wire</strong><span>NATIVE ↗</span></a>
+                    <div class="access-panel__bottom">@yydb/yyds <span>↗</span> application</div>
                 </div>
-            </section>
-
-            <section class="home__section">
-                <div class="home__section-head">
-                    <h2>{{ homeFeatureTitleLabel }}</h2>
-                    <p>{{ homeFeatureLedeLabel }}</p>
-                </div>
-                <div class="home__feature-grid">
-                    <article>
-                        <h3>{{ homeFeatureSchemaTitleLabel }}</h3>
-                        <p>{{ homeFeatureSchemaBodyLabel }}</p>
-                    </article>
-                    <article>
-                        <h3>{{ homeFeatureDurabilityTitleLabel }}</h3>
-                        <p>{{ homeFeatureDurabilityBodyLabel }}</p>
-                    </article>
-                    <article>
-                        <h3>{{ homeFeatureHostTitleLabel }}</h3>
-                        <p>{{ homeFeatureHostBodyLabel }}</p>
-                    </article>
-                    <article>
-                        <h3>{{ homeFeatureWireTitleLabel }}</h3>
-                        <p>{{ homeFeatureWireBodyLabel }}</p>
-                    </article>
-                </div>
-            </section>
-
-            <section class="home__section">
-                <div class="home__section-head">
-                    <h2>{{ homePackagesTitleLabel }}</h2>
-                    <p>{{ homePackagesLedeLabel }}</p>
-                </div>
-                <div class="home__pkg-grid">
-                    <article>
-                        <code>@yydb/yyds</code>
-                        <p>{{ homePkgYydbLabel }}</p>
-                    </article>
-                    <article>
-                        <code>@yydb/yydb-client</code>
-                        <p>{{ homePkgClientLabel }}</p>
-                    </article>
-                    <article>
-                        <code>@yydb/yyds-webui</code>
-                        <p>{{ homePkgWebuiLabel }}</p>
-                    </article>
-                    <article>
-                        <code>@yydb/yyds-skills</code>
-                        <p>{{ homePkgSkillsLabel }}</p>
-                    </article>
-                </div>
-            </section>
-        </div>
+            </div>
+        </section>
+        <section class="landing-section landing-wrap">
+            <div class="editorial-heading"><p class="overline">02 — BUILT WITH INTENT</p><h2>{{ homeFeatureTitleLabel }}</h2><p class="section-description">{{ homeFeatureLedeLabel }}</p></div>
+            <div class="feature-columns">
+                <article><span class="feature-symbol" aria-hidden="true">01 / DEFINE</span><h3>{{ homeFeatureSchemaTitleLabel }}</h3><p>{{ homeFeatureSchemaBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureSchemaTitleLabel">↗</a></article>
+                <article><span class="feature-symbol" aria-hidden="true">02 / OPERATE</span><h3>{{ homeFeatureDurabilityTitleLabel }}</h3><p>{{ homeFeatureDurabilityBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureDurabilityTitleLabel">↗</a></article>
+                <article><span class="feature-symbol" aria-hidden="true">03 / CONNECT</span><h3>{{ homeFeatureHostTitleLabel }}</h3><p>{{ homeFeatureHostBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureHostTitleLabel">↗</a></article>
+            </div>
+        </section>
+        <section class="landing-wrap closing-section">
+            <p class="overline">03 — START BUILDING</p>
+            <h2>{{ homeClosingTitleLabel }}</h2>
+            <div class="closing-section__bottom"><p>{{ homeClosingBodyLabel }}</p><a class="action action--primary" href="/install">{{ homeClosingActionLabel }}<span aria-hidden="true">↗</span></a></div>
+            <div class="service-signature" aria-hidden="true"><span>YYDS</span><span>BY YY / OPEN SOURCE</span></div>
+        </section>
     </main>
     <SiteFooter />
 </template>
 
 <script client>
-import {
-    brandShort,
-    brandFull,
-    homeEyebrow,
-    homeLede,
-    homeTagline,
-    homeActionInstall,
-    homeActionDocs,
-    homeFeatureTitle,
-    homeFeatureLede,
-    homeFeatureSchemaTitle,
-    homeFeatureSchemaBody,
-    homeFeatureDurabilityTitle,
-    homeFeatureDurabilityBody,
-    homeFeatureHostTitle,
-    homeFeatureHostBody,
-    homeFeatureWireTitle,
-    homeFeatureWireBody,
-    homePackagesTitle,
-    homePackagesLede,
-    homePkgYydb,
-    homePkgClient,
-    homePkgWebui,
-    homePkgSkills,
-    homeWireLink,
-} from "#locales/common";
+import { homeEyebrow, homeHeroLine1, homeHeroLine2, homeLede, homeActionInstall, homeActionDocs, homeInstallHint, homePrinciple1Title, homePrinciple1Body, homePrinciple2Title, homePrinciple2Body, homePrinciple3Title, homePrinciple3Body, homeFeatureTitle, homeFeatureLede, homeFeatureSchemaTitle, homeFeatureSchemaBody, homeFeatureDurabilityTitle, homeFeatureDurabilityBody, homeFeatureHostTitle, homeFeatureHostBody, homeArchitectureTitle, homeArchitectureBody, homeArchitectureLink, homeClosingTitle, homeClosingBody, homeClosingAction, homeDiagramCaption, homeEdition, titleHome } from "#locales/common";
 import { readLocaleId, withLocaleHint, watchDocumentLocale } from "../lib/locale-copy.ts";
 
-export default class IndexPage {
-    brandShortLabel = "";
-    brandFullLabel = "";
+export default class Home {
     homeEyebrowLabel = "";
+    homeHeroLine1Label = "";
+    homeHeroLine2Label = "";
     homeLedeLabel = "";
-    homeTaglineLabel = "";
     homeActionInstallLabel = "";
     homeActionDocsLabel = "";
+    homeInstallHintLabel = "";
+    homePrinciple1TitleLabel = "";
+    homePrinciple1BodyLabel = "";
+    homePrinciple2TitleLabel = "";
+    homePrinciple2BodyLabel = "";
+    homePrinciple3TitleLabel = "";
+    homePrinciple3BodyLabel = "";
     homeFeatureTitleLabel = "";
     homeFeatureLedeLabel = "";
     homeFeatureSchemaTitleLabel = "";
@@ -119,37 +115,40 @@ export default class IndexPage {
     homeFeatureDurabilityBodyLabel = "";
     homeFeatureHostTitleLabel = "";
     homeFeatureHostBodyLabel = "";
-    homeFeatureWireTitleLabel = "";
-    homeFeatureWireBodyLabel = "";
-    homePackagesTitleLabel = "";
-    homePackagesLedeLabel = "";
-    homePkgYydbLabel = "";
-    homePkgClientLabel = "";
-    homePkgWebuiLabel = "";
-    homePkgSkillsLabel = "";
-    homeWireLinkLabel = "";
+    homeArchitectureTitleLabel = "";
+    homeArchitectureBodyLabel = "";
+    homeArchitectureLinkLabel = "";
+    homeClosingTitleLabel = "";
+    homeClosingBodyLabel = "";
+    homeClosingActionLabel = "";
+    homeDiagramCaptionLabel = "";
+    homeEditionLabel = "";
     _unwatchLocale = null;
-
     onMount() {
         this.applyLocaleCopy();
         this._unwatchLocale = watchDocumentLocale((id) => this.applyLocaleCopy(id));
     }
-
     onDestroy() {
-        if (typeof this._unwatchLocale === "function") {
-            this._unwatchLocale();
-        }
+        if (typeof this._unwatchLocale === "function") this._unwatchLocale();
         this._unwatchLocale = null;
     }
-
+    applyLocaleCopy(preferred) {
+        withLocaleHint(readLocaleId(preferred), () => this.refreshCopy());
+    }
     refreshCopy() {
-        this.brandShortLabel = brandShort();
-        this.brandFullLabel = brandFull();
         this.homeEyebrowLabel = homeEyebrow();
+        this.homeHeroLine1Label = homeHeroLine1();
+        this.homeHeroLine2Label = homeHeroLine2();
         this.homeLedeLabel = homeLede();
-        this.homeTaglineLabel = homeTagline();
         this.homeActionInstallLabel = homeActionInstall();
         this.homeActionDocsLabel = homeActionDocs();
+        this.homeInstallHintLabel = homeInstallHint();
+        this.homePrinciple1TitleLabel = homePrinciple1Title();
+        this.homePrinciple1BodyLabel = homePrinciple1Body();
+        this.homePrinciple2TitleLabel = homePrinciple2Title();
+        this.homePrinciple2BodyLabel = homePrinciple2Body();
+        this.homePrinciple3TitleLabel = homePrinciple3Title();
+        this.homePrinciple3BodyLabel = homePrinciple3Body();
         this.homeFeatureTitleLabel = homeFeatureTitle();
         this.homeFeatureLedeLabel = homeFeatureLede();
         this.homeFeatureSchemaTitleLabel = homeFeatureSchemaTitle();
@@ -158,37 +157,15 @@ export default class IndexPage {
         this.homeFeatureDurabilityBodyLabel = homeFeatureDurabilityBody();
         this.homeFeatureHostTitleLabel = homeFeatureHostTitle();
         this.homeFeatureHostBodyLabel = homeFeatureHostBody();
-        this.homeFeatureWireTitleLabel = homeFeatureWireTitle();
-        this.homeFeatureWireBodyLabel = homeFeatureWireBody();
-        this.homePackagesTitleLabel = homePackagesTitle();
-        this.homePackagesLedeLabel = homePackagesLede();
-        this.homePkgYydbLabel = homePkgYydb();
-        this.homePkgClientLabel = homePkgClient();
-        this.homePkgWebuiLabel = homePkgWebui();
-        this.homePkgSkillsLabel = homePkgSkills();
-        this.homeWireLinkLabel = homeWireLink();
-    }
-
-    applyLocaleCopy(preferred) {
-        withLocaleHint(readLocaleId(preferred), () => this.refreshCopy());
-    }
-
-    goInstall() {
-        if (typeof window !== "undefined") {
-            window.location.href = "/install";
-        }
-    }
-
-    goDocs() {
-        if (typeof window !== "undefined") {
-            window.location.href = "/d/";
-        }
-    }
-
-    goWire() {
-        if (typeof window !== "undefined") {
-            window.location.href = "/wire";
-        }
+        this.homeArchitectureTitleLabel = homeArchitectureTitle();
+        this.homeArchitectureBodyLabel = homeArchitectureBody();
+        this.homeArchitectureLinkLabel = homeArchitectureLink();
+        this.homeClosingTitleLabel = homeClosingTitle();
+        this.homeClosingBodyLabel = homeClosingBody();
+        this.homeClosingActionLabel = homeClosingAction();
+        this.homeDiagramCaptionLabel = homeDiagramCaption();
+        this.homeEditionLabel = homeEdition();
+        if (typeof document !== "undefined") document.title = titleHome();
     }
 }
 </script>
