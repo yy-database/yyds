@@ -309,7 +309,7 @@
   welcomeWire: 'Frame codec demo',
   welcomeNote: 'This page is a product entrance and never connects to a running node.',
   homeHeroLine1: "One node process.",
-  homeHeroLine2: "Fluent in your clients' protocols.",
+  homeHeroLine2: "Fluent in the protocols your clients speak.",
   homeInstallHint: "One command to init. Every port and directory stays explicit.",
   homePrinciple1Title: "One definition",
   homePrinciple1Body: "VOS defines the structure and the catalog carries the release. Nodes and applications read the same schema.",
