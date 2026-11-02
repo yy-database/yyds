@@ -1450,13 +1450,15 @@ body { background: var(--yy-paper); }
 /* YYDS: cluster atlas on a server-room dark base. Graphite carries the
    structure, fog lines draw the map, and lime only fires on signals:
    leader ring, packets, status dots and the CTA. */
-.landing--service { --landing-bg: #0e1417; --landing-ink: #edf0ec; --landing-muted: #8a968d; --landing-line: #2a343a; --landing-accent: #9be31e; background: #0e1417; color: #e7ece7; }
+.landing--service { --landing-bg: #0e1417; --landing-ink: #edf0ec; --landing-muted: #8a968d; --landing-line: #2a343a; --landing-accent: #9be31e; --dur-press: 120ms; --dur-hover: 180ms; --dur-draw: 400ms; --dur-reveal: 480ms; --ease-standard: cubic-bezier(0.22, 0.61, 0.21, 1); background: #0e1417; color: #e7ece7; }
 body:has(.landing--service) { background: #0e1417; }
+/* Visible keyboard focus everywhere on the landing. */
+body:has(.landing--service) a:focus-visible, body:has(.landing--service) button:focus-visible, body:has(.landing--service) summary:focus-visible { outline: 2px solid #9be31e; outline-offset: 2px; border-radius: 1px; }
 /* Dark chrome on the landing. */
 body:has(.landing--service) .site-header { background: rgba(14, 20, 23, 0.92); border-bottom: 1px solid #2a343a; }
 body:has(.landing--service) .site-brand__word { color: #edf0ec; }
 body:has(.landing--service) .site-brand__symbol { color: #a8b3aa; }
-body:has(.landing--service) .site-nav a { color: #a8b3aa; }
+body:has(.landing--service) .site-nav a { color: #a8b3aa; transition: color var(--dur-hover) var(--ease-standard); }
 body:has(.landing--service) .site-nav a:hover { color: #edf0ec; background: transparent; }
 body:has(.landing--service) .site-nav a[aria-current="page"] { color: #edf0ec; box-shadow: inset 0 -2px #d8e0d8; }
 body:has(.landing--service) .site-header__link, body:has(.landing--service) .site-header__icon { color: #a8b3aa; }
@@ -1489,7 +1491,9 @@ body:has(.landing--service) .site-footer__bar { border-top: 1px solid #2a343a; c
 .landing--service .landing-actions { justify-content: flex-start; margin-top: 34px; }
 .landing--service .action--primary { background: #9be31e; border-color: #9be31e; color: #0e1417; border-radius: 2px; }
 .landing--service .action--primary:hover { background: #b4f24a; border-color: #b4f24a; color: #0e1417; }
-.landing--service .action--text { color: #d8e0d8; border-bottom: 2px solid #3a4640; padding-bottom: 4px; }
+.landing--service .action { transition: transform var(--dur-press) var(--ease-standard), background var(--dur-hover) var(--ease-standard), color var(--dur-hover) var(--ease-standard), border-color var(--dur-hover) var(--ease-standard); }
+.landing--service .action:active { transform: translateY(1px); }
+.landing--service .action--text { color: #d8e0d8; border-bottom: 2px solid #3a4640; padding-bottom: 4px; transition: color var(--dur-hover) var(--ease-standard), border-color var(--dur-hover) var(--ease-standard), transform var(--dur-press) var(--ease-standard); }
 .landing--service .action--text:hover { color: #9be31e; border-bottom-color: #9be31e; }
 /* The atlas figure: fog lines on the dark base. */
 .landing--service .landing-hero__mesh { min-width: 0; }
@@ -1514,11 +1518,13 @@ body:has(.landing--service) .site-footer__bar { border-top: 1px solid #2a343a; c
 .at-packet { fill: none; stroke: #9be31e; stroke-width: 2.4; stroke-linecap: round; stroke-dasharray: 20 400; animation: atlas-flow 6s linear infinite; }
 .at-packet--late { animation-delay: -3s; }
 @keyframes atlas-flow { to { stroke-dashoffset: -420; } }
-.at-leader-ring { fill: none; stroke: #9be31e; stroke-width: 1.4; opacity: 0; transform-box: fill-box; transform-origin: center; animation: atlas-pulse 3.2s ease-out infinite; }
-@keyframes atlas-pulse { 0% { transform: scale(0.8); opacity: 0.8; } 70% { opacity: 0.2; } 100% { transform: scale(1.18); opacity: 0; } }
+.at-leader-ring { fill: none; stroke: #9be31e; stroke-width: 1.4; opacity: 0; transform-box: fill-box; transform-origin: center; animation: atlas-pulse 4s ease-out infinite; }
+@keyframes atlas-pulse { 0% { transform: scale(0.82); opacity: 0.55; } 70% { opacity: 0.16; } 100% { transform: scale(1.16); opacity: 0; } }
 /* Baseline install strip. */
 .landing--service .hero-baseline { border-top: 1px solid #2a343a; padding-block: 20px; }
-.install-chip { display: inline-flex; align-items: center; gap: 10px; background: #131b1f; border: 1px solid #2a343a; color: #9be31e; font-size: 12px; padding: 8px 14px; border-radius: 2px; font-family: var(--vmz-font-mono); }
+.install-chip { display: inline-flex; align-items: center; gap: 10px; background: #131b1f; border: 1px solid #2a343a; color: #9be31e; font-size: 12px; padding: 8px 14px; border-radius: 2px; font-family: var(--vmz-font-mono); cursor: pointer; transition: border-color var(--dur-hover) var(--ease-standard), transform var(--dur-press) var(--ease-standard); }
+.install-chip:hover { border-color: #9be31e; }
+.install-chip:active { transform: translateY(1px); }
 .install-glyph { color: #9be31e; font-size: 14px; }
 .landing--service .install-description { color: #6f7a72; font-size: 11px; margin-left: 16px; }
 .landing--service .edition-label { color: #556059; }
@@ -1542,7 +1548,7 @@ body:has(.landing--service) .site-footer__bar { border-top: 1px solid #2a343a; c
 .route-table tbody td { font-size: 14px; color: #e7ece7; }
 .route-table tbody td:nth-child(2), .route-table tbody td:nth-child(3) { font-family: var(--vmz-font-mono); font-size: 12.5px; color: #a8b3aa; }
 .route-table tbody td:last-child { font-family: var(--vmz-font-mono); font-size: 11px; letter-spacing: 0.06em; color: #d8e0d8; white-space: nowrap; }
-.route-table tbody tr { transition: background 0.15s ease; }
+.route-table tbody tr { transition: background var(--dur-hover) var(--ease-standard); }
 .route-table tbody tr:hover { background: #151d21; }
 .live-dot, .probe-dot { display: inline-block; width: 7px; height: 7px; margin-right: 9px; vertical-align: 1px; }
 .live-dot { background: #9be31e; animation: seed-pulse 2.8s ease-out infinite; }
@@ -1560,13 +1566,22 @@ body:has(.landing--service) .site-footer__bar { border-top: 1px solid #2a343a; c
 .schema-panel pre { margin: 0; padding: 20px; font-family: var(--vmz-font-mono); font-size: 12.5px; line-height: 1.9; color: #dde4dc; overflow-x: auto; }
 .schema-panel__foot { padding: 11px 18px; border-top: 1px solid #222b30; font: 9px var(--vmz-font-mono); color: #9be31e; letter-spacing: 0.04em; }
 .capability-list article { position: relative; padding: 30px 44px 30px 0; border-top: 1px solid #2a343a; }
-.capability-list article::after { content: ""; position: absolute; left: 0; top: -1px; height: 1px; width: 0; background: #d8e0d8; transition: width 0.4s cubic-bezier(0.22, 0.61, 0.21, 1); }
+.capability-list article::after { content: ""; position: absolute; left: 0; top: -1px; height: 1px; width: 0; background: #d8e0d8; transition: width var(--dur-draw) var(--ease-standard); }
 .capability-list article:hover::after { width: 64px; }
 .capability-list .feature-symbol { font: 9px var(--vmz-font-mono); letter-spacing: 0.1em; color: #8a968d; display: inline-block; margin-bottom: 14px; }
 .capability-list h3 { color: #edf0ec; font-size: 19px; letter-spacing: -0.02em; margin-bottom: 12px; font-weight: 600; }
 .capability-list p { color: #8a968d; font-size: 14.5px; line-height: 1.8; max-width: 460px; }
-.capability-list a { position: absolute; top: 28px; right: 0; color: #8a968d; font-size: 19px; transition: transform 0.2s ease, color 0.2s ease; }
+.capability-list a { position: absolute; top: 28px; right: 0; color: #8a968d; font-size: 19px; transition: transform var(--dur-hover) var(--ease-standard), color var(--dur-hover) var(--ease-standard); }
 .capability-list a:hover { color: #9be31e; transform: translate(3px, -3px); }
+/* Restrained scroll-in: small rise, once, staggered inside a group. */
+@media (prefers-reduced-motion: no-preference) {
+ [data-reveal] { opacity: 0; transform: translateY(10px); transition: opacity var(--dur-reveal) var(--ease-standard), transform var(--dur-reveal) var(--ease-standard); }
+ [data-reveal].is-revealed { opacity: 1; transform: none; }
+ .principles > [data-reveal]:nth-child(2) { transition-delay: 60ms; }
+ .principles > [data-reveal]:nth-child(3) { transition-delay: 120ms; }
+ .capability-list > [data-reveal]:nth-child(2) { transition-delay: 60ms; }
+ .capability-list > [data-reveal]:nth-child(3) { transition-delay: 120ms; }
+}
 /* Closing: the darkest band with the lime point. */
 .landing--service .closing-section { background: #090e11; padding: 84px 0 0; }
 .closing-section .overline { color: #6f7a72; }
