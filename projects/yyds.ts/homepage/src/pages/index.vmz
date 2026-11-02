@@ -94,11 +94,11 @@
                 <table class="route-table">
                     <thead><tr><th scope="col">Protocol</th><th scope="col">Client</th><th scope="col">Declare</th><th scope="col">Status</th></tr></thead>
                     <tbody>
-                        <tr><td>PostgreSQL wire</td><td>psql</td><td>--pgsql-port</td><td><span class="live-dot"></span>Live</td></tr>
-                        <tr><td>MySQL wire</td><td>mysql</td><td>--mysql-port</td><td><span class="live-dot"></span>Live</td></tr>
-                        <tr><td>Redis</td><td>redis-cli</td><td>--redis-port</td><td><span class="live-dot"></span>Live</td></tr>
-                        <tr><td>MongoDB</td><td>mongosh</td><td>--mongo-port</td><td><span class="probe-dot"></span>Probe</td></tr>
-                        <tr><td>YY wire</td><td>@yydb/yydb-client</td><td>--wire-port · TCP+WS</td><td><span class="live-dot"></span>Live</td></tr>
+                        <tr><td>PostgreSQL wire</td><td data-label="Client">psql</td><td data-label="Declare">--pgsql-port</td><td data-label="Status"><span class="status-text"><span class="live-dot"></span>Live</span></td></tr>
+                        <tr><td>MySQL wire</td><td data-label="Client">mysql</td><td data-label="Declare">--mysql-port</td><td data-label="Status"><span class="status-text"><span class="live-dot"></span>Live</span></td></tr>
+                        <tr><td>Redis</td><td data-label="Client">redis-cli</td><td data-label="Declare">--redis-port</td><td data-label="Status"><span class="status-text"><span class="live-dot"></span>Live</span></td></tr>
+                        <tr><td>MongoDB</td><td data-label="Client">mongosh</td><td data-label="Declare">--mongo-port</td><td data-label="Status"><span class="status-text"><span class="probe-dot"></span>Probe</span></td></tr>
+                        <tr><td>YY wire</td><td data-label="Client">@yydb/yydb-client</td><td data-label="Declare">--wire-port · TCP+WS</td><td data-label="Status"><span class="status-text"><span class="live-dot"></span>Live</span></td></tr>
                     </tbody>
                 </table>
             </div>

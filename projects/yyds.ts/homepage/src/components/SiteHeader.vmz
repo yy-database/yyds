@@ -1,12 +1,12 @@
 <template>
-    <header data-vmz-fixture="site-header" class="site-header">
+    <header data-vmz-fixture="site-header" class="site-header" :data-menu-open="menuOpen ? 'true' : 'false'">
         <div class="site-header__inner">
             <a class="site-brand" href="/" :aria-label="homeAriaLabel">
                 <span class="site-brand__symbol" aria-hidden="true"><svg viewBox="0 0 32 32" fill="none"><rect x="10" y="10" width="12" height="12" rx="3" stroke="currentColor" stroke-width="1.6"/><path d="M16 3v7M16 22v7M3 16h7M22 16h7" stroke="currentColor" stroke-width="1.6"/><circle cx="16" cy="3" r="2" fill="currentColor"/><circle cx="16" cy="29" r="2" fill="currentColor"/><circle cx="3" cy="16" r="2" fill="currentColor"/><circle cx="29" cy="16" r="2" fill="currentColor"/></svg></span><span class="site-brand__word">{{ brandShortLabel }}</span>
                 <span class="site-brand__tag">{{ brandFullLabel }}</span>
             </a>
 
-            <nav class="site-nav" :aria-label="navPrimaryLabel">
+            <nav class="site-nav" id="site-nav" :aria-label="navPrimaryLabel" @click="(() => closeMenu())">
                 <a href="/" :aria-current="homeCurrent">{{ navHomeLabel }}</a>
                 <a href="/welcome" :aria-current="welcomeCurrent">{{ navWelcomeLabel }}</a>
                 <a href="/playground" :aria-current="playgroundCurrent">{{ navPlaygroundLabel }}</a>
@@ -16,6 +16,17 @@
             </nav>
 
             <div class="site-header__tools">
+                <button
+                    type="button"
+                    class="site-nav-toggle"
+                    aria-controls="site-nav"
+                    :aria-expanded="menuOpen ? 'true' : 'false'"
+                    :aria-label="menuOpen ? menuCloseLabel : menuOpenLabel"
+                    @click="(() => toggleMenu())"
+                >
+                    <span class="site-nav-toggle__bar" aria-hidden="true"></span>
+                    <span class="site-nav-toggle__bar" aria-hidden="true"></span>
+                </button>
                 <details class="site-language">
                     <summary :aria-label="selectLanguageLabel">{{ langSummary }}</summary>
                     <div class="site-language__menu">
@@ -82,6 +93,8 @@ import {
     langEnFull,
     langZhShort,
     langEnShort,
+    navMenuOpen,
+    navMenuClose,
 } from "#locales/common";
 import { isActivePath, readLocaleId, withLocaleHint, watchDocumentLocale } from "../lib/locale-copy.ts";
 
@@ -105,6 +118,9 @@ export default class SiteHeader {
     langSummary = "";
     langZhFullLabel = "";
     langEnFullLabel = "";
+    menuOpenLabel = "";
+    menuCloseLabel = "";
+    menuOpen = false;
     githubHref = GITHUB_HREF;
     discussionsHref = DISCUSSIONS_HREF;
     localeId = "zh-hans";
@@ -154,6 +170,8 @@ export default class SiteHeader {
         this.selectLanguageLabel = selectLanguage();
         this.langZhFullLabel = langZhFull();
         this.langEnFullLabel = langEnFull();
+        this.menuOpenLabel = navMenuOpen();
+        this.menuCloseLabel = navMenuClose();
         this.langSummary = this.localeId === "en" ? langEnShort() : langZhShort();
         this.syncNavState();
     }
@@ -161,6 +179,14 @@ export default class SiteHeader {
     applyLocaleCopy(preferred) {
         this.localeId = readLocaleId(preferred);
         withLocaleHint(this.localeId, () => this.refreshCopy());
+    }
+
+    toggleMenu() {
+        this.menuOpen = !this.menuOpen;
+    }
+
+    closeMenu() {
+        this.menuOpen = false;
     }
 
     async switchLocale(to) {
