@@ -78,14 +78,14 @@
                 </figure>
             </div>
             <div class="landing-wrap hero-baseline">
-                <div><code class="install-chip"><span class="install-glyph" aria-hidden="true">⌘</span>npm install @yydb/yyds</code><span class="install-description">{{ homeInstallHintLabel }}</span></div>
+                <div><button class="install-chip" type="button" @click='(() => copyInstall())' :aria-label="installChipAria"><span class="install-glyph" aria-hidden="true">⌘</span><span class="install-chip__text">{{ installChipText }}</span></button><span class="install-description">{{ homeInstallHintLabel }}</span></div>
                 <span class="edition-label">{{ homeEditionLabel }}</span>
             </div>
         </section>
         <section class="principles landing-wrap" aria-label="Product principles">
-            <div><span class="principle-index">01</span><h2>{{ homePrinciple1TitleLabel }}</h2><p>{{ homePrinciple1BodyLabel }}</p></div>
-            <div><span class="principle-index">02</span><h2>{{ homePrinciple2TitleLabel }}</h2><p>{{ homePrinciple2BodyLabel }}</p></div>
-            <div><span class="principle-index">03</span><h2>{{ homePrinciple3TitleLabel }}</h2><p>{{ homePrinciple3BodyLabel }}</p></div>
+            <div data-reveal="true"><span class="principle-index">01</span><h2>{{ homePrinciple1TitleLabel }}</h2><p>{{ homePrinciple1BodyLabel }}</p></div>
+            <div data-reveal="true"><span class="principle-index">02</span><h2>{{ homePrinciple2TitleLabel }}</h2><p>{{ homePrinciple2BodyLabel }}</p></div>
+            <div data-reveal="true"><span class="principle-index">03</span><h2>{{ homePrinciple3TitleLabel }}</h2><p>{{ homePrinciple3BodyLabel }}</p></div>
         </section>
         <section class="route-section">
             <div class="landing-wrap route-section__head">
@@ -96,7 +96,7 @@
                     <a class="inline-link" href="/wire">{{ homeArchitectureLinkLabel }}<span aria-hidden="true">→</span></a>
                 </div>
             </div>
-            <div class="landing-wrap">
+            <div class="landing-wrap" data-reveal="true">
                 <table class="route-table">
                     <thead><tr><th scope="col">PROTOCOL</th><th scope="col">CLIENT</th><th scope="col">DECLARE</th><th scope="col">STATUS</th></tr></thead>
                     <tbody>
@@ -115,8 +115,8 @@
                     <p class="overline">02 — CONTROL PLANE</p>
                     <h2>{{ homeFeatureTitleLabel }}</h2>
                     <p class="section-description">{{ homeFeatureLedeLabel }}</p>
-                    <p class="command-chain" aria-label="Node lifecycle"><span>init</span><i>→</i><span>start</span><i>→</i><span>status</span><i>→</i><span>stop</span></p>
-                    <div class="schema-panel">
+                    <p class="command-chain" data-reveal="true" aria-label="Node lifecycle"><span>init</span><i>→</i><span>start</span><i>→</i><span>status</span><i>→</i><span>stop</span></p>
+                    <div class="schema-panel" data-reveal="true">
                         <div class="schema-panel__bar"><span>SCHEMA · VOS</span><span>CATALOG</span></div>
                         <pre>table Setting {
     @@id: uuid,
@@ -127,14 +127,14 @@
                     </div>
                 </div>
                 <div class="capability-list">
-                    <article><span class="feature-symbol" aria-hidden="true">01 / DEFINE</span><h3>{{ homeFeatureSchemaTitleLabel }}</h3><p>{{ homeFeatureSchemaBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureSchemaTitleLabel">↗</a></article>
-                    <article><span class="feature-symbol" aria-hidden="true">02 / OPERATE</span><h3>{{ homeFeatureDurabilityTitleLabel }}</h3><p>{{ homeFeatureDurabilityBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureDurabilityTitleLabel">↗</a></article>
-                    <article><span class="feature-symbol" aria-hidden="true">03 / CONNECT</span><h3>{{ homeFeatureHostTitleLabel }}</h3><p>{{ homeFeatureHostBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureHostTitleLabel">↗</a></article>
+                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">01 / DEFINE</span><h3>{{ homeFeatureSchemaTitleLabel }}</h3><p>{{ homeFeatureSchemaBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureSchemaTitleLabel">↗</a></article>
+                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">02 / OPERATE</span><h3>{{ homeFeatureDurabilityTitleLabel }}</h3><p>{{ homeFeatureDurabilityBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureDurabilityTitleLabel">↗</a></article>
+                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">03 / CONNECT</span><h3>{{ homeFeatureHostTitleLabel }}</h3><p>{{ homeFeatureHostBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureHostTitleLabel">↗</a></article>
                 </div>
             </div>
         </section>
         <section class="closing-section">
-            <div class="landing-wrap">
+            <div class="landing-wrap" data-reveal="true">
                 <p class="overline">03 — START BUILDING</p>
                 <h2>{{ homeClosingTitleLabel }}</h2>
                 <div class="closing-section__bottom"><p>{{ homeClosingBodyLabel }}</p><a class="action action--primary" href="/install">{{ homeClosingActionLabel }}<span aria-hidden="true">→</span></a></div>
@@ -179,14 +179,88 @@ export default class Home {
     homeClosingActionLabel = "";
     homeTopologyCaptionLabel = "";
     homeEditionLabel = "";
+    installChipText = "npm install @yydb/yyds";
+    installChipAria = "Copy install command";
+    _installChipTimer = null;
+    _revealObserver = null;
     _unwatchLocale = null;
     onMount() {
         this.applyLocaleCopy();
         this._unwatchLocale = watchDocumentLocale((id) => this.applyLocaleCopy(id));
+        this.setupReveal();
     }
     onDestroy() {
         if (typeof this._unwatchLocale === "function") this._unwatchLocale();
         this._unwatchLocale = null;
+        if (this._revealObserver) this._revealObserver.disconnect();
+        this._revealObserver = null;
+        if (this._installChipTimer) clearTimeout(this._installChipTimer);
+        this._installChipTimer = null;
+    }
+    async copyInstall() {
+        const command = "npm install @yydb/yyds";
+        let copied = false;
+        try {
+            if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(command);
+                copied = true;
+            }
+        } catch {
+            copied = false;
+        }
+        if (!copied && typeof document !== "undefined") {
+            try {
+                const helper = document.createElement("textarea");
+                helper.value = command;
+                helper.setAttribute("readonly", "");
+                helper.style.position = "absolute";
+                helper.style.left = "-9999px";
+                document.body.appendChild(helper);
+                helper.select();
+                copied = document.execCommand("copy");
+                document.body.removeChild(helper);
+            } catch {
+                copied = false;
+            }
+        }
+        if (copied) {
+            this.installChipText = "COPIED · npm install @yydb/yyds";
+        } else if (typeof window !== "undefined" && typeof window.getSelection === "function") {
+            const target = document.querySelector(".install-chip__text");
+            const selection = window.getSelection();
+            if (target && selection) {
+                const range = document.createRange();
+                range.selectNodeContents(target);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }
+            this.installChipText = "PRESS Ctrl+C · npm install @yydb/yyds";
+        }
+        if (this._installChipTimer) clearTimeout(this._installChipTimer);
+        this._installChipTimer = setTimeout(() => {
+            this.installChipText = command;
+            this._installChipTimer = null;
+        }, 1600);
+    }
+    setupReveal() {
+        if (typeof document === "undefined" || typeof IntersectionObserver === "undefined") return;
+        const items = Array.from(document.querySelectorAll("[data-reveal]"));
+        if (items.length === 0) return;
+        const reduce = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (reduce) {
+            items.forEach((el) => el.classList.add("is-revealed"));
+            return;
+        }
+        const io = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add("is-revealed");
+                    io.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.15, rootMargin: "0px 0px 12% 0px" });
+        items.forEach((el) => io.observe(el));
+        this._revealObserver = io;
     }
     applyLocaleCopy(preferred) {
         withLocaleHint(readLocaleId(preferred), () => this.refreshCopy());
