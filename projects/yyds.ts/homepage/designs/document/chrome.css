@@ -36,9 +36,7 @@
 
 .doc-sidebar__label {
     font-family: var(--vmz-font-mono);
-    font-size: 0.625rem;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    font-size: 0.75rem;
     color: var(--vmz-text-muted);
     margin-bottom: 0.625rem;
 }
@@ -118,11 +116,10 @@
 
 .toc__label,
 .toc::before {
-    content: "ON THIS PAGE";
+    content: "On this page";
     display: block;
     font-family: var(--vmz-font-mono);
-    font-size: 0.625rem;
-    letter-spacing: 0.1em;
+    font-size: 0.75rem;
     color: var(--vmz-text-muted);
     margin-bottom: 0.5rem;
 }
@@ -156,8 +153,7 @@
 .doc-content main h1 {
     font-family: var(--vmz-font-display);
     font-size: clamp(1.5rem, 2.2vw, 1.875rem);
-    letter-spacing: -0.02em;
-    line-height: 1.2;
+    line-height: 1.25;
     margin: 0 0 0.875rem;
     padding-bottom: 0.75rem;
     border-bottom: 1px solid var(--vmz-line-default);
@@ -276,10 +272,8 @@
     background: var(--vmz-surface-mist);
     border-bottom: 1px solid var(--vmz-line-default);
     font-family: var(--vmz-font-mono);
-    font-size: 0.6875rem;
+    font-size: 0.75rem;
     font-weight: 500;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
     color: var(--vmz-text-steel);
     text-align: left;
     padding: 0.5rem 0.75rem;

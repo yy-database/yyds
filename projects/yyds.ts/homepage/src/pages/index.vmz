@@ -13,78 +13,62 @@
                     </div>
                 </div>
                 <figure class="landing-hero__mesh">
-                    <svg class="mesh-svg" viewBox="0 0 900 760" role="img" aria-label="YYDS cluster atlas: control plane, leader node, replica roadmap and declared gateway ports">
-<defs><pattern id="atlas-grid" width="28" height="28" patternUnits="userSpaceOnUse"><path d="M28 0H0V28" fill="none" stroke="#12304F" stroke-width="1"/></pattern>
-<linearGradient id="node-face" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#164A7E"/><stop offset="1" stop-color="#0D2B4D"/></linearGradient>
-<linearGradient id="chip-face" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#103457"/><stop offset="1" stop-color="#0C2743"/></linearGradient>
-<radialGradient id="panel-light" cx="0.18" cy="0" r="0.85"><stop offset="0" stop-color="#3D8BFF" stop-opacity="0.16"/><stop offset="0.6" stop-color="#3D8BFF" stop-opacity="0"/></radialGradient></defs>
-<rect width="900" height="760" fill="url(#atlas-grid)"/>
-<rect width="900" height="760" fill="url(#panel-light)"/>
-<circle cx="470" cy="340" r="280" fill="none" stroke="#2C4763" stroke-width="1" stroke-dasharray="3 7"/>
-<text class="at-meta" x="470" y="56" text-anchor="middle">CLUSTER REGION · c1</text>
-<g><rect x="350" y="74" width="240" height="58" fill="#0C2238" stroke="#3D5A78" stroke-width="1.2" stroke-dasharray="5 5"/>
-<text class="at-label" x="366" y="98">CONTROL PLANE</text><text class="at-chip-meta" x="366" y="118">init · start · status · stop · catalog · webui</text></g>
-<path class="at-ctl" d="M470 132V262"/>
-<g><rect x="362" y="268" width="216" height="108" rx="4" fill="#06182B"/>
-<circle class="at-leader-ring" cx="470" cy="316" r="92"/>
-<rect x="362" y="262" width="216" height="108" rx="4" fill="url(#node-face)" stroke="#4E8FD6" stroke-width="1.2"/>
-<text class="at-title-inv" x="386" y="306">N1 · YYDS NODE</text>
-<text class="at-meta-inv" x="386" y="330">LEADER · EXECUTION TODAY</text>
-<text class="at-meta-lime" x="386" y="352">SINGLE-NODE SINGLE-SHARD</text></g>
-<g><rect x="632" y="146" width="180" height="72" rx="4" fill="#050F1C"/><rect x="632" y="140" width="180" height="72" rx="4" fill="#0C2238" stroke="#3D5A78" stroke-width="1.2" stroke-dasharray="5 5"/>
-<text class="at-label" x="648" y="168">N2 · REPLICA</text><text class="at-chip-meta" x="648" y="190">ROADMAP</text></g>
-<g><rect x="668" y="476" width="180" height="72" rx="4" fill="#050F1C"/><rect x="668" y="470" width="180" height="72" rx="4" fill="#0C2238" stroke="#3D5A78" stroke-width="1.2" stroke-dasharray="5 5"/>
-<text class="at-label" x="684" y="498">N3 · REPLICA</text><text class="at-chip-meta" x="684" y="520">ROADMAP</text></g>
-<path class="at-rep-glow" d="M578 300Q614 240 632 196"/><path class="at-rep" d="M578 300Q614 240 632 196"/><path class="at-packet" d="M578 300Q614 240 632 196"/>
-<path class="at-rep-glow" d="M578 344Q628 420 668 486"/><path class="at-rep" d="M578 344Q628 420 668 486"/><path class="at-packet at-packet--late" d="M578 344Q628 420 668 486"/>
-<text class="at-meta at-meta--road" x="636" y="126">REPLICATION PATH · ROADMAP</text>
-<text class="at-meta" x="24" y="540">DECLARED PORTS · CLIENTS BELOW</text>
-<path class="at-io" d="M420 370L99 560"/><path class="at-io" d="M450 370L265 560"/><path class="at-io" d="M470 370L431 560"/><path class="at-io" d="M500 370L597 560"/><path class="at-io" d="M520 370L763 560"/>
-<g><rect x="24" y="560" width="150" height="76" rx="3" fill="url(#chip-face)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="40" y="586">PG WIRE</text><text class="at-flag" x="40" y="606">--pgsql-port</text><text class="at-chip-meta" x="40" y="626">← psql</text></g>
-<g><rect x="190" y="560" width="150" height="76" rx="3" fill="url(#chip-face)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="206" y="586">MYSQL WIRE</text><text class="at-flag" x="206" y="606">--mysql-port</text><text class="at-chip-meta" x="206" y="626">← mysql</text></g>
-<g><rect x="356" y="560" width="150" height="76" rx="3" fill="url(#chip-face)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="372" y="586">REDIS</text><text class="at-flag" x="372" y="606">--redis-port</text><text class="at-chip-meta" x="372" y="626">← redis-cli</text></g>
-<g><rect x="522" y="560" width="150" height="76" rx="3" fill="url(#chip-face)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="538" y="586">MONGO · PROBE</text><text class="at-flag" x="538" y="606">--mongo-port</text><text class="at-chip-meta" x="538" y="626">← mongosh</text></g>
-<g><rect x="688" y="560" width="150" height="76" rx="3" fill="url(#chip-face)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="704" y="586">YY WIRE</text><text class="at-flag" x="704" y="606">--wire-port</text><text class="at-chip-meta" x="704" y="626">← yydb-client · TCP/WS</text></g>
-<text class="at-meta" x="470" y="716" text-anchor="middle">EVERY CONNECTION HAS A DECLARED PATH · REPLICATION REMAINS ROADMAP</text>
+                    <svg class="mesh-svg" viewBox="0 0 690 470" role="img" aria-label="YYDS cluster topology: clients on the left reach the gateway through five declared ports, the gateway connects to the running leader node, the control plane sits above the leader, and replica nodes remain on the roadmap">
+<text class="at-meta" x="0" y="16">Cluster region · c1</text>
+<g><rect class="at-solid-blue" x="470" y="0" width="220" height="76"/>
+<text class="at-control-title" x="486" y="26">Control plane</text>
+<text class="at-control-meta" x="486" y="46">init · start · status</text>
+<text class="at-control-meta" x="486" y="62">stop · catalog · webui</text></g>
+<path class="at-link" d="M580 76V230"/>
+<text class="at-meta" x="0" y="92">Clients · declared protocol</text>
+<g><text class="at-client" x="0" y="130">psql</text><text class="at-sub" x="0" y="150">PostgreSQL · 5432</text><path class="at-link" d="M232 125H268"/></g>
+<g><text class="at-client" x="0" y="182">mysql</text><text class="at-sub" x="0" y="202">MySQL · 3306</text><path class="at-link" d="M232 177H268"/></g>
+<g><text class="at-client" x="0" y="234">redis-cli</text><text class="at-sub" x="0" y="254">Redis · 6379</text><path class="at-link" d="M232 229H268"/></g>
+<g><text class="at-client" x="0" y="286">mongosh</text><text class="at-sub" x="0" y="306">MongoDB · --mongo-port · Probe</text><path class="at-link" d="M232 281H268"/></g>
+<g><text class="at-client" x="0" y="338">@yydb/yydb-client</text><text class="at-sub" x="0" y="358">YY wire · --wire-port · TCP + WS</text><path class="at-link" d="M232 333H268"/></g>
+<path class="at-link" d="M268 125V333"/>
+<path class="at-link" d="M268 229H290"/>
+<g><rect class="at-hollow" x="290" y="181" width="140" height="96"/>
+<text class="at-node-plain" x="306" y="211">Gateway</text>
+<text class="at-sub" x="306" y="231">Declared ports</text>
+<text class="at-sub" x="306" y="257">TCP + WS</text></g>
+<path class="at-link" d="M430 229H450V275H470"/>
+<g><rect class="at-solid-ink" x="470" y="230" width="220" height="100"/>
+<text class="at-node-title" x="486" y="256">N1 · YYDS node</text>
+<text class="at-node-meta" x="486" y="276">Leader · single shard</text>
+<circle class="at-dot" cx="490" cy="297" r="3.5"/>
+<text class="at-node-meta" x="502" y="301">State · running</text></g>
+<path class="at-link" d="M580 330V360"/>
+<g><rect class="at-dash" x="470" y="360" width="220" height="64"/>
+<text class="at-replica-title" x="486" y="384">Replicas · N2, N3</text><text class="at-sub" x="486" y="404">Roadmap · not scheduled</text></g>
+<text class="at-meta" x="0" y="446">Every connection has a declared path</text>
+<path class="at-rule" d="M0 466H690"/>
 </svg>
-                    <svg class="mesh-svg-mobile" viewBox="0 0 400 560" role="img" aria-label="YYDS cluster atlas">
-<defs><linearGradient id="node-face-m" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#164A7E"/><stop offset="1" stop-color="#0D2B4D"/></linearGradient>
-<linearGradient id="chip-face-m" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#103457"/><stop offset="1" stop-color="#0C2743"/></linearGradient>
-<radialGradient id="panel-light-m" cx="0.2" cy="0" r="0.9"><stop offset="0" stop-color="#3D8BFF" stop-opacity="0.16"/><stop offset="0.6" stop-color="#3D8BFF" stop-opacity="0"/></radialGradient></defs>
-<rect width="400" height="560" fill="url(#panel-light-m)"/>
-<circle cx="200" cy="196" r="152" fill="none" stroke="#2C4763" stroke-width="1" stroke-dasharray="3 7"/>
-<g><rect x="80" y="14" width="240" height="48" rx="3" fill="#0C2238" stroke="#3D5A78" stroke-width="1.2" stroke-dasharray="5 5"/>
-<text class="at-label" x="96" y="34">CONTROL PLANE</text><text class="at-chip-meta" x="96" y="50">init · start · status · stop · catalog · webui</text></g>
-<path class="at-ctl" d="M200 62V112"/>
-<g><rect x="96" y="118" width="208" height="104" rx="4" fill="#06182B"/>
-<circle class="at-leader-ring" cx="200" cy="164" r="76"/>
-<rect x="96" y="112" width="208" height="104" rx="4" fill="url(#node-face-m)" stroke="#4E8FD6" stroke-width="1.2"/>
-<text class="at-title-inv" x="112" y="152">N1 · YYDS NODE</text>
-<text class="at-meta-inv" x="112" y="174">LEADER · EXECUTION TODAY</text>
-<text class="at-meta-lime" x="112" y="194">SINGLE-NODE SINGLE-SHARD</text></g>
-<g><rect x="252" y="242" width="132" height="52" rx="3" fill="#050F1C"/><rect x="252" y="236" width="132" height="52" rx="3" fill="#0C2238" stroke="#3D5A78" stroke-width="1.2" stroke-dasharray="5 5"/>
-<text class="at-label" x="264" y="258">N2 · N3</text><text class="at-chip-meta" x="264" y="276">REPLICA · ROADMAP</text></g>
-<path class="at-rep-glow" d="M304 196Q310 232 314 236"/><path class="at-rep" d="M304 196Q310 232 314 236"/><path class="at-packet" d="M304 196Q310 232 314 236"/>
-<text class="at-meta" x="16" y="352">DECLARED PORTS</text>
-<path class="at-io" d="M170 216L74 372"/><path class="at-io" d="M190 216L206 372"/><path class="at-io" d="M210 216L338 372"/><path class="at-io" d="M180 216L140 452"/><path class="at-io" d="M225 216L272 452"/>
-<g><rect x="16" y="372" width="116" height="72" rx="3" fill="url(#chip-face-m)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="26" y="396">PG WIRE</text><text class="at-flag" x="26" y="414">--pgsql-port</text><text class="at-chip-meta" x="26" y="432">← psql</text></g>
-<g><rect x="148" y="372" width="116" height="72" rx="3" fill="url(#chip-face-m)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="158" y="396">MYSQL</text><text class="at-flag" x="158" y="414">--mysql-port</text><text class="at-chip-meta" x="158" y="432">← mysql</text></g>
-<g><rect x="280" y="372" width="116" height="72" rx="3" fill="url(#chip-face-m)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="290" y="396">REDIS</text><text class="at-flag" x="290" y="414">--redis-port</text><text class="at-chip-meta" x="290" y="432">← redis-cli</text></g>
-<g><rect x="82" y="452" width="116" height="72" rx="3" fill="url(#chip-face-m)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="92" y="476">MONGO</text><text class="at-flag" x="92" y="494">--mongo-port</text><text class="at-chip-meta" x="92" y="512">← mongosh · probe</text></g>
-<g><rect x="214" y="452" width="116" height="72" rx="3" fill="url(#chip-face-m)" stroke="#2C4A6B" stroke-width="1.2"/>
-<text class="at-label" x="224" y="476">YY WIRE</text><text class="at-flag" x="224" y="494">--wire-port</text><text class="at-chip-meta" x="224" y="512">← yydb-client</text></g>
-<text class="at-meta" x="200" y="548" text-anchor="middle">REPLICATION REMAINS ROADMAP</text>
+                    <svg class="mesh-svg-mobile" viewBox="0 0 360 570" role="img" aria-label="YYDS cluster topology: control plane above the leader node, replica nodes on the roadmap, a declared gateway in the middle, and clients below">
+<text class="at-meta" x="0" y="18">Cluster region · c1</text>
+<g><rect class="at-solid-blue" x="0" y="36" width="360" height="64"/>
+<text class="at-control-title" x="16" y="60">Control plane</text>
+<text class="at-control-meta" x="16" y="82">init · start · status · stop · catalog</text></g>
+<path class="at-link" d="M180 100V132"/>
+<g><rect class="at-solid-ink" x="0" y="132" width="200" height="72"/>
+<text class="at-node-title" x="16" y="160">N1 · YYDS node</text>
+<text class="at-node-meta" x="16" y="182">Leader · running</text></g>
+<g><rect class="at-dash" x="212" y="132" width="148" height="72"/>
+<text class="at-replica-title" x="228" y="160">N2 · N3</text><text class="at-sub" x="228" y="182">Replica · roadmap</text></g>
+<path class="at-link" d="M200 168H212"/>
+<path class="at-link" d="M100 204V232"/>
+<g><rect class="at-hollow" x="0" y="232" width="360" height="72"/>
+<text class="at-node-plain" x="16" y="260">Gateway · declared ports</text>
+<text class="at-sub" x="16" y="282">TCP + WS · five protocols</text></g>
+<path class="at-link" d="M180 304V336"/>
+<text class="at-meta" x="0" y="352">Clients</text>
+<g><text class="at-client" x="26" y="380">psql</text><text class="at-sub" x="360" y="380" text-anchor="end">PostgreSQL · 5432</text><path class="at-link" d="M0 375H14"/></g>
+<g><text class="at-client" x="26" y="420">mysql</text><text class="at-sub" x="360" y="420" text-anchor="end">MySQL · 3306</text><path class="at-link" d="M0 415H14"/></g>
+<g><text class="at-client" x="26" y="460">redis-cli</text><text class="at-sub" x="360" y="460" text-anchor="end">Redis · 6379</text><path class="at-link" d="M0 455H14"/></g>
+<g><text class="at-client" x="26" y="500">mongosh</text><text class="at-sub" x="360" y="500" text-anchor="end">MongoDB · probe</text><path class="at-link" d="M0 495H14"/></g>
+<g><text class="at-client" x="26" y="540">@yydb/yydb-client</text><text class="at-sub" x="360" y="540" text-anchor="end">YY wire · TCP + WS</text><path class="at-link" d="M0 535H14"/></g>
 </svg>
-                    <figcaption><span>{{ homeTopologyCaptionLabel }}</span><span class="mesh-legend"><span><i class="lg-live"></i>LIVE GATEWAY</span><span><i class="lg-road"></i>REPLICA · ROADMAP</span><span aria-hidden="true">FIG. 01</span></span></figcaption>
+                    <figcaption><span>{{ homeTopologyCaptionLabel }}</span><span class="mesh-legend"><span><i class="lg-live"></i>Solid · executing</span><span><i class="lg-hollow"></i>Hollow · declared</span><span><i class="lg-road"></i>Dashed · roadmap</span><span aria-hidden="true">Figure 01</span></span></figcaption>
                 </figure>
             </div>
             <div class="landing-wrap hero-baseline">
@@ -100,7 +84,7 @@
         <section class="route-section">
             <div class="landing-wrap route-section__head">
                 <div class="route-section__copy">
-                    <p class="overline">01 — ROUTE TABLE</p>
+                    <p class="overline">01 — Route table</p>
                     <h2>{{ homeArchitectureTitleLabel }}</h2>
                     <p class="section-description">{{ homeArchitectureBodyLabel }}</p>
                     <a class="inline-link" href="/wire">{{ homeArchitectureLinkLabel }}<span aria-hidden="true">→</span></a>
@@ -108,13 +92,13 @@
             </div>
             <div class="landing-wrap" data-reveal="true">
                 <table class="route-table">
-                    <thead><tr><th scope="col">PROTOCOL</th><th scope="col">CLIENT</th><th scope="col">DECLARE</th><th scope="col">STATUS</th></tr></thead>
+                    <thead><tr><th scope="col">Protocol</th><th scope="col">Client</th><th scope="col">Declare</th><th scope="col">Status</th></tr></thead>
                     <tbody>
-                        <tr><td>PostgreSQL wire</td><td>psql</td><td>--pgsql-port</td><td><span class="live-dot"></span>LIVE</td></tr>
-                        <tr><td>MySQL wire</td><td>mysql</td><td>--mysql-port</td><td><span class="live-dot"></span>LIVE</td></tr>
-                        <tr><td>Redis</td><td>redis-cli</td><td>--redis-port</td><td><span class="live-dot"></span>LIVE</td></tr>
-                        <tr><td>MongoDB</td><td>mongosh</td><td>--mongo-port</td><td><span class="probe-dot"></span>PROBE</td></tr>
-                        <tr><td>YY wire</td><td>@yydb/yydb-client</td><td>--wire-port · TCP+WS</td><td><span class="live-dot"></span>LIVE</td></tr>
+                        <tr><td>PostgreSQL wire</td><td>psql</td><td>--pgsql-port</td><td><span class="live-dot"></span>Live</td></tr>
+                        <tr><td>MySQL wire</td><td>mysql</td><td>--mysql-port</td><td><span class="live-dot"></span>Live</td></tr>
+                        <tr><td>Redis</td><td>redis-cli</td><td>--redis-port</td><td><span class="live-dot"></span>Live</td></tr>
+                        <tr><td>MongoDB</td><td>mongosh</td><td>--mongo-port</td><td><span class="probe-dot"></span>Probe</td></tr>
+                        <tr><td>YY wire</td><td>@yydb/yydb-client</td><td>--wire-port · TCP+WS</td><td><span class="live-dot"></span>Live</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -122,33 +106,29 @@
         <section class="ops-section">
             <div class="landing-wrap ops-section__grid">
                 <div class="ops-section__lead">
-                    <p class="overline">02 — CONTROL PLANE</p>
+                    <p class="overline">02 — Control plane</p>
                     <h2>{{ homeFeatureTitleLabel }}</h2>
                     <p class="section-description">{{ homeFeatureLedeLabel }}</p>
                     <p class="command-chain" data-reveal="true" aria-label="Node lifecycle"><span>init</span><i>→</i><span>start</span><i>→</i><span>status</span><i>→</i><span>stop</span></p>
                     <div class="schema-panel" data-reveal="true">
-                        <div class="schema-panel__bar"><span>SCHEMA · VOS</span><span>CATALOG</span></div>
-                        <pre>table Setting {
-    @@id: uuid,
-    key: utf8,
-    value: utf8,
-}</pre>
+                        <div class="schema-panel__bar"><span>Schema · VOS</span><span>Catalog</span></div>
+                        <pre>table Setting {<br>@@id: uuid,<br>key: utf8,<br>value: utf8,<br>}</pre>
                         <div class="schema-panel__foot"><span>yyds catalog --catalog-path … --schema-file …</span></div>
                     </div>
                 </div>
                 <div class="capability-list">
-                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">01 / DEFINE</span><h3>{{ homeFeatureSchemaTitleLabel }}</h3><p>{{ homeFeatureSchemaBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureSchemaTitleLabel">↗</a></article>
-                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">02 / OPERATE</span><h3>{{ homeFeatureDurabilityTitleLabel }}</h3><p>{{ homeFeatureDurabilityBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureDurabilityTitleLabel">↗</a></article>
-                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">03 / CONNECT</span><h3>{{ homeFeatureHostTitleLabel }}</h3><p>{{ homeFeatureHostBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureHostTitleLabel">↗</a></article>
+                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">01 / Define</span><h3>{{ homeFeatureSchemaTitleLabel }}</h3><p>{{ homeFeatureSchemaBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureSchemaTitleLabel">↗</a></article>
+                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">02 / Operate</span><h3>{{ homeFeatureDurabilityTitleLabel }}</h3><p>{{ homeFeatureDurabilityBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureDurabilityTitleLabel">↗</a></article>
+                    <article data-reveal="true"><span class="feature-symbol" aria-hidden="true">03 / Connect</span><h3>{{ homeFeatureHostTitleLabel }}</h3><p>{{ homeFeatureHostBodyLabel }}</p><a href="/d/" :aria-label="homeFeatureHostTitleLabel">↗</a></article>
                 </div>
             </div>
         </section>
         <section class="closing-section">
             <div class="landing-wrap" data-reveal="true">
-                <p class="overline">03 — START BUILDING</p>
+                <p class="overline">03 — Start building</p>
                 <h2>{{ homeClosingTitleLabel }}</h2>
                 <div class="closing-section__bottom"><p>{{ homeClosingBodyLabel }}</p><a class="action action--primary" href="/install">{{ homeClosingActionLabel }}<span aria-hidden="true">→</span></a></div>
-                <div class="service-signature" aria-hidden="true"><span>YYDS</span><span>BY YY / OPEN SOURCE</span></div>
+                <div class="service-signature" aria-hidden="true"><span>YYDS</span><span>By YY / Open source</span></div>
             </div>
         </section>
     </main>
