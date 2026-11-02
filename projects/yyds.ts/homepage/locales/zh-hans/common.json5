@@ -21,7 +21,7 @@
   titleWire: '线协议 · YYDS',
   titleWelcome: '欢迎 · YYDS',
 
-  homeEyebrow: "YY / DISTRIBUTED STORE · 数据服务节点",
+  homeEyebrow: "YY / 分布式存储 · 数据服务节点",
   homeTitle: 'YYDS',
   homeTagline: '多协议接入的分布式存储节点',
   homeLede: "YYDS 是一台分布式存储节点：数据以 VOS 定义，节点由一组显式命令启动、管理与停止。应用不用换客户端——psql、mysql、redis-cli 直接连接节点声明的端口，就在同一张图里。",
@@ -180,7 +180,7 @@
   footerIssues: 'Issue',
   footerDiscussions: 'Discussions',
   footerCopyright: 'YY Database',
-  footerMono: "YYDS / DATA SERVICES / MPL-2.0",
+  footerMono: "YYDS / 数据服务 / MPL-2.0",
 
   installEyebrow: '安装',
   installTitle: '安装 YYDS',
@@ -325,6 +325,6 @@
   homeClosingAction: "查看部署指南",
   homeDiagramCaption: "接入结构 / 概念视图",
   homeTopologyCaption: "集群图谱 / 概念视图",
-  homeEdition: "DATA INFRASTRUCTURE / OPEN SOURCE",
+  homeEdition: "数据基础设施 / 开源",
   homeExplore: "产品与资源",
 }
