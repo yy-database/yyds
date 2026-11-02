@@ -324,6 +324,9 @@
   homeClosingBody: "打开部署指南，按显式命令初始化、启动并验证第一个节点。",
   homeClosingAction: "查看部署指南",
   homeDiagramCaption: "接入结构 / 概念视图",
+  homeTopologyTitle: "一个节点，\n看清整条数据通路。",
+  homeTopologyLede: "控制面、协议网关与存储层各在其位。客户端连接声明的端口，复制路径属于路线图，不假装已经交付。",
+  homeTopologyCaption: "节点拓扑 / 概念视图",
   homeEdition: "DATA INFRASTRUCTURE / OPEN SOURCE",
   homeExplore: "产品与资源",
 }

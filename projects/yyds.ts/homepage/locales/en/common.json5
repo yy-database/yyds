@@ -324,6 +324,9 @@
   homeClosingBody: "Open the deployment guide and initialise, start and verify your first node with explicit commands.",
   homeClosingAction: "Explore deployment",
   homeDiagramCaption: "ACCESS STRUCTURE / CONCEPTUAL VIEW",
+  homeTopologyTitle: "One node.\nThe whole data path in view.",
+  homeTopologyLede: "Control plane, protocol gateways and storage layers each in their place. Clients connect to declared ports. Replication is roadmap and is never claimed as shipped.",
+  homeTopologyCaption: "NODE TOPOLOGY / CONCEPTUAL VIEW",
   homeEdition: "DATA INFRASTRUCTURE / OPEN SOURCE",
   homeExplore: "PRODUCT & RESOURCES",
 }
