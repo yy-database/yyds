@@ -1450,39 +1450,39 @@ body { background: var(--yy-paper); }
 /* YYDS: cluster atlas in enterprise blue. The page stays on a neutral
    light base, one deep navy viewport anchors the hero with the cluster
    map inside, and blue fires on signals, status and the CTA. */
-.landing--service { --landing-bg: #fbfbfa; --landing-ink: #0b1b2b; --landing-muted: #6b7a8c; --landing-line: #dce3e8; --landing-accent: #0a66c2; --dur-press: 120ms; --dur-hover: 180ms; --dur-draw: 400ms; --dur-reveal: 480ms; --ease-standard: cubic-bezier(0.22, 0.61, 0.21, 1); background: #fbfbfa; color: #0b1b2b; }
-body:has(.landing--service) { background: #fbfbfa; }
+.landing--service { --landing-bg: #ffffff; --landing-ink: #0b1b2b; --landing-muted: #6b7a8c; --landing-line: #dce3e8; --landing-accent: #0a66c2; --dur-press: 120ms; --dur-hover: 180ms; --dur-draw: 400ms; --dur-reveal: 480ms; --ease-standard: cubic-bezier(0.22, 0.61, 0.21, 1); background: #ffffff; color: #0b1b2b; }
+body:has(.landing--service) { background: #ffffff; }
 /* Visible keyboard focus everywhere on the landing. */
 body:has(.landing--service) a:focus-visible, body:has(.landing--service) button:focus-visible, body:has(.landing--service) summary:focus-visible { outline: 2px solid #0a66c2; outline-offset: 2px; border-radius: 1px; }
-/* Chrome on the landing. */
-body:has(.landing--service) .site-header { background: rgba(251, 251, 250, 0.92); border-bottom: 1px solid #dce3e8; }
-body:has(.landing--service) .site-brand__word { color: #0b1b2b; }
-body:has(.landing--service) .site-brand__symbol { color: #0a66c2; }
-body:has(.landing--service) .site-nav a { color: #33465c; transition: color var(--dur-hover) var(--ease-standard); }
-body:has(.landing--service) .site-nav a:hover { color: #0b1b2b; background: transparent; }
-body:has(.landing--service) .site-nav a[aria-current="page"] { color: #0b1b2b; box-shadow: inset 0 -2px #0a66c2; }
-body:has(.landing--service) .site-header__link, body:has(.landing--service) .site-header__icon { color: #33465c; }
-body:has(.landing--service) .site-header__link:hover, body:has(.landing--service) .site-header__icon:hover { color: #0b1b2b; background: #eff3f6; }
-body:has(.landing--service) .site-language summary { color: #33465c; }
-body:has(.landing--service) .site-language summary::after { border-color: #33465c; }
-body:has(.landing--service) .site-language__menu { background: #ffffff; border-color: #dce3e8; box-shadow: none; }
-body:has(.landing--service) .site-language__menu button { color: #0b1b2b; }
-body:has(.landing--service) .site-language__menu button:hover { background: #eff3f6; }
-body:has(.landing--service) .site-language__menu button[aria-current="true"] { color: #0a66c2; background: #eff3f6; }
-body:has(.landing--service) .site-footer { background: #fbfbfa; border-top: 1px solid #dce3e8; color: #33465c; }
-body:has(.landing--service) .site-footer__brand { color: #0b1b2b; }
-body:has(.landing--service) .site-footer__name, body:has(.landing--service) .site-footer__blurb { color: #6b7a8c; }
-body:has(.landing--service) .site-footer h2 { color: #33465c; }
-body:has(.landing--service) .site-footer a { color: #33465c; }
-body:has(.landing--service) .site-footer a:hover { color: #0a66c2; }
-body:has(.landing--service) .site-footer__bar { border-top: 1px solid #dce3e8; color: #6b7a8c; }
+/* Chrome on the landing. The element prefix keeps the descendant space intact through CSS minification. */
+body:has(.landing--service) header.site-header { background: rgba(255, 255, 255, 0.92); border-bottom: 1px solid #dce3e8; }
+body:has(.landing--service) header .site-brand__word { color: #0b1b2b; }
+body:has(.landing--service) header .site-brand__symbol { color: #0a66c2; }
+body:has(.landing--service) header .site-nav a { color: #33465c; transition: color var(--dur-hover) var(--ease-standard); }
+body:has(.landing--service) header .site-nav a:hover { color: #0b1b2b; background: transparent; }
+body:has(.landing--service) header .site-nav a[aria-current="page"] { color: #0b1b2b; box-shadow: inset 0 -2px #0a66c2; }
+body:has(.landing--service) header .site-header__link, body:has(.landing--service) header .site-header__icon { color: #33465c; }
+body:has(.landing--service) header .site-header__link:hover, body:has(.landing--service) header .site-header__icon:hover { color: #0b1b2b; background: transparent; box-shadow: inset 0 -1px #0b1b2b; }
+body:has(.landing--service) header .site-language summary { color: #33465c; }
+body:has(.landing--service) header .site-language summary::after { border-color: #33465c; }
+body:has(.landing--service) header .site-language__menu { background: #ffffff; border-color: #dce3e8; box-shadow: none; }
+body:has(.landing--service) header .site-language__menu button { color: #0b1b2b; }
+body:has(.landing--service) header .site-language__menu button:hover { background: transparent; color: #0a66c2; }
+body:has(.landing--service) header .site-language__menu button[aria-current="true"] { color: #0a66c2; background: transparent; box-shadow: inset 2px 0 #0a66c2; }
+body:has(.landing--service) footer.site-footer { background: #ffffff; border-top: 1px solid #dce3e8; color: #33465c; }
+body:has(.landing--service) footer .site-footer__brand { color: #0b1b2b; }
+body:has(.landing--service) footer .site-footer__name, body:has(.landing--service) footer .site-footer__blurb { color: #6b7a8c; }
+body:has(.landing--service) footer h2 { color: #33465c; }
+body:has(.landing--service) footer a { color: #33465c; }
+body:has(.landing--service) footer a:hover { color: #0a66c2; }
+body:has(.landing--service) footer .site-footer__bar { border-top: 1px solid #dce3e8; color: #6b7a8c; }
 /* Shared landing type. */
 .landing--service h2 { font-size: clamp(34px, 3.4vw, 52px); font-weight: 600; letter-spacing: -0.04em; line-height: 1.22; white-space: pre-line; color: #0b1b2b; }
 .landing--service .overline { justify-content: flex-start; color: #6b7a8c; font-size: 11px; }
 .landing--service .status-seed { background: #0a66c2; animation: seed-pulse 2.8s ease-out infinite; }
 @keyframes seed-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(10, 102, 194, 0.32); } 60% { box-shadow: 0 0 0 7px rgba(10, 102, 194, 0); } }
 /* Hero: editorial copy left, the navy atlas viewport right. */
-.landing--service .landing-hero { background: #fbfbfa; border-bottom: 1px solid #dce3e8; }
+.landing--service .landing-hero { background: #ffffff; border-bottom: 1px solid #dce3e8; }
 .landing--service .landing-hero__grid { display: grid; grid-template-columns: minmax(0, 0.88fr) minmax(0, 1.12fr); gap: 40px; align-items: center; padding: 80px 0 72px max(56px, calc((100vw - 1360px) / 2)); min-height: 0; }
 .landing--service .landing-hero__copy { max-width: 640px; min-width: 0; }
 .landing--service .landing-hero h1 { display: flex; flex-direction: column; font-size: clamp(48px, 4.9vw, 68px); font-weight: 640; letter-spacing: -0.05em; line-height: 1.08; margin: 26px 0 22px; color: #0b1b2b; }
@@ -1550,8 +1550,9 @@ body:has(.landing--service) .site-footer__bar { border-top: 1px solid #dce3e8; c
 .route-table tbody td { font-size: 14px; color: #0b1b2b; }
 .route-table tbody td:nth-child(2), .route-table tbody td:nth-child(3) { font-family: var(--vmz-font-mono); font-size: 12.5px; color: #33465c; }
 .route-table tbody td:last-child { font-family: var(--vmz-font-mono); font-size: 11px; letter-spacing: 0.06em; color: #0b1b2b; white-space: nowrap; }
-.route-table tbody tr { transition: background var(--dur-hover) var(--ease-standard); }
-.route-table tbody tr:hover { background: #eff4f8; }
+.route-table tbody tr { transition: color var(--dur-hover) var(--ease-standard), box-shadow var(--dur-hover) var(--ease-standard); }
+.route-table tbody tr:hover td:first-child { box-shadow: inset 2px 0 #0a66c2; }
+.route-table tbody tr:hover td { color: #0b1b2b; }
 .live-dot, .probe-dot { display: inline-block; width: 7px; height: 7px; margin-right: 9px; vertical-align: 1px; }
 .live-dot { background: #0a66c2; animation: seed-pulse 2.8s ease-out infinite; }
 .probe-dot { border: 1px dashed #6b7a8c; }
@@ -1585,7 +1586,7 @@ body:has(.landing--service) .site-footer__bar { border-top: 1px solid #dce3e8; c
  .capability-list > [data-reveal]:nth-child(3) { transition-delay: 120ms; }
 }
 /* Closing: a quiet neutral band with the blue point. */
-.landing--service .closing-section { background: #f1f4f6; border-top: 1px solid #dce3e8; padding: 84px 0 0; }
+.landing--service .closing-section { background: #ffffff; border-top: 2px solid #0b1b2b; padding: 84px 0 0; }
 .closing-section .overline { color: #6b7a8c; }
 .closing-section h2 { margin: 26px 0 34px; }
 .closing-section__bottom { display: flex; justify-content: space-between; align-items: center; gap: 32px; padding-bottom: 48px; }
