@@ -14,63 +14,63 @@
                 </div>
                 <figure class="landing-hero__mesh">
                     <svg class="mesh-svg" viewBox="0 0 900 760" role="img" aria-label="YYDS cluster atlas: control plane, leader node, replica roadmap and declared gateway ports">
-<defs><pattern id="atlas-grid" width="28" height="28" patternUnits="userSpaceOnUse"><path d="M28 0H0V28" fill="none" stroke="#dfe7d2" stroke-width="1"/></pattern></defs>
+<defs><pattern id="atlas-grid" width="28" height="28" patternUnits="userSpaceOnUse"><path d="M28 0H0V28" fill="none" stroke="#1b2429" stroke-width="1"/></pattern></defs>
 <rect width="900" height="760" fill="url(#atlas-grid)"/>
-<circle cx="470" cy="340" r="280" fill="none" stroke="#b9c9ac" stroke-width="1" stroke-dasharray="3 7"/>
+<circle cx="470" cy="340" r="280" fill="none" stroke="#4a554e" stroke-width="1" stroke-dasharray="3 7"/>
 <text class="at-meta" x="470" y="56" text-anchor="middle">CLUSTER REGION · c1</text>
-<g><rect x="350" y="74" width="240" height="58" fill="#f4f7ee" stroke="#33523f" stroke-width="1.2" stroke-dasharray="5 5"/>
+<g><rect x="350" y="74" width="240" height="58" fill="#131b1f" stroke="#5c6862" stroke-width="1.2" stroke-dasharray="5 5"/>
 <text class="at-label" x="366" y="98">CONTROL PLANE</text><text class="at-chip-meta" x="366" y="118">init · start · status · stop · catalog · webui</text></g>
 <path class="at-ctl" d="M470 132V262"/>
 <g><circle class="at-leader-ring" cx="470" cy="316" r="92"/>
-<rect x="362" y="262" width="216" height="108" fill="#0d1f14"/>
+<rect x="362" y="262" width="216" height="108" fill="#0a0f12" stroke="#d8e0d8" stroke-width="1.5"/>
 <text class="at-title-inv" x="386" y="306">N1 · YYDS NODE</text>
 <text class="at-meta-inv" x="386" y="330">LEADER · EXECUTION TODAY</text>
 <text class="at-meta-lime" x="386" y="352">SINGLE-NODE SINGLE-SHARD</text></g>
-<g><rect x="632" y="140" width="180" height="72" fill="#f4f7ee" stroke="#33523f" stroke-width="1.2" stroke-dasharray="5 5"/>
+<g><rect x="632" y="140" width="180" height="72" fill="#131b1f" stroke="#5c6862" stroke-width="1.2" stroke-dasharray="5 5"/>
 <text class="at-label" x="648" y="168">N2 · REPLICA</text><text class="at-chip-meta" x="648" y="190">ROADMAP</text></g>
-<g><rect x="668" y="470" width="180" height="72" fill="#f4f7ee" stroke="#33523f" stroke-width="1.2" stroke-dasharray="5 5"/>
+<g><rect x="668" y="470" width="180" height="72" fill="#131b1f" stroke="#5c6862" stroke-width="1.2" stroke-dasharray="5 5"/>
 <text class="at-label" x="684" y="498">N3 · REPLICA</text><text class="at-chip-meta" x="684" y="520">ROADMAP</text></g>
 <path class="at-rep" d="M578 300Q614 240 632 196"/><path class="at-packet" d="M578 300Q614 240 632 196"/>
 <path class="at-rep" d="M578 344Q628 420 668 486"/><path class="at-packet at-packet--late" d="M578 344Q628 420 668 486"/>
 <text class="at-meta at-meta--road" x="636" y="126">REPLICATION PATH · ROADMAP</text>
 <text class="at-meta" x="24" y="540">DECLARED PORTS · CLIENTS BELOW</text>
 <path class="at-io" d="M420 370L99 560"/><path class="at-io" d="M450 370L265 560"/><path class="at-io" d="M470 370L431 560"/><path class="at-io" d="M500 370L597 560"/><path class="at-io" d="M520 370L763 560"/>
-<g><rect x="24" y="560" width="150" height="76" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="24" y="560" width="150" height="76" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="40" y="586">PG WIRE</text><text class="at-flag" x="40" y="606">--pgsql-port</text><text class="at-chip-meta" x="40" y="626">← psql</text></g>
-<g><rect x="190" y="560" width="150" height="76" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="190" y="560" width="150" height="76" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="206" y="586">MYSQL WIRE</text><text class="at-flag" x="206" y="606">--mysql-port</text><text class="at-chip-meta" x="206" y="626">← mysql</text></g>
-<g><rect x="356" y="560" width="150" height="76" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="356" y="560" width="150" height="76" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="372" y="586">REDIS</text><text class="at-flag" x="372" y="606">--redis-port</text><text class="at-chip-meta" x="372" y="626">← redis-cli</text></g>
-<g><rect x="522" y="560" width="150" height="76" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="522" y="560" width="150" height="76" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="538" y="586">MONGO · PROBE</text><text class="at-flag" x="538" y="606">--mongo-port</text><text class="at-chip-meta" x="538" y="626">← mongosh</text></g>
-<g><rect x="688" y="560" width="150" height="76" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="688" y="560" width="150" height="76" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="704" y="586">YY WIRE</text><text class="at-flag" x="704" y="606">--wire-port</text><text class="at-chip-meta" x="704" y="626">← yydb-client · TCP/WS</text></g>
 <text class="at-meta" x="470" y="716" text-anchor="middle">EVERY CONNECTION HAS A DECLARED PATH · REPLICATION REMAINS ROADMAP</text>
 </svg>
                     <svg class="mesh-svg-mobile" viewBox="0 0 400 560" role="img" aria-label="YYDS cluster atlas">
-<circle cx="200" cy="196" r="152" fill="none" stroke="#b9c9ac" stroke-width="1" stroke-dasharray="3 7"/>
-<g><rect x="80" y="14" width="240" height="48" fill="#f4f7ee" stroke="#33523f" stroke-width="1.2" stroke-dasharray="5 5"/>
+<circle cx="200" cy="196" r="152" fill="none" stroke="#4a554e" stroke-width="1" stroke-dasharray="3 7"/>
+<g><rect x="80" y="14" width="240" height="48" fill="#131b1f" stroke="#5c6862" stroke-width="1.2" stroke-dasharray="5 5"/>
 <text class="at-label" x="96" y="34">CONTROL PLANE</text><text class="at-chip-meta" x="96" y="50">init · start · status · stop · catalog · webui</text></g>
 <path class="at-ctl" d="M200 62V112"/>
 <g><circle class="at-leader-ring" cx="200" cy="164" r="76"/>
-<rect x="96" y="112" width="208" height="104" fill="#0d1f14"/>
+<rect x="96" y="112" width="208" height="104" fill="#0a0f12" stroke="#d8e0d8" stroke-width="1.5"/>
 <text class="at-title-inv" x="112" y="152">N1 · YYDS NODE</text>
 <text class="at-meta-inv" x="112" y="174">LEADER · EXECUTION TODAY</text>
 <text class="at-meta-lime" x="112" y="194">SINGLE-NODE SINGLE-SHARD</text></g>
-<g><rect x="252" y="236" width="132" height="52" fill="#f4f7ee" stroke="#33523f" stroke-width="1.2" stroke-dasharray="5 5"/>
+<g><rect x="252" y="236" width="132" height="52" fill="#131b1f" stroke="#5c6862" stroke-width="1.2" stroke-dasharray="5 5"/>
 <text class="at-label" x="264" y="258">N2 · N3</text><text class="at-chip-meta" x="264" y="276">REPLICA · ROADMAP</text></g>
 <path class="at-rep" d="M304 196Q310 232 314 236"/><path class="at-packet" d="M304 196Q310 232 314 236"/>
 <text class="at-meta" x="16" y="352">DECLARED PORTS</text>
 <path class="at-io" d="M170 216L74 372"/><path class="at-io" d="M190 216L206 372"/><path class="at-io" d="M210 216L338 372"/><path class="at-io" d="M180 216L140 452"/><path class="at-io" d="M225 216L272 452"/>
-<g><rect x="16" y="372" width="116" height="72" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="16" y="372" width="116" height="72" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="26" y="396">PG WIRE</text><text class="at-flag" x="26" y="414">--pgsql-port</text><text class="at-chip-meta" x="26" y="432">← psql</text></g>
-<g><rect x="148" y="372" width="116" height="72" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="148" y="372" width="116" height="72" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="158" y="396">MYSQL</text><text class="at-flag" x="158" y="414">--mysql-port</text><text class="at-chip-meta" x="158" y="432">← mysql</text></g>
-<g><rect x="280" y="372" width="116" height="72" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="280" y="372" width="116" height="72" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="290" y="396">REDIS</text><text class="at-flag" x="290" y="414">--redis-port</text><text class="at-chip-meta" x="290" y="432">← redis-cli</text></g>
-<g><rect x="82" y="452" width="116" height="72" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="82" y="452" width="116" height="72" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="92" y="476">MONGO</text><text class="at-flag" x="92" y="494">--mongo-port</text><text class="at-chip-meta" x="92" y="512">← mongosh · probe</text></g>
-<g><rect x="214" y="452" width="116" height="72" fill="#f4f7ee" stroke="#0d1f14" stroke-width="1.2"/>
+<g><rect x="214" y="452" width="116" height="72" fill="#131b1f" stroke="#3a4640" stroke-width="1.2"/>
 <text class="at-label" x="224" y="476">YY WIRE</text><text class="at-flag" x="224" y="494">--wire-port</text><text class="at-chip-meta" x="224" y="512">← yydb-client</text></g>
 <text class="at-meta" x="200" y="548" text-anchor="middle">REPLICATION REMAINS ROADMAP</text>
 </svg>
