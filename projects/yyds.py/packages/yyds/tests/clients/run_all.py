@@ -20,10 +20,11 @@ import sys
 import binary_payload_suite
 import mysql_suite
 import postgres_suite
+import redis_suite
 from harness import CaseResult, NodeFailure, attach_node, start_node
 
 GATEWAYS = {"postgresql": postgres_suite.run_postgresql, "mysql": mysql_suite.run_mysql}
-SUITES = ("matrix", "payloads")
+SUITES = ("matrix", "payloads", "redis")
 
 
 def _parse_arguments(argv: list[str]) -> argparse.Namespace:
@@ -37,6 +38,8 @@ def _parse_arguments(argv: list[str]) -> argparse.Namespace:
     arguments = parser.parse_args(argv)
     if arguments.suite == "payloads" and (arguments.gateway != "all" or arguments.postgresql_port or arguments.mysql_port):
         parser.error("--suite payloads always runs every driver against its own node")
+    if arguments.suite == "redis" and (arguments.gateway != "all" or arguments.postgresql_port or arguments.mysql_port):
+        parser.error("--suite redis always starts its own redis-only node")
     return arguments
 
 
@@ -46,6 +49,19 @@ def _selected_gateways(name: str) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parse_arguments(sys.argv[1:] if argv is None else argv)
+
+    if arguments.suite == "redis":
+        try:
+            results = redis_suite.run_redis()
+        except NodeFailure as error:
+            print(error, file=sys.stderr)
+            return 2
+        for result in results:
+            detail = f" - {result.detail}" if result.detail else ""
+            print(f"{result.status.upper()} {result.name}{detail}")
+        failures = [result for result in results if result.status != "pass"]
+        print(f"{len(results) - len(failures)}/{len(results)} cases passed")
+        return 1 if failures else 0
 
     attached = arguments.postgresql_port is not None or arguments.mysql_port is not None
     if attached and (arguments.postgresql_port is None or arguments.mysql_port is None):
