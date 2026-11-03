@@ -80,6 +80,31 @@ fn file_shard_rejects_corrupt_bytes() {
 }
 
 #[test]
+fn file_shard_rejects_a_flipped_value_byte_via_checksum() {
+    let path = temp_path("checksum");
+    let mut shard = FileShard::open(&path).expect("open");
+    let key = Key::new("tenant", b"row".to_vec());
+    shard.put(key, StoredValue::Inline(InlineValue(b"payload".to_vec()))).expect("put");
+    drop(shard);
+    let mut bytes = fs::read(&path).expect("read");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&path, bytes).expect("corrupt");
+    let error = FileShard::open(&path).expect_err("checksum must reject the flipped value");
+    assert!(error.to_string().contains("checksum"), "{error}");
+    cleanup(&path);
+}
+
+#[test]
+fn file_shard_rejects_legacy_v2_snapshots_explicitly() {
+    let path = temp_path("legacy");
+    fs::write(&path, b"YYKV\x02\x00\x00\x00\x00\x00\x00\x00\x00").expect("write legacy");
+    let error = FileShard::open(&path).expect_err("legacy header must be rejected");
+    assert!(error.to_string().contains("legacy yykv v2"), "{error}");
+    cleanup(&path);
+}
+
+#[test]
 fn failed_snapshot_publication_preserves_records_and_revision() {
     let path = temp_path("failed-publication");
     let backup = path.with_extension("saved");
