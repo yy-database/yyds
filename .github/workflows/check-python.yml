@@ -112,8 +112,10 @@ jobs:
       - name: Build native bindings
         run: pnpm build:napi
       - name: Install SQL client drivers
-        run: python -m pip install psycopg2-binary psycopg pymysql mysql-connector-python
+        run: python -m pip install psycopg2-binary psycopg pymysql mysql-connector-python redis
       - name: Run the SQL real-client matrix
         run: python projects/yyds.py/packages/yyds/tests/clients/run_all.py
       - name: Run the binary payload cases
         run: python projects/yyds.py/packages/yyds/tests/clients/run_all.py --suite payloads
+      - name: Run the Redis real-client suite
+        run: python projects/yyds.py/packages/yyds/tests/clients/run_all.py --suite redis

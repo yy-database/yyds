@@ -126,7 +126,7 @@ class YydsNode:
         stderr = "\n".join(self.stderr_lines)
         return f"--- node stdout ---\n{stdout}\n--- node stderr ---\n{stderr}"
 
-    def stop(self) -> None:
+    def stop(self, *, wipe: bool = True) -> None:
         if self.attached:
             return
         process = self.process
@@ -145,9 +145,9 @@ class YydsNode:
                     process.kill()
                     process.wait(timeout=10.0)
         self.process = None
-        if self.data_dir is not None and self.data_dir.exists():
+        if wipe and self.data_dir is not None and self.data_dir.exists():
             shutil.rmtree(self.data_dir, ignore_errors=True)
-        self.data_dir = None
+            self.data_dir = None
 
     def __enter__(self) -> "YydsNode":
         return self
@@ -285,6 +285,83 @@ def attach_node(*, host: str, pgsql_port: int, mysql_port: int) -> YydsNode:
         data_dir=None,
         attached=True,
     )
+
+
+def _wait_for_redis(node: YydsNode, timeout: float) -> None:
+    deadline = time.monotonic() + timeout
+    announced = False
+    while time.monotonic() < deadline:
+        process = node.process
+        if process is not None and process.poll() is not None:
+            raise NodeFailure(f"yyds start exited with code {process.returncode} before readiness\n{node.logs()}")
+        for line in node.stdout_lines:
+            if _RUNNING_LINE.match(line) is not None:
+                announced = True
+        if announced and _port_open(node.host, node.redis_port):
+            return
+        time.sleep(PROBE_INTERVAL_SECONDS)
+    raise NodeFailure(f"node did not accept Redis connections within {timeout:.0f}s\n{node.logs()}")
+
+
+def start_redis_node(
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    sweep_interval_ms: int | None = None,
+    data_dir: Path | None = None,
+    cluster_id: str | None = None,
+    node_id: str | None = None,
+) -> YydsNode:
+    """Starts one node with only the Redis gateway, no catalog.
+
+    Passing `data_dir` reuses an existing node directory (restart cycles); the caller
+    decides when to wipe it via `node.stop(wipe=...)`. The identity arguments are
+    required when reusing a directory so `yyds init` stays idempotent.
+    """
+
+    reserved: set[int] = set()
+    redis_port = _free_port(reserved)
+    if data_dir is None:
+        data_dir = Path(tempfile.mkdtemp(prefix="yyds-redis-clients-"))
+        cluster_id = f"cluster-{os.getpid()}-{int(time.time())}"
+        node_id = f"node-{os.getpid()}"
+    if cluster_id is None or node_id is None:
+        raise NodeFailure("reusing a data directory requires both cluster_id and node_id")
+
+    node = YydsNode(host="127.0.0.1", pgsql_port=0, mysql_port=0, redis_port=redis_port, data_dir=data_dir)
+    try:
+        init = _run_cli(["init", "--data-dir", str(data_dir), "--cluster-id", cluster_id, "--node-id", node_id], 30.0)
+        if init.returncode != 0:
+            raise NodeFailure(f"yyds init exited with code {init.returncode}: {init.stderr.strip()}")
+        args = [
+            "start",
+            "--data-dir",
+            str(data_dir),
+            "--cluster-id",
+            cluster_id,
+            "--node-id",
+            node_id,
+            "--redis-port",
+            str(redis_port),
+        ]
+        if sweep_interval_ms is not None:
+            args += ["--expiry-sweep-interval-ms", str(sweep_interval_ms)]
+        node.process = subprocess.Popen(
+            _cli_arguments(args),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert node.process.stdout is not None and node.process.stderr is not None
+        threading.Thread(target=_pump, args=(node.process.stdout, node.stdout_lines), daemon=True).start()
+        threading.Thread(target=_pump, args=(node.process.stderr, node.stderr_lines), daemon=True).start()
+        _wait_for_redis(node, timeout)
+        return node
+    except Exception:
+        node.stop()
+        raise
 
 
 def main() -> int:
