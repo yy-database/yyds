@@ -17,6 +17,15 @@ function expectSqlState(state: string) {
     };
 }
 
+function expectError(state: string, message: RegExp) {
+    return (error: unknown) => {
+        const failure = error as PgFailure;
+        assert.equal(failure.code, state, `expected SQLSTATE ${state}, got ${failure.message}`);
+        assert.match(failure.message, message);
+        return true;
+    };
+}
+
 test("pg drives startup, simple and extended queries, and protocol transactions", { timeout: 60_000 }, async (t) => {
     const node = await startYydsNode();
     const client = new pg.Client({
@@ -79,6 +88,24 @@ test("pg drives startup, simple and extended queries, and protocol transactions"
     // After ROLLBACK the aborted state is cleared and statements execute again.
     const recovered = await client.query("SELECT 2 AS value");
     assert.deepEqual(recovered.rows, [{ value: "2" }]);
+
+    // Structured catalog errors keep their own SQLSTATE.
+    await assert.rejects(client.query("SELECT id FROM missing_table"), expectError("42P01", /unknown SQL table/));
+    await assert.rejects(client.query("SELECT missing_column FROM users"), expectError("42703", /unknown SQL column/));
+
+    // Execution-time semantic errors are classified instead of becoming XX000.
+    await assert.rejects(
+        client.query("SELECT id, name, COUNT(*) FROM users GROUP BY id"),
+        expectError("42803", /GROUP BY/i),
+    );
+    await assert.rejects(
+        client.query("SELECT id FROM users WHERE id IN (SELECT id, name FROM users)"),
+        expectError("42601", /exactly one column/i),
+    );
+    await assert.rejects(
+        client.query("SELECT id FROM users WHERE id = (SELECT id FROM users)"),
+        expectError("21000", /more than one row/i),
+    );
 
     await client.query("BEGIN");
     await client.query("COMMIT");
