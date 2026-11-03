@@ -52,22 +52,24 @@ test("mysql2 drives connection, session commands and gateway boundaries", { time
         expectErrno(1115),
     );
 
-    // The shipped CLI starts protocol listeners without a SQL runtime, so every
-    // statement that needs the engine is rejected with a structured error.
-    await assert.rejects(connection.query("SELECT 1 AS value"), expectErrno(1235));
-    await assert.rejects(
-        connection.query("INSERT INTO users (id, name) VALUES (1, 'ada')"),
-        expectErrno(1235),
-    );
-    await assert.rejects(
-        connection.query("UPDATE users SET name = 'grace' WHERE id = 1"),
-        expectErrno(1235),
-    );
-    await assert.rejects(connection.query("DELETE FROM users WHERE id = 1"), expectErrno(1235));
+    // The shipped CLI mounts a SQL runtime by default, so engine statements execute.
+    const [selected] = await connection.query("SELECT 1 AS value");
+    assert.deepEqual(selected, [{ value: 1 }]);
 
-    await assert.rejects(connection.beginTransaction(), expectErrno(1235));
-    await connection.commit();
+    await connection.query("CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(191))");
+    await connection.query("INSERT INTO users (id, name) VALUES (1, 'ada')");
+    const [updated] = await connection.query("UPDATE users SET name = 'grace' WHERE id = 1");
+    assert.equal((updated as { affectedRows: number }).affectedRows, 1);
+    const [found] = await connection.query("SELECT name FROM users WHERE id = 1");
+    assert.deepEqual(found, [{ name: "grace" }]);
+    const [deleted] = await connection.query("DELETE FROM users WHERE id = 1");
+    assert.equal((deleted as { affectedRows: number }).affectedRows, 1);
+
+    await connection.beginTransaction();
+    await connection.query("INSERT INTO users (id, name) VALUES (2, 'lin')");
     await connection.rollback();
+    const [afterRollback] = await connection.query("SELECT id FROM users");
+    assert.deepEqual(afterRollback, []);
 
     // Failures must not desynchronize the session.
     const [recovered] = await connection.query("SHOW VARIABLES LIKE 'version'");
