@@ -158,3 +158,71 @@ fn file_shard_scan_prefix_and_cursor() {
     assert_eq!(r.len(), 1);
     cleanup(&path);
 }
+
+#[test]
+fn file_shard_sweep_expired_reclaims_elapsed_records_durably() {
+    let path = temp_path("sweep");
+    let mut shard = FileShard::open(&path).expect("open");
+    let now = yyds_kv::now_unix_ms();
+    let live = Key::new("ns", b"live");
+    let fresh = Key::new("ns", b"fresh");
+    let gone = Key::new("ns", b"gone");
+    shard.put(live.clone(), StoredValue::Inline(InlineValue(b"v".to_vec()))).unwrap();
+    shard.put_expiring(fresh.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
+    shard.put_expiring(gone.clone(), StoredValue::Inline(InlineValue(b"payload".to_vec())), now - 1).unwrap();
+
+    assert_eq!(shard.sweep_expired(now).expect("sweep"), 1);
+    // Reclaim must survive reopen: the expired key is physically gone, not just filtered.
+    drop(shard);
+    let mut reopened = FileShard::open(&path).expect("reopen after sweep");
+    assert_eq!(reopened.sweep_expired(now).unwrap(), 0, "a reopened shard has nothing left to reclaim");
+    assert!(reopened.get(&live).unwrap().is_some());
+    assert!(reopened.get(&fresh).unwrap().is_some());
+    assert!(reopened.get(&gone).unwrap().is_none());
+    cleanup(&path);
+}
+
+#[test]
+fn file_shard_sweep_without_expired_records_leaves_the_snapshot_untouched() {
+    let path = temp_path("sweep-noop");
+    let mut shard = FileShard::open(&path).expect("open");
+    let now = yyds_kv::now_unix_ms();
+    shard.put(Key::new("ns", b"live"), StoredValue::Inline(InlineValue(b"v".to_vec()))).unwrap();
+    shard.put_expiring(Key::new("ns", b"fresh"), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
+    let published = fs::read(&path).unwrap();
+
+    assert_eq!(shard.sweep_expired(now).unwrap(), 0);
+    assert_eq!(fs::read(&path).unwrap(), published, "a no-op sweep must not rewrite the snapshot");
+    cleanup(&path);
+}
+
+#[test]
+fn file_shard_failed_sweep_preserves_the_previous_snapshot() {
+    let path = temp_path("sweep-failure");
+    let backup = path.with_extension("saved");
+    let mut shard = FileShard::open(&path).expect("open");
+    let now = yyds_kv::now_unix_ms();
+    let gone = Key::new("ns", b"gone");
+    let live = Key::new("ns", b"live");
+    shard.put_expiring(gone.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now - 1).unwrap();
+    shard.put(live.clone(), StoredValue::Inline(InlineValue(b"v".to_vec()))).unwrap();
+    let published = fs::read(&path).unwrap();
+    fs::rename(&path, &backup).unwrap();
+    fs::create_dir(&path).unwrap();
+
+    assert!(shard.sweep_expired(now).is_err(), "the reclaim must fail when the snapshot cannot be replaced");
+    // The in-memory state is not published either: both records stay in their pre-sweep
+    // shape (the expired one still filtered from reads, the live one intact).
+    assert!(shard.get(&gone).unwrap().is_none());
+    assert!(shard.get(&live).unwrap().is_some());
+    assert_eq!(fs::read(&backup).unwrap(), published, "the durable snapshot keeps the pre-sweep bytes");
+
+    fs::remove_dir(&path).unwrap();
+    fs::rename(&backup, &path).unwrap();
+    // After the storage fault clears, the same shard can reclaim again.
+    assert_eq!(shard.sweep_expired(now).unwrap(), 1);
+    drop(shard);
+    let mut reopened = FileShard::open(&path).unwrap();
+    assert_eq!(reopened.sweep_expired(now).unwrap(), 0);
+    cleanup(&path);
+}

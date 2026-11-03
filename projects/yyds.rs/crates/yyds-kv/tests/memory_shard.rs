@@ -1,4 +1,4 @@
-use yyds_kv::{compare_and_put, InlineValue, Key, KvStore, MemoryShard, StoredValue};
+use yyds_kv::{compare_and_put, now_unix_ms, InlineValue, Key, KvStore, MemoryShard, StoredValue};
 use yyds_types::Namespace;
 
 #[test]
@@ -96,4 +96,41 @@ fn scan_empty_namespace_returns_nothing() {
     shard.put(Key::new("used", b"x"), StoredValue::Inline(InlineValue(b"y".to_vec()))).unwrap();
     let results = shard.scan(&Namespace("unused".into()), b"", None, None, 0).unwrap();
     assert!(results.is_empty());
+}
+
+#[test]
+fn sweep_expired_removes_only_elapsed_records() {
+    let mut shard = MemoryShard::new();
+    let now = now_unix_ms();
+    let live = Key::new("ns", b"live");
+    let fresh = Key::new("ns", b"fresh");
+    let gone = Key::new("ns", b"gone");
+    let stale = Key::new("ns", b"stale");
+    shard.put(live.clone(), StoredValue::Inline(InlineValue(b"v".to_vec()))).unwrap();
+    shard.put_expiring(fresh.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
+    shard.put_expiring(gone.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now - 1).unwrap();
+    shard.put_expiring(stale.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now).unwrap();
+
+    // The deadline itself counts as elapsed, matching the read-path filter.
+    assert_eq!(shard.sweep_expired(now).unwrap(), 2);
+    assert!(shard.get(&live).unwrap().is_some());
+    assert!(shard.get(&fresh).unwrap().is_some());
+    assert!(shard.get(&gone).unwrap().is_none());
+    assert!(shard.get(&stale).unwrap().is_none());
+    // A second sweep is a no-op.
+    assert_eq!(shard.sweep_expired(now).unwrap(), 0);
+}
+
+#[test]
+fn sweep_expired_does_not_extend_revisions() {
+    let mut shard = MemoryShard::new();
+    let now = now_unix_ms();
+    let gone = Key::new("ns", b"gone");
+    let fresh = Key::new("ns", b"fresh");
+    shard.put_expiring(gone.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now - 1).unwrap();
+    let fresh_revision =
+        shard.put_expiring(fresh.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
+
+    assert_eq!(shard.sweep_expired(now).unwrap(), 1);
+    assert_eq!(shard.get(&fresh).unwrap().unwrap().revision, fresh_revision, "reclaim must not renumber surviving records");
 }
