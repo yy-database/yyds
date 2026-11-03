@@ -8,10 +8,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use yyds_kv::{FileShard, InlineValue, Key, KvStore, ShardChange, StoredValue};
+use yyds_kv::{now_unix_ms, FileShard, InlineValue, Key, KvStore, ShardChange, StoredValue};
 use yyds_types::{
     Error, FenceToken, KeyValueAction, KeyValueCommand, KeyValueResult, Namespace, OwnerEntry, ShardId, ShardMap,
 };
+
+mod sweep;
+
+pub use crate::sweep::ExpirySweeper;
 
 /// Execution surface consumed by protocol adapters.
 pub trait KeyValueExecutor: Debug + Send + Sync {
@@ -100,6 +104,22 @@ pub trait KeyValueExecutor: Debug + Send + Sync {
     /// executor-side mutex does not make a volatile commit durable.
     fn begin_transaction(self: Arc<Self>, _fence: Option<&FenceToken>) -> yyds_types::Result<Box<dyn TransactionHandle>> {
         Err(Error::Unsupported("this executor does not support local transactions"))
+    }
+
+    /// Reclaims every record whose expiry deadline has elapsed, returning the total number
+    /// of records physically removed across all mounted shards.
+    ///
+    /// Reclaim is a maintenance operation, not a transaction: each shard is swept under its
+    /// own lock and persists through its own durable commit boundary. A failure on one shard
+    /// leaves that shard's previous snapshot intact and does not undo shards already swept.
+    /// Reclaimed records were already invisible to every read path, so sweeping never
+    /// changes observable data, and the foreground request path never performs reclamation
+    /// work — it only shares the per-shard lock for the duration of one ordinary write.
+    ///
+    /// Executors without a reclamation contract must return `Error::Unsupported`
+    /// (the default).
+    fn sweep_expired(&self) -> yyds_types::Result<usize> {
+        Err(Error::Unsupported("expiry reclamation is not implemented by this executor"))
     }
 }
 
@@ -824,6 +844,22 @@ where
         let decision = self.routing.route(&command.namespace.0, &command.key);
         self.check_fence(fence, &decision.shard)?;
         Self::with_global_lock(|| self.execute_single_locked(command))
+    }
+
+    fn sweep_expired(&self) -> yyds_types::Result<usize> {
+        // Shard-at-a-time reclamation: each shard sweeps under its own lock and commits
+        // through its own durable boundary. The executor-wide write lock is deliberately
+        // not taken — reclaim only removes records that are already invisible to every
+        // read path, so it cannot conflict with OCC validation or batch commits, and
+        // foreground writes are never queued behind a full multi-shard sweep.
+        let now = now_unix_ms();
+        let mut reclaimed = 0;
+        for shard_id in self.routing.shards() {
+            let shard = self.shards.get(shard_id).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
+            let mut guard = shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?;
+            reclaimed += guard.sweep_expired(now)?;
+        }
+        Ok(reclaimed)
     }
 
     fn commit_batch(&self, fence: Option<&FenceToken>, batch: Vec<BufferedCommit>) -> yyds_types::Result<()> {

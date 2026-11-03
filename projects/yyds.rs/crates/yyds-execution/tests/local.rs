@@ -1202,3 +1202,77 @@ fn owner_switch_rejects_commit_and_leaves_disk_untouched() {
     );
     assert_eq!(reopened.get(&Key::new("redis:0", b"guarded")).unwrap(), None);
 }
+
+#[test]
+fn sweep_expired_reclaims_across_mounted_shards() {
+    let directory = create_folder().unwrap();
+    let shard_a = ShardId("shard-a".into());
+    let shard_b = ShardId("shard-b".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_a.clone(), shard_b.clone()]).unwrap();
+    let mut shards = HashMap::new();
+    shards.insert(shard_a.clone(), FileShard::open(directory.path().join("shard-a.yykv")).unwrap());
+    shards.insert(shard_b.clone(), FileShard::open(directory.path().join("shard-b.yykv")).unwrap());
+    let executor = LocalExecutor::new(routing, shards, Vec::new()).unwrap();
+
+    let now = yyds_kv::now_unix_ms();
+    // Route one expired key per shard plus one live key, proving the total aggregates
+    // per-shard reclamation and survivors stay readable.
+    let mut expired_on_b = None;
+    for index in 0..200 {
+        let key = format!("sweep-{index}").into_bytes();
+        let decision = executor.routing().route("redis:0", &key);
+        executor
+            .execute(None, command(KeyValueAction::PutExpiring { value: b"v".to_vec(), expires_at: now - 1 }, &key))
+            .unwrap();
+        if decision.shard == shard_b && expired_on_b.is_none() {
+            expired_on_b = Some(key);
+        }
+    }
+    executor.execute(None, command(KeyValueAction::Put(b"keep".to_vec()), b"survivor")).unwrap();
+    let expired_on_b = expired_on_b.expect("some key must route to shard-b");
+
+    let reclaimed = executor.sweep_expired().unwrap();
+    assert_eq!(reclaimed, 200, "every elapsed record on every mounted shard is reclaimed");
+    assert_eq!(executor.sweep_expired().unwrap(), 0, "a second sweep finds nothing left");
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"survivor")).unwrap(),
+        KeyValueResult::Get(Some(b"keep".to_vec()))
+    );
+    assert_eq!(executor.execute(None, command(KeyValueAction::Get, &expired_on_b)).unwrap(), KeyValueResult::Get(None));
+}
+
+#[test]
+fn expiry_sweeper_reclaims_in_the_background() {
+    let shard_id = ShardId("shard-a".into());
+    let executor: std::sync::Arc<dyn KeyValueExecutor> = std::sync::Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).unwrap(),
+            HashMap::from([(shard_id, MemoryShard::new())]),
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    let now = yyds_kv::now_unix_ms();
+    for index in 0..8 {
+        let key = format!("background-{index}").into_bytes();
+        executor
+            .execute(None, command(KeyValueAction::PutExpiring { value: b"v".to_vec(), expires_at: now - 1 }, &key))
+            .unwrap();
+    }
+    executor.execute(None, command(KeyValueAction::Put(b"keep".to_vec()), b"survivor")).unwrap();
+
+    let sweeper = yyds_execution::ExpirySweeper::start(std::sync::Arc::clone(&executor), std::time::Duration::from_millis(5))
+        .expect("sweeper starts");
+    // The background worker reclaims without any read traffic: once it has run, a manual
+    // sweep finds nothing left.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while executor.sweep_expired().unwrap() != 0 {
+        assert!(std::time::Instant::now() < deadline, "the sweeper did not reclaim within the deadline");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    sweeper.stop();
+    assert_eq!(
+        executor.execute(None, command(KeyValueAction::Get, b"survivor")).unwrap(),
+        KeyValueResult::Get(Some(b"keep".to_vec()))
+    );
+}
