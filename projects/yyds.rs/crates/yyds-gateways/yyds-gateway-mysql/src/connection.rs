@@ -21,7 +21,7 @@ use yyds_gateway::{
     SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
 };
 
-use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
+use crate::wire::{encode_packet, PacketError};
 
 const SERVER_CAPABILITIES: u32 =
     0x0000_0001 | 0x0000_0004 | 0x0000_0008 | 0x0000_0200 | 0x0000_2000 | 0x0000_8000 | 0x0002_0000 | 0x0008_0000;
@@ -33,6 +33,9 @@ const SERVER_STATUS_AUTOCOMMIT: u16 = 0x0002;
 const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
 const CLIENT_PLUGIN_AUTH_LENENC: u32 = 0x0020_0000;
 const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
+/// Largest request frame accepted, and the value advertised as
+/// `@@max_allowed_packet`. Keeping the two equal means a client never sends
+/// a frame the server will refuse.
 const MAX_PACKET: usize = 1024 * 1024;
 
 const COM_QUIT: u8 = 0x01;
@@ -82,7 +85,7 @@ const MYSQL_VARIABLES: &[(&str, &str)] = &[
     ("hostname", "localhost"),
     ("init_connect", ""),
     ("lower_case_table_names", "0"),
-    ("max_allowed_packet", "67108864"),
+    ("max_allowed_packet", "1048576"),
     ("net_write_timeout", "60"),
     ("socket", ""),
     ("sql_mode", ""),
@@ -322,9 +325,13 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
     let mut statements = PreparedStatements::new();
     write_packet(&mut stream, 0, &handshake())?;
     let response = match read_packet(&mut stream)? {
-        Some((1, response)) => response,
-        Some(_) => return Err(invalid_data("invalid MySQL handshake sequence")),
-        None => {
+        ReadPacket::Packet(1, response) => response,
+        ReadPacket::Packet(_, _) => return Err(invalid_data("invalid MySQL handshake sequence")),
+        ReadPacket::TooLarge(sequence) => {
+            write_packet_too_large(&mut stream, sequence)?;
+            return Ok(());
+        }
+        ReadPacket::Closed => {
             let _ = session.restore_schema(runtime.as_ref());
             return Ok(());
         }
@@ -344,11 +351,18 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
     write_ok(&mut stream, 2, session.status_flags())?;
 
     loop {
-        let Some((sequence, payload)) = read_packet(&mut stream)?
-        else {
-            // A connection that goes away mid-transaction is an implicit rollback.
-            let _ = session.restore_schema(runtime.as_ref());
-            return Ok(());
+        let (sequence, payload) = match read_packet(&mut stream)? {
+            ReadPacket::Packet(sequence, payload) => (sequence, payload),
+            ReadPacket::TooLarge(sequence) => {
+                write_packet_too_large(&mut stream, sequence)?;
+                let _ = session.restore_schema(runtime.as_ref());
+                return Ok(());
+            }
+            ReadPacket::Closed => {
+                // A connection that goes away mid-transaction is an implicit rollback.
+                let _ = session.restore_schema(runtime.as_ref());
+                return Ok(());
+            }
         };
         if sequence != 0 {
             write_error(&mut stream, sequence.wrapping_add(1), 1047, "08S01", "invalid command sequence")?;
@@ -891,12 +905,12 @@ fn advance(payload: &[u8], cursor: &mut usize, length: usize) -> Result<(), &'st
     Ok(())
 }
 
-fn read_packet(stream: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
+fn read_packet(stream: &mut impl Read) -> io::Result<ReadPacket> {
     let mut header = [0; 4];
     let mut read = 0;
     while read < header.len() {
         match stream.read(&mut header[read..]) {
-            Ok(0) if read == 0 => return Ok(None),
+            Ok(0) if read == 0 => return Ok(ReadPacket::Closed),
             Ok(0) => return Err(invalid_data("truncated MySQL packet header")),
             Ok(count) => read += count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -904,12 +918,32 @@ fn read_packet(stream: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
         }
     }
     let length = usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
-    if length > MAX_PACKET.min(MAX_PACKET_PAYLOAD) {
-        return Err(invalid_data("MySQL packet exceeds byte limit"));
+    if length > MAX_PACKET {
+        return Ok(ReadPacket::TooLarge(header[3]));
     }
     let mut payload = vec![0; length];
     stream.read_exact(&mut payload)?;
-    Ok(Some((header[3], payload)))
+    Ok(ReadPacket::Packet(header[3], payload))
+}
+
+/// Result of one wire frame read.
+///
+/// `TooLarge` is separated from I/O errors so the session can answer with
+/// MySQL `1153` before closing instead of dropping the connection silently.
+enum ReadPacket {
+    Packet(u8, Vec<u8>),
+    TooLarge(u8),
+    Closed,
+}
+
+fn write_packet_too_large(stream: &mut impl Write, sequence: u8) -> io::Result<()> {
+    write_error(
+        stream,
+        sequence.wrapping_add(1),
+        1153,
+        "08S01",
+        "Got a packet bigger than 'max_allowed_packet' bytes (1048576)",
+    )
 }
 
 fn write_packet(stream: &mut impl Write, sequence: u8, payload: &[u8]) -> io::Result<()> {
