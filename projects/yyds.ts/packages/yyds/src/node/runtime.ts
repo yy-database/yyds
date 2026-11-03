@@ -4,6 +4,7 @@ import type { YydsProtocol } from "./cluster.ts";
 import { loadYydsNative } from "./load.ts";
 
 const DEFAULT_REDIS_PORT = 6379;
+const DEFAULT_EXPIRY_SWEEP_INTERVAL_MS = 100;
 
 export interface StartNodeOptions {
     dataDir: string;
@@ -15,6 +16,8 @@ export interface StartNodeOptions {
     mysqlPort?: number;
     mongoPort?: number;
     wirePort?: number;
+    /** Background expiry reclamation period in milliseconds. Defaults to 100. */
+    expirySweepIntervalMs?: number;
 }
 
 export function parseStartOptions(protocol: YydsProtocol, args: string[]): StartNodeOptions {
@@ -80,6 +83,13 @@ export function parseStartOptions(protocol: YydsProtocol, args: string[]): Start
             options.wirePort = Number(args[++index]);
             continue;
         }
+        if (argument === "--expiry-sweep-interval-ms") {
+            const value = Number(args[++index]);
+            if (!Number.isInteger(value) || value <= 0)
+                throw new Error("expiry sweep interval must be a positive integer");
+            options.expirySweepIntervalMs = value;
+            continue;
+        }
         throw new Error(`unknown option '${argument}'`);
     }
 
@@ -107,6 +117,10 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     const identity = new native.NodeIdentityHandle(options.clusterId, options.nodeId);
     const lease = native.NodeLeaseHandle.acquire(options.dataDir, identity);
     const executor = new native.LocalExecutorHandle(options.dataDir, options.catalogPath);
+    const sweeper = native.ExpirySweeperHandle.start(
+        executor,
+        options.expirySweepIntervalMs ?? DEFAULT_EXPIRY_SWEEP_INTERVAL_MS,
+    );
     const redis = new native.RedisServiceHandle(
         lease,
         options.redisPort ?? DEFAULT_REDIS_PORT,
@@ -178,5 +192,6 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     mysql?.stop();
     mongo?.stop();
     wire?.stop();
+    sweeper.stop();
     native.nodeClearRuntimeArtifacts(options.dataDir, runtime.generation);
 }
