@@ -142,6 +142,9 @@ pub struct SqlCatalogField {
     /// Human-readable VOS type name carried for diagnostics, populated only when
     /// [`Self::field_type`] falls back to [`SqlFieldType::Unknown`].
     pub vos_type_name: Option<String>,
+    /// Declared character or octet capacity from local DDL, absent for fields
+    /// projected from the published VOS contract.
+    pub capacity: Option<u32>,
 }
 
 /// The gateway's immutable view of one published VOS catalog revision.
@@ -199,6 +202,7 @@ impl SqlCatalog {
                             name: field.canonical_name.clone(),
                             field_type,
                             vos_type_name,
+                            capacity: None,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -211,6 +215,40 @@ impl SqlCatalog {
     /// Returns the catalog schema revision used by this binding view.
     pub fn schema_version(&self) -> u32 {
         self.schema_version
+    }
+
+    /// Builds a gateway view from locally registered DDL tables.
+    ///
+    /// The registry validates identities while applying DDL, so this constructor
+    /// repeats the checks that keep binders from observing ambiguous tables.
+    pub fn from_tables(schema_version: u32, tables: Vec<SqlCatalogTable>) -> Result<Self, SqlFrontendError> {
+        if schema_version == 0 {
+            return Err(catalog_error("catalog schema version must be nonzero"));
+        }
+        let mut type_ids = std::collections::BTreeSet::new();
+        let mut field_ids = std::collections::BTreeSet::new();
+        for table in &tables {
+            if table.name.is_empty() {
+                return Err(catalog_error("catalog table has no name"));
+            }
+            if table.type_id == 0 || !type_ids.insert(table.type_id) {
+                return Err(catalog_error("invalid or duplicate catalog type identity"));
+            }
+            for field in &table.fields {
+                if field.name.is_empty() {
+                    return Err(catalog_error("catalog field has no name"));
+                }
+                if field.field_id == 0 || !field_ids.insert(field.field_id) {
+                    return Err(catalog_error("invalid or duplicate catalog field identity"));
+                }
+            }
+        }
+        Ok(Self::assemble(schema_version, tables))
+    }
+
+    /// Wraps already validated table identities without repeating the checks.
+    pub(crate) fn assemble(schema_version: u32, tables: Vec<SqlCatalogTable>) -> Self {
+        Self { schema_version, tables }
     }
 
     /// Returns the catalog tables in VOS declaration order.
@@ -1793,18 +1831,21 @@ mod tests {
                         name: "body".to_string(),
                         field_type: SqlFieldType::Bytes,
                         vos_type_name: None,
+                        capacity: None,
                     },
                     SqlCatalogField {
                         field_id: 2,
                         name: "photo".to_string(),
                         field_type: SqlFieldType::Unknown,
                         vos_type_name: Some("file".to_string()),
+                        capacity: None,
                     },
                     SqlCatalogField {
                         field_id: 3,
                         name: "vec".to_string(),
                         field_type: SqlFieldType::Unknown,
                         vos_type_name: Some("vector<1>".to_string()),
+                        capacity: None,
                     },
                 ],
             }],
@@ -1899,6 +1940,7 @@ mod tests {
                 name: "body".to_string(),
                 field_type: SqlFieldType::Bytes,
                 vos_type_name: None,
+                capacity: None,
             }],
         });
         let err = bind_sql_catalog("SELECT t.body FROM t INNER JOIN u ON t.photo = u.body", &catalog, 1, SqlDialect::Mysql)
@@ -1939,6 +1981,7 @@ mod tests {
                     name: "photo".to_string(),
                     field_type: SqlFieldType::Optional(Box::new(SqlFieldType::Unknown)),
                     vos_type_name: Some("file".to_string()),
+                    capacity: None,
                 }],
             }],
         };

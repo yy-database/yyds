@@ -14,10 +14,10 @@ use std::{
 
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_session_command,
-    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalog,
-    SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
-    SqlParameterStyle, SqlResult, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
+    bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_ddl, parse_session_command,
+    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalogBoundStatement,
+    SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult,
+    SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -93,13 +93,11 @@ const MYSQL_VARIABLES: &[(&str, &str)] = &[
     ("wait_timeout", "28800"),
 ];
 
-/// Runtime dependencies injected into a MySQL connection so SQL SELECT can execute.
+/// Runtime dependencies injected into a MySQL connection so SQL SELECT and DDL can execute.
 #[derive(Debug)]
 pub struct MysqlSqlRuntime {
-    /// Bound YYDS catalog view used for SQL name resolution.
-    pub catalog: SqlCatalog,
-    /// Schema version expected by the gateway binder.
-    pub schema_version: u32,
+    /// Local schema registry holding catalog snapshots and applying DDL.
+    pub schema: Arc<SqlSchemaRegistry>,
     /// KV execution plane.
     pub executor: Arc<dyn KeyValueExecutor>,
 }
@@ -373,6 +371,38 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                         continue;
                     }
                 };
+                // DDL resolves against the local schema registry instead of the
+                // session-command parser, so a `CREATE` / `ALTER` / `DROP` that the
+                // registry cannot apply never falls through to the Oak binder.
+                match parse_ddl(sql, SqlDialect::Mysql) {
+                    Err(error) => {
+                        write_statement_error(&mut stream, sequence.wrapping_add(1), "ddl", error)?;
+                        continue;
+                    }
+                    Ok(Some(statement)) => {
+                        let Some(rt) = runtime.as_ref()
+                        else {
+                            write_error(&mut stream, sequence.wrapping_add(1), 1235, "42000", "no SQL runtime")?;
+                            continue;
+                        };
+                        if session.failed {
+                            write_error(
+                                &mut stream,
+                                sequence.wrapping_add(1),
+                                40001,
+                                "HY000",
+                                "current transaction is aborted",
+                            )?;
+                            continue;
+                        }
+                        match rt.schema.apply_ddl(&statement) {
+                            Ok(_) => write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?,
+                            Err(error) => write_statement_error(&mut stream, sequence.wrapping_add(1), "ddl", error)?,
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
                 match parse_session_command(&normalize_session_boolean(sql)) {
                     Ok(Some(SqlSessionCommand::SetNames { character_set, .. }))
                         if !character_set.eq_ignore_ascii_case("utf8mb4") =>
@@ -822,10 +852,11 @@ fn execute_sql(
     binary_rows: bool,
     column_nullables: &[bool],
 ) -> io::Result<()> {
+    let catalog = runtime.schema.catalog();
     let bound = match bind_sql_catalog_with_variables(
         sql,
-        &runtime.catalog,
-        runtime.schema_version,
+        &catalog,
+        catalog.schema_version(),
         &mysql_system_variable,
         SqlDialect::Mysql,
     ) {
@@ -836,7 +867,7 @@ fn execute_sql(
             return Ok(());
         }
     };
-    let plan = match plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Mysql) {
+    let plan = match plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql) {
         Ok(plan) => plan,
         Err(error) => {
             session.fail();
@@ -901,6 +932,10 @@ fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
         NumericOverflow => (1690, "22003"),
         // PostgreSQL-only 分类：MySQL 对负长度返回空串，因此不会走到这里。
         InvalidSubstringLength => (1105, "HY000"),
+        TableAlreadyExists => (1050, "42S01"),
+        ColumnAlreadyExists => (1060, "42S21"),
+        IndexAlreadyExists => (1061, "42000"),
+        UnknownIndex => (1091, "42000"),
     }
 }
 
@@ -940,10 +975,11 @@ fn handle_prepare(
             return Ok(());
         }
     };
+    let catalog = runtime.schema.catalog();
     let bound = match bind_sql_catalog_with_variables(
         &neutral,
-        &runtime.catalog,
-        runtime.schema_version,
+        &catalog,
+        catalog.schema_version(),
         &mysql_system_variable,
         SqlDialect::Mysql,
     ) {
@@ -958,7 +994,7 @@ fn handle_prepare(
     // 因此这里只为 SELECT 推导结果列。
     let description = match bound {
         SqlCatalogBoundStatement::Select(_) | SqlCatalogBoundStatement::SetOperation(_) => {
-            match plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Mysql) {
+            match plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql) {
                 Ok(plan) => describe_plan(&plan),
                 Err(error) => {
                     session.fail();

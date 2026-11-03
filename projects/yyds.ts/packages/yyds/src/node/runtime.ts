@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import type { YydsProtocol } from "./cluster.ts";
@@ -127,30 +128,44 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
         executor,
     );
 
-    // SQL runtimes 仅在提供了 catalog 时启动完整执行路径；否则保持协议壳。
-    const hasRuntime = options.catalogPath !== undefined;
+    // 提供了 catalog 时走 catalog 派生的 SQL runtime，否则用本地持久化 schema registry。
+    const hasRuntime =
+        options.catalogPath !== undefined ||
+        options.mysqlPort !== undefined ||
+        options.pgsqlPort !== undefined;
+    const schemaPath = join(options.dataDir, "sql-schema.v0.json");
     const pgsql =
         options.pgsqlPort === undefined
             ? undefined
-            : hasRuntime
+            : options.catalogPath !== undefined
                 ? native.PgsqlServiceHandle.startWithExecutor(
                       lease,
                       options.pgsqlPort,
                       executor,
-                      options.catalogPath!,
+                      options.catalogPath,
                   )
-                : new native.PgsqlServiceHandle(lease, options.pgsqlPort);
+                : native.PgsqlServiceHandle.startWithSchema(
+                      lease,
+                      options.pgsqlPort,
+                      executor,
+                      schemaPath,
+                  );
     const mysql =
         options.mysqlPort === undefined
             ? undefined
-            : hasRuntime
+            : options.catalogPath !== undefined
                 ? native.MysqlServiceHandle.startWithExecutor(
                       lease,
                       options.mysqlPort,
                       executor,
-                      options.catalogPath!,
+                      options.catalogPath,
                   )
-                : new native.MysqlServiceHandle(lease, options.mysqlPort);
+                : native.MysqlServiceHandle.startWithSchema(
+                      lease,
+                      options.mysqlPort,
+                      executor,
+                      schemaPath,
+                  );
     const mongo =
         options.mongoPort === undefined
             ? undefined
