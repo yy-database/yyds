@@ -6,7 +6,10 @@ export interface YydsBindings {
     NodeLeaseHandle: {
         acquire(dataDir: string, identity: unknown): unknown;
     };
-    LocalExecutorHandle: new (dataDir: string, catalogPath?: string | null) => unknown;
+    LocalExecutorHandle: new (dataDir: string, catalogPath?: string | null) => LocalExecutorBinding;
+    ExpirySweeperHandle: {
+        start(executor: LocalExecutorBinding, intervalMs: number): ExpirySweeperBinding;
+    };
     RedisServiceHandle: new (
         lease: unknown,
         port: number,
@@ -50,6 +53,15 @@ export interface YydsBindings {
 export interface ServiceBinding {
     address(): string;
     isFinished(): boolean;
+    stop(): void;
+}
+
+export interface LocalExecutorBinding {
+    /** Reclaims every expired record once and returns how many were removed. */
+    sweepExpired(): number;
+}
+
+export interface ExpirySweeperBinding {
     stop(): void;
 }
 

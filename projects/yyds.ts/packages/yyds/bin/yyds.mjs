@@ -10,7 +10,7 @@ function usage() {
 }
 
 function startUsage() {
-    return "usage: yyds start --data-dir DIR --cluster-id ID --node-id ID [--catalog-path FILE] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--mongo-port PORT] [--wire-port PORT]";
+    return "usage: yyds start --data-dir DIR --cluster-id ID --node-id ID [--catalog-path FILE] [--redis-port PORT] [--pgsql-port PORT] [--mysql-port PORT] [--mongo-port PORT] [--wire-port PORT] [--expiry-sweep-interval-ms MS]";
 }
 
 function catalogUsage() {
@@ -32,6 +32,7 @@ function parseCommonArgs(command, args) {
         mysqlPort: undefined,
         mongoPort: undefined,
         wirePort: undefined,
+        expirySweepIntervalMs: undefined,
     };
     for (let index = 0; index < args.length; index += 1) {
         const flag = args[index];
@@ -84,6 +85,12 @@ function parseCommonArgs(command, args) {
                 if (command !== "start")
                     throw new Error(`option ${flag} is not valid for this command`);
                 options.wirePort = Number(value);
+                index += 1;
+                break;
+            case "--expiry-sweep-interval-ms":
+                if (command !== "start")
+                    throw new Error(`option ${flag} is not valid for this command`);
+                options.expirySweepIntervalMs = Number(value);
                 index += 1;
                 break;
             default:
@@ -166,6 +173,7 @@ async function main(args) {
                 mysqlPort: options.mysqlPort,
                 mongoPort: options.mongoPort,
                 wirePort: options.wirePort,
+                expirySweepIntervalMs: options.expirySweepIntervalMs,
             });
             return;
         case "status": {
