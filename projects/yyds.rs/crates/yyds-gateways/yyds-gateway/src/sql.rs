@@ -38,8 +38,20 @@ pub enum SqlErrorKind {
     UnknownFunction,
     /// A `@@` system variable is not published by the gateway.
     UnknownVariable,
-    /// Catalog construction or publication is inconsistent.
-    Catalog,
+    /// A scalar subquery produced more than one row. PostgreSQL reports
+    /// `21000` and MySQL `1242`.
+    CardinalityViolation,
+    /// A grouped projection references a column outside the `GROUP BY` key.
+    /// PostgreSQL reports `42803` and MySQL `1055`.
+    InvalidGrouping,
+    /// An `IN (SELECT …)` subquery selects more than one column. PostgreSQL
+    /// reports `42601` and MySQL `1241`.
+    OperandColumns,
+    /// Last resort for failures the gateway cannot classify: an inconsistent
+    /// catalog publication or a storage/executor failure. MySQL `1105`,
+    /// PostgreSQL `XX000`. Every user-visible scenario must be classified
+    /// before it reaches this variant.
+    Internal,
     /// Parameter substitution or a bind parameter position is invalid.
     Parameter,
     /// A write would create a duplicate key: the primary key or a declared
@@ -48,8 +60,6 @@ pub enum SqlErrorKind {
     DuplicateKey,
     /// Optimistic concurrency rejected a read-modify-write.
     Conflict,
-    /// The storage layer failed while executing the statement.
-    Execution,
     /// Division or modulo by zero — PostgreSQL raises an error, MySQL returns NULL.
     DivisionByZero,
     /// `SUBSTRING` was given a negative length. PostgreSQL rejects it with SQLSTATE
@@ -98,9 +108,9 @@ impl SqlFrontendError {
         Self::new(SqlErrorKind::Unsupported, message)
     }
 
-    /// A catalog identity is missing or inconsistent.
-    pub fn catalog(message: impl Into<String>) -> Self {
-        Self::new(SqlErrorKind::Catalog, message)
+    /// A catalog identity or storage failure the gateway cannot classify.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(SqlErrorKind::Internal, message)
     }
 }
 

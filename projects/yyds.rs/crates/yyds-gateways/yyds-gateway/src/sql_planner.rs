@@ -1932,7 +1932,7 @@ fn validate_grouped_select(select: &SqlCatalogBoundSelect, has_aggregate: bool) 
                     SqlCatalogBoundExpression::Column(column) => format!("column `{}`", column.field_name),
                     other => format!("expression {other:?}"),
                 };
-                return Err(planner_error(&format!(
+                return Err(grouping_error(&format!(
                     "{detail} must appear in the GROUP BY clause or be used in an aggregate function"
                 )));
             }
@@ -1947,7 +1947,7 @@ fn validate_grouped_select(select: &SqlCatalogBoundSelect, has_aggregate: bool) 
     if let Some(items) = select.order_by.as_ref() {
         for item in items {
             if !allowed(&item.expression) {
-                return Err(planner_error("ORDER BY must reference GROUP BY columns or aggregate functions"));
+                return Err(grouping_error("ORDER BY must reference GROUP BY columns or aggregate functions"));
             }
         }
     }
@@ -2042,4 +2042,9 @@ fn validate_distinct_order_by(
 
 fn planner_error(message: &str) -> SqlFrontendError {
     SqlFrontendError::unsupported(message)
+}
+
+/// 分组语义错误有独立的 SQLSTATE：PostgreSQL `42803`、MySQL `1055`。
+fn grouping_error(message: &str) -> SqlFrontendError {
+    SqlFrontendError::new(SqlErrorKind::InvalidGrouping, message)
 }
