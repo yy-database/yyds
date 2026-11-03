@@ -29,7 +29,7 @@ pub use crate::{
         SqlCatalogTable, SqlFieldType,
     },
     sql_batch::{split_sql_batch, SqlBatchStatement},
-    sql_ddl::{is_ddl_statement, parse_ddl, DdlColumn, SqlDdlStatement},
+    sql_ddl::{is_accepted_collation, is_ddl_statement, parse_ddl, DdlColumn, SqlDdlStatement, ACCEPTED_COLLATIONS},
     sql_describe::{describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
     sql_meta::{analyze_meta_query, mysql_data_type, postgres_type, MetaQuery, PG_SERVER_VERSION},
