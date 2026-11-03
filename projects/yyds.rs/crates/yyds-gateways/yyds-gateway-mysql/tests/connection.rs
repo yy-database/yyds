@@ -1466,9 +1466,10 @@ fn blob_columns_round_trip_raw_octets_and_reject_text_only_paths() {
     );
 
     // 超出声明容量在 bind 期拒绝，而不是写入截断值。
+    // MySQL 对数据超长的错误是 `1406` / SQLSTATE `22001`，不是编码错误 `1366`。
     let oversized = "00".repeat(yyds_gateway::MYSQL_BLOB_CAPACITY + 1);
     let oversized_sql = format!("INSERT INTO payloads (id, blob) VALUES (5, CAST('{oversized}' AS BLOB))");
-    assert_eq!(expect_error(&mut client, &oversized_sql), (1366, "HY000".into()));
+    assert_eq!(expect_error(&mut client, &oversized_sql), (1406, "22001".into()));
 
     drop(client);
     server.join().unwrap();
@@ -1762,6 +1763,46 @@ fn mysql_ddl_builds_the_runtime_catalog_and_reports_catalog_errors() {
 
     expect_ok(&mut client, "DROP TABLE users");
     assert_eq!(expect_error(&mut client, "SELECT id FROM users"), (1146, "42S02".into()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn mysql_declared_capacity_rejects_oversized_strings() {
+    let (mut client, server) = start_server_with_empty_schema();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(&mut client, "CREATE TABLE users (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(191) NOT NULL)");
+
+    // 191 个字符正好压在声明容量上：必须原样写入并回读。
+    let fits = "a".repeat(191);
+    expect_ok(&mut client, &format!("INSERT INTO users (id, name) VALUES (1, '{fits}')"));
+    assert_eq!(expect_row_values(&mut client, "SELECT name FROM users WHERE id = 1"), vec![text(&fits)]);
+
+    // 192 个字符越界：MySQL 1406 / 22001，且不得截断写入。
+    let too_long = "a".repeat(192);
+    assert_eq!(
+        expect_error(&mut client, &format!("INSERT INTO users (id, name) VALUES (2, '{too_long}')")),
+        (1406, "22001".into())
+    );
+    let (_, rows) = read_result_set(&mut client, "SELECT name FROM users WHERE id = 2");
+    assert!(rows.is_empty(), "oversized insert must not be stored: {rows:?}");
+
+    // 多字节字符按字符数计数，不按 octets：191 个汉字合法，192 个越界。
+    let fits_multibyte = "字".repeat(191);
+    expect_ok(&mut client, &format!("INSERT INTO users (id, name) VALUES (3, '{fits_multibyte}')"));
+    assert_eq!(
+        expect_row_values(&mut client, "SELECT name FROM users WHERE id = 3"),
+        vec![text(&fits_multibyte)]
+    );
+    assert_eq!(
+        expect_error(&mut client, &format!("INSERT INTO users (id, name) VALUES (4, '{}')", "字".repeat(192))),
+        (1406, "22001".into())
+    );
 
     drop(client);
     server.join().unwrap();

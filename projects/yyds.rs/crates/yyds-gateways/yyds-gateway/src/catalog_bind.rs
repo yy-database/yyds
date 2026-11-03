@@ -319,6 +319,8 @@ pub struct SqlCatalogBoundColumn {
     /// Name the reference was written by in its column scope, which a CTE's explicit
     /// column list can rename away from [`Self::field_name`].
     pub visible_name: String,
+    /// Declared character/octet capacity of the bound field, used for write guards.
+    pub capacity: Option<u32>,
 }
 
 /// A column of the directly enclosing query read by a correlated subquery.
@@ -750,6 +752,7 @@ fn bind_insert(
                         table_name: table.name.clone(),
                         field_name: f.name.clone(),
                         visible_name: f.name.clone(),
+                        capacity: f.capacity,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?
@@ -1726,6 +1729,7 @@ fn find_field_in_table(
                 table_name: table.name.clone(),
                 field_name: field.name.clone(),
                 visible_name: source.visible_column_name(*index, field),
+                capacity: field.capacity,
             }))
         }
         _ => Err(SqlFrontendError::new(SqlErrorKind::AmbiguousColumn, format!("ambiguous SQL column: {name}"))),

@@ -4487,7 +4487,7 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     .expect("bind");
     let error =
         yyds_gateway::plan_statement_for_dialect(bound.clone(), &catalog, SqlDialect::Mysql).expect_err("mysql capacity");
-    assert_eq!(error.kind, SqlErrorKind::TypeMismatch);
+    assert_eq!(error.kind, SqlErrorKind::ValueTooLong);
     assert!(error.message.contains("exceeds the declared capacity"), "{}", error.message);
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("postgres has no dialect-level bytes cap");
     yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("postgres stores the oversized payload");

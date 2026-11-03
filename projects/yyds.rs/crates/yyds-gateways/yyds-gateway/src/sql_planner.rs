@@ -567,8 +567,8 @@ pub fn plan_insert(
         for (field, value) in target_fields.iter().zip(row_values.iter()) {
             let lit = literal_from_expression(value)?;
             let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
-            check_write_literal(&lit, &field_type, &field.field_name, dialect)?;
-            write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
+            check_write_literal(&lit, &field_type, &field.field_name, dialect, field.capacity)?;
+            write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type, capacity: field.capacity });
         }
         plans.push(WritePlan {
             namespace: namespace.clone(),
@@ -625,21 +625,24 @@ fn plan_on_conflict(
                 if column.field_id == pk.field_id {
                     return Err(SqlFrontendError::unsupported("ON CONFLICT DO UPDATE cannot reassign the table primary key"));
                 }
-                let field_type = table
+                let field = table
                     .fields
                     .iter()
-                    .find(|field| field.field_id == column.field_id)
+                    .find(|field| field.field_id == column.field_id);
+                let field_type = field
                     .map(|field| field.field_type.clone())
                     .unwrap_or(SqlFieldType::Unknown);
+                let capacity = field.and_then(|field| field.capacity);
                 check_conflict_value(&expression)?;
                 // 字面量在计划期就能按列类型判定，引用列的形态要等实际值算出来。
                 if let SqlCatalogBoundExpression::Literal(lit) = &expression {
-                    check_write_literal(lit, &field_type, &column.field_name, dialect)?;
+                    check_write_literal(lit, &field_type, &column.field_name, dialect, capacity)?;
                 }
                 planned.push(ConflictAssignment {
                     field_id: column.field_id,
                     field_name: column.field_name,
                     field_type,
+                    capacity,
                     value: expression,
                 });
             }
@@ -712,6 +715,7 @@ fn plan_returning(
                             table_name: table.name.clone(),
                             field_name: field.name.clone(),
                             visible_name: field.name.clone(),
+                            capacity: field.capacity,
                         }),
                         field.name.clone(),
                     ));
@@ -773,7 +777,7 @@ fn plan_insert_select(
                 ),
             ));
         }
-        fields.push(InsertSelectColumn { field_id: field.field_id, field_name: field.field_name.clone(), field_type });
+        fields.push(InsertSelectColumn { field_id: field.field_id, field_name: field.field_name.clone(), field_type, capacity: field.capacity });
     }
     Ok(SqlExecutionPlan::InsertSelect(InsertSelectPlan {
         namespace,
@@ -815,8 +819,8 @@ pub fn plan_update(
     for (field, value_expr) in &update.assignments {
         let lit = literal_from_expression(value_expr)?;
         let field_type = field_types.get(&field.field_id).cloned().unwrap_or(crate::catalog_bind::SqlFieldType::Unknown);
-        check_write_literal(&lit, &field_type, &field.field_name, dialect)?;
-        write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type });
+        check_write_literal(&lit, &field_type, &field.field_name, dialect, field.capacity)?;
+        write_fields.push(WriteField { field_id: field.field_id, value: lit, field_type, capacity: field.capacity });
     }
 
     let Some(predicate) = update.predicate
@@ -903,17 +907,31 @@ pub(crate) fn check_write_literal(
     field_type: &SqlFieldType,
     column: &str,
     dialect: SqlDialect,
+    capacity: Option<u32>,
 ) -> Result<(), SqlFrontendError> {
-    // `bytes` 列单独处理：容量诊断必须指名 octets 与方言声明上限，不能与普通类型不匹配混在一起。
+    // `bytes` 列单独处理：容量诊断必须指名 octets 与声明上限，不能与普通类型不匹配混在一起。
     if matches!(field_type.inner(), SqlFieldType::Bytes) {
+        // A declared capacity wins: it is the column's own contract, while the
+        // dialect cap only describes the wire's widest binary type.
+        let limit = capacity.or_else(|| dialect.bytes_capacity().and_then(|limit| u32::try_from(limit).ok()));
         return match literal {
-            // NULL 与文本字面量保持既有行为：文本按 UTF-8 写入，ASCII payload 无损。
-            SqlBoundLiteral::Null | SqlBoundLiteral::String(_) => Ok(()),
-            SqlBoundLiteral::Bytes(bytes) => match dialect.bytes_capacity() {
-                Some(capacity) if bytes.len() > capacity => Err(SqlFrontendError::new(
-                    SqlErrorKind::TypeMismatch,
+            // 文本字面量按 UTF-8 写入，容量按实际 octets 判定。
+            SqlBoundLiteral::Null => Ok(()),
+            SqlBoundLiteral::String(text) => match limit {
+                Some(limit) if text.len() as u64 > limit as u64 => Err(SqlFrontendError::new(
+                    SqlErrorKind::ValueTooLong,
                     format!(
-                        "binary payload of {} octets exceeds the declared capacity of {capacity} for column `{column}`",
+                        "binary payload of {} octets exceeds the declared capacity of {limit} for column `{column}`",
+                        text.len()
+                    ),
+                )),
+                Some(_) | None => Ok(()),
+            },
+            SqlBoundLiteral::Bytes(bytes) => match limit {
+                Some(limit) if bytes.len() as u64 > limit as u64 => Err(SqlFrontendError::new(
+                    SqlErrorKind::ValueTooLong,
+                    format!(
+                        "binary payload of {} octets exceeds the declared capacity of {limit} for column `{column}`",
                         bytes.len()
                     ),
                 )),
@@ -949,6 +967,17 @@ pub(crate) fn check_write_literal(
         SqlFieldType::Bytes | SqlFieldType::Optional(_) => unreachable!("handled above"),
     };
     if fits {
+        if let (SqlFieldType::String, SqlBoundLiteral::String(text), Some(limit)) = (field_type.inner(), literal, capacity) {
+            let chars = text.chars().count() as u64;
+            if chars > u64::from(limit) {
+                return Err(SqlFrontendError::new(
+                    SqlErrorKind::ValueTooLong,
+                    format!(
+                        "string value of {chars} characters exceeds the declared capacity of {limit} for column `{column}`"
+                    ),
+                ));
+            }
+        }
         Ok(())
     }
     else {
@@ -1214,6 +1243,8 @@ pub struct ConflictAssignment {
     pub field_name: String,
     /// 目标列声明类型，执行层编码校验用。
     pub field_type: crate::catalog_bind::SqlFieldType,
+    /// 目标列声明的字符/octet 容量，执行层长度守卫用。
+    pub capacity: Option<u32>,
     /// 赋值右值。
     pub value: SqlCatalogBoundExpression,
 }
@@ -1244,6 +1275,8 @@ pub struct InsertSelectColumn {
     pub field_name: String,
     /// 目标列声明类型。
     pub field_type: crate::catalog_bind::SqlFieldType,
+    /// 目标列声明的字符/octet 容量。
+    pub capacity: Option<u32>,
 }
 
 /// UPDATE 执行计划。payload 由 execute 层做 TLV 编码。
@@ -1271,6 +1304,8 @@ pub struct WriteField {
     pub value: SqlBoundLiteral,
     /// 从 catalog 投影的字段类型，execute 层编码校验用。
     pub field_type: crate::catalog_bind::SqlFieldType,
+    /// 目标列声明的字符/octet 容量，执行层长度守卫用。
+    pub capacity: Option<u32>,
 }
 
 /// DELETE 执行计划。

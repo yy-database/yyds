@@ -1684,7 +1684,7 @@ fn conflict_updated_row(
     for assignment in assignments {
         let value = eval_expression(&assignment.value, &scope, &scope_types, dialect)?;
         let literal = value_to_literal(value);
-        check_write_literal(&literal, &assignment.field_type, &assignment.field_name, dialect)?;
+        check_write_literal(&literal, &assignment.field_type, &assignment.field_name, dialect, assignment.capacity)?;
         updates.push((assignment.field_id, sql_value_to_bytes(&literal)));
     }
     let mut row = existing.clone();
@@ -1719,8 +1719,8 @@ fn execute_insert_select(
         let rowid = pk_literal_to_rowid(&literals[0])?;
         let mut fields = Vec::with_capacity(plan.fields.len());
         for (column, value) in plan.fields.iter().zip(literals) {
-            check_write_literal(&value, &column.field_type, &column.field_name, dialect)?;
-            fields.push(WriteField { field_id: column.field_id, value, field_type: column.field_type.clone() });
+            check_write_literal(&value, &column.field_type, &column.field_name, dialect, column.capacity)?;
+            fields.push(WriteField { field_id: column.field_id, value, field_type: column.field_type.clone(), capacity: column.capacity });
         }
         write_plans.push(WritePlan {
             namespace: plan.namespace.clone(),
