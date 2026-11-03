@@ -369,6 +369,28 @@ fn mysql_system_variable_probes_return_single_row() {
     assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1193);
     assert!(error.windows(b"Unknown system variable".len()).any(|window| window == b"Unknown system variable"));
 
+    // 连接期隐式探测：`@@socket` 必须应答（空串即表示无 unix socket），不得报错
+    client.write_all(&encode_packet(0, b"\x03SELECT @@socket").unwrap()).unwrap();
+    let (_, col_count) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&col_count).0, 1);
+    let _ = read_packet_full(&mut client); // column definition
+    let _ = read_packet_full(&mut client); // EOF
+    let (_, row) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc_str(&row).0, b"");
+    let _ = read_packet_full(&mut client); // EOF
+
+    // `@@max_allowed_packet` 必须是非零整数，否则驱动在 connect 阶段失败
+    client.write_all(&encode_packet(0, b"\x03SELECT @@max_allowed_packet").unwrap()).unwrap();
+    let (_, col_count) = read_packet_full(&mut client);
+    assert_eq!(read_lenenc(&col_count).0, 1);
+    let _ = read_packet_full(&mut client); // column definition
+    let _ = read_packet_full(&mut client); // EOF
+    let (_, row) = read_packet_full(&mut client);
+    let packet_size = read_lenenc_str(&row).0;
+    let packet_size: u64 = std::str::from_utf8(packet_size).unwrap().parse().unwrap();
+    assert!(packet_size > 0);
+    let _ = read_packet_full(&mut client); // EOF
+
     drop(client);
     server.join().unwrap();
 }

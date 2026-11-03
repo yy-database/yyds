@@ -78,6 +78,17 @@ fn session_variable_statements_follow_postgresql_semantics() {
     assert_eq!(shown[2], (b'C', b"SHOW\0".to_vec()));
     assert_eq!(shown[3], (b'Z', b"I".to_vec()));
 
+    // `tokio-postgres` 在连接期固定发出 `SHOW transaction_read_only`，缺这一行连接直接失败。
+    send_query(&mut client, "SHOW transaction_read_only");
+    let shown = receive_until_ready(&mut client);
+    assert_eq!(shown.len(), 4);
+    assert_eq!(shown[0].0, b'T');
+    assert_eq!(shown[1].0, b'D');
+    assert_eq!(shown[1].1.len(), 2 + 4 + 3);
+    assert!(String::from_utf8_lossy(&shown[1].1).ends_with("off"));
+    assert_eq!(shown[2], (b'C', b"SHOW\0".to_vec()));
+    assert_eq!(shown[3], (b'Z', b"I".to_vec()));
+
     // `SHOW search_path` defaults to PostgreSQL convention `"$user, public"`.
     send_query(&mut client, "SHOW search_path");
     let shown = receive_until_ready(&mut client);

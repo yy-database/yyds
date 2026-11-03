@@ -1367,6 +1367,8 @@ const PG_PARAMETERS: &[(&str, &str)] = &[
     ("standard_conforming_strings", "on"),
     ("timezone", "UTC"),
     ("transaction_isolation", "read committed"),
+    ("transaction_read_only", "off"),
+    ("default_transaction_read_only", "off"),
 ];
 
 /// Case-insensitive lookup in [`PG_PARAMETERS`].
