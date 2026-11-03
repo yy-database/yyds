@@ -258,6 +258,39 @@ def _case_multi_exec(node: YydsNode) -> None:
         client.close()
 
 
+def _case_rename_rotation(node: YydsNode) -> None:
+    client = _client(node)
+    reader = _client(node)
+    try:
+        client.execute_command("SET", "py-rn-src", "session", "PX", "45000")
+        check(client.execute_command("RENAME", "py-rn-src", "py-rn-dst") is True, "RENAME must answer OK")
+        check(client.get("py-rn-dst") == "session", "the value must move with the key")
+        check(client.get("py-rn-src") is None, "the source must be gone")
+        pttl = client.pttl("py-rn-dst")
+        check(0 < pttl <= 45_000, f"the remaining deadline must move too, got {pttl}")
+        check(reader.get("py-rn-dst") == "session", "the move must be visible cross-connection")
+
+        client.execute_command("SET", "py-rn-nx", "keep", "PX", "45000")
+        client.execute_command("SET", "py-rn-blocker", "old")
+        check(client.execute_command("RENAMENX", "py-rn-nx", "py-rn-blocker") == 0, "an occupied destination must reject the move")
+        check(client.get("py-rn-nx") == "keep", "the rejected source must stay")
+        check(client.get("py-rn-blocker") == "old", "the rejected destination must stay")
+        check(client.execute_command("RENAMENX", "py-rn-nx", "py-rn-free") == 1, "a free destination must accept the move")
+        check(client.get("py-rn-free") == "keep", "RENAMENX must move the value")
+        check(client.get("py-rn-nx") is None, "RENAMENX must delete the source")
+
+        pipe = client.pipeline(transaction=True)
+        pipe.execute_command("RENAME", "py-rn-missing", "py-rn-target")
+        pipe.ping()
+        results = pipe.execute(raise_on_error=False)
+        check(len(results) == 2, f"EXEC must return one element per command, got {results!r}")
+        check(isinstance(results[0], redis.exceptions.ResponseError), f"the missing source must fail inside EXEC, got {results[0]!r}")
+        check(results[1] is True, f"the command after the failure must still apply, got {results[1]!r}")
+    finally:
+        client.close()
+        reader.close()
+
+
 def _case_error_paths(node: YydsNode) -> None:
     client = _client(node)
     try:
@@ -323,7 +356,9 @@ def _case_restart_persistence() -> None:
         first = start_redis_node(data_dir=data_dir, **identity)
         writer = _client(first)
         writer.set("py-restart-keep", "v")
-        writer.execute_command("SET", "py-restart-long", "v", "PX", 45_000)
+        # Rotate the session key before shutdown: the value and deadline must survive the restart.
+        writer.execute_command("SET", "py-restart-src", "v", "PX", 45_000)
+        writer.execute_command("RENAME", "py-restart-src", "py-restart-long")
         writer.execute_command("SET", "py-restart-gone", "v", "PX", 600)
         writer.close()
         time.sleep(0.9)
@@ -360,6 +395,7 @@ def run_redis(node: YydsNode | None = None) -> list[CaseResult]:
             ("cross-connection", lambda: _case_cross_connection(node)),
             ("reconnect", lambda: _case_reconnect(node)),
             ("multi-exec", lambda: _case_multi_exec(node)),
+            ("rename-rotation", lambda: _case_rename_rotation(node)),
             ("error-paths", lambda: _case_error_paths(node)),
             ("background-reclaim", lambda: _case_background_reclaim(node)),
             ("restart-persistence", _case_restart_persistence),

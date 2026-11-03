@@ -103,6 +103,39 @@
                 { "cmd": ["LPUSH", "d5-list", "v"], "expect": { "error": "ERR unsupported command" } },
                 { "cmd": ["SELECT", "16"], "expect": { "error": "ERR DB index is out of range" } }
             ]
+        },
+        {
+            "name": "rename-session-rotation",
+            "steps": [
+                { "cmd": ["SET", "d6-src", "session", "PX", "60000"], "expect": "OK" },
+                { "cmd": ["SET", "d6-occupied", "old"], "expect": "OK" },
+                { "cmd": ["RENAME", "d6-src", "d6-dst"], "expect": "OK" },
+                { "cmd": ["GET", "d6-dst"], "expect": "session" },
+                { "cmd": ["GET", "d6-src"], "expect": null },
+                { "cmd": ["PTTL", "d6-dst"], "expect": { "intBetween": [55000, 60000] } },
+                { "cmd": ["RENAMENX", "d6-dst", "d6-occupied"], "expect": 0 },
+                { "cmd": ["GET", "d6-dst"], "expect": "session" },
+                { "cmd": ["GET", "d6-occupied"], "expect": "old" },
+                { "cmd": ["RENAMENX", "d6-dst", "d6-free"], "expect": 1 },
+                { "cmd": ["GET", "d6-free"], "expect": "session" },
+                { "cmd": ["GET", "d6-dst"], "expect": null },
+                { "cmd": ["PTTL", "d6-free"], "expect": { "intBetween": [55000, 60000] } },
+                { "cmd": ["RENAME", "d6-free", "d6-occupied"], "expect": "OK" },
+                { "cmd": ["GET", "d6-occupied"], "expect": "session" },
+                { "cmd": ["SET", "d6-same", "v", "PX", "60000"], "expect": "OK" },
+                { "cmd": ["RENAME", "d6-same", "d6-same"], "expect": "OK" },
+                { "cmd": ["RENAMENX", "d6-same", "d6-same"], "expect": 0 },
+                { "cmd": ["GET", "d6-same"], "expect": "v" }
+            ]
+        },
+        {
+            "name": "rename-missing-and-arity",
+            "steps": [
+                { "cmd": ["RENAME", "d6-missing", "d6-target"], "expect": { "error": "ERR no such key" } },
+                { "cmd": ["RENAMENX", "d6-missing", "d6-target"], "expect": { "error": "ERR no such key" } },
+                { "cmd": ["RENAME", "d6-only"], "expect": { "error": "ERR wrong number of arguments for 'rename' command" } },
+                { "cmd": ["RENAMENX", "d6-a", "d6-b", "d6-c"], "expect": { "error": "ERR wrong number of arguments for 'renamenx' command" } }
+            ]
         }
     ]
 }
