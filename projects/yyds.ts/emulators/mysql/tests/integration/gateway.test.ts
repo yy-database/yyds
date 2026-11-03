@@ -7,6 +7,7 @@ import mysql from "mysql2/promise";
 interface ServerError {
     errno?: number;
     sqlState?: string;
+    sqlMessage?: string;
     message: string;
 }
 
@@ -14,6 +15,16 @@ function expectErrno(code: number) {
     return (error: unknown) => {
         const failure = error as ServerError;
         assert.equal(failure.errno, code, `expected MySQL error ${code}, got ${failure.message}`);
+        return true;
+    };
+}
+
+function expectServerError(code: number, sqlState: string, message: RegExp) {
+    return (error: unknown) => {
+        const failure = error as ServerError;
+        assert.equal(failure.errno, code, `expected MySQL error ${code}, got ${failure.message}`);
+        assert.equal(failure.sqlState, sqlState);
+        assert.match(failure.sqlMessage ?? failure.message, message);
         return true;
     };
 }
@@ -76,6 +87,31 @@ test("mysql2 drives connection, session commands and gateway boundaries", { time
     const versionRows = recovered as Array<{ Variable_name?: string; Value?: string }>;
     assert.equal(versionRows.length, 1);
     assert.match(versionRows[0]?.Value ?? "", /yyds/);
+
+    // Structured catalog errors stay distinguishable on the wire.
+    await assert.rejects(
+        connection.query("SELECT id FROM missing_table"),
+        expectServerError(1146, "42S02", /unknown SQL table: missing_table/i),
+    );
+    await assert.rejects(
+        connection.query("SELECT missing_column FROM users"),
+        expectServerError(1054, "42S22", /unknown SQL column: missing_column/i),
+    );
+
+    // Execution-time semantic errors keep their own errno instead of 1105.
+    await connection.query("INSERT INTO users (id, name) VALUES (10, 'a'), (11, 'b')");
+    await assert.rejects(
+        connection.query("SELECT id, name, COUNT(*) FROM users GROUP BY id"),
+        expectServerError(1055, "42000", /GROUP BY/i),
+    );
+    await assert.rejects(
+        connection.query("SELECT id FROM users WHERE id IN (SELECT id, name FROM users)"),
+        expectServerError(1241, "21000", /exactly one column/i),
+    );
+    await assert.rejects(
+        connection.query("SELECT id FROM users WHERE id = (SELECT id FROM users)"),
+        expectServerError(1242, "21000", /more than one row/i),
+    );
 
     await assert.rejects(connection.query("SELECT ("), expectErrno(1064));
 });
