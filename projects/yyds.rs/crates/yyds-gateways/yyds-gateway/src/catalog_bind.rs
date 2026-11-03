@@ -713,8 +713,8 @@ pub fn bind_sql_catalog_with_variables(
             catalog.schema_version
         )));
     }
-    // `::<binary type>` 在 Oak 里只有词法没有节点，收下就等于把转义拼写当载荷存储。
-    crate::sql::reject_binary_cast_operator(source)?;
+    // `::<type>` 在 Oak 里只有词法没有节点，收下就等于静默丢掉转换和列名。
+    crate::sql::reject_cast_operator(source)?;
     let statement = bind_sql(source, dialect)?;
     match statement {
         SqlBoundStatement::Select(select) => bind_select(select, catalog, variables).map(SqlCatalogBoundStatement::Select),
