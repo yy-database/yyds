@@ -1768,6 +1768,28 @@ fn mysql_ddl_builds_the_runtime_catalog_and_reports_catalog_errors() {
     server.join().unwrap();
 }
 
+/// `BEGIN; CREATE TABLE; INSERT; ROLLBACK;` 必须同时丢弃 schema 与数据。
+#[test]
+fn mysql_rollback_discards_ddl_together_with_rows() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(&mut client, "BEGIN");
+    expect_ok(&mut client, "CREATE TABLE txn_users (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(32) NOT NULL)");
+    expect_ok(&mut client, "INSERT INTO txn_users (id, name) VALUES (1, 'alice')");
+    assert_eq!(expect_row_values(&mut client, "SELECT name FROM txn_users WHERE id = 1"), vec![text("alice")]);
+
+    expect_ok(&mut client, "ROLLBACK");
+    // 回滚后 catalog 与数据一致：表不存在，也就没有残留行。
+    assert_eq!(expect_error(&mut client, "SELECT name FROM txn_users"), (1146, "42S02".into()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
 #[test]
 fn mysql_declared_capacity_rejects_oversized_strings() {
     let (mut client, server) = start_server_with_empty_schema();

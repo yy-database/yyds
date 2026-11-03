@@ -129,12 +129,26 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
     loop {
         let message = match read_message(&mut stream, &mut pending) {
             Ok(Some(message)) => message,
-            Ok(None) => return Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(error) => return Err(error),
+            Ok(None) => {
+                // A connection that goes away mid-transaction is an implicit
+                // rollback, catalog changes included.
+                let _ = session.restore_schema(runtime.as_ref());
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                let _ = session.restore_schema(runtime.as_ref());
+                return Ok(());
+            }
+            Err(error) => {
+                let _ = session.restore_schema(runtime.as_ref());
+                return Err(error);
+            }
         };
         match message.tag {
-            b'X' if message.payload.is_empty() => return Ok(()),
+            b'X' if message.payload.is_empty() => {
+                let _ = session.restore_schema(runtime.as_ref());
+                return Ok(());
+            }
             b'Q' => {
                 let Some(sql_bytes) = message.payload.strip_suffix(&[0])
                 else {
@@ -214,6 +228,9 @@ struct TransactionSession {
     search_path: String,
     /// Startup `database` parameter, reported by synthesized `current_database()`.
     database: String,
+    /// Registry snapshot captured at `BEGIN`. The catalog rides the same
+    /// transaction as rows: `COMMIT` keeps it, every rollback path restores it.
+    schema_checkpoint: Option<yyds_gateway::SqlSchemaCheckpoint>,
 }
 
 impl TransactionSession {
@@ -225,7 +242,22 @@ impl TransactionSession {
             failed: false,
             search_path: DEFAULT_SEARCH_PATH.to_string(),
             database: "postgres".to_string(),
+            schema_checkpoint: None,
         }
+    }
+
+    /// Captures the registry state when a transaction block opens.
+    fn capture_schema(&mut self, runtime: Option<&Arc<PgsqlSqlRuntime>>) {
+        self.schema_checkpoint = runtime.map(|rt| rt.schema.checkpoint());
+    }
+
+    /// Restores the snapshot captured at `BEGIN`. Only rollback paths call
+    /// this — a successful `COMMIT` drops the checkpoint instead.
+    fn restore_schema(&mut self, runtime: Option<&Arc<PgsqlSqlRuntime>>) -> io::Result<()> {
+        if let (Some(checkpoint), Some(rt)) = (self.schema_checkpoint.take(), runtime) {
+            rt.schema.restore(checkpoint).map_err(|error| io::Error::other(error.message))?;
+        }
+        Ok(())
     }
 
     /// `RESET` / `RESET ALL`: every emulated GUC returns to its default.
@@ -250,6 +282,10 @@ impl TransactionSession {
         self.executor = None;
         self.protocol_only_transaction = false;
         self.failed = false;
+        // `DISCARD ALL` is rejected inside a transaction block, so there is no
+        // pending checkpoint here; dropping the slot keeps the invariant that
+        // only an open block owns schema rollback.
+        self.schema_checkpoint = None;
         self.reset_parameters();
     }
 
@@ -414,24 +450,17 @@ fn handle_simple_query(
         return handle_single_statement(stream, single, session, extended, runtime);
     }
     // PostgreSQL parses the whole string and stops at the first failing
-    // statement. Earlier statements are their own implicit transactions unless
-    // the batch opened or continued a transaction, so the registry checkpoint
-    // exists only in the transactional case.
-    let mut checkpoint: Option<yyds_gateway::SqlSchemaCheckpoint> = None;
+    // statement. Outside a transaction block each statement is its own implicit
+    // transaction, so earlier statements stay committed. Inside a block the
+    // checkpoint captured at `BEGIN` owns the schema rollback, so a failing
+    // statement only aborts the block — `ROLLBACK`, `DISCARD ALL` or a
+    // disconnect restores the catalog.
     for (index, statement) in statements.iter().enumerate() {
-        if checkpoint.is_none() && session.in_transaction() {
-            checkpoint = runtime.map(|rt| rt.schema.checkpoint());
-        }
         let mut buffer = Vec::new();
         handle_single_statement(&mut buffer, &statement.text, session, extended, runtime)?;
         match annotate_batch_error(&buffer, index + 1, statements.len(), statement.offset) {
             Some(annotated) => {
                 stream.write_all(&annotated)?;
-                if let Some(checkpoint) = checkpoint {
-                    if let Some(rt) = runtime {
-                        rt.schema.restore(checkpoint).map_err(|error| io::Error::other(error.message))?;
-                    }
-                }
                 return Ok(());
             }
             None => stream.write_all(&buffer)?,
@@ -503,6 +532,7 @@ fn handle_single_statement(
                                 session.handle = Some(handle);
                                 session.protocol_only_transaction = false;
                                 session.failed = false;
+                                session.capture_schema(runtime);
                                 write_command_complete(stream, "BEGIN")
                             }
                             Err(err) => write_error_response(stream, "0A000", &format!("BEGIN failed: {err}")),
@@ -515,6 +545,7 @@ fn handle_single_statement(
                         session.handle = None;
                         session.protocol_only_transaction = true;
                         session.failed = false;
+                        session.schema_checkpoint = None;
                         write_command_complete(stream, "BEGIN")
                     }
                 }
@@ -527,6 +558,8 @@ fn handle_single_statement(
                 session.handle = None;
                 session.protocol_only_transaction = false;
                 session.failed = false;
+                // `COMMIT` of an aborted block is a rollback: the catalog goes with the rows.
+                session.restore_schema(runtime)?;
                 write_command_complete(stream, "ROLLBACK")
             }
             SqlTransactionAction::Commit => {
@@ -536,6 +569,9 @@ fn handle_single_statement(
                             yyds_types::Error::CasConflict { .. } => "40001",
                             _ => "58P01",
                         };
+                        // A failed commit did not publish the transaction, so the
+                        // DDL it collected is discarded too.
+                        session.restore_schema(runtime)?;
                         write_error_response(stream, state, &format!("COMMIT failed: {err}"))?;
                         return Ok(());
                     }
@@ -544,6 +580,8 @@ fn handle_single_statement(
                 session.handle = None;
                 session.protocol_only_transaction = false;
                 session.failed = false;
+                // The commit point publishes the schema revision as well.
+                session.schema_checkpoint = None;
                 write_command_complete(stream, "COMMIT")
             }
             SqlTransactionAction::Rollback => {
@@ -554,6 +592,7 @@ fn handle_single_statement(
                 session.handle = None;
                 session.protocol_only_transaction = false;
                 session.failed = false;
+                session.restore_schema(runtime)?;
                 write_command_complete(stream, "ROLLBACK")
             }
             SqlTransactionAction::Savepoint(_)

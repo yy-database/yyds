@@ -17,8 +17,8 @@ use yyds_gateway::{
     analyze_meta_query, apply_auto_increment, bind_sql_catalog_with_variables, describe_plan, execute_plan,
     neutralized_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect, substitute_sql_parameters,
     SqlBoundExpression, SqlBoundLiteral, SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan,
-    SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult, SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction,
-    SqlValue, MYSQL_BLOB_CAPACITY,
+    SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult, SqlSchemaCheckpoint, SqlSchemaRegistry, SqlSessionCommand,
+    SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -203,11 +203,28 @@ struct MysqlTransactionSession {
     /// Schema selected by the handshake database field or `COM_INIT_DB`, used
     /// verbatim by `DATABASE()` and the synthesized `TABLE_SCHEMA` columns.
     schema: String,
+    /// Registry snapshot captured at `BEGIN`. The catalog rides the same
+    /// transaction as rows: `COMMIT` keeps it, every rollback path restores it.
+    schema_checkpoint: Option<SqlSchemaCheckpoint>,
 }
 
 impl MysqlTransactionSession {
     fn new() -> Self {
-        Self { executor: None, handle: None, failed: false, autocommit: true, schema: String::new() }
+        Self { executor: None, handle: None, failed: false, autocommit: true, schema: String::new(), schema_checkpoint: None }
+    }
+
+    /// Captures the registry state when a transaction block opens.
+    fn capture_schema(&mut self, runtime: Option<&Arc<MysqlSqlRuntime>>) {
+        self.schema_checkpoint = runtime.map(|rt| rt.schema.checkpoint());
+    }
+
+    /// Restores the snapshot captured at `BEGIN`. Only rollback paths call
+    /// this — a successful `COMMIT` drops the checkpoint instead.
+    fn restore_schema(&mut self, runtime: Option<&Arc<MysqlSqlRuntime>>) -> io::Result<()> {
+        if let (Some(checkpoint), Some(rt)) = (self.schema_checkpoint.take(), runtime) {
+            rt.schema.restore(checkpoint).map_err(|error| io::Error::other(error.message))?;
+        }
+        Ok(())
     }
 
     fn fail(&mut self) {
@@ -251,7 +268,11 @@ impl Default for MysqlTransactionSession {
 /// keeps one commit point per command, autocommit returns to its default ON,
 /// the aborted flag clears and every prepared statement handle is dropped
 /// (real MySQL also invalidates them on reset).
-fn reset_connection_session(session: &mut MysqlTransactionSession, statements: &mut PreparedStatements) {
+fn reset_connection_session(
+    session: &mut MysqlTransactionSession,
+    statements: &mut PreparedStatements,
+    runtime: Option<&Arc<MysqlSqlRuntime>>,
+) -> io::Result<()> {
     if let Some(handle) = session.handle.take() {
         handle.rollback();
     }
@@ -260,6 +281,8 @@ fn reset_connection_session(session: &mut MysqlTransactionSession, statements: &
     session.autocommit = true;
     session.schema.clear();
     statements.entries.clear();
+    // Resetting a connection discards an open transaction, catalog changes included.
+    session.restore_schema(runtime)
 }
 
 /// A prepared statement as advertised by `COM_STMT_PREPARE`: the SQL text, the
@@ -301,7 +324,10 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
     let response = match read_packet(&mut stream)? {
         Some((1, response)) => response,
         Some(_) => return Err(invalid_data("invalid MySQL handshake sequence")),
-        None => return Ok(()),
+        None => {
+            let _ = session.restore_schema(runtime.as_ref());
+            return Ok(());
+        }
     };
     let (username, empty_password, database) = match parse_handshake_response(&response) {
         Ok(parsed) => parsed,
@@ -320,6 +346,8 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
     loop {
         let Some((sequence, payload)) = read_packet(&mut stream)?
         else {
+            // A connection that goes away mid-transaction is an implicit rollback.
+            let _ = session.restore_schema(runtime.as_ref());
             return Ok(());
         };
         if sequence != 0 {
@@ -331,7 +359,10 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
             continue;
         }
         match payload[0] {
-            COM_QUIT => return Ok(()),
+            COM_QUIT => {
+                let _ = session.restore_schema(runtime.as_ref());
+                return Ok(());
+            }
             // Drivers issue COM_PING to prove liveness before creating a cursor
             // and COM_INIT_DB when switching schema. The gateway keeps a single
             // catalog, so `COM_INIT_DB` only records the new default schema and
@@ -351,7 +382,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
             // return an idle connection to its initial state. The socket and the
             // authentication stay untouched; only session state is reset.
             COM_RESET_CONNECTION => {
-                reset_connection_session(&mut session, &mut statements);
+                reset_connection_session(&mut session, &mut statements, runtime.as_ref())?;
                 write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
             }
             COM_STMT_PREPARE => handle_prepare(
@@ -491,6 +522,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                                     session.executor = Some(rt.executor.clone());
                                     session.handle = Some(handle);
                                     session.failed = false;
+                                    session.capture_schema(runtime.as_ref());
                                     write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_IN_TRANS)?;
                                 }
                                 Err(err) => {
@@ -510,6 +542,8 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             }
                             session.executor = None;
                             session.failed = false;
+                            // `COMMIT` of an aborted block is a rollback: catalog changes go too.
+                            session.restore_schema(runtime.as_ref())?;
                             write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?;
                         }
                         SqlTransactionAction::Commit => {
@@ -522,22 +556,33 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             session.executor = None;
                             session.failed = false;
                             match commit_error {
-                                // OCC 拒绝必须回报给客户端，否则并发写会被静默丢弃。
-                                Some(err @ yyds_types::Error::CasConflict { .. }) => write_error(
-                                    &mut stream,
-                                    sequence.wrapping_add(1),
-                                    1213,
-                                    "40001",
-                                    &format!("COMMIT failed: serialization conflict: {err}"),
-                                )?,
-                                Some(err) => write_error(
-                                    &mut stream,
-                                    sequence.wrapping_add(1),
-                                    1105,
-                                    "HY000",
-                                    &format!("COMMIT failed: {err}"),
-                                )?,
-                                None => write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?,
+                                Some(err) => {
+                                    // A failed commit did not publish the transaction, so
+                                    // the DDL it collected is discarded too.
+                                    session.restore_schema(runtime.as_ref())?;
+                                    match err {
+                                        // OCC 拒绝必须回报给客户端，否则并发写会被静默丢弃。
+                                        err @ yyds_types::Error::CasConflict { .. } => write_error(
+                                            &mut stream,
+                                            sequence.wrapping_add(1),
+                                            1213,
+                                            "40001",
+                                            &format!("COMMIT failed: serialization conflict: {err}"),
+                                        )?,
+                                        err => write_error(
+                                            &mut stream,
+                                            sequence.wrapping_add(1),
+                                            1105,
+                                            "HY000",
+                                            &format!("COMMIT failed: {err}"),
+                                        )?,
+                                    }
+                                }
+                                None => {
+                                    // The commit point publishes the schema revision as well.
+                                    session.schema_checkpoint = None;
+                                    write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?;
+                                }
                             }
                         }
                         SqlTransactionAction::Rollback => {
@@ -546,6 +591,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             }
                             session.executor = None;
                             session.failed = false;
+                            session.restore_schema(runtime.as_ref())?;
                             write_ok(&mut stream, sequence.wrapping_add(1), SERVER_STATUS_AUTOCOMMIT)?;
                         }
                         SqlTransactionAction::Savepoint(_)
