@@ -558,8 +558,16 @@ pub fn plan_insert(
     }
 
     let mut plans = Vec::with_capacity(rows.len());
+    let pk_field = primary_key_of(table)?;
+    let pk_index = target_fields
+        .iter()
+        .position(|field| field.field_id == pk_field.field_id)
+        .ok_or_else(|| planner_error("INSERT must provide the table primary key column"))?;
     for row_values in rows {
-        let pk_value = row_values.first().ok_or_else(|| planner_error("INSERT row has no values"))?;
+        // 行以主键字面量为 KV key。主键列未必是第一个目标列（例如省略
+        // `BIGSERIAL` 主键、由 registry 追加在末尾），所以按 field_id 定位，
+        // 不能依赖位置。
+        let pk_value = row_values.get(pk_index).ok_or_else(|| planner_error("INSERT row has no primary key value"))?;
         let rowid = literal_from_expression(pk_value)?;
         let rowid_bytes = pk_literal_to_rowid(&rowid)?;
 

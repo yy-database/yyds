@@ -79,6 +79,9 @@ pub struct DdlColumn {
     pub not_null: bool,
     /// Whether `PRIMARY KEY` was written inline.
     pub inline_primary_key: bool,
+    /// Whether the column allocates its own values: MySQL `AUTO_INCREMENT` or
+    /// PostgreSQL `SERIAL` / `BIGSERIAL` / `SMALLSERIAL`.
+    pub auto_increment: bool,
     /// Raw `DEFAULT` literal text, when written.
     pub default: Option<String>,
 }
@@ -601,6 +604,8 @@ impl Parser {
         }
         let mut not_null = false;
         let mut inline_primary_key = false;
+        // PostgreSQL serial pseudo-types imply an owned sequence.
+        let mut auto_increment = matches!(sql_type.as_str(), "SERIAL" | "BIGSERIAL" | "SMALLSERIAL");
         let mut default = None;
         loop {
             match self.peek_keyword().as_deref() {
@@ -631,6 +636,7 @@ impl Parser {
                 }
                 Some("AUTO_INCREMENT") => {
                     self.cursor += 1;
+                    auto_increment = true;
                 }
                 Some("COMMENT") => {
                     self.cursor += 1;
@@ -652,7 +658,7 @@ impl Parser {
                 _ => break,
             }
         }
-        Ok(DdlColumn { name, sql_type, not_null, inline_primary_key, default })
+        Ok(DdlColumn { name, sql_type, not_null, inline_primary_key, auto_increment, default })
     }
 
     fn type_parameters(&mut self) -> Result<String, SqlFrontendError> {
@@ -1043,7 +1049,14 @@ mod tests {
     use crate::SqlErrorKind;
 
     fn mysql_column(name: &str, sql_type: &str, not_null: bool, inline_primary_key: bool) -> DdlColumn {
-        DdlColumn { name: name.to_string(), sql_type: sql_type.to_string(), not_null, inline_primary_key, default: None }
+        DdlColumn {
+            name: name.to_string(),
+            sql_type: sql_type.to_string(),
+            not_null,
+            inline_primary_key,
+            auto_increment: false,
+            default: None,
+        }
     }
 
     #[test]
