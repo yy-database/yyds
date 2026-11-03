@@ -2099,6 +2099,81 @@ fn pgsql_aborted_batch_discards_schema_inside_a_transaction() {
     server.join().unwrap();
 }
 
+/// `BEGIN; CREATE TABLE; INSERT; ROLLBACK;` 必须同时丢弃 schema 与数据。
+#[test]
+fn pgsql_rollback_discards_ddl_together_with_rows() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "CREATE TABLE txn_users (id BIGINT PRIMARY KEY, name TEXT NOT NULL)");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+    send_query(&mut client, "INSERT INTO txn_users VALUES (1, 'alice')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    // 事务内 schema 与数据都可见。
+    assert_eq!(single_row(&mut client, "SELECT name FROM txn_users WHERE id = 1"), vec![value("alice")]);
+
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"ROLLBACK\0".to_vec()));
+
+    // 回滚后 catalog 与数据一致：表不存在，也就没有残留行。
+    assert_sqlstate(&mut client, "SELECT name FROM txn_users", b"42P01");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 提交路径是回滚的对照：schema revision 随事务一起提交，数据和表都保留。
+#[test]
+fn pgsql_commit_keeps_ddl_and_rows_together() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut client, "CREATE TABLE committed_users (id BIGINT PRIMARY KEY, name TEXT NOT NULL)");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+    send_query(&mut client, "INSERT INTO committed_users VALUES (1, 'alice')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    send_query(&mut client, "COMMIT");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"COMMIT\0".to_vec()));
+
+    assert_eq!(single_row(&mut client, "SELECT name FROM committed_users WHERE id = 1"), vec![value("alice")]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 断开连接等于隐式回滚：未提交的 DDL 不能留在共享 registry 里。
+#[test]
+fn pgsql_disconnect_discards_uncommitted_ddl_and_rows() {
+    let (mut clients, server) = start_shared_schema_server(2);
+    let mut writer = clients.remove(0);
+    let mut reader = clients.remove(0);
+
+    send_query(&mut writer, "BEGIN");
+    assert_eq!(receive_until_ready(&mut writer).last().unwrap(), &(b'Z', b"T".to_vec()));
+    send_query(&mut writer, "CREATE TABLE drop_on_disconnect (id BIGINT PRIMARY KEY)");
+    assert_eq!(receive_until_ready(&mut writer)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+    send_query(&mut writer, "INSERT INTO drop_on_disconnect VALUES (1)");
+    assert_eq!(receive_until_ready(&mut writer)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    drop(writer);
+
+    // 服务线程只能在客户端断开后回滚 schema，用有界轮询等待它完成。
+    let mut gone = false;
+    for _ in 0..100 {
+        send_query(&mut reader, "SELECT id FROM drop_on_disconnect");
+        if receive_until_ready(&mut reader).iter().any(|(tag, _)| *tag == b'E') {
+            gone = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(gone, "disconnect must discard uncommitted DDL, catalog still reports the table");
+
+    drop(reader);
+    server.join().unwrap();
+}
+
 fn error_message(payload: &[u8]) -> String {
     let marker = b"\0M";
     let start = payload.windows(2).position(|window| window == marker).expect("ErrorResponse message field") + 2;
