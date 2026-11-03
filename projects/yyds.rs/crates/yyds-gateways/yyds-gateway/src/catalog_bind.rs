@@ -128,6 +128,11 @@ pub struct SqlCatalogTable {
     pub name: String,
     /// Columns in catalog order.
     pub fields: Vec<SqlCatalogField>,
+    /// Secondary `UNIQUE` constraints as field identities in declaration order.
+    ///
+    /// Each inner vector is one constraint. Writes are rejected when they would
+    /// produce a duplicate tuple, matching PostgreSQL `23505` and MySQL `1062`.
+    pub unique_constraints: Vec<Vec<u64>>,
 }
 
 /// A column identity exposed by the YYDS catalog to a gateway binder.
@@ -206,7 +211,7 @@ impl SqlCatalog {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(SqlCatalogTable { type_id: entry.type_id, name, fields })
+                Ok(SqlCatalogTable { type_id: entry.type_id, name, fields, unique_constraints: Vec::new() })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { schema_version, tables })
@@ -240,6 +245,16 @@ impl SqlCatalog {
                 }
                 if field.field_id == 0 || !field_ids.insert(field.field_id) {
                     return Err(catalog_error("invalid or duplicate catalog field identity"));
+                }
+            }
+            for constraint in &table.unique_constraints {
+                if constraint.is_empty() {
+                    return Err(catalog_error("catalog unique constraint has no columns"));
+                }
+                for field_id in constraint {
+                    if !table.fields.iter().any(|field| field.field_id == *field_id) {
+                        return Err(catalog_error("catalog unique constraint references an unknown field"));
+                    }
                 }
             }
         }
@@ -1852,6 +1867,7 @@ mod tests {
                         capacity: None,
                     },
                 ],
+                unique_constraints: Vec::new(),
             }],
         }
     }
@@ -1946,6 +1962,7 @@ mod tests {
                 vos_type_name: None,
                 capacity: None,
             }],
+            unique_constraints: Vec::new(),
         });
         let err = bind_sql_catalog("SELECT t.body FROM t INNER JOIN u ON t.photo = u.body", &catalog, 1, SqlDialect::Mysql)
             .expect_err("JOIN ON 应拒绝 Unknown 字段");
@@ -1987,6 +2004,7 @@ mod tests {
                     vos_type_name: Some("file".to_string()),
                     capacity: None,
                 }],
+                unique_constraints: Vec::new(),
             }],
         };
         let err =

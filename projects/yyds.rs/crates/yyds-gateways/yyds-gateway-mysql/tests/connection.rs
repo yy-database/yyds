@@ -1830,6 +1830,39 @@ fn mysql_auto_increment_fills_omitted_ids() {
     server.join().unwrap();
 }
 
+#[test]
+fn mysql_unique_constraint_reports_1062_for_insert_and_update() {
+    let (mut client, server) = start_server_with_empty_schema();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(
+        &mut client,
+        "CREATE TABLE outbox (id BIGINT NOT NULL AUTO_INCREMENT, operation_id VARCHAR(64) NOT NULL, entity_version BIGINT NOT NULL, payload VARCHAR(64), PRIMARY KEY (id), UNIQUE KEY uk_operation (operation_id, entity_version)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+    );
+    expect_ok(&mut client, "INSERT INTO outbox (operation_id, entity_version, payload) VALUES ('op-1', 1, 'first')");
+    assert_eq!(
+        expect_error(&mut client, "INSERT INTO outbox (operation_id, entity_version, payload) VALUES ('op-1', 1, 'duplicate')"),
+        (1062, "23000".to_string())
+    );
+    assert_eq!(expect_row_values(&mut client, "SELECT payload FROM outbox"), vec![text("first")]);
+
+    expect_ok(&mut client, "INSERT INTO outbox (operation_id, entity_version, payload) VALUES ('op-2', 1, 'second')");
+    assert_eq!(
+        expect_error(&mut client, "UPDATE outbox SET operation_id = 'op-1' WHERE operation_id = 'op-2'"),
+        (1062, "23000".to_string())
+    );
+    assert_eq!(
+        read_result_set(&mut client, "SELECT operation_id FROM outbox ORDER BY id").1,
+        vec![vec![text("op-1")], vec![text("op-2")]]
+    );
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 发送 `COM_INIT_DB` 并断言 OK 包。
 fn init_db(client: &mut TcpStream, schema: &str) {
     let mut payload = vec![0x02];

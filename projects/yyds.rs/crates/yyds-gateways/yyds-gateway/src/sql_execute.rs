@@ -28,7 +28,7 @@ use crate::{
     sql_planner::{
         check_write_literal, pk_literal_to_rowid, ConflictAssignment, ConflictPolicy, DeletePlan, DeleteScanPlan,
         InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ReturningProjections, ScalarPlan, ScanPlan, SetOperationPlan,
-        SqlExecutionPlan, UpdatePlan, UpdateScanPlan, WriteField, WritePlan,
+        SqlExecutionPlan, UniqueConstraintPlan, UpdatePlan, UpdateScanPlan, WriteField, WritePlan,
     },
 };
 
@@ -1324,13 +1324,22 @@ fn insert_row_if_absent(
     dialect: SqlDialect,
 ) -> Result<SqlResult, SqlFrontendError> {
     let row = write_plan_to_row(plan);
+    if let Some(constraint) =
+        unique_conflict_on_write(executor, transaction, &plan.namespace, &plan.unique_constraints, &row, None)?
+    {
+        // `ON CONFLICT DO NOTHING` 对任何唯一冲突都跳过，而不是只跳过主键冲突。
+        if do_nothing {
+            return returning_result(&plan.returning, &plan.field_types, Vec::new(), 0, dialect);
+        }
+        return Err(duplicate_key_error(&constraint));
+    }
     let bytes = encode_row(&row);
     let affected = match put_if_absent(executor, transaction, &plan.namespace, &plan.rowid, bytes)? {
         true => 1,
         false if do_nothing => 0,
         false => {
             return Err(SqlFrontendError::new(
-                SqlErrorKind::UniqueViolation,
+                SqlErrorKind::DuplicateKey,
                 format!("duplicate key value violates unique constraint: {}", plan.namespace),
             ));
         }
@@ -1359,6 +1368,11 @@ fn upsert_row(
         let Some(existing_bytes) = existing_bytes
         else {
             let row = write_plan_to_row(plan);
+            if let Some(constraint) =
+                unique_conflict_on_write(executor, transaction, &plan.namespace, &plan.unique_constraints, &row, None)?
+            {
+                return Err(duplicate_key_error(&constraint));
+            }
             let bytes = encode_row(&row);
             if put_if_absent(executor, transaction, &plan.namespace, &plan.rowid, bytes)? {
                 return returning_result(&plan.returning, &plan.field_types, vec![row], 1, dialect);
@@ -1372,6 +1386,11 @@ fn upsert_row(
         else {
             return returning_result(&plan.returning, &plan.field_types, Vec::new(), 0, dialect);
         };
+        if let Some(constraint) =
+            unique_conflict_on_write(executor, transaction, &plan.namespace, &plan.unique_constraints, &row, Some(&plan.rowid))?
+        {
+            return Err(duplicate_key_error(&constraint));
+        }
         let encoded = encode_row(&row);
         let command =
             KeyValueCommand { namespace: namespace.clone(), key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
@@ -1511,7 +1530,7 @@ fn execute_multi_insert_atomic(
     let namespace = Namespace(first.namespace.clone());
     let unique_conflict = || {
         SqlFrontendError::new(
-            SqlErrorKind::UniqueViolation,
+            SqlErrorKind::DuplicateKey,
             format!("duplicate key value violates unique constraint: {}", first.namespace),
         )
     };
@@ -1605,6 +1624,27 @@ fn execute_multi_insert_atomic(
                         }
                     }
                 }
+            }
+        }
+
+        if !first.unique_constraints.is_empty() {
+            // 基存快照 + 同语句已折叠行共同决定 `UNIQUE` 冲突，整批在提交前拦截。
+            let stored = scan_rows(executor, None, &namespace, &[], None, None, 0, "unique_check")?;
+            let mut pending: Vec<(Vec<u8>, RowFieldValues)> = Vec::new();
+            for rowid in &order {
+                let entry = &folded[rowid];
+                if !entry.applied {
+                    continue;
+                }
+                let row = entry.current.as_ref().expect("applied entry carries a row");
+                let pending_without_self: Vec<(Vec<u8>, RowFieldValues)> =
+                    pending.iter().filter(|(pending_rowid, _)| pending_rowid != rowid).cloned().collect();
+                if let Some(constraint) =
+                    unique_conflict_in_snapshot(&first.unique_constraints, row, Some(rowid), &pending_without_self, &stored)?
+                {
+                    return Err(duplicate_key_error(&constraint));
+                }
+                pending.push((rowid.clone(), row.clone()));
             }
         }
 
@@ -1720,7 +1760,12 @@ fn execute_insert_select(
         let mut fields = Vec::with_capacity(plan.fields.len());
         for (column, value) in plan.fields.iter().zip(literals) {
             check_write_literal(&value, &column.field_type, &column.field_name, dialect, column.capacity)?;
-            fields.push(WriteField { field_id: column.field_id, value, field_type: column.field_type.clone(), capacity: column.capacity });
+            fields.push(WriteField {
+                field_id: column.field_id,
+                value,
+                field_type: column.field_type.clone(),
+                capacity: column.capacity,
+            });
         }
         write_plans.push(WritePlan {
             namespace: plan.namespace.clone(),
@@ -1729,6 +1774,7 @@ fn execute_insert_select(
             field_types: plan.field_types.clone(),
             conflict: plan.conflict.clone(),
             returning: plan.returning.clone(),
+            unique_constraints: plan.unique_constraints.clone(),
         });
     }
     // 没有冲突策略时，源行之间与目标表内都不能出现重复主键，预检保证整条语句不发布。
@@ -1736,6 +1782,8 @@ fn execute_insert_select(
     if plan.conflict.is_none() {
         ensure_insert_targets_absent(executor, transaction, &write_plans)?;
     }
+    // 次要 `UNIQUE` 约束与主键一样在写入前整体预检，命中即整条语句拒绝。
+    ensure_unique_targets_absent(executor, transaction, &write_plans)?;
     // 源查询没有产出行时写语句仍有结果形状（`RETURNING` 列定义，0 行）。
     if write_plans.is_empty() {
         let columns = plan.returning.as_ref().map(returning_column_labels).unwrap_or_default();
@@ -1756,7 +1804,7 @@ fn ensure_insert_targets_absent(
     };
     let conflict = |plan: &WritePlan| {
         SqlFrontendError::new(
-            SqlErrorKind::UniqueViolation,
+            SqlErrorKind::DuplicateKey,
             format!("duplicate key value violates unique constraint: {}", plan.namespace),
         )
     };
@@ -1779,6 +1827,36 @@ fn ensure_insert_targets_absent(
     };
     if results.iter().any(|result| matches!(result, yyds_types::KeyValueResult::Get(Some(_)))) {
         return Err(conflict(first));
+    }
+    Ok(())
+}
+
+/// 写入前确认候选行之间与目标表内都不存在 `UNIQUE` 冲突。
+fn ensure_unique_targets_absent(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    plans: &[WritePlan],
+) -> Result<(), SqlFrontendError> {
+    let Some(first) = plans.first()
+    else {
+        return Ok(());
+    };
+    if first.unique_constraints.is_empty() {
+        return Ok(());
+    }
+    let namespace = Namespace(first.namespace.clone());
+    let stored = scan_rows(executor, transaction, &namespace, &[], None, None, 0, "unique_check")?;
+    let mut pending: Vec<(Vec<u8>, RowFieldValues)> = Vec::new();
+    for plan in plans {
+        let row = write_plan_to_row(plan);
+        let pending_without_self: Vec<(Vec<u8>, RowFieldValues)> =
+            pending.iter().filter(|(rowid, _)| rowid != &plan.rowid).cloned().collect();
+        if let Some(constraint) =
+            unique_conflict_in_snapshot(&first.unique_constraints, &row, Some(&plan.rowid), &pending_without_self, &stored)?
+        {
+            return Err(duplicate_key_error(&constraint));
+        }
+        pending.push((plan.rowid.clone(), row));
     }
     Ok(())
 }
@@ -1820,6 +1898,11 @@ fn execute_update(
             Some(bytes) => row.insert(field.field_id, bytes),
             None => row.remove(field.field_id),
         }
+    }
+    if let Some(constraint) =
+        unique_conflict_on_write(executor, transaction, &plan.namespace, &plan.unique_constraints, &row, Some(&plan.rowid))?
+    {
+        return Err(duplicate_key_error(&constraint));
     }
     let encoded = encode_row(&row);
     let put_cmd = KeyValueCommand { namespace, key: plan.rowid.clone(), action: KeyValueAction::Put(encoded) };
@@ -1974,6 +2057,7 @@ fn execute_update_scan(
         "update_scan",
     )?;
     let mut changes = Vec::with_capacity(scanned.len());
+    let mut pending: Vec<(Vec<u8>, RowFieldValues)> = Vec::new();
     for (rowid, pre_image) in scanned {
         let mut row = decode_row(&pre_image)?;
         if let Some(predicate) = &plan.predicate {
@@ -1987,6 +2071,18 @@ fn execute_update_scan(
                 Some(bytes) => row.insert(field.field_id, bytes),
                 None => row.remove(field.field_id),
             }
+        }
+        if !plan.unique_constraints.is_empty() {
+            // 旧快照仍含本行自身与同语句已处理的行，两者都要从冲突候选里排除。
+            let stored = scan_rows(executor, transaction, &namespace, &[], None, None, 0, "unique_check")?;
+            let pending_without_self: Vec<(Vec<u8>, RowFieldValues)> =
+                pending.iter().filter(|(pending_rowid, _)| pending_rowid != &rowid).cloned().collect();
+            if let Some(constraint) =
+                unique_conflict_in_snapshot(&plan.unique_constraints, &row, Some(&rowid), &pending_without_self, &stored)?
+            {
+                return Err(duplicate_key_error(&constraint));
+            }
+            pending.push((rowid.clone(), row.clone()));
         }
         changes.push(StatementChange {
             command: KeyValueCommand {
@@ -2048,6 +2144,85 @@ fn write_plan_to_row(plan: &WritePlan) -> RowFieldValues {
         }
     }
     row
+}
+
+/// 把一行的约束列折叠成可比较的元组；任一列为 NULL 时返回 `None`（SQL 的
+/// `UNIQUE` 允许多行 NULL）。
+fn constraint_tuple(row: &RowFieldValues, columns: &[(u64, String)]) -> Option<Vec<Vec<u8>>> {
+    let mut tuple = Vec::with_capacity(columns.len());
+    for (field_id, _) in columns {
+        tuple.push(row.get(*field_id)?.to_vec());
+    }
+    Some(tuple)
+}
+
+/// 候选行与既有行构成的 `UNIQUE` 冲突描述。
+fn unique_conflict_between(
+    constraints: &[UniqueConstraintPlan],
+    candidate: &RowFieldValues,
+    existing: &RowFieldValues,
+) -> Option<String> {
+    constraints.iter().find_map(|constraint| {
+        let left = constraint_tuple(candidate, &constraint.columns)?;
+        let right = constraint_tuple(existing, &constraint.columns)?;
+        (left == right).then(|| {
+            let names: Vec<&str> = constraint.columns.iter().map(|(_, name)| name.as_str()).collect();
+            format!("UNIQUE ({})", names.join(", "))
+        })
+    })
+}
+
+/// 在基存快照与同语句已产出的行中查找 `UNIQUE` 冲突。
+///
+/// `excluded_rowid` 排除当前行自身（UPDATE 时它仍然存在于旧快照里）。
+/// `pending` 是同一条语句里已经通过校验的最终行，用来发现语句内重复。
+fn unique_conflict_in_snapshot(
+    constraints: &[UniqueConstraintPlan],
+    candidate: &RowFieldValues,
+    excluded_rowid: Option<&[u8]>,
+    pending: &[(Vec<u8>, RowFieldValues)],
+    stored: &[(Vec<u8>, Vec<u8>)],
+) -> Result<Option<String>, SqlFrontendError> {
+    for (rowid, row) in pending {
+        if excluded_rowid.is_some_and(|excluded| excluded == rowid.as_slice()) {
+            continue;
+        }
+        if let Some(conflict) = unique_conflict_between(constraints, candidate, row) {
+            return Ok(Some(conflict));
+        }
+    }
+    for (rowid, bytes) in stored {
+        if excluded_rowid.is_some_and(|excluded| excluded == rowid.as_slice()) {
+            continue;
+        }
+        let row = decode_row(bytes)?;
+        if let Some(conflict) = unique_conflict_between(constraints, candidate, &row) {
+            return Ok(Some(conflict));
+        }
+    }
+    Ok(None)
+}
+
+/// 扫描整张表后校验候选行，供单行 INSERT / UPDATE 使用。
+fn unique_conflict_on_write(
+    executor: &dyn KeyValueExecutor,
+    transaction: Option<&dyn TransactionHandle>,
+    namespace: &str,
+    constraints: &[UniqueConstraintPlan],
+    candidate: &RowFieldValues,
+    excluded_rowid: Option<&[u8]>,
+) -> Result<Option<String>, SqlFrontendError> {
+    if constraints.is_empty() {
+        return Ok(None);
+    }
+    let namespace = Namespace(namespace.to_string());
+    let stored = scan_rows(executor, transaction, &namespace, &[], None, None, 0, "unique_check")?;
+    unique_conflict_in_snapshot(constraints, candidate, excluded_rowid, &[], &stored)
+}
+
+/// `UNIQUE` 冲突统一按 `DuplicateKey` 上报，由方言层映射成 `23505` / `1062`。
+fn duplicate_key_error(constraint: &str) -> SqlFrontendError {
+    SqlFrontendError::new(SqlErrorKind::DuplicateKey, format!("duplicate key value violates unique constraint {constraint}"))
 }
 
 fn sql_value_to_bytes(lit: &SqlBoundLiteral) -> Option<Vec<u8>> {

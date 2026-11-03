@@ -37,7 +37,7 @@ pub use crate::{
     sql_planner::{
         plan_select, plan_select_for_dialect, plan_statement, plan_statement_for_dialect, DeletePlan, InsertSelectColumn,
         InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, SqlSetOrderByItem,
-        UpdatePlan, WritePlan,
+        UniqueConstraintPlan, UpdatePlan, WritePlan,
     },
     sql_schema::{SqlAutoIncrementField, SqlDdlOutcome, SqlSchemaCheckpoint, SqlSchemaRegistry},
     sql_serial::apply_auto_increment,
