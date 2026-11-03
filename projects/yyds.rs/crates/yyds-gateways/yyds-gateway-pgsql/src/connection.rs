@@ -678,7 +678,7 @@ fn run_statement(
         session.fail();
         return Err(("42601".to_string(), "Oak could not parse the SQL statement".to_string()));
     }
-    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version).map_err(|error| {
+    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version, SqlDialect::Postgres).map_err(|error| {
         session.fail();
         statement_error("bind", error)
     })?;
@@ -1090,8 +1090,8 @@ fn statement_description(
 
 /// Binds and plans rendered SQL only to read its result shape.
 fn plan_description(sql: &str, runtime: &Arc<PgsqlSqlRuntime>) -> Result<Vec<SqlColumn>, (String, String)> {
-    let bound =
-        bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version).map_err(|error| statement_error("bind", error))?;
+    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version, SqlDialect::Postgres)
+        .map_err(|error| statement_error("bind", error))?;
     let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres)
         .map_err(|error| statement_error("plan", error))?;
     Ok(describe_plan(&plan))

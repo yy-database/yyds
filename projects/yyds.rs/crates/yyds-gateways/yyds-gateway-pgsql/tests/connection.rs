@@ -1391,7 +1391,10 @@ fn extended_protocol_runs_session_reset_and_discard_commands() {
     send_query(&mut client, "SHOW search_path");
     let shown = receive_until_ready(&mut client);
     let text = String::from_utf8_lossy(&shown[1].1);
-    assert!(text.contains("$user") && text.contains("public"), "extended `RESET search_path` must restore the default, got {text}");
+    assert!(
+        text.contains("$user") && text.contains("public"),
+        "extended `RESET search_path` must restore the default, got {text}"
+    );
 
     // `DISCARD ALL` 还要清掉扩展协议 prepared statement 缓存。
     let mut parse = cstring("keep");
@@ -1528,6 +1531,84 @@ fn pgsql_boolean_parameter_accepts_postgres_extended_literals() {
         "Bind must accept 'On' as boolean-compatible value, got {:?}",
         executed
     );
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 走 PostgreSQL extended protocol：`Parse`（显式声明 `text` 参数）+ `Bind`（文本参数）
+/// + `Execute` + `Sync`，返回结果行。
+fn extended_rows(client: &mut TcpStream, statement: &str, sql: &str, params: &[&str]) -> Vec<Vec<Option<Vec<u8>>>> {
+    let mut parse = cstring(statement);
+    parse.extend_from_slice(&cstring(sql));
+    parse.extend_from_slice(&(params.len() as i16).to_be_bytes());
+    for _ in params {
+        parse.extend_from_slice(&25_u32.to_be_bytes()); // TEXT oid
+    }
+    send_message(client, b'P', &parse);
+
+    let mut bind = cstring("portal");
+    bind.extend_from_slice(&cstring(statement));
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 全部参数沿用默认 text 格式
+    bind.extend_from_slice(&(params.len() as i16).to_be_bytes());
+    for param in params {
+        bind.extend_from_slice(&(param.len() as i32).to_be_bytes());
+        bind.extend_from_slice(param.as_bytes());
+    }
+    bind.extend_from_slice(&0_i16.to_be_bytes()); // 结果沿用 text 格式
+    send_message(client, b'B', &bind);
+
+    let mut execute = cstring("portal");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(client, b'E', &execute);
+    send_message(client, b'S', &[]);
+    let responses = receive_until_ready(client);
+    assert!(!responses.iter().any(|(tag, _)| *tag == b'E'), "extended query `{sql}` failed: {responses:?}");
+    responses.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect()
+}
+
+/// Iris PostgreSQL 适配器生成的 `strpos` 与 `left` / `right` 谓词必须按 code point
+/// 精确、大小写敏感地执行。
+#[test]
+fn extended_protocol_executes_iris_text_predicates_case_sensitively() {
+    let (mut client, server) = start_server_with_runtime();
+
+    for (id, name) in [(1, "alice"), (2, "Alicia"), (3, "bob")] {
+        send_query(&mut client, &format!("INSERT INTO users VALUES ({id}, '{name}')"));
+        assert_eq!(receive_until_ready(&mut client)[0].0, b'C');
+    }
+
+    // `strpos("f", $n) > 0`
+    let matches = extended_rows(&mut client, "i1", "SELECT id FROM users WHERE strpos(name, $1) > 0", &["ice"]);
+    assert_eq!(matches, vec![vec![Some(b"1".to_vec())]], "`ice` must match only `alice`");
+    let misses = extended_rows(&mut client, "i2", "SELECT id FROM users WHERE strpos(name, $1) > 0", &["ICE"]);
+    assert!(misses.is_empty(), "text predicates are case-sensitive, got {misses:?}");
+
+    // `left("f", char_length($n)) = $m`
+    let prefix =
+        extended_rows(&mut client, "l1", "SELECT id FROM users WHERE left(name, char_length($1)) = $2", &["ali", "ali"]);
+    assert_eq!(prefix, vec![vec![Some(b"1".to_vec())]]);
+    let prefix_miss =
+        extended_rows(&mut client, "l2", "SELECT id FROM users WHERE left(name, char_length($1)) = $2", &["ali", "ALI"]);
+    assert!(prefix_miss.is_empty(), "the prefix comparison must stay case-sensitive, got {prefix_miss:?}");
+
+    // `right("f", char_length($n)) = $m`
+    let suffix =
+        extended_rows(&mut client, "r1", "SELECT id FROM users WHERE right(name, char_length($1)) = $2", &["ice", "ice"]);
+    assert_eq!(suffix, vec![vec![Some(b"1".to_vec())]]);
+    let suffix_miss =
+        extended_rows(&mut client, "r2", "SELECT id FROM users WHERE right(name, char_length($1)) = $2", &["ice", "ICE"]);
+    assert!(suffix_miss.is_empty(), "the suffix comparison must stay case-sensitive, got {suffix_miss:?}");
+
+    // 简单查询路径同样按 code point 计数：1-based 位置与字符前缀。
+    send_query(&mut client, "SELECT left(name, 3), strpos(name, 'ice') FROM users WHERE id = 1");
+    let rows = receive_until_ready(&mut client);
+    let row: Vec<Option<Vec<u8>>> =
+        rows.iter().find(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).unwrap();
+    assert_eq!(row, vec![Some(b"ali".to_vec()), Some(b"3".to_vec())]);
+
+    // `INSTR` 是 MySQL 拼写，PostgreSQL 必须按未知函数拒绝而不是近似执行。
+    assert_sqlstate(&mut client, "SELECT INSTR(name, 'x') FROM users", b"42883");
 
     drop(client);
     server.join().unwrap();

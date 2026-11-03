@@ -76,8 +76,8 @@ const MYSQL_VARIABLES: &[(&str, &str)] = &[
     ("character_set_connection", "utf8mb4"),
     ("character_set_results", "utf8mb4"),
     ("character_set_server", "utf8mb4"),
-    ("collation_connection", "utf8mb4_general_ci"),
-    ("collation_server", "utf8mb4_general_ci"),
+    ("collation_connection", "utf8mb4_bin"),
+    ("collation_server", "utf8mb4_bin"),
     ("init_connect", ""),
     ("lower_case_table_names", "0"),
     ("max_allowed_packet", "67108864"),
@@ -377,10 +377,9 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                     {
                         write_error(&mut stream, sequence.wrapping_add(1), 1115, "42000", "unknown character set")?;
                     }
+                    // 文本按 code point 精确比较，因此唯一的真实 collation 是 `utf8mb4_bin`。
                     Ok(Some(SqlSessionCommand::SetNames { collation, .. }))
-                        if collation
-                            .as_deref()
-                            .is_none_or(|collation| collation.eq_ignore_ascii_case("utf8mb4_general_ci")) =>
+                        if collation.as_deref().is_none_or(|collation| collation.eq_ignore_ascii_case("utf8mb4_bin")) =>
                     {
                         write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
                     }
@@ -821,7 +820,13 @@ fn execute_sql(
     binary_rows: bool,
     column_nullables: &[bool],
 ) -> io::Result<()> {
-    let bound = match bind_sql_catalog_with_variables(sql, &runtime.catalog, runtime.schema_version, &mysql_system_variable) {
+    let bound = match bind_sql_catalog_with_variables(
+        sql,
+        &runtime.catalog,
+        runtime.schema_version,
+        &mysql_system_variable,
+        SqlDialect::Mysql,
+    ) {
         Ok(bound) => bound,
         Err(error) => {
             session.fail();
@@ -933,15 +938,20 @@ fn handle_prepare(
             return Ok(());
         }
     };
-    let bound =
-        match bind_sql_catalog_with_variables(&neutral, &runtime.catalog, runtime.schema_version, &mysql_system_variable) {
-            Ok(bound) => bound,
-            Err(error) => {
-                session.fail();
-                write_statement_error(stream, sequence, "bind", error)?;
-                return Ok(());
-            }
-        };
+    let bound = match bind_sql_catalog_with_variables(
+        &neutral,
+        &runtime.catalog,
+        runtime.schema_version,
+        &mysql_system_variable,
+        SqlDialect::Mysql,
+    ) {
+        Ok(bound) => bound,
+        Err(error) => {
+            session.fail();
+            write_statement_error(stream, sequence, "bind", error)?;
+            return Ok(());
+        }
+    };
     // 写入语句的值类型检查推迟到 execute，因为只有执行时才知道参数的真实类型，
     // 因此这里只为 SELECT 推导结果列。
     let description = match bound {

@@ -61,17 +61,16 @@ pub enum SqlValue {
     Null,
 }
 
-/// utf8mb4_general_ci 风格的大小写不敏感比较：所有字符串相等/排序/分桶路径共用。
-fn eq_string_ci(a: &str, b: &str) -> bool {
-    a.to_lowercase() == b.to_lowercase()
+/// 文本按 Unicode code point 精确比较：相等、排序、LIKE 与分桶共用同一口径。
+///
+/// gateway 不建模 collation，也不做大小写折叠。`CAST(x AS BINARY)` 因此只是恒等
+/// 字节视图，不会带来第二套比较语义。
+fn eq_string(a: &str, b: &str) -> bool {
+    a == b
 }
 
-fn cmp_string_ci(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase())
-}
-
-fn canonical_string(s: &str) -> String {
-    s.to_lowercase()
+fn cmp_string(a: &str, b: &str) -> std::cmp::Ordering {
+    a.cmp(b)
 }
 
 /// 解析 SQL 数值字面量：不带小数点或指数的文本优先按 `i64` 精确解析，
@@ -2755,7 +2754,7 @@ fn eval_expression(
         }
         SqlCatalogBoundExpression::Cast { expr, target } => {
             let inner = eval_expression(expr, row, field_types, dialect)?;
-            eval_cast(inner, target)?
+            eval_cast(inner, target, matches!(expr.as_ref(), SqlCatalogBoundExpression::Literal(_)))?
         }
     })
 }
@@ -2951,8 +2950,12 @@ fn eval_case_having(
 
 /// CAST(expr AS type_name) 求值。支持 INTEGER/INT, REAL/DOUBLE/FLOAT/NUMBER, TEXT/STRING/VARCHAR/CHAR, BLOB/BINARY 互转。
 ///
+/// `from_literal` 区分两种文本→二进制来源：字面量按十六进制解码（wire 层把二进制
+/// 入参渲染成 `CAST('<hex>' AS BINARY)`），其余表达式是恒等字节视图
+/// （Iris 用 `CAST(f AS BINARY)` 规避 MySQL collation）。
+///
 /// 类型不支持或无法转换时返回 NULL（与 SQLite/Postgres CAST 行为一致），而不是报错。
-fn eval_cast(value: SqlValue, target: &str) -> Result<SqlValue, SqlFrontendError> {
+fn eval_cast(value: SqlValue, target: &str, from_literal: bool) -> Result<SqlValue, SqlFrontendError> {
     let t = target.trim().to_ascii_uppercase();
     // 忽略括号里的长度修饰，如 VARCHAR(32)
     let base_type = t.split('(').next().unwrap_or(&t);
@@ -2980,9 +2983,15 @@ fn eval_cast(value: SqlValue, target: &str) -> Result<SqlValue, SqlFrontendError
         }
         (SqlValue::Bytes(bytes), target) if crate::sql::is_binary_type_name(target) => Ok(SqlValue::Bytes(bytes)),
         (SqlValue::String(text), target) if crate::sql::is_binary_type_name(target) => {
-            // 十六进制拼写是 text → binary 的唯一无损转换。非法拼写必须报错，
-            // 不能像旧实现那样静默返回 NULL。
-            crate::sql::decode_binary_literal(&text).map(SqlValue::Bytes)
+            if from_literal {
+                // 十六进制拼写是 text → binary 的唯一无损转换。非法拼写必须报错，
+                // 不能像旧实现那样静默返回 NULL。
+                crate::sql::decode_binary_literal(&text).map(SqlValue::Bytes)
+            }
+            else {
+                // 非字面量表达式：恒等字节视图，不经过十六进制解释。
+                Ok(SqlValue::Bytes(text.into_bytes()))
+            }
         }
         (_, "BLOB" | "BINARY") => {
             // 其它类型没有到二进制列的文档化转换，维持 NULL 结果。
@@ -3037,10 +3046,18 @@ fn eval_scalar_function(
     dialect: SqlDialect,
 ) -> Result<SqlValue, SqlFrontendError> {
     use SqlValue::{Integer, Null, Number, String as Text};
-    // 二进制实参只在语义明确的函数里有定义。其余函数没有无损的文本形式，
-    // 显式报类型错误，而不是悄悄退化成 NULL。
-    if !matches!(function, SqlScalarFunction::Length | SqlScalarFunction::Coalesce)
-        && args.iter().any(|value| matches!(value, SqlValue::Bytes(_)))
+    // 二进制实参只在语义明确的函数里有定义。文本谓词把 `CAST(... AS BINARY)` 的
+    // 恒等字节视图按 UTF-8 解码（见 [`text_view`]），无法解码时报类型错误；
+    // 其余函数没有无损的文本形式，显式报类型错误，而不是悄悄退化成 NULL。
+    if !matches!(
+        function,
+        SqlScalarFunction::Length
+            | SqlScalarFunction::Coalesce
+            | SqlScalarFunction::Instr
+            | SqlScalarFunction::Strpos
+            | SqlScalarFunction::Left
+            | SqlScalarFunction::Right
+    ) && args.iter().any(|value| matches!(value, SqlValue::Bytes(_)))
     {
         return Err(SqlFrontendError::new(
             SqlErrorKind::TypeMismatch,
@@ -3159,6 +3176,45 @@ fn eval_scalar_function(
             Text(joined)
         }
         SqlScalarFunction::Coalesce => args.iter().find(|value| **value != Null).cloned().unwrap_or(Null),
+        SqlScalarFunction::Instr | SqlScalarFunction::Strpos => {
+            // 两种拼写语义相同（1-based 字符位置，未找到为 0），但只在各自方言里可调用。
+            let allowed = match dialect {
+                SqlDialect::Mysql => SqlScalarFunction::Instr,
+                SqlDialect::Postgres => SqlScalarFunction::Strpos,
+            };
+            if function != allowed {
+                let (owner, alternate) = if function == SqlScalarFunction::Instr {
+                    ("MySQL", SqlScalarFunction::Strpos)
+                }
+                else {
+                    ("PostgreSQL", SqlScalarFunction::Instr)
+                };
+                return Err(SqlFrontendError::new(
+                    SqlErrorKind::UnknownFunction,
+                    format!("{}() is a {owner} spelling, the other dialect spells it {}()", function.name(), alternate.name()),
+                ));
+            }
+            let haystack = match text_view(args, 0)? {
+                Some(text) => text,
+                None => return Ok(Null),
+            };
+            let needle = match text_view(args, 1)? {
+                Some(text) => text,
+                None => return Ok(Null),
+            };
+            Integer(character_position(&haystack, &needle))
+        }
+        SqlScalarFunction::Left | SqlScalarFunction::Right => {
+            let text = match text_view(args, 0)? {
+                Some(text) => text,
+                None => return Ok(Null),
+            };
+            let count = match scalar_integer(args, 1) {
+                Some(count) => count,
+                None => return Ok(Null),
+            };
+            Text(edge_characters(&text, count, function == SqlScalarFunction::Right))
+        }
         SqlScalarFunction::Abs => match args.first() {
             Some(Integer(value)) => Integer(value.checked_abs().ok_or_else(|| numeric_overflow_error("ABS"))?),
             Some(Number(value)) => Number(value.abs()),
@@ -3260,6 +3316,49 @@ fn scalar_integer(args: &[SqlValue], index: usize) -> Option<i64> {
         SqlValue::Boolean(value) => Some(i64::from(*value)),
         SqlValue::Bytes(_) => None,
         SqlValue::Null => None,
+    }
+}
+
+/// 把第 `index` 个参数取成文本视图，供文本谓词使用。
+///
+/// `CAST(x AS BINARY)` 的恒等字节视图只在能整体按 UTF-8 解码时才参与文本谓词；
+/// 真正的二进制列无法解码，报类型不匹配而不是静默近似。NULL 与缺失返回 `None`。
+fn text_view(args: &[SqlValue], index: usize) -> Result<Option<String>, SqlFrontendError> {
+    match args.get(index) {
+        None | Some(SqlValue::Null) => Ok(None),
+        Some(SqlValue::Bytes(bytes)) => std::str::from_utf8(bytes).map(|text| Some(text.to_string())).map_err(|_| {
+            SqlFrontendError::new(
+                SqlErrorKind::TypeMismatch,
+                "binary value is not valid UTF-8 text and cannot serve as text".to_string(),
+            )
+        }),
+        _ => Ok(scalar_text(args, index)),
+    }
+}
+
+/// `INSTR` / `STRPOS` 的 1-based 字符位置；未找到为 0，空 needle 为 1（两方言一致）。
+fn character_position(haystack: &str, needle: &str) -> i64 {
+    if needle.is_empty() {
+        return 1;
+    }
+    match haystack.find(needle) {
+        Some(byte_offset) => i64::try_from(haystack[..byte_offset].chars().count()).map_or(i64::MAX, |chars| chars + 1),
+        None => 0,
+    }
+}
+
+/// `LEFT` / `RIGHT` 按字符计数取一侧片段；非正数计数返回空串，超出长度取整串。
+fn edge_characters(text: &str, count: i64, from_end: bool) -> String {
+    if count <= 0 {
+        return String::new();
+    }
+    let characters: Vec<char> = text.chars().collect();
+    let take = usize::try_from(count).unwrap_or(usize::MAX).min(characters.len());
+    if from_end {
+        characters[characters.len() - take..].iter().collect()
+    }
+    else {
+        characters[..take].iter().collect()
     }
 }
 
@@ -3375,20 +3474,19 @@ fn eval_binary(
         (Integer(a), Number(b)) => float_binary(op, *a as f64, *b, dialect)?,
         (Number(a), Integer(b)) => float_binary(op, *a, *b as f64, dialect)?,
         (Number(a), Number(b)) => float_binary(op, *a, *b, dialect)?,
-        // utf8mb4_general_ci / en_US.UTF-8 default — case-insensitive equality,
-        // ordering and LIKE matching so that `'ABC' = 'abc'` and `'A' < 'b'`
-        // follow the collation declared in `SET NAMES utf8mb4 COLLATE utf8mb4_general_ci`.
+        // utf8mb4 / UTF8 文本按 code point 精确比较，大小写敏感，不使用 collation。
         (String(a), String(b)) => match op {
-            SqlBoundBinaryOperator::Equal => Boolean(eq_string_ci(a, b)),
-            SqlBoundBinaryOperator::NotEqual => Boolean(!eq_string_ci(a, b)),
-            SqlBoundBinaryOperator::Less => Boolean(cmp_string_ci(a, b).is_lt()),
-            SqlBoundBinaryOperator::Greater => Boolean(cmp_string_ci(a, b).is_gt()),
-            SqlBoundBinaryOperator::LessEqual => Boolean(!cmp_string_ci(a, b).is_gt()),
-            SqlBoundBinaryOperator::GreaterEqual => Boolean(!cmp_string_ci(a, b).is_lt()),
-            SqlBoundBinaryOperator::Like => Boolean(like_match_ci(a, b)),
+            SqlBoundBinaryOperator::Equal => Boolean(eq_string(a, b)),
+            SqlBoundBinaryOperator::NotEqual => Boolean(!eq_string(a, b)),
+            SqlBoundBinaryOperator::Less => Boolean(cmp_string(a, b).is_lt()),
+            SqlBoundBinaryOperator::Greater => Boolean(cmp_string(a, b).is_gt()),
+            SqlBoundBinaryOperator::LessEqual => Boolean(!cmp_string(a, b).is_gt()),
+            SqlBoundBinaryOperator::GreaterEqual => Boolean(!cmp_string(a, b).is_lt()),
+            SqlBoundBinaryOperator::Like => Boolean(like_match(a, b)),
             _ => Null,
         },
-        // 二进制值按字节序比较；字符串的 case-insensitive 排序规则不适用于 octets。
+        // 二进制值按字节序比较。文本没有隐式转成 octets：混合比较返回 NULL，
+        // 需要比较时由调用方显式 `CAST`。
         (Bytes(a), Bytes(b)) if is_comparison(op) => comparison_value(op, a.cmp(b)),
         (Boolean(a), Boolean(b)) => match op {
             SqlBoundBinaryOperator::Equal => Boolean(a == b),
@@ -3524,9 +3622,8 @@ fn float_binary(op: SqlBoundBinaryOperator, a: f64, b: f64, dialect: SqlDialect)
 }
 
 /// SQL LIKE 匹配。`%` 匹配 0+ 任意字符，`_` 匹配正好 1 个任意字符。
-/// utf8mb4_general_ci 风格的 LIKE 匹配：非通配符字符按大小写不敏感方式比较。
-/// 与运算符比较共享同一 collation 语义，避免 `WHERE name LIKE 'bob%'` 漏掉 `'BOBBY'`。
-fn like_match_ci(haystack: &str, pattern: &str) -> bool {
+/// 非通配符字符按 code point 精确比较，与运算符比较共用同一口径。
+fn like_match(haystack: &str, pattern: &str) -> bool {
     let haystack: Vec<char> = haystack.chars().collect();
     let pattern: Vec<char> = pattern.chars().collect();
     let n = haystack.len();
@@ -3555,16 +3652,12 @@ fn like_match_ci(haystack: &str, pattern: &str) -> bool {
                     dp[i][j] = dp[i - 1][j - 1];
                 }
                 p => {
-                    dp[i][j] = dp[i - 1][j - 1] && chars_eq_ci(haystack[i - 1], p);
+                    dp[i][j] = dp[i - 1][j - 1] && haystack[i - 1] == p;
                 }
             }
         }
     }
     dp[n][m]
-}
-
-fn chars_eq_ci(a: char, b: char) -> bool {
-    a.eq_ignore_ascii_case(&b) || a.to_lowercase().next() == b.to_lowercase().next()
 }
 
 struct Cursor<'a> {
@@ -3638,7 +3731,7 @@ fn serialize_group_key(values: &[SqlValue]) -> String {
             }
             SqlValue::String(s) => {
                 buf.push_str("S:");
-                buf.push_str(&canonical_string(s));
+                buf.push_str(s);
             }
             SqlValue::Boolean(b) => {
                 buf.push_str(if *b { "B:true" } else { "B:false" });
@@ -3717,7 +3810,7 @@ fn eval_having(
         }
         SqlCatalogBoundExpression::Cast { expr, target } => {
             let inner = eval_having(expr, bucket_rows, group_exprs, field_types, dialect)?;
-            eval_cast(inner, target)?
+            eval_cast(inner, target, matches!(expr.as_ref(), SqlCatalogBoundExpression::Literal(_)))?
         }
     })
 }
@@ -3762,7 +3855,7 @@ fn values_equal(left: &SqlValue, right: &SqlValue) -> bool {
         (SqlValue::Number(left), SqlValue::Number(right)) => {
             left.partial_cmp(right).unwrap_or(Ordering::Equal) == Ordering::Equal
         }
-        (SqlValue::String(left), SqlValue::String(right)) => eq_string_ci(left, right),
+        (SqlValue::String(left), SqlValue::String(right)) => eq_string(left, right),
         (SqlValue::Boolean(left), SqlValue::Boolean(right)) => left == right,
         (SqlValue::Null, SqlValue::Null) => true,
         _ => false,
@@ -3832,7 +3925,7 @@ fn compare_values_with_nulls(a: Option<&SqlValue>, b: Option<&SqlValue>, nulls_f
                 compare_integer_float(*n2, *n1).map(Ordering::reverse).unwrap_or(Ordering::Equal)
             }
             (SqlValue::Number(n1), SqlValue::Number(n2)) => n1.partial_cmp(n2).unwrap_or(Ordering::Equal),
-            (SqlValue::String(s1), SqlValue::String(s2)) => cmp_string_ci(s1, s2),
+            (SqlValue::String(s1), SqlValue::String(s2)) => cmp_string(s1, s2),
             (SqlValue::Boolean(b1), SqlValue::Boolean(b2)) => b1.cmp(b2),
             // 二进制列按原始 octets 的字节序排序，不经过任何文本折叠。
             (SqlValue::Bytes(a), SqlValue::Bytes(b)) => a.cmp(b),

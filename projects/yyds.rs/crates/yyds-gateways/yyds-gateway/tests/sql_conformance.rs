@@ -45,7 +45,7 @@ impl Fixture {
     }
 
     fn execute(&self, transaction: Option<&dyn TransactionHandle>, sql: &str) -> Result<SqlResult, String> {
-        let bound = bind_sql_catalog(sql, &self.catalog, SCHEMA_VERSION).map_err(|error| error.message)?;
+        let bound = bind_sql_catalog(sql, &self.catalog, SCHEMA_VERSION, self.dialect).map_err(|error| error.message)?;
         let plan = plan_statement_for_dialect(bound, &self.catalog, self.dialect).map_err(|error| error.message)?;
         execute_plan(self.executor.as_ref(), transaction, &plan, self.dialect).map_err(|error| error.message)
     }
@@ -224,7 +224,7 @@ fn sql_integer_overflow_reports_numeric_out_of_range() {
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
         let fixture = Fixture::with_dialect(dialect);
         for sql in overflow_sql {
-            let bound = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION)
+            let bound = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION, fixture.dialect)
                 .unwrap_or_else(|error| panic!("`{sql}` must bind: {}", error.message));
             let plan = plan_statement_for_dialect(bound, &fixture.catalog, dialect)
                 .unwrap_or_else(|error| panic!("`{sql}` must plan: {}", error.message));
@@ -242,7 +242,7 @@ fn sql_integer_overflow_reports_numeric_out_of_range() {
 fn sql_upsert_arithmetic_keeps_dialect_numeric_rules() {
     // 结构化错误需要未经 `String` 降级的前端结果，因此这里直接走 bind/plan/execute。
     let raw = |fixture: &Fixture, sql: &str, dialect: SqlDialect| {
-        let bound = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION)?;
+        let bound = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION, fixture.dialect)?;
         let plan = plan_statement_for_dialect(bound, &fixture.catalog, dialect)?;
         execute_plan(fixture.executor.as_ref(), None, &plan, dialect)
     };
@@ -364,7 +364,7 @@ fn sql_string_function_arity_is_rejected_while_binding() {
         "SELECT CONCAT()",
         "SELECT TRIM('a', 'b', 'c')",
     ] {
-        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err(sql);
+        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION, fixture.dialect).expect_err(sql);
         assert_eq!(error.kind, SqlErrorKind::UnknownFunction, "`{sql}`: {}", error.message);
     }
 }
@@ -462,7 +462,7 @@ fn sql_curdate_and_curtime_are_mysql_spellings() {
 
     let pg = Fixture::with_dialect(SqlDialect::Postgres);
     for sql in ["SELECT CURDATE()", "SELECT CURTIME()"] {
-        let bound = bind_sql_catalog(sql, &pg.catalog, SCHEMA_VERSION).expect("binds under PostgreSQL");
+        let bound = bind_sql_catalog(sql, &pg.catalog, SCHEMA_VERSION, SqlDialect::Postgres).expect("binds under PostgreSQL");
         let plan = plan_statement_for_dialect(bound, &pg.catalog, SqlDialect::Postgres).expect("plans");
         let error = execute_plan(pg.executor.as_ref(), None, &plan, SqlDialect::Postgres)
             .expect_err("PostgreSQL rejects MySQL spelling");
@@ -476,14 +476,15 @@ fn sql_curdate_and_curtime_are_mysql_spellings() {
 fn sql_date_function_gaps_are_reported_explicitly() {
     let fixture = Fixture::new();
     for sql in ["SELECT CURRENT_DATE(1)", "SELECT CURRENT_TIME('x')", "SELECT NOW(1)", "SELECT CURDATE(1)"] {
-        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err(sql);
+        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION, fixture.dialect).expect_err(sql);
         assert_eq!(error.kind, SqlErrorKind::UnknownFunction, "`{sql}`: {}", error.message);
     }
 
     // Oak 把 `EXTRACT(field FROM value)` 解析成普通函数调用，网关在函数白名单上拒绝，
     // 因为 YYDS 没有日期类型可供抽取，编造一个语义会比报未支持更糟。
     for sql in ["SELECT EXTRACT(YEAR FROM age) FROM users", "SELECT EXTRACT(age) FROM users"] {
-        let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err("EXTRACT must not bind");
+        let error =
+            bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION, fixture.dialect).expect_err("EXTRACT must not bind");
         assert_eq!(error.kind, SqlErrorKind::UnknownFunction, "`{sql}`: {}", error.message);
         assert!(error.message.contains("EXTRACT"), "`{sql}`: {}", error.message);
     }
@@ -563,15 +564,20 @@ fn sql_table_alias_and_self_join_agree_across_dialects() {
             "self join under {dialect:?}"
         );
 
-        let ambiguous_column =
-            bind_sql_catalog("SELECT name FROM users a JOIN users b ON a.id = b.id", &fixture.catalog, SCHEMA_VERSION)
-                .expect_err("ambiguous shared column");
+        let ambiguous_column = bind_sql_catalog(
+            "SELECT name FROM users a JOIN users b ON a.id = b.id",
+            &fixture.catalog,
+            SCHEMA_VERSION,
+            fixture.dialect,
+        )
+        .expect_err("ambiguous shared column");
         assert_eq!(ambiguous_column.kind, SqlErrorKind::AmbiguousColumn, "under {dialect:?}: {}", ambiguous_column.message);
 
         let ambiguous_table = bind_sql_catalog(
             "SELECT users.name FROM users JOIN users ON users.id = users.id",
             &fixture.catalog,
             SCHEMA_VERSION,
+            fixture.dialect,
         )
         .expect_err("duplicate unaliased source");
         assert_eq!(ambiguous_table.kind, SqlErrorKind::AmbiguousTable, "under {dialect:?}: {}", ambiguous_table.message);
@@ -644,9 +650,13 @@ fn sql_exists_predicates_agree_across_dialects() {
             .unwrap_or_else(|error| panic!("NOT EXISTS without rows under {dialect:?}: {error}"));
         assert!(negated_present.rows.is_empty(), "NOT EXISTS without rows under {dialect:?}");
 
-        let unknown =
-            bind_sql_catalog("SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)", &fixture.catalog, SCHEMA_VERSION)
-                .expect_err("unknown inner table");
+        let unknown = bind_sql_catalog(
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
+            &fixture.catalog,
+            SCHEMA_VERSION,
+            fixture.dialect,
+        )
+        .expect_err("unknown inner table");
         assert_eq!(unknown.kind, SqlErrorKind::UnknownTable, "under {dialect:?}: {}", unknown.message);
     }
 }
@@ -681,8 +691,13 @@ fn sql_scalar_subquery_agrees_across_dialects() {
             .expect_err("several rows must be a cardinality error");
         assert!(error.contains("more than one row"), "scalar subquery with several rows under {dialect:?}: {error}");
 
-        let wide = bind_sql_catalog("SELECT (SELECT id, age FROM users) FROM users", &fixture.catalog, SCHEMA_VERSION)
-            .expect_err("scalar subquery must project one column");
+        let wide = bind_sql_catalog(
+            "SELECT (SELECT id, age FROM users) FROM users",
+            &fixture.catalog,
+            SCHEMA_VERSION,
+            fixture.dialect,
+        )
+        .expect_err("scalar subquery must project one column");
         assert_eq!(wide.kind, SqlErrorKind::Unsupported, "under {dialect:?}: {}", wide.message);
     }
 }
@@ -738,6 +753,7 @@ fn sql_common_table_expressions_agree_across_dialects() {
             "WITH u AS (SELECT * FROM users) SELECT * FROM u JOIN missing ON TRUE",
             &fixture.catalog,
             SCHEMA_VERSION,
+            fixture.dialect,
         )
         .expect_err("unknown joined table");
         assert_eq!(unknown.kind, SqlErrorKind::UnknownTable, "under {dialect:?}: {}", unknown.message);
@@ -784,7 +800,8 @@ fn sql_cte_scope_reaches_into_subqueries_across_dialects() {
             "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE id IN (SELECT id FROM missing)",
             "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
         ] {
-            let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION).expect_err("unknown name inside a subquery");
+            let error = bind_sql_catalog(sql, &fixture.catalog, SCHEMA_VERSION, fixture.dialect)
+                .expect_err("unknown name inside a subquery");
             assert_eq!(error.kind, SqlErrorKind::UnknownTable, "under {dialect:?} `{sql}`: {}", error.message);
         }
     }

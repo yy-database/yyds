@@ -4,8 +4,8 @@ use crate::sql::{
     bind_sql, SqlBoundAssignment, SqlBoundBinaryOperator, SqlBoundConflictAction, SqlBoundCte, SqlBoundDelete,
     SqlBoundExpression, SqlBoundInsert, SqlBoundJoinKind, SqlBoundLiteral, SqlBoundOrderByItem, SqlBoundOrderDirection,
     SqlBoundProjection, SqlBoundSelect, SqlBoundSetOperand, SqlBoundSetOperation, SqlBoundSetOperator, SqlBoundSource,
-    SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlBoundWindowFrame, SqlBoundWindowSpec, SqlErrorKind,
-    SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
+    SqlBoundStatement, SqlBoundUnaryOperator, SqlBoundUpdate, SqlBoundWindowFrame, SqlBoundWindowSpec, SqlDialect,
+    SqlErrorKind, SqlFrontendError, SqlNullsOrder, SqlScalarFunction,
 };
 use vos::types::{CanonicalScalar, ResolvedCanonicalType};
 
@@ -635,8 +635,9 @@ pub fn bind_sql_catalog(
     source: &str,
     catalog: &SqlCatalog,
     expected_schema_version: u32,
+    dialect: SqlDialect,
 ) -> Result<SqlCatalogBoundStatement, SqlFrontendError> {
-    bind_sql_catalog_with_variables(source, catalog, expected_schema_version, &reject_system_variable)
+    bind_sql_catalog_with_variables(source, catalog, expected_schema_version, &reject_system_variable, dialect)
 }
 
 /// Binds a parsed SQL surface against a catalog revision, resolving system variables.
@@ -649,6 +650,7 @@ pub fn bind_sql_catalog_with_variables(
     catalog: &SqlCatalog,
     expected_schema_version: u32,
     variables: &dyn Fn(&str) -> Result<SqlBoundLiteral, SqlFrontendError>,
+    dialect: SqlDialect,
 ) -> Result<SqlCatalogBoundStatement, SqlFrontendError> {
     if catalog.schema_version != expected_schema_version {
         return Err(catalog_error(&format!(
@@ -658,7 +660,7 @@ pub fn bind_sql_catalog_with_variables(
     }
     // `::<binary type>` 在 Oak 里只有词法没有节点，收下就等于把转义拼写当载荷存储。
     crate::sql::reject_binary_cast_operator(source)?;
-    let statement = bind_sql(source)?;
+    let statement = bind_sql(source, dialect)?;
     match statement {
         SqlBoundStatement::Select(select) => bind_select(select, catalog, variables).map(SqlCatalogBoundStatement::Select),
         SqlBoundStatement::Insert(insert) => bind_insert(insert, catalog, variables).map(SqlCatalogBoundStatement::Insert),
@@ -1813,18 +1815,18 @@ mod tests {
     fn sql_select_composite_field_is_rejected_with_vos_hint() {
         let catalog = composite_field_catalog();
         // bytes 列正常通过
-        let ok = bind_sql_catalog("SELECT body FROM t", &catalog, 1);
+        let ok = bind_sql_catalog("SELECT body FROM t", &catalog, 1, SqlDialect::Mysql);
         assert!(ok.is_ok(), "bytes 列应该可投影: {ok:?}");
 
         // file 列被拒绝，错误消息带 vos 类型名
-        let err = bind_sql_catalog("SELECT photo FROM t", &catalog, 1).expect_err("file 列应被拒绝");
+        let err = bind_sql_catalog("SELECT photo FROM t", &catalog, 1, SqlDialect::Mysql).expect_err("file 列应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
         assert!(err.message.contains("`file`"), "消息应带 VOS 类型名: {}", err.message);
         assert!(err.message.contains("has no SQL equivalent"), "消息应提示无 SQL 等价: {}", err.message);
 
         // vector 列同理
-        let err = bind_sql_catalog("SELECT vec FROM t", &catalog, 1).expect_err("vector 列应被拒绝");
+        let err = bind_sql_catalog("SELECT vec FROM t", &catalog, 1, SqlDialect::Mysql).expect_err("vector 列应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`vec`"), "消息应带字段名: {}", err.message);
         assert!(err.message.contains("vector"), "消息应带 VOS 类型名: {}", err.message);
@@ -1833,8 +1835,8 @@ mod tests {
     #[test]
     fn sql_insert_composite_field_explicit_column_is_rejected() {
         let catalog = composite_field_catalog();
-        let err =
-            bind_sql_catalog("INSERT INTO t (photo) VALUES (NULL)", &catalog, 1).expect_err("显式列名写 Unknown 字段应被拒绝");
+        let err = bind_sql_catalog("INSERT INTO t (photo) VALUES (NULL)", &catalog, 1, SqlDialect::Mysql)
+            .expect_err("显式列名写 Unknown 字段应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
         assert!(err.message.contains("`file`"), "消息应带 VOS 类型名: {}", err.message);
@@ -1843,7 +1845,7 @@ mod tests {
     #[test]
     fn sql_insert_composite_field_implicit_column_is_rejected() {
         let catalog = composite_field_catalog();
-        let err = bind_sql_catalog("INSERT INTO t VALUES (NULL, NULL, NULL)", &catalog, 1)
+        let err = bind_sql_catalog("INSERT INTO t VALUES (NULL, NULL, NULL)", &catalog, 1, SqlDialect::Mysql)
             .expect_err("默认列顺序里有 Unknown 字段应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`") || err.message.contains("`vec`"), "应报出第一个 Unknown 字段: {}", err.message);
@@ -1852,7 +1854,8 @@ mod tests {
     #[test]
     fn sql_update_composite_field_is_rejected() {
         let catalog = composite_field_catalog();
-        let err = bind_sql_catalog("UPDATE t SET photo = NULL", &catalog, 1).expect_err("UPDATE 赋值 Unknown 字段应被拒绝");
+        let err = bind_sql_catalog("UPDATE t SET photo = NULL", &catalog, 1, SqlDialect::Mysql)
+            .expect_err("UPDATE 赋值 Unknown 字段应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`"), "消息应带字段名: {}", err.message);
     }
@@ -1860,7 +1863,7 @@ mod tests {
     #[test]
     fn sql_select_star_expansion_rejects_composite_fields() {
         let catalog = composite_field_catalog();
-        let bound = bind_sql_catalog("SELECT * FROM t", &catalog, 1).expect("Star 投影应能通过 bind 阶段");
+        let bound = bind_sql_catalog("SELECT * FROM t", &catalog, 1, SqlDialect::Mysql).expect("Star 投影应能通过 bind 阶段");
         for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
             let err = plan_statement_for_dialect(bound.clone(), &catalog, dialect).expect_err("Star 展开时应拒绝 Unknown 字段");
             assert_eq!(err.kind, SqlErrorKind::Unsupported);
@@ -1873,12 +1876,13 @@ mod tests {
     #[test]
     fn sql_predicate_paths_reject_composite_fields_with_vos_hint() {
         let catalog = composite_field_catalog();
-        let err =
-            bind_sql_catalog("SELECT body FROM t WHERE photo IS NULL", &catalog, 1).expect_err("WHERE 应拒绝 Unknown 字段");
+        let err = bind_sql_catalog("SELECT body FROM t WHERE photo IS NULL", &catalog, 1, SqlDialect::Mysql)
+            .expect_err("WHERE 应拒绝 Unknown 字段");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`") && err.message.contains("`file`"), "{}", err.message);
 
-        let err = bind_sql_catalog("SELECT body FROM t ORDER BY vec", &catalog, 1).expect_err("ORDER BY 应拒绝 Unknown 字段");
+        let err = bind_sql_catalog("SELECT body FROM t ORDER BY vec", &catalog, 1, SqlDialect::Mysql)
+            .expect_err("ORDER BY 应拒绝 Unknown 字段");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`vec`"), "{}", err.message);
     }
@@ -1897,7 +1901,7 @@ mod tests {
                 vos_type_name: None,
             }],
         });
-        let err = bind_sql_catalog("SELECT t.body FROM t INNER JOIN u ON t.photo = u.body", &catalog, 1)
+        let err = bind_sql_catalog("SELECT t.body FROM t INNER JOIN u ON t.photo = u.body", &catalog, 1, SqlDialect::Mysql)
             .expect_err("JOIN ON 应拒绝 Unknown 字段");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`photo`") && err.message.contains("`file`"), "{}", err.message);
@@ -1938,7 +1942,8 @@ mod tests {
                 }],
             }],
         };
-        let err = bind_sql_catalog("SELECT photo FROM t", &catalog, 1).expect_err("Optional<Unknown> 应被拒绝");
+        let err =
+            bind_sql_catalog("SELECT photo FROM t", &catalog, 1, SqlDialect::Mysql).expect_err("Optional<Unknown> 应被拒绝");
         assert_eq!(err.kind, SqlErrorKind::Unsupported);
         assert!(err.message.contains("`file`"), "消息应剥掉 Optional 外壳报底层类型: {}", err.message);
     }
