@@ -488,7 +488,9 @@ fn invalid_set_options_report_redis_errors_and_keep_the_stream_aligned() {
         (&["SET", "bad", "v", "EX", "0"], "-ERR invalid expire time in 'set' command\r"),
         (&["SET", "bad", "v", "EX", "-1"], "-ERR invalid expire time in 'set' command\r"),
         (&["SET", "bad", "v", "EX", "1", "KEEPTTL"], "-ERR syntax error\r"),
-        (&["SET", "bad", "v", "EXAT", "1700000000"], "-ERR unsupported SET option\r"),
+        (&["SET", "bad", "v", "EXAT", "0"], "-ERR invalid expire time in 'set' command\r"),
+        (&["SET", "bad", "v", "PXAT", "abc"], "-ERR value is not an integer or out of range\r"),
+        (&["SET", "bad", "v", "EX", "1", "EXAT", "1"], "-ERR syntax error\r"),
     ];
     for (arguments, expected) in cases {
         send_command(&mut client, arguments);
@@ -947,5 +949,113 @@ fn append_keeps_the_existing_ttl() {
     assert_eq!(read_integer(&mut client), 4);
     send_command(&mut client, &["TTL", "fresh"]);
     assert_eq!(read_integer(&mut client), -1);
+    finish(client, server);
+}
+
+// ---------- EXPIREAT / PEXPIREAT / SET EXAT|PXAT / GETEX ----------
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// `EXPIREAT` 把截止期钉在绝对墙钟时刻，`TTL` 随即按剩余时间倒数。
+#[test]
+fn expireat_pins_an_absolute_deadline_and_ttl_counts_down() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "w1", "v"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    let at = now_unix_secs() + 100;
+    send_command(&mut client, &["EXPIREAT", "w1", &at.to_string()]);
+    assert_eq!(read_integer(&mut client), 1);
+    send_command(&mut client, &["TTL", "w1"]);
+    let ttl = read_integer(&mut client);
+    assert!((95..=100).contains(&ttl), "EXPIREAT must leave about 100 seconds, got {ttl}");
+    send_command(&mut client, &["EXPIREAT", "missing", &at.to_string()]);
+    assert_eq!(read_integer(&mut client), 0, "an absent key reports 0");
+    finish(client, server);
+}
+
+/// 非正绝对截止期等价删除，与 `EXPIRE <= 0` 同形。
+#[test]
+fn expireat_non_positive_deletes_the_key() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "w2", "v"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["EXPIREAT", "w2", "0"]);
+    assert_eq!(read_integer(&mut client), 1);
+    send_command(&mut client, &["GET", "w2"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["EXPIREAT", "w2", "-5"]);
+    assert_eq!(read_integer(&mut client), 0);
+    finish(client, server);
+}
+
+/// `SET … EXAT/PXAT` 写入即钉绝对截止期；过去时刻写入后立即缺失。
+#[test]
+fn set_exat_pxat_write_absolute_deadlines() {
+    let (mut client, server) = executor_server();
+    let at_secs = now_unix_secs() + 100;
+    send_command(&mut client, &["SET", "w3", "v", "EXAT", &at_secs.to_string()]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["TTL", "w3"]);
+    let ttl = read_integer(&mut client);
+    assert!((95..=100).contains(&ttl), "SET EXAT must leave about 100 seconds, got {ttl}");
+
+    let at_ms = now_unix_secs() * 1000 + 100_000;
+    send_command(&mut client, &["SET", "w4", "v", "PXAT", &at_ms.to_string()]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["PTTL", "w4"]);
+    let pttl = read_integer(&mut client);
+    assert!((95_000..=100_000).contains(&pttl), "SET PXAT must leave about 100000 ms, got {pttl}");
+
+    // 过去的绝对时刻允许写入，但记录立即被读侧过滤为缺失。
+    send_command(&mut client, &["SET", "w5", "v", "EXAT", "1"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["GET", "w5"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["TTL", "w5"]);
+    assert_eq!(read_integer(&mut client), -2);
+    finish(client, server);
+}
+
+/// `GETEX` 原子读+触设：续期、清除与只读三种形态，以及缺键不触设。
+#[test]
+fn getex_reads_and_touches_the_ttl() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "g1", "payload", "EX", "100"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+
+    // 读回值并把 TTL 触设为新的相对截止期（滑动续期）。
+    send_command(&mut client, &["GETEX", "g1", "EX", "500"]);
+    assert_eq!(read_bulk(&mut client), Some(b"payload".to_vec()));
+    send_command(&mut client, &["TTL", "g1"]);
+    let ttl = read_integer(&mut client);
+    assert!((495..=500).contains(&ttl), "GETEX EX must re-touch the TTL, got {ttl}");
+
+    // `PERSIST` 触设后清除过期。
+    send_command(&mut client, &["GETEX", "g1", "PERSIST"]);
+    assert_eq!(read_bulk(&mut client), Some(b"payload".to_vec()));
+    send_command(&mut client, &["TTL", "g1"]);
+    assert_eq!(read_integer(&mut client), -1);
+
+    // 无选项只读，不改过期状态。
+    send_command(&mut client, &["GETEX", "g1"]);
+    assert_eq!(read_bulk(&mut client), Some(b"payload".to_vec()));
+    send_command(&mut client, &["TTL", "g1"]);
+    assert_eq!(read_integer(&mut client), -1);
+
+    // 缺键返回 nil 且不触设任何状态。
+    send_command(&mut client, &["GETEX", "missing", "EX", "10"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["EXISTS", "missing"]);
+    assert_eq!(read_integer(&mut client), 0);
+
+    // 非法选项与非法时间戳在读之前就被拒绝。
+    send_command(&mut client, &["GETEX", "g1", "EX", "0"]);
+    assert_eq!(read_line(&mut client), "-ERR invalid expire time in 'getex' command\r");
+    send_command(&mut client, &["GETEX", "g1", "FOO"]);
+    assert_eq!(read_line(&mut client), "-ERR syntax error\r");
+    send_command(&mut client, &["GETEX", "g1", "EX", "1", "PERSIST"]);
+    assert_eq!(read_line(&mut client), "-ERR syntax error\r");
     finish(client, server);
 }
