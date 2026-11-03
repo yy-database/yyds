@@ -11,7 +11,13 @@ use yyds_types::{Error, Namespace, Result, SweepReport};
 
 use crate::{Key, Record, StoredValue};
 
-const MAGIC: &[u8] = b"YYKV\x02";
+/// `.yykv` snapshot magic including the format version.
+///
+/// Version 3 added a body checksum so bit rot and truncation cannot be
+/// returned as data. Version 2 files have no checksum and are rejected
+/// explicitly instead of being parsed optimistically.
+const MAGIC: &[u8] = b"YYKV\x03";
+const LEGACY_MAGIC: &[u8] = b"YYKV\x02";
 
 /// Current wall clock as Unix epoch milliseconds, used for record expiry deadlines.
 pub fn now_unix_ms() -> i64 {
@@ -409,30 +415,46 @@ fn collect_scan(
 }
 
 fn encode_snapshot(records: &BTreeMap<Key, Record>, next_revision: u64) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    bytes.write_all(MAGIC)?;
-    bytes.write_all(&next_revision.to_le_bytes())?;
-    write_count(&mut bytes, records.len())?;
+    let mut body = Vec::new();
+    body.write_all(&next_revision.to_le_bytes())?;
+    write_count(&mut body, records.len())?;
     // BTreeMap iteration already yields namespace-then-bytes order — no manual sort needed.
     for record in records.values() {
-        write_bytes(&mut bytes, record.key.namespace.0.as_bytes())?;
-        write_bytes(&mut bytes, &record.key.bytes)?;
-        bytes.write_all(&record.revision.to_le_bytes())?;
+        write_bytes(&mut body, record.key.namespace.0.as_bytes())?;
+        write_bytes(&mut body, &record.key.bytes)?;
+        body.write_all(&record.revision.to_le_bytes())?;
         // `0` is the sentinel for "no expiry"; Unix-millisecond deadlines are always positive.
         let encoded_expiry = record.expires_at.map(|deadline| deadline as u64).unwrap_or(0);
-        bytes.write_all(&encoded_expiry.to_le_bytes())?;
+        body.write_all(&encoded_expiry.to_le_bytes())?;
         match &record.value {
             StoredValue::Inline(value) => {
-                bytes.write_all(&[0])?;
-                write_bytes(&mut bytes, &value.0)?;
+                body.write_all(&[0])?;
+                write_bytes(&mut body, &value.0)?;
             }
             StoredValue::Object(value) => {
-                bytes.write_all(&[1])?;
-                write_bytes(&mut bytes, value.hash_hex.as_bytes())?;
+                body.write_all(&[1])?;
+                write_bytes(&mut body, value.hash_hex.as_bytes())?;
             }
         }
     }
+    let mut bytes = Vec::with_capacity(MAGIC.len() + 8 + body.len());
+    bytes.write_all(MAGIC)?;
+    bytes.write_all(&checksum(&body).to_le_bytes())?;
+    bytes.write_all(&body)?;
     Ok(bytes)
+}
+
+/// FNV-1a over the snapshot body.
+///
+/// This is an integrity check, not a security primitive: it detects truncation
+/// and accidental bit flips so a damaged shard fails loudly at open time.
+fn checksum(body: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in body {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Writes `bytes` to a temp file beside `path`, fsyncs it, then atomically replaces `path`
@@ -466,9 +488,21 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<FileShard> {
     let mut cursor = Cursor::new(bytes);
     let mut magic = [0_u8; MAGIC.len()];
     read_exact(&mut cursor, &mut magic)?;
+    if magic == LEGACY_MAGIC {
+        return Err(Error::Corrupt(
+            "legacy yykv v2 snapshot has no checksum: delete the shard file and let the node recreate it",
+        ));
+    }
     if magic != MAGIC {
         return Err(Error::Corrupt("unknown yykv header"));
     }
+    let expected_checksum = read_u64(&mut cursor)?;
+    let body_start = MAGIC.len() + 8;
+    let body = bytes.get(body_start..).ok_or(Error::Corrupt("truncated yykv checksum"))?;
+    if checksum(body) != expected_checksum {
+        return Err(Error::Corrupt("yykv checksum mismatch"));
+    }
+    let mut cursor = Cursor::new(body);
     let next_revision = read_u64(&mut cursor)?;
     let count = read_u32(&mut cursor)? as usize;
     let mut records = BTreeMap::new();
@@ -494,7 +528,7 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<FileShard> {
             return Err(Error::Corrupt("duplicate shard key"));
         }
     }
-    if cursor.position() != bytes.len() as u64 {
+    if cursor.position() != body.len() as u64 {
         return Err(Error::Corrupt("trailing shard bytes"));
     }
     Ok(FileShard { path: path.to_path_buf(), records, next_revision, sweep_cursor: None })
