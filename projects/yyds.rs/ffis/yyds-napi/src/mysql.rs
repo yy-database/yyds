@@ -3,10 +3,10 @@ use std::{net::SocketAddr, sync::Arc};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use yyds_catalog::Catalog;
-use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
+use yyds_gateway::SqlCatalog;
 use yyds_gateway_mysql::service::MysqlService;
 
-use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle};
+use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle, schema::SqlSchemaRegistryHandle};
 
 /// Loopback MySQL protocol listener bound to a node lease.
 #[napi]
@@ -44,22 +44,25 @@ impl MysqlServiceHandle {
         Ok(Self { inner: Some(service) })
     }
 
-    /// Starts a MySQL listener backed by a persisted local schema registry.
+    /// Starts a MySQL listener on a registry shared with the other SQL gateway.
     ///
-    /// `schema_path` 指向 `yyds-sql-schema/v0` 文件，缺失时会以空 schema 启动。
+    /// The node opens one persisted registry per data directory, so PostgreSQL
+    /// and MySQL allocate disjoint type ids and persist the same schema state.
     #[napi(factory)]
-    pub fn start_with_schema(
+    pub fn start_with_shared_schema(
         lease: &NodeLeaseHandle,
         port: u16,
         executor: &LocalExecutorHandle,
-        schema_path: String,
+        schema: &SqlSchemaRegistryHandle,
     ) -> Result<Self> {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let schema = SqlSchemaRegistry::open(&schema_path)
-            .map_err(|error| Error::from_reason(format!("open SQL schema: {}", error.message)))?;
-        let service =
-            MysqlService::start_with_registry(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), Arc::new(schema))
-                .map_err(map_io)?;
+        let service = MysqlService::start_with_registry(
+            Arc::clone(&lease.inner),
+            address,
+            Arc::clone(&executor.inner),
+            Arc::clone(&schema.inner),
+        )
+        .map_err(map_io)?;
         Ok(Self { inner: Some(service) })
     }
 

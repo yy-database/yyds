@@ -13,6 +13,7 @@ mod node;
 mod node_runtime;
 mod pgsql;
 mod redis;
+mod schema;
 mod wire;
 mod wire_dispatch;
 mod wire_protocol;

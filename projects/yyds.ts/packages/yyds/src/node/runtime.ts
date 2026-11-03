@@ -134,6 +134,12 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
         options.mysqlPort !== undefined ||
         options.pgsqlPort !== undefined;
     const schemaPath = join(options.dataDir, "sql-schema.v0.json");
+    // 两个 SQL gateway 必须共用同一个 registry：各开一份会让 type id 撞车，
+    // 把两张表映射到同一个 KV namespace，并在每次 DDL 时互相覆盖持久化状态。
+    const sharedSchema =
+        options.catalogPath === undefined && (options.pgsqlPort !== undefined || options.mysqlPort !== undefined)
+            ? native.SqlSchemaRegistryHandle.open(schemaPath)
+            : undefined;
     const pgsql =
         options.pgsqlPort === undefined
             ? undefined
@@ -144,11 +150,11 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
                       executor,
                       options.catalogPath,
                   )
-                : native.PgsqlServiceHandle.startWithSchema(
+                : native.PgsqlServiceHandle.startWithSharedSchema(
                       lease,
                       options.pgsqlPort,
                       executor,
-                      schemaPath,
+                      sharedSchema,
                   );
     const mysql =
         options.mysqlPort === undefined
@@ -160,11 +166,11 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
                       executor,
                       options.catalogPath,
                   )
-                : native.MysqlServiceHandle.startWithSchema(
+                : native.MysqlServiceHandle.startWithSharedSchema(
                       lease,
                       options.mysqlPort,
                       executor,
-                      schemaPath,
+                      sharedSchema,
                   );
     const mongo =
         options.mongoPort === undefined
