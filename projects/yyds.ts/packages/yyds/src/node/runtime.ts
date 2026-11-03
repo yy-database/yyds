@@ -117,81 +117,106 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     const native = loadYydsNative();
     const identity = new native.NodeIdentityHandle(options.clusterId, options.nodeId);
     const lease = native.NodeLeaseHandle.acquire(options.dataDir, identity);
-    const executor = new native.LocalExecutorHandle(options.dataDir, options.catalogPath);
-    const sweeper = native.ExpirySweeperHandle.start(
-        executor,
-        options.expirySweepIntervalMs ?? DEFAULT_EXPIRY_SWEEP_INTERVAL_MS,
-    );
-    const redis = new native.RedisServiceHandle(
-        lease,
-        options.redisPort ?? DEFAULT_REDIS_PORT,
-        executor,
-    );
-
+    const generation = crypto.randomUUID();
+    const started: StartedService[] = [];
     // 提供了 catalog 时走 catalog 派生的 SQL runtime，否则用本地持久化 schema registry。
     const hasRuntime =
         options.catalogPath !== undefined ||
         options.mysqlPort !== undefined ||
         options.pgsqlPort !== undefined;
-    const schemaPath = join(options.dataDir, "sql-schema.v0.json");
-    // 两个 SQL gateway 必须共用同一个 registry：各开一份会让 type id 撞车，
-    // 把两张表映射到同一个 KV namespace，并在每次 DDL 时互相覆盖持久化状态。
-    const sharedSchema =
-        options.catalogPath === undefined && (options.pgsqlPort !== undefined || options.mysqlPort !== undefined)
-            ? native.SqlSchemaRegistryHandle.open(schemaPath)
-            : undefined;
-    const pgsql =
-        options.pgsqlPort === undefined
-            ? undefined
-            : options.catalogPath !== undefined
+
+    let redis: RedisLike;
+    let pgsql: SqlLike | undefined;
+    let mysql: SqlLike | undefined;
+    let mongo: SqlLike | undefined;
+    let wire: SqlLike | undefined;
+    let runtime!: RuntimeStatus;
+
+    try {
+        const executor = new native.LocalExecutorHandle(options.dataDir, options.catalogPath);
+        const sweeper = native.ExpirySweeperHandle.start(
+            executor,
+            options.expirySweepIntervalMs ?? DEFAULT_EXPIRY_SWEEP_INTERVAL_MS,
+        );
+        started.push(sweeper);
+
+        redis = startListener("redis", options.redisPort ?? DEFAULT_REDIS_PORT, () =>
+            new native.RedisServiceHandle(
+                lease,
+                options.redisPort ?? DEFAULT_REDIS_PORT,
+                executor,
+            ),
+        );
+        started.push(redis);
+
+        const schemaPath = join(options.dataDir, "sql-schema.v0.json");
+        // 两个 SQL gateway 必须共用同一个 registry：各开一份会让 type id 撞车，
+        // 把两张表映射到同一个 KV namespace，并在每次 DDL 时互相覆盖持久化状态。
+        const sharedSchema =
+            options.catalogPath === undefined && (options.pgsqlPort !== undefined || options.mysqlPort !== undefined)
+                ? native.SqlSchemaRegistryHandle.open(schemaPath)
+                : undefined;
+        pgsql = startOptionalListener("postgresql", options.pgsqlPort, (port) =>
+            options.catalogPath !== undefined
                 ? native.PgsqlServiceHandle.startWithExecutor(
                       lease,
-                      options.pgsqlPort,
+                      port,
                       executor,
                       options.catalogPath,
                   )
                 : native.PgsqlServiceHandle.startWithSharedSchema(
                       lease,
-                      options.pgsqlPort,
+                      port,
                       executor,
                       sharedSchema,
-                  );
-    const mysql =
-        options.mysqlPort === undefined
-            ? undefined
-            : options.catalogPath !== undefined
+                  ),
+        );
+        if (pgsql) started.push(pgsql);
+        mysql = startOptionalListener("mysql", options.mysqlPort, (port) =>
+            options.catalogPath !== undefined
                 ? native.MysqlServiceHandle.startWithExecutor(
                       lease,
-                      options.mysqlPort,
+                      port,
                       executor,
                       options.catalogPath,
                   )
                 : native.MysqlServiceHandle.startWithSharedSchema(
                       lease,
-                      options.mysqlPort,
+                      port,
                       executor,
                       sharedSchema,
-                  );
-    const mongo =
-        options.mongoPort === undefined
-            ? undefined
-            : new native.MongoServiceHandle(lease, options.mongoPort, executor);
-    const wire =
-        options.wirePort === undefined
-            ? undefined
-            : new native.WireServerHandle(options.wirePort, executor);
+                  ),
+        );
+        if (mysql) started.push(mysql);
+        mongo = startOptionalListener("mongodb", options.mongoPort, (port) =>
+            new native.MongoServiceHandle(lease, port, executor),
+        );
+        if (mongo) started.push(mongo);
+        wire = startOptionalListener("wire", options.wirePort, (port) => new native.WireServerHandle(port, executor));
+        if (wire) started.push(wire);
 
-    const runtime = {
-        version: 1,
-        generation: crypto.randomUUID(),
-        pid: process.pid,
-        startedAtUnixMs: Date.now(),
-        redisAddress: redis.address(),
-        pgsqlAddress: pgsql?.address(),
-        mysqlAddress: mysql?.address(),
-        wireAddress: wire?.address(),
-    };
-    native.nodeWriteRuntimeStatus(options.dataDir, JSON.stringify(runtime));
+        runtime = {
+            version: 1,
+            generation,
+            pid: process.pid,
+            startedAtUnixMs: Date.now(),
+            redisAddress: redis.address(),
+            pgsqlAddress: pgsql?.address(),
+            mysqlAddress: mysql?.address(),
+            wireAddress: wire?.address(),
+        };
+        native.nodeWriteRuntimeStatus(options.dataDir, JSON.stringify(runtime));
+    } catch (error) {
+        // 部分启动失败时回收已监听的端口与后台 sweeper，并清掉本 generation 的标记，
+        // 否则重新 `start` 会看到半套服务和陈旧 runtime 状态。
+        for (const service of started.reverse()) stopQuietly(service);
+        try {
+            native.nodeClearRuntimeArtifacts(options.dataDir, generation);
+        } catch {
+            // 清理失败不能覆盖原始启动错误。
+        }
+        throw error;
+    }
 
     const runtimeTag = hasRuntime ? "sql-runtime" : "protocol-only";
     process.stdout.write(
@@ -213,6 +238,61 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
     mysql?.stop();
     mongo?.stop();
     wire?.stop();
-    sweeper.stop();
+    for (const service of started.reverse()) stopQuietly(service);
     native.nodeClearRuntimeArtifacts(options.dataDir, runtime.generation);
+}
+
+interface StartedService {
+    stop(): void;
+}
+
+interface RedisLike extends StartedService {
+    address(): string;
+    isFinished(): boolean;
+}
+
+interface SqlLike extends StartedService {
+    address(): string;
+    isFinished(): boolean;
+}
+
+interface RuntimeStatus {
+    version: number;
+    generation: string;
+    pid: number;
+    startedAtUnixMs: number;
+    redisAddress: string;
+    pgsqlAddress?: string;
+    mysqlAddress?: string;
+    wireAddress?: string;
+}
+
+function startListener<T extends StartedService>(protocol: string, port: number, start: () => T): T {
+    try {
+        return start();
+    } catch (error) {
+        throw listenerError(protocol, port, error);
+    }
+}
+
+function startOptionalListener<T extends StartedService>(
+    protocol: string,
+    port: number | undefined,
+    start: (port: number) => T,
+): T | undefined {
+    if (port === undefined) return undefined;
+    return startListener(protocol, port, () => start(port));
+}
+
+function listenerError(protocol: string, port: number, error: unknown): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    return new Error(`${protocol} listener on 127.0.0.1:${port} failed: ${message}`, { cause: error });
+}
+
+function stopQuietly(service: StartedService): void {
+    try {
+        service.stop();
+    } catch {
+        // 启动失败或退出阶段的重复停止不应掩盖原始结果。
+    }
 }
