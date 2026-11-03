@@ -68,6 +68,10 @@ fn protocol_v10_handshake_accepts_charset_setup_then_rejects_sql_explicitly() {
     assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1115);
 
     client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4 COLLATE utf8mb4_bin").unwrap()).unwrap();
+    assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
+
+    // 大小写折叠的 collation 无法真实生效，必须显式拒绝而不是接受后近似执行。
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4 COLLATE utf8mb4_general_ci").unwrap()).unwrap();
     let (sequence, error) = read_packet(&mut client);
     assert_eq!(sequence, 1);
     assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1273);
@@ -1536,6 +1540,107 @@ fn mysql_transaction_error_recovery_after_unique_violation() {
 
     // 恢复后正常查询通过。
     let _ = expect_single_value(&mut client, "SELECT id FROM users WHERE id = 42");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// Iris MySQL 适配器生成的三类文本谓词在 prepared statement 上必须按 code point
+/// 精确、大小写敏感地执行；`CAST(... AS BINARY)` 只是恒等字节视图。
+#[test]
+fn prepared_statements_execute_iris_text_predicates_case_sensitively() {
+    let (mut client, server) = start_server_with_runtime();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    // `INSTR(CAST(`name` AS BINARY), ?) > 0`
+    let (instr_id, columns, parameters, names, types) =
+        prepare(&mut client, "SELECT id FROM users WHERE INSTR(CAST(name AS BINARY), ?) > 0");
+    assert_eq!((columns, parameters), (1, 1));
+    assert_eq!(names, vec!["id".to_string()]);
+    assert_eq!(types, vec![0x08]);
+    for (needle, matches) in [("lic", true), ("LIC", false)] {
+        let value = lenenc_bytes(needle.as_bytes());
+        let payload = execute_payload(instr_id, &[(0xFD, false)], &[Some(&value)], true);
+        let (_, header) = execute(&mut client, &payload);
+        assert_eq!(read_lenenc(&header).0, 1);
+        let (_, definition) = read_packet_full(&mut client);
+        assert_eq!(extract_column_name(&definition), "id");
+        let (_, eof) = read_packet_full(&mut client);
+        assert_eq!(eof[0], 0xFE);
+        let (_, row) = read_packet_full(&mut client);
+        if matches {
+            assert_eq!(row[0], 0x00);
+            assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 42);
+            let (_, eof) = read_packet_full(&mut client);
+            assert_eq!(eof[0], 0xFE);
+        }
+        else {
+            assert_eq!(row[0], 0xFE, "`LIC` must not match `alice`, got {row:?}");
+        }
+    }
+
+    // `LEFT(CAST(`name` AS BINARY), CHAR_LENGTH(?)) = ?`
+    let (left_id, _, parameters, _, _) =
+        prepare(&mut client, "SELECT id FROM users WHERE LEFT(CAST(name AS BINARY), CHAR_LENGTH(?)) = ?");
+    assert_eq!(parameters, 2);
+    for (prefix, matches) in [("ali", true), ("ALI", false)] {
+        let first = lenenc_bytes(prefix.as_bytes());
+        let second = lenenc_bytes(prefix.as_bytes());
+        let payload = execute_payload(left_id, &[(0xFD, false), (0xFD, false)], &[Some(&first), Some(&second)], true);
+        let (_, header) = execute(&mut client, &payload);
+        assert_eq!(read_lenenc(&header).0, 1);
+        let (_, definition) = read_packet_full(&mut client);
+        let (_, eof) = read_packet_full(&mut client);
+        assert_eq!(eof[0], 0xFE);
+        let (_, row) = read_packet_full(&mut client);
+        if matches {
+            assert_eq!(extract_column_name(&definition), "id");
+            assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 42);
+            let (_, eof) = read_packet_full(&mut client);
+            assert_eq!(eof[0], 0xFE);
+        }
+        else {
+            assert_eq!(row[0], 0xFE, "the `LEFT` prefix comparison must stay case-sensitive, got {row:?}");
+        }
+    }
+
+    // `RIGHT(CAST(`name` AS BINARY), CHAR_LENGTH(?)) = ?`
+    let (right_id, _, parameters, _, _) =
+        prepare(&mut client, "SELECT id FROM users WHERE RIGHT(CAST(name AS BINARY), CHAR_LENGTH(?)) = ?");
+    assert_eq!(parameters, 2);
+    for (suffix, matches) in [("ice", true), ("ICE", false)] {
+        let first = lenenc_bytes(suffix.as_bytes());
+        let second = lenenc_bytes(suffix.as_bytes());
+        let payload = execute_payload(right_id, &[(0xFD, false), (0xFD, false)], &[Some(&first), Some(&second)], true);
+        let (_, header) = execute(&mut client, &payload);
+        assert_eq!(read_lenenc(&header).0, 1);
+        let (_, definition) = read_packet_full(&mut client);
+        let (_, eof) = read_packet_full(&mut client);
+        assert_eq!(eof[0], 0xFE);
+        let (_, row) = read_packet_full(&mut client);
+        if matches {
+            assert_eq!(extract_column_name(&definition), "id");
+            assert_eq!(i64::from_le_bytes(row[2..10].try_into().unwrap()), 42);
+            let (_, eof) = read_packet_full(&mut client);
+            assert_eq!(eof[0], 0xFE);
+        }
+        else {
+            assert_eq!(row[0], 0xFE, "the `RIGHT` suffix comparison must stay case-sensitive, got {row:?}");
+        }
+    }
+
+    // 文本协议路径与 prepared 走同一求值器：1-based 位置、字符计数、未找到为 0。
+    // `INSTR('alice', 'lic')` 是 2（`lic` 从第二个字符开始），不是 3。
+    assert_eq!(expect_single_value(&mut client, "SELECT INSTR(name, 'lic') FROM users"), b"2".to_vec());
+    assert_eq!(expect_single_value(&mut client, "SELECT INSTR(name, 'LIC') FROM users"), b"0".to_vec());
+    assert_eq!(expect_single_value(&mut client, "SELECT LEFT(name, 3) FROM users"), b"ali".to_vec());
+    assert_eq!(expect_single_value(&mut client, "SELECT RIGHT(name, 3) FROM users"), b"ice".to_vec());
+
+    // `STRPOS` 是 PostgreSQL 拼写，MySQL 必须按未知函数拒绝而不是近似执行。
+    assert_eq!(expect_error(&mut client, "SELECT STRPOS(name, 'lic') FROM users"), (1305, "42000".into()));
 
     drop(client);
     server.join().unwrap();

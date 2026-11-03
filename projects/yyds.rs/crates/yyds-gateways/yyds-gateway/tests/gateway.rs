@@ -49,7 +49,8 @@ fn sql_catalog_binding_consumes_published_yyds_identity() {
     let mut yyds_catalog = yyds_catalog::Catalog::open_memory();
     yyds_catalog.ensure_schema(7, "table users { @@id: i64 }\n").expect("publish VOS schema");
     let catalog = yyds_gateway::SqlCatalog::from_yyds_catalog(&yyds_catalog).expect("published identity");
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7).expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     assert!(matches!(bound, yyds_gateway::SqlCatalogBoundStatement::Select(_)));
 }
 
@@ -101,12 +102,12 @@ fn forbidden_legacy_surfaces_include_sql_gateway() {
 
 #[test]
 fn sql_surface_is_parsed_by_oak_without_creating_a_gateway_planner() {
-    yyds_gateway::parse_sql("SELECT 1").expect("Oak parses the SQL compatibility surface");
+    yyds_gateway::parse_sql("SELECT 1", SqlDialect::Postgres).expect("Oak parses the SQL compatibility surface");
 }
 
 #[test]
 fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
-    let bound = bind_sql("SELECT id, 1 AS constant FROM users WHERE id = 7").expect("bind");
+    let bound = bind_sql("SELECT id, 1 AS constant FROM users WHERE id = 7", SqlDialect::Postgres).expect("bind");
     let select = match bound {
         SqlBoundStatement::Select(s) => s,
         other => panic!("expected SqlBoundStatement::Select, got {other:?}"),
@@ -135,14 +136,15 @@ fn sql_binding_preserves_surface_shape_for_a_yyds_catalog_binder() {
 
 #[test]
 fn sql_binding_rejects_unimplemented_clauses_and_dml() {
-    assert!(bind_sql("CREATE TABLE users (id i64)").is_err());
-    assert!(bind_sql("SELECT * FROM a JOIN b").is_err()); // JOIN without ON
+    assert!(bind_sql("CREATE TABLE users (id i64)", SqlDialect::Postgres).is_err());
+    assert!(bind_sql("SELECT * FROM a JOIN b", SqlDialect::Postgres).is_err()); // JOIN without ON
 }
 
 #[test]
 fn sql_catalog_binding_resolves_vos_type_and_field_identity() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64 }\n");
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 7", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 7", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let select = match bound {
         yyds_gateway::SqlCatalogBoundStatement::Select(s) => s,
         other => panic!("expected SqlCatalogBoundStatement::Select, got {other:?}"),
@@ -163,11 +165,14 @@ fn sql_catalog_binding_resolves_vos_type_and_field_identity() {
 #[test]
 fn sql_catalog_binding_rejects_unknown_names_and_schema_versions() {
     let catalog = catalog("table users { @@id: i64 }\n");
-    let unknown_table = yyds_gateway::bind_sql_catalog("SELECT id FROM missing", &catalog, 7).expect_err("unknown table");
+    let unknown_table =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM missing", &catalog, 7, SqlDialect::Postgres).expect_err("unknown table");
     assert!(unknown_table.message.contains("unknown SQL table"));
-    let unknown_column = yyds_gateway::bind_sql_catalog("SELECT missing FROM users", &catalog, 7).expect_err("unknown column");
+    let unknown_column = yyds_gateway::bind_sql_catalog("SELECT missing FROM users", &catalog, 7, SqlDialect::Postgres)
+        .expect_err("unknown column");
     assert!(unknown_column.message.contains("unknown SQL column"));
-    let version = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 8).expect_err("schema version mismatch");
+    let version = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 8, SqlDialect::Postgres)
+        .expect_err("schema version mismatch");
     assert!(version.message.contains("schema version mismatch"));
 }
 
@@ -203,7 +208,8 @@ fn sql_select_pk_equality_executes_against_kv_adapter() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     let executor = make_executor_with_row("table:1", b"42", &[(1, b"42"), (2, b"alice"), (3, b"30")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 42", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE id = 42", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
 
@@ -217,7 +223,8 @@ fn sql_select_star_expands_all_fields() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"bob")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users WHERE id = 1", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users WHERE id = 1", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
 
@@ -230,8 +237,8 @@ fn sql_select_pk_string_literal_uses_string_rowid() {
     let catalog = catalog("table users { @@id: utf8, score: i64 }\n");
     let executor = make_executor_with_row("table:1", b"alice", &[(1, b"alice"), (2, b"100")]);
 
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT score FROM users WHERE id = 'alice'", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT score FROM users WHERE id = 'alice'", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
 
@@ -244,7 +251,8 @@ fn sql_select_missing_row_returns_empty_result() {
     // namespace "table:1" 存在但 key "999" 没有
     let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"exist")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 999", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 999", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
 
@@ -254,7 +262,7 @@ fn sql_select_missing_row_returns_empty_result() {
 #[test]
 fn sql_select_without_pk_generates_scan_plan() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
         .expect("pk-less query should now produce a scan plan");
     match plan {
@@ -272,7 +280,7 @@ fn sql_select_without_pk_generates_scan_plan() {
 #[test]
 fn sql_select_non_pk_equality_becomes_scan_with_remaining_predicate() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE name = 'foo'", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE name = 'foo'", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
         .expect("non-pk equality should produce scan plan with remaining predicate");
     match plan {
@@ -290,8 +298,13 @@ fn sql_select_and_extracts_pk_and_filters_on_remaining() {
     let executor = make_executor_with_row("table:1", b"5", &[(1, b"5"), (2, b"carol"), (3, b"25")]);
 
     // AND predicate 包含 pk 等值 + 额外条件；plan 应只提 pk，额外条件作为 remaining
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 5 AND age = 25", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users WHERE id = 5 AND age = 25",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let read_plan = match &plan {
         yyds_gateway::SqlExecutionPlan::Read(p) => p,
@@ -310,7 +323,8 @@ fn sql_select_projects_binary_expression() {
 
     // 先确认 Oak 支持哪些 projection 表达式
     let bound =
-        yyds_gateway::bind_sql_catalog("SELECT id + 1 AS inc FROM users WHERE id = 1", &catalog, 7).expect("catalog bind");
+        yyds_gateway::bind_sql_catalog("SELECT id + 1 AS inc FROM users WHERE id = 1", &catalog, 7, SqlDialect::Postgres)
+            .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
 
@@ -353,7 +367,7 @@ fn nullable_users() -> (yyds_gateway::SqlCatalog, yyds_execution::LocalExecutor<
         "INSERT INTO users VALUES (2, '', 0)",
         "INSERT INTO users VALUES (3, 'x', 10)",
     ] {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("insert bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("insert bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("insert plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert nullable row");
     }
@@ -384,7 +398,7 @@ fn file_nullable_users(
         "INSERT INTO users VALUES (2, '', 0)",
         "INSERT INTO users VALUES (3, 'x', 10)",
     ] {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("insert bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("insert bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("insert plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert nullable row");
     }
@@ -451,13 +465,15 @@ fn sql_insert_then_select_round_trip() {
 
     // INSERT INTO users VALUES (7, 'alice', 30)
     // Oak 解析后 INSERT VALUES 第一个值是 pk literal = 7
-    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (7, 'alice', 30)", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (7, 'alice', 30)", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert executes");
 
     // SELECT 出来验证
     let bound =
-        yyds_gateway::bind_sql_catalog("SELECT id, name, age FROM users WHERE id = 7", &catalog, 7).expect("catalog bind");
+        yyds_gateway::bind_sql_catalog("SELECT id, name, age FROM users WHERE id = 7", &catalog, 7, SqlDialect::Postgres)
+            .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select after insert");
 
@@ -481,33 +497,54 @@ fn sql_int64_round_trip_preserves_precision_beyond_f64() {
     let id: i64 = 9_007_199_254_740_993;
     let age: i64 = i64::MAX - 1;
 
-    let bound = yyds_gateway::bind_sql_catalog(&format!("INSERT INTO users VALUES ({id}, 'big', {age})"), &catalog, 7)
-        .expect("insert bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        &format!("INSERT INTO users VALUES ({id}, 'big', {age})"),
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("insert bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("insert plan");
     yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert executes");
 
-    let bound = yyds_gateway::bind_sql_catalog(&format!("SELECT id, age FROM users WHERE id = {id}"), &catalog, 7)
-        .expect("select bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        &format!("SELECT id, age FROM users WHERE id = {id}"),
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("select bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("select plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select exact int64");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(id), yyds_gateway::SqlValue::Integer(age)]);
 
     // 扫描路径的整数等值比较也必须精确，不能先转成 f64。
-    let bound = yyds_gateway::bind_sql_catalog(&format!("SELECT COUNT(*) FROM users WHERE age = {age}"), &catalog, 7)
-        .expect("count bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        &format!("SELECT COUNT(*) FROM users WHERE age = {age}"),
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("count bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("count plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("count exact int64 predicate");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(1)]);
 
     // SUM 走 i128 精确累加。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT SUM(age) FROM users", &catalog, 7).expect("sum bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT SUM(age) FROM users", &catalog, 7, SqlDialect::Postgres).expect("sum bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("sum plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("sum exact int64");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(age)]);
 
     // 整数溢出必须显式失败，而不是静默转成 f64。
-    let bound = yyds_gateway::bind_sql_catalog(&format!("SELECT age + 2 FROM users WHERE id = {id}"), &catalog, 7)
-        .expect("overflow select bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        &format!("SELECT age + 2 FROM users WHERE id = {id}"),
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("overflow select bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("overflow select plan");
     let error =
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("integer overflow must fail");
@@ -521,7 +558,7 @@ fn sql_contract_catalog_projects_integer_types_for_exact_decode() {
     assert_eq!(catalog.tables()[0].fields[1].field_type, yyds_gateway::SqlFieldType::Int64);
 
     let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"9007199254740993")]);
-    let bound = yyds_gateway::bind_sql_catalog("SELECT age FROM users", &catalog, 7).expect("scan bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT age FROM users", &catalog, 7, SqlDialect::Postgres).expect("scan bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("scan plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("contract typed decode");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(9_007_199_254_740_993)]);
@@ -535,44 +572,46 @@ fn sql_aggregate_functions_count_sum_avg_max_min() {
     // Insert three rows: (7, alice, 30), (11, bob, 25), (13, carol, 35)
     for (id, name, age) in [(7i64, "alice", 30i64), (11, "bob", 25), (13, "carol", 35)] {
         let sql = format!("INSERT INTO users VALUES ({id}, '{name}', {age})");
-        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert");
     }
 
     // COUNT(*) → 3
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT(*)");
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(3)]);
 
     // COUNT(age) WHERE age > 28 → alice(30) + carol(35) = 2
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users WHERE age > 28", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users WHERE age > 28", &catalog, 7, SqlDialect::Postgres)
+            .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT(col) WHERE");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(2)]);
 
     // SUM(age) → 30 + 25 + 35 = 90
-    let bound = yyds_gateway::bind_sql_catalog("SELECT SUM(age) FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT SUM(age) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec SUM");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(90)]);
 
     // AVG(age) → 90 / 3 = 30
-    let bound = yyds_gateway::bind_sql_catalog("SELECT AVG(age) FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT AVG(age) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec AVG");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Number(30.0)]);
 
     // MAX(age) → 35
-    let bound = yyds_gateway::bind_sql_catalog("SELECT MAX(age) FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT MAX(age) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec MAX");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(35)]);
 
     // MIN(age) → 25
-    let bound = yyds_gateway::bind_sql_catalog("SELECT MIN(age) FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT MIN(age) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec MIN");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(25)]);
@@ -584,20 +623,21 @@ fn sql_count_distinct_deduplicates_non_null_values() {
     let (catalog, executor) = nullable_users();
 
     // Verify fixture has the expected seed (3 rows)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(3)]);
 
     // COUNT(age) — non-NULL ages = 2 rows (age=0 and age=10)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT(col)");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(2)]);
 
     // COUNT(DISTINCT age) — unique non-NULL ages = 2 distinct values (0 and 10)
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7).expect("bind COUNT DISTINCT");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind COUNT DISTINCT");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(2)], "COUNT(DISTINCT age) on default fixture");
@@ -605,26 +645,27 @@ fn sql_count_distinct_deduplicates_non_null_values() {
     // Now insert duplicates: age=10 twice and age=5 once
     for (id, name, age) in [(17i64, "d", 10i64), (19, "e", 10), (23, "f", 5)] {
         let sql = format!("INSERT INTO users VALUES ({id}, '{name}', {age})");
-        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind insert");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7, SqlDialect::Postgres).expect("bind insert");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan insert");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert");
     }
 
     // COUNT(*) = 6 now
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7).expect("bind COUNT*");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT COUNT(*) FROM users", &catalog, 7, SqlDialect::Postgres).expect("bind COUNT*");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT*");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT*");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(6)]);
 
     // COUNT(age) = 5 (original 2 non-NULL + 3 inserted)
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7).expect("bind COUNT col after insert");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(age) FROM users", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind COUNT col after insert");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT col");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT col after insert");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(5)]);
 
     // COUNT(DISTINCT age) = 3 (unique non-NULL: 0, 10, 5)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7)
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT age) FROM users", &catalog, 7, SqlDialect::Postgres)
         .expect("bind COUNT DISTINCT after insert");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT");
     let result =
@@ -632,8 +673,8 @@ fn sql_count_distinct_deduplicates_non_null_values() {
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Integer(3)], "COUNT(DISTINCT age) must dedup 10s and ignore NULL");
 
     // COUNT(DISTINCT *) is not semantically different from COUNT(*) — still 6 rows
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT *) FROM users", &catalog, 7).expect("bind COUNT DISTINCT star");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT COUNT(DISTINCT *) FROM users", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind COUNT DISTINCT star");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan COUNT DISTINCT star");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec COUNT DISTINCT star");
     assert_eq!(
@@ -647,13 +688,14 @@ fn sql_count_distinct_deduplicates_non_null_values() {
 fn sql_aggregate_rejects_wildcard_for_non_count_functions() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     let executor = empty_executor();
-    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (7, 'alice', 30)", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (7, 'alice', 30)", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert");
 
     for sql in ["SELECT SUM(*) FROM users", "SELECT AVG(*) FROM users", "SELECT MIN(*) FROM users", "SELECT MAX(*) FROM users"]
     {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         let err =
             yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("`*` is only valid for COUNT");
@@ -670,7 +712,7 @@ fn sql_null_tests_and_not_predicate_use_three_valued_logic() {
         ("SELECT id FROM users WHERE name IS NULL", vec![1i64]),
         ("SELECT id FROM users WHERE name IS NOT NULL ORDER BY id", vec![2, 3]),
     ] {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute null test");
         let ids: Vec<i64> = result
@@ -685,7 +727,8 @@ fn sql_null_tests_and_not_predicate_use_three_valued_logic() {
     }
 
     // `NOT (age = 0)` 对 age = NULL 的行仍是 NULL，因此只返回 id=3。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE NOT (age = 0)", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE NOT (age = 0)", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute NOT predicate");
     assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::Integer(3)]]);
@@ -793,7 +836,7 @@ fn sql_in_subquery_evaluates_membership_with_three_valued_logic() {
         ("SELECT id FROM users WHERE id NOT IN (SELECT age FROM users WHERE id = 1)", Vec::new()),
     ];
     for (sql, expected) in cases {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         let mut result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute IN subquery");
         result.rows.sort_by_key(|row| match row.first() {
@@ -815,7 +858,7 @@ fn sql_in_subquery_evaluates_membership_with_three_valued_logic() {
 #[test]
 fn sql_aggregate_rejects_mixed_aggregate_nonaggregate() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
-    let result = yyds_gateway::bind_sql_catalog("SELECT id, COUNT(*) FROM users", &catalog, 7);
+    let result = yyds_gateway::bind_sql_catalog("SELECT id, COUNT(*) FROM users", &catalog, 7, SqlDialect::Postgres);
     assert!(result.is_ok());
     let bound = result.unwrap();
     let err = yyds_gateway::plan_statement(bound, &catalog).expect_err("planner should reject mixed");
@@ -833,13 +876,15 @@ fn sql_limit_with_where_scans_all_then_returns_limited() {
     // 按 rowid 顺序（= id 升序）：(7,30), (11,20), (13,35), (17,22)
     for (id, _name, age) in [(7i64, "alice", 30i64), (11, "bob", 20), (13, "carol", 35), (17, "dan", 22)] {
         let sql = format!("INSERT INTO users VALUES ({id}, '', {age})");
-        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert");
     }
 
     // WHERE age > 22 LIMIT 2 → 预期：2 行 alice(30), carol(35)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id, age FROM users WHERE age > 22 LIMIT 2", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id, age FROM users WHERE age > 22 LIMIT 2", &catalog, 7, SqlDialect::Postgres)
+            .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec");
 
@@ -859,14 +904,19 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     // 按 age: bob=20, dan=22, alice=30, carol=35
     for (id, _name, age) in [(7i64, "alice", 30i64), (11, "bob", 20), (13, "carol", 35), (17, "dan", 22)] {
         let sql = format!("INSERT INTO users VALUES ({id}, '', {age})");
-        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert");
     }
 
     // ORDER BY age ASC LIMIT 2 → bob(20), dan(22)
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT name, age FROM users ORDER BY age ASC LIMIT 2", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users ORDER BY age ASC LIMIT 2",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec ASC+LIMIT");
     assert_eq!(result.rows.len(), 2);
@@ -874,8 +924,13 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Integer(22), "ASC second should be dan(22)");
 
     // ORDER BY age DESC LIMIT 2 → carol(35), alice(30)
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT name, age FROM users ORDER BY age DESC LIMIT 2", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users ORDER BY age DESC LIMIT 2",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec DESC+LIMIT");
     assert_eq!(result.rows.len(), 2);
@@ -883,8 +938,13 @@ fn sql_order_by_with_limit_offset_uses_top_n_heap() {
     assert_eq!(result.rows[1][1], yyds_gateway::SqlValue::Integer(30), "DESC second should be alice(30)");
 
     // ORDER BY age ASC LIMIT 1 OFFSET 1 → dan(22) — 跳过 bob(20)
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users ORDER BY age ASC LIMIT 1 OFFSET 1", &catalog, 7)
-        .expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT name, age FROM users ORDER BY age ASC LIMIT 1 OFFSET 1",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec ASC+OFFSET+LIMIT");
     assert_eq!(result.rows.len(), 1);
@@ -898,13 +958,19 @@ fn sql_update_then_select_round_trip() {
     let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
 
     // UPDATE users SET name='updated', age=99 WHERE id = 9
-    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated', age = 99 WHERE id = 9", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated', age = 99 WHERE id = 9",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("update executes");
 
     // SELECT 验证
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select after update");
 
@@ -918,12 +984,14 @@ fn sql_delete_removes_row() {
     let executor = make_executor_with_row("table:1", b"55", &[(1, b"55"), (2, b"victim")]);
 
     // DELETE FROM users WHERE id = 55
-    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("delete executes");
 
     // SELECT 验证空
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7, SqlDialect::Postgres)
+        .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select after delete");
     assert!(result.rows.is_empty());
@@ -933,8 +1001,13 @@ fn sql_delete_removes_row() {
 fn sql_insert_column_list_must_name_catalog_columns() {
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
     // `@@id` 是 catalog 里的主键注解，SQL 列名是 `id`；`@@` 前缀属于系统变量，不能当列名。
-    let error = yyds_gateway::bind_sql_catalog("INSERT INTO users (age, @@id, name) VALUES (25, 11, 'bob')", &catalog, 7)
-        .expect_err("system variable prefix is not a column");
+    let error = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (age, @@id, name) VALUES (25, 11, 'bob')",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect_err("system variable prefix is not a column");
     assert!(error.message.contains("unknown SQL column"), "{}", error.message);
 }
 
@@ -943,7 +1016,8 @@ fn sql_insert_pk_must_be_first_value() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     // VALUES 第一个必须是 pk literal — 如果 Oak 把 "1" 当作 name 值也会在 planner 层报错
     // 这里只是验证 planner 接受正确的形式
-    let _bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (1, 'one')", &catalog, 7).expect("insert bind");
+    let _bound = yyds_gateway::bind_sql_catalog("INSERT INTO users VALUES (1, 'one')", &catalog, 7, SqlDialect::Postgres)
+        .expect("insert bind");
 }
 
 // --- INSERT ... SELECT ---
@@ -988,7 +1062,9 @@ fn sql_insert_select_copies_filtered_rows_from_a_table() {
 #[test]
 fn sql_insert_select_requires_matching_column_counts() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT id FROM users", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT id FROM users", &catalog, 7, SqlDialect::Postgres)
+            .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("column count mismatch");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
     assert!(error.message.contains("column count mismatch"), "{}", error.message);
@@ -997,8 +1073,13 @@ fn sql_insert_select_requires_matching_column_counts() {
 #[test]
 fn sql_insert_select_rejects_incompatible_column_types() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let bound =
-        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) SELECT name, name FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) SELECT name, name FROM users",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("type mismatch");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::TypeMismatch);
 }
@@ -1011,8 +1092,13 @@ fn sql_insert_select_unique_conflict_publishes_nothing() {
     run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (1, 'alice')");
     run_sql(&executor, None, &catalog, "INSERT INTO users VALUES (2, 'bob')");
 
-    let bound =
-        yyds_gateway::bind_sql_catalog("INSERT INTO admins (id, name) SELECT id, name FROM users", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO admins (id, name) SELECT id, name FROM users",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("duplicate primary key");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
@@ -1110,6 +1196,7 @@ fn sql_on_conflict_rejects_non_unique_targets_and_mysql() {
         "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (name) DO NOTHING",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("target is not unique");
@@ -1117,9 +1204,13 @@ fn sql_on_conflict_rejects_non_unique_targets_and_mysql() {
     assert!(error.message.contains("unique constraint"), "{}", error.message);
 
     // MySQL 没有 ON CONFLICT 语法。
-    let bound =
-        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT DO NOTHING", &catalog, 7)
-            .expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT DO NOTHING",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let error =
         yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql).expect_err("MySQL has no ON CONFLICT");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
@@ -1250,6 +1341,7 @@ fn sql_on_conflict_do_update_rejects_invalid_shapes() {
         "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT DO UPDATE SET name = 'x'",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("DO UPDATE requires a target");
@@ -1261,6 +1353,7 @@ fn sql_on_conflict_do_update_rejects_invalid_shapes() {
         "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id) DO UPDATE SET id = 2",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("primary key cannot be reassigned");
@@ -1268,8 +1361,9 @@ fn sql_on_conflict_do_update_rejects_invalid_shapes() {
     assert!(error.message.contains("primary key"), "{}", error.message);
 
     // 结构不完整（`ON CONFLICT` 没有动作）由 Oak 拒绝。
-    let error = yyds_gateway::bind_sql("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id)")
-        .expect_err("ON CONFLICT requires an action");
+    let error =
+        yyds_gateway::bind_sql("INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id)", SqlDialect::Postgres)
+            .expect_err("ON CONFLICT requires an action");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
 
     // MySQL 方言显式拒绝，不退化成 ON DUPLICATE KEY UPDATE。
@@ -1277,6 +1371,7 @@ fn sql_on_conflict_do_update_rejects_invalid_shapes() {
         "INSERT INTO users (id, name) VALUES (1, 'alice') ON CONFLICT (id) DO UPDATE SET name = 'x'",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("bind");
     let error =
@@ -1417,7 +1512,7 @@ fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = CASE WHEN users.age > 0 THEN 1 ELSE 2 END",
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = (SELECT MAX(age) FROM users)",
     ] {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres)
             .unwrap_or_else(|error| panic!("bind `{sql}`: {}", error.message));
         let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("shape is not executable");
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}");
@@ -1428,6 +1523,7 @@ fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = ABS(users.age)",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect_err("a function call is not a supported assignment value");
     assert!(!function_error.message.is_empty(), "function assignment must report a reason");
@@ -1437,6 +1533,7 @@ fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = age + 1",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect_err("unqualified column is ambiguous");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::AmbiguousColumn);
@@ -1446,6 +1543,7 @@ fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET age = EXCLUDED.age WHERE EXCLUDED.age > 0",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect_err("excluded is not visible in the conflict predicate");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownTableQualifier);
@@ -1455,6 +1553,7 @@ fn sql_on_conflict_do_update_rejects_expressions_beyond_column_arithmetic() {
         "INSERT INTO users VALUES (1, 'alice', 30) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("bind");
     let error =
@@ -1503,7 +1602,7 @@ fn try_run_sql(
     catalog: &yyds_gateway::SqlCatalog,
     sql: &str,
 ) -> Result<yyds_gateway::SqlResult, yyds_gateway::SqlFrontendError> {
-    let bound = yyds_gateway::bind_sql_catalog(sql, catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, catalog).expect("plan");
     yyds_gateway::execute_plan(executor, None, &plan, SqlDialect::Postgres)
 }
@@ -1655,16 +1754,25 @@ fn sql_insert_returning_rejects_unknown_columns_and_mysql() {
     let executor = empty_executor();
 
     // 未知列在 catalog 绑定层拒绝，语句不执行。
-    let bound =
-        yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING missing", &catalog, 7)
-            .expect_err("unknown RETURNING column");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING missing",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect_err("unknown RETURNING column");
     assert_eq!(bound.kind, yyds_gateway::SqlErrorKind::UnknownColumn);
     let rows = run_sql(&executor, None, &catalog, "SELECT id FROM users");
     assert!(rows.rows.is_empty(), "the rejected statement must not write");
 
     // MySQL 的 INSERT 没有 RETURNING。
-    let bound = yyds_gateway::bind_sql_catalog("INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING id", &catalog, 7)
-        .expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO users (id, name) VALUES (1, 'alice') RETURNING id",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let error = yyds_gateway::plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql)
         .expect_err("MySQL has no INSERT ... RETURNING");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax);
@@ -1680,7 +1788,7 @@ fn sql_select_star_from_table_scans_all_rows() {
         &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM users", &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     // 确认走 Scan 路径
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
@@ -1702,7 +1810,8 @@ fn sql_scan_applies_remaining_predicate_from_non_pk_equality() {
 
     // WHERE name = 'alice' — 不是 pk 等值，planner 输出 ScanPlan 带 remaining_predicate
     let bound =
-        yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE name = 'alice'", &catalog, 7).expect("catalog bind");
+        yyds_gateway::bind_sql_catalog("SELECT id, name FROM users WHERE name = 'alice'", &catalog, 7, SqlDialect::Postgres)
+            .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
@@ -1724,13 +1833,13 @@ fn sql_insert_multiple_then_select_star_returns_all() {
     for sql in
         &["INSERT INTO items VALUES (1, 'A1')", "INSERT INTO items VALUES (2, 'B2')", "INSERT INTO items VALUES (3, 'C3')"]
     {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("insert");
     }
 
     // SELECT * 验证 scan 路径返回所有三行
-    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM items", &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT * FROM items", &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scan(_)));
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("scan");
@@ -1748,7 +1857,7 @@ fn sql_select_pk_greater_pushes_after_cursor() {
         &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
 
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id > 1", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id > 1", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
         .expect("plan");
     match &plan {
@@ -1773,7 +1882,7 @@ fn sql_select_pk_less_pushes_before_cursor() {
         &[(b"1", &[(1, b"1"), (2, b"alice")]), (b"2", &[(1, b"2"), (2, b"bob")]), (b"3", &[(1, b"3"), (2, b"carol")])],
     );
 
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id < 3", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id < 3", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
         .expect("plan");
     match &plan {
@@ -1802,9 +1911,10 @@ fn sql_select_pk_range_after_and_before_together() {
         ],
     );
 
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id > 1 AND id < 4", &catalog, 7)
-        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
-        .expect("plan");
+    let plan =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id > 1 AND id < 4", &catalog, 7, SqlDialect::Postgres)
+            .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+            .expect("plan");
     match &plan {
         yyds_gateway::SqlExecutionPlan::Scan(s) => {
             assert_eq!(s.rowid_after.as_deref(), Some(b"1".as_ref()));
@@ -1832,7 +1942,7 @@ fn sql_limit_pushes_down_to_scan() {
         ],
     );
 
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users LIMIT 3", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users LIMIT 3", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
         .expect("plan");
     match &plan {
@@ -1862,7 +1972,7 @@ fn sql_select_pk_like_prefix_pushes_rowid_prefix() {
     );
 
     // LIKE 'app%' on pk → rowid_prefix = b"app" → scan pushes prefix
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id LIKE 'app%'", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id LIKE 'app%'", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
         .expect("plan");
     match &plan {
@@ -1904,9 +2014,10 @@ fn sql_select_pk_between_extracts_range() {
     // 显式 AND：id >= 2 AND id <= 4
     // GreaterEqual(2) → after 必须 exclusive：key > (2-1) = key > 1 → after=b"1"
     // LessEqual(4) → before 必须 exclusive：key < (4+1) = key < 5 → before=b"5"
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id >= 2 AND id <= 4", &catalog, 7)
-        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
-        .expect("plan");
+    let plan =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id >= 2 AND id <= 4", &catalog, 7, SqlDialect::Postgres)
+            .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+            .expect("plan");
     match &plan {
         yyds_gateway::SqlExecutionPlan::Scan(s) => {
             assert_eq!(s.rowid_after.as_deref(), Some(b"1".as_ref()));
@@ -1916,9 +2027,10 @@ fn sql_select_pk_between_extracts_range() {
     }
 
     // BETWEEN 2 AND 4 → 展开同上
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id BETWEEN 2 AND 4", &catalog, 7)
-        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
-        .expect("plan");
+    let plan =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id BETWEEN 2 AND 4", &catalog, 7, SqlDialect::Postgres)
+            .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+            .expect("plan");
     match &plan {
         yyds_gateway::SqlExecutionPlan::Scan(s) => {
             assert_eq!(s.rowid_after.as_deref(), Some(b"1".as_ref()));
@@ -1945,7 +2057,7 @@ fn sql_select_pk_in_list_filters_rows() {
     );
 
     // id IN (2, 4, 5) — 展开成 OR 树，走 Scan + remaining_predicate
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id IN (2, 4, 5)", &catalog, 7)
+    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id IN (2, 4, 5)", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
         .expect("plan");
     match &plan {
@@ -1960,7 +2072,7 @@ fn sql_select_pk_in_list_filters_rows() {
 
 /// 直接用 yyds_gateway::parse_sql 看 AST，诊断 oak_sql parser 对各 WHERE 语法到底产啥。
 fn probe_ast(sql: &str) -> String {
-    let root = yyds_gateway::parse_sql(sql).unwrap_or_else(|e| panic!("parse fail {sql}: {e:?}"));
+    let root = yyds_gateway::parse_sql(sql, SqlDialect::Postgres).unwrap_or_else(|e| panic!("parse fail {sql}: {e:?}"));
     let sel = match &root.statements[0] {
         oak_sql::ast::SqlStatement::Select(s) => s,
         _ => panic!("not select"),
@@ -2011,7 +2123,7 @@ fn probe_parser_between_in_like_is_null() {
 #[test]
 fn probe_planner_supports_order_by() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let result = yyds_gateway::bind_sql_catalog("SELECT id FROM users ORDER BY id", &catalog, 7)
+    let result = yyds_gateway::bind_sql_catalog("SELECT id FROM users ORDER BY id", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
     match result {
         Ok(_) => eprintln!("ORDER BY: supported ✅"),
@@ -2022,7 +2134,7 @@ fn probe_planner_supports_order_by() {
 #[test]
 fn probe_planner_supports_group_by() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let result = yyds_gateway::bind_sql_catalog("SELECT name FROM users GROUP BY name", &catalog, 7)
+    let result = yyds_gateway::bind_sql_catalog("SELECT name FROM users GROUP BY name", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
     match result {
         Ok(_) => eprintln!("GROUP BY: supported ✅"),
@@ -2033,7 +2145,7 @@ fn probe_planner_supports_group_by() {
 #[test]
 fn probe_planner_supports_distinct() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
-    let result = yyds_gateway::bind_sql_catalog("SELECT DISTINCT name FROM users", &catalog, 7)
+    let result = yyds_gateway::bind_sql_catalog("SELECT DISTINCT name FROM users", &catalog, 7, SqlDialect::Postgres)
         .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
     match result {
         Ok(_) => eprintln!("DISTINCT: supported ✅"),
@@ -2047,7 +2159,8 @@ fn probe_planner_supports_aggregates() {
     let queries =
         ["SELECT COUNT(*) FROM users", "SELECT MAX(id) FROM users", "SELECT SUM(id) FROM users", "SELECT AVG(id) FROM users"];
     for q in &queries {
-        let r = yyds_gateway::bind_sql_catalog(q, &catalog, 7).and_then(|b| yyds_gateway::plan_statement(b, &catalog));
+        let r = yyds_gateway::bind_sql_catalog(q, &catalog, 7, SqlDialect::Postgres)
+            .and_then(|b| yyds_gateway::plan_statement(b, &catalog));
         match r {
             Ok(_) => eprintln!("{q}: supported ✅"),
             Err(e) => eprintln!("{q}: blocked ❌ — {e:?}"),
@@ -2059,9 +2172,14 @@ fn probe_planner_supports_aggregates() {
 fn probe_planner_supports_or_in_where() {
     // WHERE a = 1 OR b = 2  — OR 树能否正确走 remaining_predicate
     let catalog = catalog("table users { @@id: i64, name: utf8, age: i64 }\n");
-    let plan = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE name = 'alice' OR age > 20", &catalog, 7)
-        .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
-        .expect("plan");
+    let plan = yyds_gateway::bind_sql_catalog(
+        "SELECT id FROM users WHERE name = 'alice' OR age > 20",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .and_then(|b| yyds_gateway::plan_statement(b, &catalog))
+    .expect("plan");
     match plan {
         yyds_gateway::SqlExecutionPlan::Scan(_) => eprintln!("OR in WHERE: Scan with remaining_predicate ✅"),
         other => panic!("expected Scan, got {other:?}"),
@@ -2076,15 +2194,21 @@ fn sql_update_rejects_when_remaining_predicate_fails() {
 
     // UPDATE users SET name='updated' WHERE id = 9 AND age = 99
     // age=99 与实际 age=20 不匹配 — 应该影响 0 行且数据不变
-    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age = 99", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated' WHERE id = 9 AND age = 99",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("update");
 
     assert_eq!(result.affected_rows, 0, "remaining predicate mismatch should affect 0 rows");
 
     // SELECT 验证：数据保持原样
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
 
@@ -2098,15 +2222,21 @@ fn sql_update_succeeds_when_remaining_predicate_matches() {
     let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
 
     // UPDATE users SET name='updated' WHERE id = 9 AND age = 20 — 应该成功
-    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age = 20", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated' WHERE id = 9 AND age = 20",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("update");
 
     assert_eq!(result.affected_rows, 1, "matching remaining predicate should affect 1 row");
 
     // SELECT 验证：name 已更新
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 9", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
 
@@ -2120,25 +2250,37 @@ fn sql_update_applies_range_predicate_beyond_pk() {
     let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"original"), (3, b"20")]);
 
     // pk 等值命中但 age 范围不命中 —— 不允许只按主键就写。
-    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age > 25", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated' WHERE id = 9 AND age > 25",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("update");
     assert_eq!(result.affected_rows, 0, "range predicate mismatch should affect 0 rows");
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users WHERE id = 9", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::String("original".into()), yyds_gateway::SqlValue::Integer(20)]);
 
     // 范围命中 —— 应该写入。
-    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET name = 'updated' WHERE id = 9 AND age > 10", &catalog, 7)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "UPDATE users SET name = 'updated' WHERE id = 9 AND age > 10",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("update");
     assert_eq!(result.affected_rows, 1, "range predicate match should affect 1 row");
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 9", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
     assert_eq!(result.rows[0][0], yyds_gateway::SqlValue::String("updated".into()));
@@ -2151,30 +2293,35 @@ fn sql_delete_applies_like_predicate_beyond_pk() {
         make_executor_with_rows("table:1", &[(b"55", &[(1, b"55"), (2, b"victim")]), (b"56", &[(1, b"56"), (2, b"other")])]);
 
     // pk 等值命中但 LIKE 不命中 —— 不允许只按主键就删除。
-    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 56 AND name LIKE 'v%'", &catalog, 7)
-        .expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 56 AND name LIKE 'v%'", &catalog, 7, SqlDialect::Postgres)
+            .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("delete");
     assert_eq!(result.affected_rows, 0, "LIKE predicate mismatch should affect 0 rows");
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 56", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 56", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
     assert_eq!(result.rows.len(), 1, "row 56 must survive a failed LIKE predicate");
 
     // LIKE 命中 —— 应该删除，且只删命中的那一行。
-    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55 AND name LIKE 'v%'", &catalog, 7)
-        .expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55 AND name LIKE 'v%'", &catalog, 7, SqlDialect::Postgres)
+            .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("delete");
     assert_eq!(result.affected_rows, 1, "LIKE predicate match should affect 1 row");
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 55", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 55", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
     assert!(result.rows.is_empty(), "row 55 must be deleted");
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 56", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 56", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
     assert_eq!(result.rows.len(), 1, "row 56 must not be affected");
@@ -2186,15 +2333,17 @@ fn sql_delete_rejects_when_remaining_predicate_fails() {
     let executor = make_executor_with_row("table:1", b"55", &[(1, b"55"), (2, b"victim")]);
 
     // DELETE FROM users WHERE id = 55 AND name = 'other' — name 不匹配
-    let bound = yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55 AND name = 'other'", &catalog, 7)
-        .expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("DELETE FROM users WHERE id = 55 AND name = 'other'", &catalog, 7, SqlDialect::Postgres)
+            .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("delete");
 
     assert_eq!(result.affected_rows, 0, "remaining predicate mismatch should affect 0 rows");
 
     // SELECT 验证：数据仍然存在
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT name FROM users WHERE id = 55", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
 
@@ -2207,7 +2356,8 @@ fn utf8_field_preserves_leading_zeros_through_decode() {
     let catalog = catalog("table users { @@id: i64, code: utf8 }\n");
     let executor = make_executor_with_row("table:1", b"9", &[(1, b"9"), (2, b"001")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 9", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 9", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
 
@@ -2222,7 +2372,8 @@ fn utf8_field_preserves_empty_string() {
     let catalog = catalog("table users { @@id: i64, label: utf8 }\n");
     let executor = make_executor_with_row("table:1", b"1", &[(1, b"1"), (2, b"")]);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT label FROM users WHERE id = 1", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT label FROM users WHERE id = 1", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
 
@@ -2234,7 +2385,8 @@ fn utf8_field_preserves_empty_string() {
 fn sql_null_is_distinct_from_empty_string() {
     let (catalog, executor) = nullable_users();
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT name, age FROM users", &catalog, 7).expect("scan bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT name, age FROM users", &catalog, 7, SqlDialect::Postgres).expect("scan bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("scan plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("scan nullable rows");
 
@@ -2254,7 +2406,7 @@ fn sql_order_by_nulls_first_last_overrides_dialect_default() {
 
     let (catalog, executor) = nullable_users();
     let ids = |dialect: SqlDialect, sql: &str| -> Vec<yyds_gateway::SqlValue> {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("order bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("order bind");
         let plan = yyds_gateway::plan_statement_for_dialect(bound, &catalog, dialect).expect("order plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres)
             .expect("order exec")
@@ -2295,7 +2447,7 @@ fn sql_order_by_nulls_first_last_overrides_dialect_default() {
 fn sql_group_by_ordinal_and_unqualified_having() {
     let (catalog, executor) = nullable_users();
     let rows = |sql: &str| -> Vec<Vec<yyds_gateway::SqlValue>> {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("exec").rows
     };
@@ -2311,8 +2463,8 @@ fn sql_group_by_ordinal_and_unqualified_having() {
     assert!(rows("SELECT COUNT(*) FROM users HAVING COUNT(*) > 3").is_empty());
 
     // Out-of-range and star positions are rejected explicitly.
-    assert!(yyds_gateway::bind_sql_catalog("SELECT age FROM users GROUP BY 2", &catalog, 7).is_err());
-    assert!(yyds_gateway::bind_sql_catalog("SELECT * FROM users GROUP BY 1", &catalog, 7).is_err());
+    assert!(yyds_gateway::bind_sql_catalog("SELECT age FROM users GROUP BY 2", &catalog, 7, SqlDialect::Postgres).is_err());
+    assert!(yyds_gateway::bind_sql_catalog("SELECT * FROM users GROUP BY 1", &catalog, 7, SqlDialect::Postgres).is_err());
 }
 
 #[test]
@@ -2320,7 +2472,8 @@ fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
     let (catalog, executor) = nullable_users();
 
     // 扫描路径：NULL > 5 求值为 NULL，不进入结果，也不报错。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE age > 5", &catalog, 7).expect("scan bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE age > 5", &catalog, 7, SqlDialect::Postgres)
+        .expect("scan bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("scan plan");
     let result =
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("null predicate should not error");
@@ -2328,20 +2481,22 @@ fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
 
     // 主键 Read 路径的剩余谓词同样按三值逻辑处理：NULL 条件为假，影响 0 行。
     let bound =
-        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 1 AND age > 5", &catalog, 7).expect("read bind");
+        yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = 1 AND age > 5", &catalog, 7, SqlDialect::Postgres)
+            .expect("read bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("read plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("null remaining predicate");
     assert!(result.rows.is_empty());
 
     // 投影里的比较结果本身是 NULL。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT age > 5 FROM users WHERE id = 1", &catalog, 7).expect("projection bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT age > 5 FROM users WHERE id = 1", &catalog, 7, SqlDialect::Postgres)
+        .expect("projection bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("projection plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("null comparison projection");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Null]);
 
     // ASC 时 NULL 最后，DESC 时 NULL 最前。
     let ids = |sql: &str| -> Vec<yyds_gateway::SqlValue> {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("order bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("order bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("order plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres)
             .expect("order exec")
@@ -2360,9 +2515,13 @@ fn sql_null_predicates_and_order_by_follow_three_valued_logic() {
     );
 
     // 聚合忽略 NULL：COUNT(age)=2，SUM=10，AVG=5，MAX=10，MIN=0。
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT COUNT(age), SUM(age), AVG(age), MAX(age), MIN(age) FROM users", &catalog, 7)
-            .expect("aggregate bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT COUNT(age), SUM(age), AVG(age), MAX(age), MIN(age) FROM users",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("aggregate bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("aggregate plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("aggregate exec");
     assert_eq!(
@@ -2382,7 +2541,7 @@ fn sql_null_three_valued_predicate_logic() {
     let (catalog, executor) = nullable_users();
     let count = |predicate: &str| -> yyds_gateway::SqlValue {
         let sql = format!("SELECT COUNT(*) FROM users WHERE {predicate}");
-        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7).expect("predicate bind");
+        let bound = yyds_gateway::bind_sql_catalog(&sql, &catalog, 7, SqlDialect::Postgres).expect("predicate bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("predicate plan");
         yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("predicate exec").rows[0][0].clone()
     };
@@ -2398,12 +2557,14 @@ fn sql_null_three_valued_predicate_logic() {
 fn sql_update_set_null_removes_field() {
     let (catalog, executor) = nullable_users();
 
-    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET age = NULL WHERE id = 3", &catalog, 7).expect("update bind");
+    let bound = yyds_gateway::bind_sql_catalog("UPDATE users SET age = NULL WHERE id = 3", &catalog, 7, SqlDialect::Postgres)
+        .expect("update bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("update plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("update set null");
     assert_eq!(result.affected_rows, 1);
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT age FROM users WHERE id = 3", &catalog, 7).expect("select bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT age FROM users WHERE id = 3", &catalog, 7, SqlDialect::Postgres)
+        .expect("select bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("select plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select null after update");
     assert_eq!(result.rows[0], vec![yyds_gateway::SqlValue::Null]);
@@ -2416,14 +2577,21 @@ fn predicate_on_utf8_field_does_not_numeric_coerce() {
     let executor = make_executor_with_row("table:1", b"5", &[(1, b"5"), (2, b"001")]);
 
     // 类型正确的匹配
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = '001'", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT code FROM users WHERE id = 5 AND code = '001'",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
     assert_eq!(result.rows.len(), 1, "string literal match should find row");
 
     // 类型错误：用数字 literal 查字符串字段 — 应该不匹配（宽松比较不做自动类型转换）
-    let bound = yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = 1", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT code FROM users WHERE id = 5 AND code = 1", &catalog, 7, SqlDialect::Postgres)
+            .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("select");
     assert_eq!(result.rows.len(), 0, "number literal should not coerce match against string field");
@@ -2435,7 +2603,7 @@ fn predicate_on_utf8_field_does_not_numeric_coerce() {
 fn evaluate_source_less(sql: &str) -> yyds_gateway::SqlResult {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     let executor = empty_executor();
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(
         matches!(plan, yyds_gateway::SqlExecutionPlan::Scalar(_)),
@@ -2456,7 +2624,8 @@ fn sql_source_less_select_returns_constant_row() {
 fn sql_system_variable_requires_a_dialect_resolver() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
     // 没有变量表方言（PostgreSQL 等）必须明确拒绝 `@@`，不能退化成列名查找。
-    let error = yyds_gateway::bind_sql_catalog("SELECT @@version", &catalog, 7).expect_err("no system variables");
+    let error =
+        yyds_gateway::bind_sql_catalog("SELECT @@version", &catalog, 7, SqlDialect::Postgres).expect_err("no system variables");
     assert!(error.message.contains("system variable"), "{}", error.message);
 }
 
@@ -2468,8 +2637,14 @@ fn sql_system_variable_binds_through_injected_resolver() {
     let resolver = |name: &str| -> Result<yyds_gateway::SqlBoundLiteral, yyds_gateway::SqlFrontendError> {
         Ok(yyds_gateway::SqlBoundLiteral::String(name.trim_start_matches("@@").to_string()))
     };
-    let bound = yyds_gateway::bind_sql_catalog_with_variables("SELECT @@version, @@session.sql_mode", &catalog, 7, &resolver)
-        .expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog_with_variables(
+        "SELECT @@version, @@session.sql_mode",
+        &catalog,
+        7,
+        &resolver,
+        SqlDialect::Postgres,
+    )
+    .expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Scalar(_)));
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
@@ -2548,7 +2723,8 @@ fn sql_source_less_select_honours_limit_zero() {
 #[test]
 fn sql_source_less_select_rejects_where_clause() {
     let catalog = catalog("table users { @@id: i64 }\n");
-    let bound = yyds_gateway::bind_sql_catalog("SELECT 1 WHERE 1 = 1", &catalog, 7).expect("catalog bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT 1 WHERE 1 = 1", &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("WHERE without FROM must be rejected");
     assert!(error.message.contains("requires a FROM source"), "unexpected message: {}", error.message);
 }
@@ -2651,7 +2827,7 @@ fn sql_inner_join_projects_both_sides_with_where_and_order_by() {
     let (catalog, executor) = join_fixture();
     let sql = "SELECT users.name, orders.total FROM users JOIN orders ON users.id = orders.user_id \
                WHERE orders.total > 60 ORDER BY orders.total";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Join(_)), "got {plan:?}");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
@@ -2670,7 +2846,7 @@ fn sql_inner_join_projects_both_sides_with_where_and_order_by() {
 fn sql_inner_join_star_expands_every_joined_table() {
     let (catalog, executor) = join_fixture();
     let sql = "SELECT * FROM users JOIN orders ON users.id = orders.user_id ORDER BY orders.total";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
 
@@ -2690,14 +2866,14 @@ fn sql_inner_join_without_matching_rows_returns_empty() {
 
     // ON 条件本身不命中。
     let sql = "SELECT users.name FROM users JOIN orders ON users.id = orders.user_id AND orders.total > 1000";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert!(result.rows.is_empty(), "ON filter should drop every pair");
 
     // JOIN 命中但 WHERE 全部过滤掉。
     let sql = "SELECT users.name FROM users JOIN orders ON users.id = orders.user_id WHERE orders.total > 1000";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert!(result.rows.is_empty(), "WHERE filter should drop every joined row");
@@ -2709,7 +2885,7 @@ fn sql_left_join_preserves_unmatched_left_rows() {
 
     // 所有左行都匹配时，LEFT JOIN 与 INNER JOIN 等价。
     let sql = "SELECT users.name, orders.total FROM users LEFT JOIN orders ON users.id = orders.user_id ORDER BY orders.total";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Join(_)));
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
@@ -2717,7 +2893,7 @@ fn sql_left_join_preserves_unmatched_left_rows() {
 
     // ON 条件永远不命中：每个左行保留，右列全部 NULL。
     let sql = "SELECT users.name, orders.total FROM users LEFT JOIN orders ON 1 = 0";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(result.rows.len(), 2, "both users must appear even with zero right matches");
@@ -2727,7 +2903,7 @@ fn sql_left_join_preserves_unmatched_left_rows() {
 
     // 与 INNER JOIN 对比：同 ON 条件下 INNER JOIN 返回空集。
     let sql_inner = "SELECT users.name FROM users JOIN orders ON 1 = 0";
-    let bound = yyds_gateway::bind_sql_catalog(sql_inner, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql_inner, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let inner_result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert!(inner_result.rows.is_empty(), "inner join with never-match ON must be empty");
@@ -2740,7 +2916,7 @@ fn sql_right_join_preserves_unmatched_right_rows() {
     // orders.user_id = 9 没有 users 匹配：该右行保留，左表字段全 NULL。
     let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON users.id = orders.user_id \
                ORDER BY orders.total";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Join(_)));
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
@@ -2758,7 +2934,7 @@ fn sql_right_join_preserves_unmatched_right_rows() {
 
     // ON 永不命中：左行全部丢弃，每个右行以 NULL 左字段保留。
     let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders ON 1 = 0";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(result.rows.len(), 4, "every right row must survive with no left match");
@@ -2774,7 +2950,7 @@ fn sql_full_join_preserves_both_unmatched_sides() {
     // ON 只让 alice 的订单匹配：bob 成为未匹配左行，user_id = 2 / 9 的订单成为未匹配右行。
     let sql = "SELECT users.name, orders.total FROM users FULL JOIN orders \
                ON users.id = orders.user_id AND users.id = 1 ORDER BY orders.total";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
 
@@ -2794,7 +2970,7 @@ fn sql_full_join_preserves_both_unmatched_sides() {
 fn sql_outer_join_keeps_present_side_when_other_table_is_empty() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable orders { @@id: i64, user_id: i64, total: i64 }\n");
     let query = |executor: &dyn yyds_execution::KeyValueExecutor, sql: &str| {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         yyds_gateway::execute_plan(executor, None, &plan, SqlDialect::Postgres).expect("execute")
     };
@@ -2828,7 +3004,7 @@ fn sql_outer_join_on_and_where_differ_for_unmatched_rows() {
     // 过滤写在 ON 里：只决定「是否算匹配」，未匹配右行仍以 NULL 左字段保留。
     let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders \
                ON users.id = orders.user_id AND orders.total > 60 ORDER BY orders.total";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let on_filter = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(
@@ -2844,7 +3020,7 @@ fn sql_outer_join_on_and_where_differ_for_unmatched_rows() {
     // 同样的过滤写在 WHERE 里：未匹配行同样被 total 过滤掉，结果只剩真正命中的组合。
     let sql = "SELECT users.name, orders.total FROM users RIGHT JOIN orders \
                ON users.id = orders.user_id WHERE orders.total > 60 ORDER BY orders.total";
-    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let where_filter = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(
@@ -2908,7 +3084,8 @@ fn sql_cross_join_is_a_full_cartesian_product() {
 
     // binder 侧：CROSS JOIN 映射为 `Cross`，`ON` 只是恒真占位。
     let bound =
-        yyds_gateway::bind_sql_catalog("SELECT users.id FROM users CROSS JOIN orders", &catalog, 7).expect("cross join bind");
+        yyds_gateway::bind_sql_catalog("SELECT users.id FROM users CROSS JOIN orders", &catalog, 7, SqlDialect::Postgres)
+            .expect("cross join bind");
     let yyds_gateway::SqlCatalogBoundStatement::Select(select) = bound
     else {
         panic!("expected SELECT")
@@ -2952,7 +3129,7 @@ fn sql_cross_join_keeps_both_column_scopes() {
     let (catalog, executor) = join_fixture();
 
     // `users.id` 与 `orders.id` 都可见，未限定的 `id` 必须报歧义。
-    let ambiguous = yyds_gateway::bind_sql_catalog("SELECT id FROM users CROSS JOIN orders", &catalog, 7)
+    let ambiguous = yyds_gateway::bind_sql_catalog("SELECT id FROM users CROSS JOIN orders", &catalog, 7, SqlDialect::Postgres)
         .expect_err("ambiguous cross join column");
     assert_eq!(ambiguous.kind, yyds_gateway::SqlErrorKind::AmbiguousColumn, "{}", ambiguous.message);
     assert!(ambiguous.message.contains("ambiguous SQL column: id"), "{}", ambiguous.message);
@@ -3087,15 +3264,21 @@ fn sql_set_operation_returns_an_empty_result_when_nothing_matches() {
 fn sql_set_operation_rejects_mismatched_operands_at_any_boundary() {
     let (catalog, _executor) = set_operation_fixture();
 
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id, value FROM a UNION SELECT value FROM b", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT id, value FROM a UNION SELECT value FROM b", &catalog, 7, SqlDialect::Postgres)
+            .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("column count mismatch");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", error.message);
     assert!(error.message.contains("column count mismatch"), "{}", error.message);
 
     // 不匹配发生在第三个操作数上：逐对校验要指出 2/3 边界，而不只是最左一对。
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT value FROM a UNION SELECT value FROM b UNION SELECT name FROM s", &catalog, 7)
-            .expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT value FROM a UNION SELECT value FROM b UNION SELECT name FROM s",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("type mismatch");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::TypeMismatch, "{}", error.message);
     assert!(error.message.contains("operands 2/3"), "{}", error.message);
@@ -3197,7 +3380,7 @@ fn sql_limit_and_offset_reject_invalid_counts() {
 
     // 超出 `i64` 字面量在绑定阶段就被拒绝，其余语义在计划阶段拒绝，两者都是稳定错误。
     let clause_error = |sql: &str| -> yyds_gateway::SqlFrontendError {
-        let bound = match yyds_gateway::bind_sql_catalog(sql, &catalog, 7) {
+        let bound = match yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres) {
             Ok(bound) => bound,
             Err(error) => return error,
         };
@@ -3239,14 +3422,23 @@ fn sql_join_rejects_ambiguous_unqualified_columns() {
     let (catalog, _executor) = join_fixture();
 
     // `id` 在两张表里都有，未限定必须报歧义而不是随便选一张。
-    let error = yyds_gateway::bind_sql_catalog("SELECT id FROM users JOIN orders ON users.id = orders.user_id", &catalog, 7)
-        .expect_err("ambiguous column");
+    let error = yyds_gateway::bind_sql_catalog(
+        "SELECT id FROM users JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect_err("ambiguous column");
     assert!(error.message.contains("ambiguous SQL column: id"), "{}", error.message);
 
     // 引用不存在表的限定名。
-    let error =
-        yyds_gateway::bind_sql_catalog("SELECT admins.id FROM users JOIN orders ON users.id = orders.user_id", &catalog, 7)
-            .expect_err("unknown qualifier");
+    let error = yyds_gateway::bind_sql_catalog(
+        "SELECT admins.id FROM users JOIN orders ON users.id = orders.user_id",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect_err("unknown qualifier");
     assert!(error.message.contains("unknown SQL table qualifier"), "{}", error.message);
 }
 
@@ -3259,6 +3451,7 @@ fn sql_join_rejects_aggregate_and_duplicate_unaliased_source() {
         "SELECT users.name FROM users RIGHT JOIN orders ON users.id = orders.user_id",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("right join should bind");
     if let yyds_gateway::SqlCatalogBoundStatement::Select(sel) = &right {
@@ -3272,6 +3465,7 @@ fn sql_join_rejects_aggregate_and_duplicate_unaliased_source() {
         "SELECT users.name FROM users FULL JOIN orders ON users.id = orders.user_id",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("full join should bind");
     if let yyds_gateway::SqlCatalogBoundStatement::Select(sel) = &full {
@@ -3286,6 +3480,7 @@ fn sql_join_rejects_aggregate_and_duplicate_unaliased_source() {
         "SELECT users.name FROM users LEFT JOIN orders ON users.id = orders.user_id",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("left join should bind");
     if let yyds_gateway::SqlCatalogBoundStatement::Select(sel) = &left {
@@ -3296,9 +3491,13 @@ fn sql_join_rejects_aggregate_and_duplicate_unaliased_source() {
     }
 
     // 同一张表出现两次又都没写别名：两个 `users` 争同一个限定名，按歧义表拒绝。
-    let duplicate =
-        yyds_gateway::bind_sql_catalog("SELECT users.name FROM users JOIN users ON users.id = users.id", &catalog, 7)
-            .expect_err("duplicate table without aliases");
+    let duplicate = yyds_gateway::bind_sql_catalog(
+        "SELECT users.name FROM users JOIN users ON users.id = users.id",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect_err("duplicate table without aliases");
     assert_eq!(duplicate.kind, yyds_gateway::SqlErrorKind::AmbiguousTable, "{}", duplicate.message);
     assert!(duplicate.message.contains("more than once"), "{}", duplicate.message);
 
@@ -3306,6 +3505,7 @@ fn sql_join_rejects_aggregate_and_duplicate_unaliased_source() {
         "SELECT SUM(orders.total) FROM users JOIN orders ON users.id = orders.user_id",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("catalog bind");
     let error = yyds_gateway::plan_statement(aggregate, &catalog).expect_err("aggregate over join");
@@ -3317,21 +3517,22 @@ fn sql_table_alias_replaces_the_table_qualifier() {
     let (catalog, executor) = join_fixture();
 
     // 别名接管限定名：`u.id` 可用，主键等值仍然下推成单点读。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT u.name FROM users u WHERE u.id = 2", &catalog, 7).expect("aliased bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT u.name FROM users u WHERE u.id = 2", &catalog, 7, SqlDialect::Postgres)
+        .expect("aliased bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     assert!(matches!(plan, yyds_gateway::SqlExecutionPlan::Read(_)), "got {plan:?}");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::String("bob".into())]]);
 
     // `AS` 拼写等价。
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT u.id FROM users AS u ORDER BY u.id", &catalog, 7).expect("AS alias bind");
+    let bound = yyds_gateway::bind_sql_catalog("SELECT u.id FROM users AS u ORDER BY u.id", &catalog, 7, SqlDialect::Postgres)
+        .expect("AS alias bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(result.rows.len(), 2);
 
     // 别名存在后，原表名不再是可见限定名。
-    let error = yyds_gateway::bind_sql_catalog("SELECT users.name FROM users u", &catalog, 7)
+    let error = yyds_gateway::bind_sql_catalog("SELECT users.name FROM users u", &catalog, 7, SqlDialect::Postgres)
         .expect_err("table name is hidden by its alias");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownTableQualifier, "{}", error.message);
 
@@ -3340,6 +3541,7 @@ fn sql_table_alias_replaces_the_table_qualifier() {
         "SELECT u.name, o.total FROM users AS u JOIN orders AS o ON u.id = o.user_id ORDER BY o.total",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("aliased join bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
@@ -3354,7 +3556,8 @@ fn sql_table_alias_replaces_the_table_qualifier() {
     );
 
     // 别名只改限定名，不改 catalog 列名：拼错的列照常报未知列。
-    let error = yyds_gateway::bind_sql_catalog("SELECT u.nope FROM users u", &catalog, 7).expect_err("unknown column");
+    let error = yyds_gateway::bind_sql_catalog("SELECT u.nope FROM users u", &catalog, 7, SqlDialect::Postgres)
+        .expect_err("unknown column");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownColumn, "{}", error.message);
 }
 
@@ -3363,9 +3566,13 @@ fn sql_self_join_keeps_both_occurrences_of_a_shared_column() {
     let (catalog, executor) = join_fixture();
 
     // 同一张表出现两次，两个别名各自保留一份 `id` / `name`。
-    let bound =
-        yyds_gateway::bind_sql_catalog("SELECT a.id, a.name, b.name FROM users a JOIN users b ON a.id = b.id + 1", &catalog, 7)
-            .expect("self join bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT a.id, a.name, b.name FROM users a JOIN users b ON a.id = b.id + 1",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("self join bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(
@@ -3379,8 +3586,13 @@ fn sql_self_join_keeps_both_occurrences_of_a_shared_column() {
     assert_eq!(result.columns, vec!["id".to_string(), "name".to_string(), "name".to_string()]);
 
     // 未限定同名列必须报歧义，而不是随便挑一侧。
-    let ambiguous = yyds_gateway::bind_sql_catalog("SELECT name FROM users a JOIN users b ON a.id = b.id", &catalog, 7)
-        .expect_err("ambiguous shared column");
+    let ambiguous = yyds_gateway::bind_sql_catalog(
+        "SELECT name FROM users a JOIN users b ON a.id = b.id",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect_err("ambiguous shared column");
     assert_eq!(ambiguous.kind, yyds_gateway::SqlErrorKind::AmbiguousColumn, "{}", ambiguous.message);
 }
 
@@ -3389,8 +3601,13 @@ fn sql_derived_table_flattens_when_it_is_the_same_table_under_a_new_name() {
     let (catalog, executor) = join_fixture();
 
     // 内层过滤并入外层 `WHERE`，外层只看得见派生别名 `x`。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT x.name FROM (SELECT * FROM users WHERE id = 2) x", &catalog, 7)
-        .expect("derived bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT x.name FROM (SELECT * FROM users WHERE id = 2) x",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("derived bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let result = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect("execute");
     assert_eq!(result.rows, vec![vec![yyds_gateway::SqlValue::String("bob".into())]]);
@@ -3423,7 +3640,8 @@ fn sql_derived_table_reports_unflattenable_shapes() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\n");
 
     // 方言语法本身就要求别名，缺失按 Syntax 拒绝。
-    let missing = yyds_gateway::bind_sql_catalog("SELECT * FROM (SELECT * FROM users)", &catalog, 7).expect_err("no alias");
+    let missing = yyds_gateway::bind_sql_catalog("SELECT * FROM (SELECT * FROM users)", &catalog, 7, SqlDialect::Postgres)
+        .expect_err("no alias");
     assert_eq!(missing.kind, yyds_gateway::SqlErrorKind::Syntax, "{}", missing.message);
     assert!(missing.message.contains("requires an alias"), "{}", missing.message);
 
@@ -3441,7 +3659,7 @@ fn sql_derived_table_reports_unflattenable_shapes() {
             "INNER join",
         ),
     ] {
-        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres)
             .expect_err(&format!("{label} must stay outside the gateway subset"));
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{label}: {}", error.message);
         assert!(error.message.contains("derived table"), "{label}: {}", error.message);
@@ -3577,16 +3795,21 @@ fn sql_window_ntile_lag_lead_reject_invalid_shapes_at_bind_time() {
         "SELECT NTILE(2) FROM users",
         "SELECT LAG(name) FROM users",
     ] {
-        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres)
             .err()
             .unwrap_or_else(|| panic!("`{sql}` must be rejected at bind time"));
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}: {}", error.message);
     }
 
     // 未知窗口名保持窗口语境诊断，与不支持参数形状的诊断分离。
-    let unknown = yyds_gateway::bind_sql_catalog("SELECT FIRST_VALUE(name) OVER (ORDER BY age) FROM users", &catalog, 7)
-        .err()
-        .expect("FIRST_VALUE is outside the gateway subset");
+    let unknown = yyds_gateway::bind_sql_catalog(
+        "SELECT FIRST_VALUE(name) OVER (ORDER BY age) FROM users",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .err()
+    .expect("FIRST_VALUE is outside the gateway subset");
     assert_eq!(unknown.kind, yyds_gateway::SqlErrorKind::Unsupported, "{}", unknown.message);
     assert!(unknown.message.contains("window function"), "{}", unknown.message);
 }
@@ -3605,7 +3828,7 @@ fn sql_window_range_frames_reject_undefined_value_semantics() {
             "exactly one ORDER BY",
         ),
     ] {
-        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7)
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres)
             .err()
             .unwrap_or_else(|| panic!("`{sql}` must be rejected at bind time"));
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Unsupported, "{sql}: {}", error.message);
@@ -3617,6 +3840,7 @@ fn sql_window_range_frames_reject_undefined_value_semantics() {
         "SELECT id, SUM(age) OVER (ORDER BY age, score RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM users",
         &catalog,
         7,
+        SqlDialect::Postgres,
     )
     .expect("peer-bounded RANGE frame over multiple ORDER BY columns binds");
 }
@@ -3638,7 +3862,7 @@ fn sql_window_range_frame_offsets_reject_ordering_values_without_value_distance(
         "SELECT id, SUM(age) OVER (ORDER BY name RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users",
         "SELECT id, SUM(age) OVER (ORDER BY tag RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM users",
     ] {
-        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect("shape binds");
+        let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("shape binds");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("value axis must fail");
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution, "{sql}: {}", error.message);
@@ -3775,7 +3999,8 @@ fn sql_subqueries_inherit_the_enclosing_cte_scope() {
         "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE id IN (SELECT id FROM missing)",
         "WITH u AS (SELECT * FROM users) SELECT id FROM users WHERE EXISTS (SELECT 1 FROM missing)",
     ] {
-        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect_err("unknown name inside the subquery");
+        let error = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres)
+            .expect_err("unknown name inside the subquery");
         assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UnknownTable, "{sql}: {}", error.message);
     }
 }
@@ -3807,16 +4032,22 @@ fn sql_scalar_subquery_yields_one_value_and_pins_its_cardinality() {
     assert_eq!(predicate.rows, vec![vec![SqlValue::Integer(3)]]);
 
     // 多行 → 基数违规，按执行错误上报（不是语法错误）。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT id FROM users WHERE id = (SELECT id FROM users)", &catalog, 7)
-        .expect("bind scalar subquery");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "SELECT id FROM users WHERE id = (SELECT id FROM users)",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind scalar subquery");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan scalar subquery");
     let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("several rows");
     assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution, "{}", error.message);
     assert!(error.message.contains("more than one row"), "{}", error.message);
 
     // 投影多列时无法作为单一值，绑定期就显式拒绝。
-    let wide = yyds_gateway::bind_sql_catalog("SELECT (SELECT id, age FROM users) FROM users", &catalog, 7)
-        .expect_err("multi column scalar subquery");
+    let wide =
+        yyds_gateway::bind_sql_catalog("SELECT (SELECT id, age FROM users) FROM users", &catalog, 7, SqlDialect::Postgres)
+            .expect_err("multi column scalar subquery");
     assert_eq!(wide.kind, yyds_gateway::SqlErrorKind::Unsupported, "{}", wide.message);
     assert!(wide.message.contains("exactly one column"), "{}", wide.message);
 }
@@ -3825,7 +4056,8 @@ fn sql_scalar_subquery_yields_one_value_and_pins_its_cardinality() {
 fn sql_common_table_expression_reports_unflattenable_shapes() {
     let (catalog, _executor) = join_fixture();
     let reject = |sql: &str| {
-        yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect_err(&format!("`{sql}` must stay outside the gateway subset"))
+        yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres)
+            .expect_err(&format!("`{sql}` must stay outside the gateway subset"))
     };
 
     for (label, sql, reason) in [
@@ -3899,8 +4131,13 @@ fn sql_common_table_expression_applies_an_explicit_output_column_list() {
     assert_eq!(filtered.rows, vec![vec![SqlValue::Integer(2), SqlValue::String("bob".into())]]);
 
     // 旧列名不再属于这个 CTE 的作用域。
-    let stale = yyds_gateway::bind_sql_catalog("WITH u(no, who) AS (SELECT name, id FROM users) SELECT id FROM u", &catalog, 7)
-        .expect_err("the explicit column list hides the catalog names");
+    let stale = yyds_gateway::bind_sql_catalog(
+        "WITH u(no, who) AS (SELECT name, id FROM users) SELECT id FROM u",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect_err("the explicit column list hides the catalog names");
     assert_eq!(stale.kind, yyds_gateway::SqlErrorKind::UnknownColumn, "{}", stale.message);
 
     // 同表另一份未重命名的引用仍按原名解析，两个 occurrence 的行槽互不覆盖。
@@ -3932,7 +4169,8 @@ fn sql_common_table_expression_applies_an_explicit_output_column_list() {
 fn sql_common_table_expression_rejects_unmappable_explicit_column_lists() {
     let (catalog, _executor) = join_fixture();
     let reject = |sql: &str| {
-        yyds_gateway::bind_sql_catalog(sql, &catalog, 7).expect_err(&format!("`{sql}` must stay outside the gateway subset"))
+        yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres)
+            .expect_err(&format!("`{sql}` must stay outside the gateway subset"))
     };
 
     // 显式列名按位置替换 body 的输出列，数量必须与投影一一对应。
@@ -4000,10 +4238,11 @@ fn sql_exists_predicates_evaluate_against_subquery_rows() {
 #[test]
 fn sql_scalar_function_binding_rejects_unknown_name_and_bad_arity() {
     let catalog = catalog("table users { @@id: i64 }\n");
-    let unknown = yyds_gateway::bind_sql_catalog("SELECT NO_SUCH_FN(1)", &catalog, 7).expect_err("unknown fn");
+    let unknown =
+        yyds_gateway::bind_sql_catalog("SELECT NO_SUCH_FN(1)", &catalog, 7, SqlDialect::Postgres).expect_err("unknown fn");
     assert!(unknown.message.contains("unknown SQL function"), "unexpected message: {}", unknown.message);
 
-    let arity = yyds_gateway::bind_sql_catalog("SELECT LOWER()", &catalog, 7).expect_err("arity");
+    let arity = yyds_gateway::bind_sql_catalog("SELECT LOWER()", &catalog, 7, SqlDialect::Postgres).expect_err("arity");
     assert!(arity.message.contains("LOWER() expects 1 argument"), "unexpected message: {}", arity.message);
 }
 
@@ -4016,7 +4255,7 @@ fn run_sql(
     catalog: &yyds_gateway::SqlCatalog,
     sql: &str,
 ) -> yyds_gateway::SqlResult {
-    let bound = yyds_gateway::bind_sql_catalog(sql, catalog, 7).expect("catalog bind");
+    let bound = yyds_gateway::bind_sql_catalog(sql, catalog, 7, SqlDialect::Postgres).expect("catalog bind");
     let plan = yyds_gateway::plan_statement(bound, catalog).expect("plan");
     yyds_gateway::execute_plan(executor, transaction, &plan, SqlDialect::Postgres).expect("execute")
 }
@@ -4217,14 +4456,20 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     );
 
     // 非法十六进制拼写必须显式拒绝，不能截断或悄悄写成 NULL。
-    let bound =
-        yyds_gateway::bind_sql_catalog("INSERT INTO payloads VALUES (4, CAST('0G' AS BYTEA))", &catalog, 7).expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        "INSERT INTO payloads VALUES (4, CAST('0G' AS BYTEA))",
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let error = yyds_gateway::plan_statement(bound, &catalog).expect_err("bad hex");
     assert!(error.message.contains("non-hexadecimal"), "{}", error.message);
 
     // `::bytea` 在 Oak 里只有词法没有节点：网关稳定拒绝，避免把转义拼写当载荷存下。
-    let error = yyds_gateway::bind_sql_catalog("INSERT INTO payloads VALUES (4, '\\x00FF'::bytea)", &catalog, 7)
-        .expect_err("`::bytea` must be rejected");
+    let error =
+        yyds_gateway::bind_sql_catalog("INSERT INTO payloads VALUES (4, '\\x00FF'::bytea)", &catalog, 7, SqlDialect::Postgres)
+            .expect_err("`::bytea` must be rejected");
     assert_eq!(error.kind, SqlErrorKind::Unsupported);
     assert!(error.message.contains("::bytea"), "{}", error.message);
     // 字符串字面量里的 `::` 不是类型转换，照常通过。
@@ -4233,9 +4478,13 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     // 容量上限是方言 wire 事实：MySQL 裸 BLOB 超过 65 535 octets 必须拒绝并给出诊断，
     // PostgreSQL `BYTEA` 不继承该上限，同一载荷必须原样落盘并回读。
     let too_big = "00".repeat(yyds_gateway::MYSQL_BLOB_CAPACITY + 1);
-    let bound =
-        yyds_gateway::bind_sql_catalog(&format!("INSERT INTO payloads VALUES (4, CAST('{too_big}' AS BYTEA))"), &catalog, 7)
-            .expect("bind");
+    let bound = yyds_gateway::bind_sql_catalog(
+        &format!("INSERT INTO payloads VALUES (4, CAST('{too_big}' AS BYTEA))"),
+        &catalog,
+        7,
+        SqlDialect::Postgres,
+    )
+    .expect("bind");
     let error =
         yyds_gateway::plan_statement_for_dialect(bound.clone(), &catalog, SqlDialect::Mysql).expect_err("mysql capacity");
     assert_eq!(error.kind, SqlErrorKind::TypeMismatch);
@@ -4248,7 +4497,8 @@ fn binary_columns_round_trip_raw_octets_and_reject_bad_literals() {
     );
 
     // 文本函数没有二进制的文本形式，显式拒绝而不是退化成 NULL。
-    let bound = yyds_gateway::bind_sql_catalog("SELECT LOWER(body) FROM payloads", &catalog, 7).expect("bind");
+    let bound =
+        yyds_gateway::bind_sql_catalog("SELECT LOWER(body) FROM payloads", &catalog, 7, SqlDialect::Postgres).expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("text function on binary");
     assert_eq!(error.kind, SqlErrorKind::TypeMismatch);

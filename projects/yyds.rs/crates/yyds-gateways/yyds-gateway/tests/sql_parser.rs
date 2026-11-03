@@ -1,7 +1,9 @@
+use yyds_gateway::SqlDialect;
+
 #[test]
 fn oak_parse_errors_recovered_as_ast_nodes_are_reported() {
-    yyds_gateway::parse_sql("SELECT 1").unwrap();
-    assert!(yyds_gateway::parse_sql("SELECT (").is_err());
+    yyds_gateway::parse_sql("SELECT 1", SqlDialect::Postgres).unwrap();
+    assert!(yyds_gateway::parse_sql("SELECT (", SqlDialect::Postgres).is_err());
 }
 
 #[test]
@@ -9,7 +11,7 @@ fn oak_prefix_unary_minus_survives_parsing() {
     // 回归：前缀 `-` 曾被当作缺失左操作数的二元减号，现已解析成 Unary 节点。
     use oak_sql::ast::{BinaryOperator, Expression, SqlStatement, UnaryOperator};
 
-    let root = yyds_gateway::parse_sql("SELECT id FROM users WHERE age > -1").expect("parse");
+    let root = yyds_gateway::parse_sql("SELECT id FROM users WHERE age > -1", SqlDialect::Postgres).expect("parse");
     let SqlStatement::Select(select) = &root.statements[0]
     else {
         panic!("expected SELECT")
@@ -22,7 +24,7 @@ fn oak_prefix_unary_minus_survives_parsing() {
     assert_eq!(*op, BinaryOperator::Greater);
     assert!(matches!(**right, Expression::Unary { op: UnaryOperator::Minus, .. }), "got {right:?}");
 
-    let root = yyds_gateway::parse_sql("SELECT -3").expect("parse");
+    let root = yyds_gateway::parse_sql("SELECT -3", SqlDialect::Postgres).expect("parse");
     let SqlStatement::Select(select) = &root.statements[0]
     else {
         panic!("expected SELECT")
@@ -37,13 +39,15 @@ fn oak_prefix_unary_minus_survives_parsing() {
 fn select_clauses_come_from_ast_fields() {
     use yyds_gateway::{bind_sql, SqlBoundExpression, SqlBoundStatement};
 
-    let SqlBoundStatement::Select(select) = bind_sql("SELECT age, COUNT(*) FROM users GROUP BY 1").expect("bind")
+    let SqlBoundStatement::Select(select) =
+        bind_sql("SELECT age, COUNT(*) FROM users GROUP BY 1", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
     assert_eq!(select.group_by, Some(vec![SqlBoundExpression::Identifier("age".into())]));
 
-    let SqlBoundStatement::Select(select) = bind_sql("SELECT age FROM users ORDER BY age DESC NULLS FIRST").expect("bind")
+    let SqlBoundStatement::Select(select) =
+        bind_sql("SELECT age FROM users ORDER BY age DESC NULLS FIRST", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
@@ -61,7 +65,7 @@ fn unsupported_upstream_forms_are_rejected_explicitly() {
         "SELECT age FROM users GROUP BY CUBE(age)",
         "SELECT id FROM users FOR UPDATE",
     ] {
-        assert!(bind_sql(sql).is_err(), "`{sql}` must be rejected explicitly");
+        assert!(bind_sql(sql, SqlDialect::Postgres).is_err(), "`{sql}` must be rejected explicitly");
     }
 }
 
@@ -77,7 +81,7 @@ fn set_operations_bind_every_operand_and_the_combined_tail() {
         ("SELECT id FROM users INTERSECT SELECT id FROM users", SqlBoundSetOperator::Intersect),
         ("SELECT id FROM users EXCEPT SELECT id FROM users", SqlBoundSetOperator::Except),
     ] {
-        let SqlBoundStatement::SetOperation(set) = bind_sql(sql).expect("bind")
+        let SqlBoundStatement::SetOperation(set) = bind_sql(sql, SqlDialect::Postgres).expect("bind")
         else {
             panic!("expected set operation for `{sql}`")
         };
@@ -87,7 +91,8 @@ fn set_operations_bind_every_operand_and_the_combined_tail() {
     }
 
     let SqlBoundStatement::SetOperation(set) =
-        bind_sql("SELECT id FROM users UNION SELECT id FROM users ORDER BY id DESC LIMIT 2 OFFSET 1").expect("bind")
+        bind_sql("SELECT id FROM users UNION SELECT id FROM users ORDER BY id DESC LIMIT 2 OFFSET 1", SqlDialect::Postgres)
+            .expect("bind")
     else {
         panic!("expected set operation")
     };
@@ -104,7 +109,8 @@ fn limit_and_offset_bind_as_constant_expressions() {
         bind_sql, SqlBoundBinaryOperator, SqlBoundExpression, SqlBoundLiteral, SqlBoundStatement, SqlErrorKind,
     };
 
-    let SqlBoundStatement::Select(select) = bind_sql("SELECT id FROM users LIMIT 5 + 5 OFFSET 2").expect("bind")
+    let SqlBoundStatement::Select(select) =
+        bind_sql("SELECT id FROM users LIMIT 5 + 5 OFFSET 2", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
@@ -121,7 +127,7 @@ fn limit_and_offset_bind_as_constant_expressions() {
         ("SELECT id FROM users LIMIT (SELECT 1)", SqlErrorKind::Unsupported, "does not accept a subquery"),
         ("SELECT id FROM users LIMIT 2 OFFSET (SELECT 1)", SqlErrorKind::Unsupported, "does not accept a subquery"),
     ] {
-        let error = bind_sql(sql).expect_err("clause shape must be rejected");
+        let error = bind_sql(sql, SqlDialect::Postgres).expect_err("clause shape must be rejected");
         assert_eq!(error.kind, kind, "`{sql}`: got `{}`", error.message);
         assert!(error.message.contains(expected), "`{sql}`: got `{}`", error.message);
     }
@@ -133,14 +139,14 @@ fn limit_and_offset_bind_as_constant_expressions() {
 fn standalone_offset_binds_without_a_limit() {
     use yyds_gateway::{bind_sql, SqlBoundExpression, SqlBoundLiteral, SqlBoundStatement};
 
-    let SqlBoundStatement::Select(select) = bind_sql("SELECT id FROM users OFFSET 2").expect("bind")
+    let SqlBoundStatement::Select(select) = bind_sql("SELECT id FROM users OFFSET 2", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
     assert!(select.limit.is_none(), "a standalone OFFSET must not bind a LIMIT row count");
     assert_eq!(select.offset, Some(SqlBoundExpression::Literal(SqlBoundLiteral::Integer(2))));
 
-    let SqlBoundStatement::Select(limited) = bind_sql("SELECT id FROM users LIMIT 3").expect("bind")
+    let SqlBoundStatement::Select(limited) = bind_sql("SELECT id FROM users LIMIT 3", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
@@ -172,7 +178,7 @@ fn set_operations_fold_intersect_before_the_rest() {
     }
 
     fn top_level(sql: &str) -> (Vec<SqlBoundSetOperand>, Vec<SqlBoundSetOperator>) {
-        let SqlBoundStatement::SetOperation(set) = bind_sql(sql).expect("bind")
+        let SqlBoundStatement::SetOperation(set) = bind_sql(sql, SqlDialect::Postgres).expect("bind")
         else {
             panic!("expected set operation for `{sql}`")
         };
@@ -204,7 +210,7 @@ fn set_operations_fold_intersect_before_the_rest() {
 
     // 整条链只有 `INTERSECT` 时，折叠出的层级直接成为顶层节点。
     let sql = "SELECT id FROM users INTERSECT SELECT id FROM users INTERSECT SELECT id FROM users";
-    let SqlBoundStatement::SetOperation(set) = bind_sql(sql).expect("bind")
+    let SqlBoundStatement::SetOperation(set) = bind_sql(sql, SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected set operation for `{sql}`")
     };
@@ -218,9 +224,11 @@ fn set_operations_fold_intersect_before_the_rest() {
 fn insert_clauses_are_bound_for_dialect_planning() {
     use yyds_gateway::{bind_sql, SqlBoundConflictAction, SqlBoundProjection, SqlBoundStatement};
 
-    let do_update =
-        bind_sql("INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO UPDATE SET name = 'Jane' WHERE name = 'John'")
-            .expect("ON CONFLICT DO UPDATE binds");
+    let do_update = bind_sql(
+        "INSERT INTO users (name) VALUES ('John') ON CONFLICT (name) DO UPDATE SET name = 'Jane' WHERE name = 'John'",
+        SqlDialect::Postgres,
+    )
+    .expect("ON CONFLICT DO UPDATE binds");
     let SqlBoundStatement::Insert(insert) = do_update
     else {
         panic!("expected insert");
@@ -236,7 +244,8 @@ fn insert_clauses_are_bound_for_dialect_planning() {
     assert!(predicate.is_some(), "the DO UPDATE WHERE predicate is retained");
 
     let do_nothing =
-        bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT (id) DO NOTHING").expect("DO NOTHING binds");
+        bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT (id) DO NOTHING", SqlDialect::Postgres)
+            .expect("DO NOTHING binds");
     let SqlBoundStatement::Insert(insert) = do_nothing
     else {
         panic!("expected insert");
@@ -245,15 +254,16 @@ fn insert_clauses_are_bound_for_dialect_planning() {
     assert_eq!(conflict.columns, vec!["id".to_string()]);
     assert!(matches!(conflict.action, SqlBoundConflictAction::DoNothing));
 
-    let no_target =
-        bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT DO NOTHING").expect("target is optional");
+    let no_target = bind_sql("INSERT INTO users (id, name) VALUES (1, 'John') ON CONFLICT DO NOTHING", SqlDialect::Postgres)
+        .expect("target is optional");
     let SqlBoundStatement::Insert(insert) = no_target
     else {
         panic!("expected insert");
     };
     assert_eq!(insert.conflict.expect("conflict clause is retained").columns, Vec::<String>::new());
 
-    let returning = bind_sql("INSERT INTO users (name) VALUES ('John') RETURNING id, name AS alias").expect("RETURNING binds");
+    let returning = bind_sql("INSERT INTO users (name) VALUES ('John') RETURNING id, name AS alias", SqlDialect::Postgres)
+        .expect("RETURNING binds");
     let SqlBoundStatement::Insert(insert) = returning
     else {
         panic!("expected insert");
@@ -266,7 +276,8 @@ fn insert_clauses_are_bound_for_dialect_planning() {
     };
     assert_eq!(alias.as_deref(), Some("alias"));
 
-    let insert_select = bind_sql("INSERT INTO users (id, name) SELECT id, name FROM users").expect("INSERT ... SELECT binds");
+    let insert_select = bind_sql("INSERT INTO users (id, name) SELECT id, name FROM users", SqlDialect::Postgres)
+        .expect("INSERT ... SELECT binds");
     let SqlBoundStatement::Insert(insert) = insert_select
     else {
         panic!("expected insert");
@@ -282,7 +293,8 @@ fn insert_clauses_are_bound_for_dialect_planning() {
     assert_eq!(select.projections.len(), 2);
 
     // 多行 VALUES 的每行必须与列数一致。
-    let mismatched = bind_sql("INSERT INTO users (id, name) VALUES (1, 'one'), (2)").expect_err("ragged VALUES");
+    let mismatched =
+        bind_sql("INSERT INTO users (id, name) VALUES (1, 'one'), (2)", SqlDialect::Postgres).expect_err("ragged VALUES");
     assert!(mismatched.message.contains("INSERT"), "{}", mismatched.message);
 }
 
@@ -290,23 +302,24 @@ fn insert_clauses_are_bound_for_dialect_planning() {
 fn select_distinct_modifier_is_bound() {
     use yyds_gateway::{bind_sql, SqlBoundStatement};
 
-    let SqlBoundStatement::Select(distinct) = bind_sql("SELECT DISTINCT id FROM users ORDER BY id").expect("bind")
+    let SqlBoundStatement::Select(distinct) =
+        bind_sql("SELECT DISTINCT id FROM users ORDER BY id", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
     assert!(distinct.distinct);
-    let SqlBoundStatement::Select(plain) = bind_sql("select id from users").expect("bind")
+    let SqlBoundStatement::Select(plain) = bind_sql("select id from users", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
     assert!(!plain.distinct);
-    let SqlBoundStatement::Select(all) = bind_sql("SELECT ALL id FROM users").expect("bind")
+    let SqlBoundStatement::Select(all) = bind_sql("SELECT ALL id FROM users", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
     assert!(!all.distinct);
     let SqlBoundStatement::Select(subquery) =
-        bind_sql("SELECT id FROM users WHERE id IN (SELECT DISTINCT id FROM users)").expect("bind")
+        bind_sql("SELECT id FROM users WHERE id IN (SELECT DISTINCT id FROM users)", SqlDialect::Postgres).expect("bind")
     else {
         panic!("expected SELECT")
     };
@@ -316,10 +329,10 @@ fn select_distinct_modifier_is_bound() {
     };
     assert!(select.distinct);
     // `COUNT(DISTINCT ...)` 现已在网关绑定期通过。
-    let r = bind_sql("SELECT COUNT(DISTINCT id) FROM users");
+    let r = bind_sql("SELECT COUNT(DISTINCT id) FROM users", SqlDialect::Postgres);
     assert!(r.is_ok(), "expected COUNT(DISTINCT) to bind");
     // `DISTINCT ON` 仍然不被支持。
-    assert!(bind_sql("SELECT DISTINCT ON (id) id FROM users").is_err());
+    assert!(bind_sql("SELECT DISTINCT ON (id) id FROM users", SqlDialect::Postgres).is_err());
 }
 
 #[test]

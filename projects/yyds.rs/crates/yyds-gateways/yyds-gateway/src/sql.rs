@@ -3,6 +3,8 @@
 //! This module only parses the SQL surface. It does not execute SQL, own a
 //! query planner, or bypass the YY execution model.
 
+use std::borrow::Cow;
+
 use oak_sql::ast::{BinaryOperator, Expression, Literal, SelectItem, SqlStatement};
 
 /// Structured failure category from the Oak SQL frontend, gateway binder,
@@ -198,8 +200,25 @@ pub enum SqlTransactionAction {
 }
 
 /// Parses one SQL surface statement through the official Oak SQL frontend.
-pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError> {
-    let root = oak_sql::parse(source).map_err(SqlFrontendError::syntax)?;
+///
+/// The Oak parser is always built with [`SqlLanguage::mysql`] because that is the
+/// only language configuration that lexes backtick identifiers, which both the
+/// normalization step and MySQL clients need. PostgreSQL double-quoted identifiers
+/// are therefore normalized into backtick identifiers before parsing.
+pub fn parse_sql(source: &str, dialect: SqlDialect) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError> {
+    parse_ast(&normalise_sql_source(source, dialect))
+}
+
+/// Parses already-normalized SQL text and rejects Oak error statements.
+fn parse_ast(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError> {
+    use oak_core::{parser::session::ParseSession, source::SourceText, Builder};
+
+    let language = oak_sql::SqlLanguage::mysql();
+    let builder = oak_sql::SqlBuilder::new(&language);
+    let source_text = SourceText::new(source.to_string());
+    let mut cache = ParseSession::default();
+    let root =
+        builder.build(&source_text, &[], &mut cache).result.map_err(|error| SqlFrontendError::syntax(error.to_string()))?;
     for statement in &root.statements {
         match statement {
             SqlStatement::Error { message, .. } => return Err(SqlFrontendError::syntax(message.to_string())),
@@ -213,6 +232,93 @@ pub fn parse_sql(source: &str) -> Result<oak_sql::ast::SqlRoot, SqlFrontendError
     Ok(root)
 }
 
+/// 按方言把 SQL 文本改写成 Oak 能解析的形状。
+///
+/// 两处改写都是词法层事实，不是语义近似：
+/// - PostgreSQL 的双引号标识符改成反引号（Oak 只在反引号配置下产出标识符节点）。
+/// - `LEFT` / `RIGHT` 在 Oak 词表里是 JOIN 关键字，函数调用位置无法解析，改写成引号标识符。
+fn normalise_sql_source(source: &str, dialect: SqlDialect) -> Cow<'_, str> {
+    let quoted = normalise_quoted_identifiers(source, dialect);
+    match normalize_reserved_function_calls(&quoted) {
+        // Borrowed result still points at `source` or into `quoted`, and `quoted`
+        // owning the text is exactly what the caller needs to receive.
+        Cow::Borrowed(_) => quoted,
+        Cow::Owned(text) => Cow::Owned(text),
+    }
+}
+
+/// PostgreSQL 双引号标识符 → 反引号标识符；MySQL 的双引号是字符串字面量，保持原样。
+///
+/// 只扫描代码位置：单引号字符串、反引号标识符与注释原样保留。
+fn normalise_quoted_identifiers(source: &str, dialect: SqlDialect) -> Cow<'_, str> {
+    if dialect == SqlDialect::Mysql || !source.contains('"') {
+        return Cow::Borrowed(source);
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut copied = 0;
+    let mut changed = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => index = skip_quoted_bytes(bytes, index, b'\''),
+            b'`' => index = skip_quoted_bytes(bytes, index, b'`'),
+            b'-' if bytes.get(index + 1) == Some(&b'-') => index = skip_line_comment(bytes, index),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => index = skip_block_comment(bytes, index),
+            b'"' => {
+                let start = index;
+                let mut content = String::new();
+                let mut cursor = index + 1;
+                while cursor < bytes.len() {
+                    if bytes[cursor] == b'"' {
+                        if bytes.get(cursor + 1) == Some(&b'"') {
+                            content.push('"');
+                            cursor += 2;
+                            continue;
+                        }
+                        cursor += 1;
+                        break;
+                    }
+                    content.push(source[cursor..].chars().next().expect("in-bounds character"));
+                    cursor += source[cursor..].chars().next().map_or(1, |ch| ch.len_utf8());
+                }
+                out.push_str(&source[copied..start]);
+                out.push('`');
+                out.push_str(&content);
+                out.push('`');
+                copied = cursor;
+                index = cursor;
+                changed = true;
+            }
+            _ => index += 1,
+        }
+    }
+    if !changed {
+        return Cow::Borrowed(source);
+    }
+    out.push_str(&source[copied..]);
+    Cow::Owned(out)
+}
+
+fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index += 1;
+    }
+    index
+}
+
+fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index < bytes.len() {
+        if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+            return index + 2;
+        }
+        index += 1;
+    }
+    index
+}
+
 /// Projects the small set of protocol session commands from Oak's SQL AST.
 pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, SqlFrontendError> {
     if let Some(intent) = detect_savepoint_statement(source) {
@@ -222,7 +328,10 @@ pub fn parse_session_command(source: &str) -> Result<Option<SqlSessionCommand>, 
         return Ok(Some(command));
     }
     let normalized = normalize_start_transaction(source).or_else(|| normalize_quoted_set_names(source));
-    let root = parse_sql(normalized.as_deref().unwrap_or(source))?;
+    // 这里只做协议命令投影，从不读取标识符文本；按 PostgreSQL 口径消除双引号，
+    // 让 PostgreSQL 客户端带 `"identifiers"` 的语句也能通过可解析性检查。
+    let source = normalized.as_deref().unwrap_or(source);
+    let root = parse_ast(&normalise_sql_source(source, SqlDialect::Postgres))?;
     if root.statements.len() != 1 {
         return Ok(None);
     }
@@ -967,6 +1076,14 @@ pub enum SqlScalarFunction {
     Abs,
     /// `ROUND(x[, digits])`.
     Round,
+    /// `INSTR(haystack, needle)` — MySQL spelling, 1-based character position, `0` when absent.
+    Instr,
+    /// `STRPOS(haystack, needle)` — PostgreSQL spelling of [`Self::Instr`].
+    Strpos,
+    /// `LEFT(text, n)` — first `n` characters.
+    Left,
+    /// `RIGHT(text, n)` — last `n` characters.
+    Right,
 }
 
 impl SqlScalarFunction {
@@ -993,6 +1110,11 @@ impl SqlScalarFunction {
             "COALESCE" | "IFNULL" => Some(Self::Coalesce),
             "ABS" => Some(Self::Abs),
             "ROUND" => Some(Self::Round),
+            // 文本谓词：两种方言各用各的拼写，跨方言调用在求值期报未知函数。
+            "INSTR" => Some(Self::Instr),
+            "STRPOS" => Some(Self::Strpos),
+            "LEFT" => Some(Self::Left),
+            "RIGHT" => Some(Self::Right),
             _ => None,
         }
     }
@@ -1035,6 +1157,10 @@ impl SqlScalarFunction {
             Self::Coalesce => "COALESCE",
             Self::Abs => "ABS",
             Self::Round => "ROUND",
+            Self::Instr => "INSTR",
+            Self::Strpos => "STRPOS",
+            Self::Left => "LEFT",
+            Self::Right => "RIGHT",
         }
     }
 
@@ -1055,6 +1181,7 @@ impl SqlScalarFunction {
             Self::Substring => (2, Some(3)),
             Self::Trim | Self::Ltrim | Self::Rtrim => (1, Some(2)),
             Self::Replace => (3, Some(3)),
+            Self::Instr | Self::Strpos | Self::Left | Self::Right => (2, Some(2)),
             Self::Concat | Self::Coalesce => (1, None),
         }
     }
@@ -1135,8 +1262,8 @@ pub enum SqlBoundUnaryOperator {
 }
 
 /// Binds the supported SQL compatibility subset without executing it.
-pub fn bind_sql(source: &str) -> Result<SqlBoundStatement, SqlFrontendError> {
-    let root = parse_sql(source)?;
+pub fn bind_sql(source: &str, dialect: SqlDialect) -> Result<SqlBoundStatement, SqlFrontendError> {
+    let root = parse_sql(source, dialect)?;
     if root.statements.len() != 1 {
         return Err(bind_error("SQL gateway accepts exactly one statement"));
     }
@@ -1908,7 +2035,7 @@ fn bind_expression(expression: &Expression) -> Result<SqlBoundExpression, SqlFro
                     SqlFrontendError::new(
                         SqlErrorKind::UnknownFunction,
                         format!(
-                            "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/CURRENT_DATE/CURRENT_TIME/CURDATE/CURTIME/LOWER/UPPER/LENGTH/CHAR_LENGTH/SUBSTRING/TRIM/LTRIM/RTRIM/REPLACE/CONCAT/COALESCE/ABS/ROUND)"
+                            "unknown SQL function: {display} (supported: aggregate COUNT/SUM/AVG/MAX/MIN and scalar VERSION/DATABASE/CURRENT_SCHEMA/NOW/CURRENT_DATE/CURRENT_TIME/CURDATE/CURTIME/LOWER/UPPER/LENGTH/CHAR_LENGTH/SUBSTRING/TRIM/LTRIM/RTRIM/REPLACE/CONCAT/COALESCE/ABS/ROUND/INSTR/STRPOS/LEFT/RIGHT)"
                         ),
                     )
                 });
@@ -2077,6 +2204,89 @@ pub fn reject_binary_cast_operator(sql: &str) -> Result<(), SqlFrontendError> {
     Ok(())
 }
 
+/// 把 `LEFT(...)` / `RIGHT(...)` 的保留字函数拼写改写成引号标识符。
+///
+/// Oak 的 SQL 词表把 `LEFT` / `RIGHT` 固定成 JOIN 关键字，函数调用位置根本无法解析。
+/// MySQL 与 PostgreSQL 都把这两个词当函数名使用，所以这里只在代码位置、只在这两个词
+/// 后面紧跟 `(` 时加一层引号（`` `LEFT` ``），绑定器 `normalize_identifier` 再还原成
+/// 同一个函数名。`LEFT JOIN` 等没有 `(` 的用法原样保留，字符串字面量、引号标识符与
+/// 注释也一律不动。
+fn normalize_reserved_function_calls(sql: &str) -> Cow<'_, str> {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut index = 0;
+    let mut copied = 0;
+    let mut changed = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            let start = index;
+            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$')) {
+                index += 1;
+            }
+            let word = &sql[start..index];
+            if (word.eq_ignore_ascii_case("LEFT") || word.eq_ignore_ascii_case("RIGHT"))
+                && previous_code_byte(bytes, start).is_none_or(|byte| byte != b'.')
+                && next_code_byte(bytes, index) == Some(b'(')
+            {
+                out.push_str(&sql[copied..start]);
+                out.push('`');
+                out.push_str(word);
+                out.push('`');
+                copied = index;
+                changed = true;
+            }
+            continue;
+        }
+        match byte {
+            quote @ (b'\'' | b'"' | b'`') => index = skip_quoted_bytes(bytes, index, quote),
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index < bytes.len() {
+                    if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    if !changed {
+        Cow::Borrowed(sql)
+    }
+    else {
+        out.push_str(&sql[copied..]);
+        Cow::Owned(out)
+    }
+}
+
+/// 从 `index` 起跳过空白后的下一个字节（`None` 表示已到结尾）。
+fn next_code_byte(bytes: &[u8], mut index: usize) -> Option<u8> {
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    bytes.get(index).copied()
+}
+
+/// `start` 之前跳过空白后的最后一个字节（`None` 表示前面没有代码）。
+fn previous_code_byte(bytes: &[u8], mut start: usize) -> Option<u8> {
+    while start > 0 && bytes[start - 1].is_ascii_whitespace() {
+        start -= 1;
+    }
+    if start == 0 {
+        return None;
+    }
+    bytes.get(start - 1).copied()
+}
+
 /// Advances past one quoted run, honouring both doubled quotes and the MySQL
 /// backslash escape inside single-quoted strings.
 fn skip_quoted_bytes(bytes: &[u8], mut index: usize, quote: u8) -> usize {
@@ -2180,13 +2390,74 @@ fn bind_error(message: &str) -> SqlFrontendError {
     SqlFrontendError::syntax(message)
 }
 
+/// 规范化一个标识符：去掉一层引号（`` `x` `` / `"x"` / `[x]`）与前后空白。
+///
+/// MySQL 客户端的标识符一律用反引号，PostgreSQL 用双引号，Oak 保留引号文本。
+/// 网关按去掉引号后的名字解析表、列与函数，因此这里统一剥一层。
 fn normalize_identifier(name: &str) -> String {
-    name.trim().to_string()
+    let trimmed = name.trim();
+    let unquoted = match trimmed.as_bytes() {
+        [first, .., last] if *first == b'`' && *last == b'`' => &trimmed[1..trimmed.len() - 1],
+        [first, .., last] if *first == b'"' && *last == b'"' => &trimmed[1..trimmed.len() - 1],
+        [first, .., last] if *first == b'[' && *last == b']' => &trimmed[1..trimmed.len() - 1],
+        _ => trimmed,
+    };
+    unquoted.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::SqlDialect;
+
+    /// 保留字函数拼写只在代码位置改写：`LEFT JOIN`、字符串与注释保持原样。
+    #[test]
+    fn reserved_function_spellings_are_rewritten_only_in_code_positions() {
+        use super::normalize_reserved_function_calls;
+
+        assert_eq!(normalize_reserved_function_calls("SELECT LEFT(name, 3) FROM users"), "SELECT `LEFT`(name, 3) FROM users");
+        assert_eq!(
+            normalize_reserved_function_calls("select right(`name`, 3) from users"),
+            "select `right`(`name`, 3) from users"
+        );
+        assert_eq!(normalize_reserved_function_calls("SELECT a LEFT JOIN b ON 1 = 1"), "SELECT a LEFT JOIN b ON 1 = 1");
+        assert_eq!(normalize_reserved_function_calls("SELECT LEFT"), "SELECT LEFT");
+        assert_eq!(normalize_reserved_function_calls("SELECT 'LEFT(1)' AS s"), "SELECT 'LEFT(1)' AS s");
+        assert_eq!(normalize_reserved_function_calls("SELECT 1 -- LEFT(1)"), "SELECT 1 -- LEFT(1)");
+        assert_eq!(normalize_reserved_function_calls("SELECT 1 /* LEFT(1) */"), "SELECT 1 /* LEFT(1) */");
+    }
+
+    /// 引号标识符只剥一层引号：MySQL 反引号与 PostgreSQL 双引号共用同一口径。
+    #[test]
+    fn identifiers_lose_exactly_one_layer_of_quoting() {
+        use super::normalize_identifier;
+
+        assert_eq!(normalize_identifier("`users`"), "users");
+        assert_eq!(normalize_identifier("\"users\""), "users");
+        assert_eq!(normalize_identifier("[users]"), "users");
+        assert_eq!(normalize_identifier(" users "), "users");
+        assert_eq!(normalize_identifier("``"), "");
+        assert_eq!(normalize_identifier("`a.b`"), "a.b");
+    }
+
+    /// Iris 生成的 `LEFT` / `RIGHT` 形态必须被解析成函数调用，而不是 JOIN 关键字。
+    #[test]
+    fn reserved_function_calls_parse_as_function_calls() {
+        use super::bind_sql;
+
+        for sql in [
+            "SELECT LEFT(name, 3) FROM users",
+            "SELECT id FROM users WHERE LEFT(name, 3) = 'ali'",
+            "SELECT id FROM users WHERE LEFT(CAST(name AS BINARY), 3) = 'ali'",
+            "SELECT id FROM users WHERE LEFT(name, CHAR_LENGTH('alice')) = 'alice'",
+            "SELECT RIGHT(name, 3) FROM users",
+            "SELECT id FROM users WHERE RIGHT(name, CHAR_LENGTH('alice')) = 'alice'",
+        ] {
+            bind_sql(sql, SqlDialect::Mysql).unwrap_or_else(|error| panic!("`{sql}` must bind: {}", error.message));
+        }
+        // JOIN 位置的关键字仍是 JOIN，不会因为函数改写而失配。
+        bind_sql("SELECT a.id FROM users a LEFT JOIN orders b ON a.id = b.user_id", SqlDialect::Mysql)
+            .expect("LEFT JOIN must still parse");
+    }
 
     /// `bytes` 容量是方言 wire 事实：MySQL 裸 `BLOB` 封顶 65 535 octets，
     /// PostgreSQL `BYTEA` 不继承该上限，共享规划层不得替它拒绝任何载荷。

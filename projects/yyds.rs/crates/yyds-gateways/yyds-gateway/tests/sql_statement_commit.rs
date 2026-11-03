@@ -113,8 +113,8 @@ fn catalog(source: &str) -> SqlCatalog {
 }
 
 fn plan(catalog: &SqlCatalog, sql: &str) -> SqlExecutionPlan {
-    let bound =
-        bind_sql_catalog(sql, catalog, SCHEMA_VERSION).unwrap_or_else(|error| panic!("`{sql}` must bind: {}", error.message));
+    let bound = bind_sql_catalog(sql, catalog, SCHEMA_VERSION, SqlDialect::Postgres)
+        .unwrap_or_else(|error| panic!("`{sql}` must bind: {}", error.message));
     plan_statement_for_dialect(bound, catalog, SqlDialect::Postgres)
         .unwrap_or_else(|error| panic!("`{sql}` must plan: {}", error.message))
 }
