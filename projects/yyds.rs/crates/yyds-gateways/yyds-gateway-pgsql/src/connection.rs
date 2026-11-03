@@ -15,9 +15,9 @@ use crate::wire::{decode_message, decode_startup, encode_message, FrameError, St
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
     bind_sql_catalog, describe_plan, detect_session_reset_statement, encode_hex, execute_plan, neutralized_sql_parameters,
-    nulled_sql_parameters, parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, DiscardTarget,
-    SqlBoundExpression, SqlBoundLiteral, SqlCatalog, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType,
-    SqlFrontendError, SqlParameterStyle, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    nulled_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect, substitute_sql_parameters,
+    DiscardTarget, SqlBoundExpression, SqlBoundLiteral, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType,
+    SqlFrontendError, SqlParameterStyle, SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -51,10 +51,8 @@ const DEFAULT_SEARCH_PATH: &str = "$user, public";
 /// Injects YYDS SQL execution into PostgreSQL SimpleQuery.
 #[derive(Debug)]
 pub struct PgsqlSqlRuntime {
-    /// Bound YYDS catalog view used for SQL name resolution.
-    pub catalog: SqlCatalog,
-    /// Schema version expected by the gateway binder.
-    pub schema_version: u32,
+    /// Local schema registry holding catalog snapshots and applying DDL.
+    pub schema: Arc<SqlSchemaRegistry>,
     /// KV execution plane.
     pub executor: Arc<dyn KeyValueExecutor>,
 }
@@ -402,6 +400,36 @@ fn handle_simple_query(
     extended: &mut ExtendedSession,
     runtime: Option<&Arc<PgsqlSqlRuntime>>,
 ) -> io::Result<()> {
+    // DDL resolves against the local schema registry before the Oak session
+    // parser, so a `CREATE` / `ALTER` / `DROP` outside the supported subset is
+    // reported as such instead of being misclassified as an unknown table.
+    match parse_ddl(sql, SqlDialect::Postgres) {
+        Err(error) => {
+            session.fail();
+            return write_error_response(stream, pg_sqlstate(error.kind), &format!("SQL ddl error: {}", error.message));
+        }
+        Ok(Some(statement)) => {
+            if session.failed {
+                return write_error_response(
+                    stream,
+                    "25P02",
+                    "current transaction is aborted, commands ignored until end of transaction block",
+                );
+            }
+            let Some(runtime) = runtime
+            else {
+                return write_error_response(stream, "0A000", "YYDS PostgreSQL SQL execution is not implemented");
+            };
+            return match runtime.schema.apply_ddl(&statement) {
+                Ok(outcome) => write_command_complete(stream, outcome.command_tag()),
+                Err(error) => {
+                    session.fail();
+                    write_error_response(stream, pg_sqlstate(error.kind), &format!("SQL ddl error: {}", error.message))
+                }
+            };
+        }
+        Ok(None) => {}
+    }
     match parse_session_command(sql) {
         Err(_) => {
             session.fail();
@@ -678,11 +706,12 @@ fn run_statement(
         session.fail();
         return Err(("42601".to_string(), "Oak could not parse the SQL statement".to_string()));
     }
-    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version, SqlDialect::Postgres).map_err(|error| {
+    let catalog = runtime.schema.catalog();
+    let bound = bind_sql_catalog(sql, &catalog, catalog.schema_version(), SqlDialect::Postgres).map_err(|error| {
         session.fail();
         statement_error("bind", error)
     })?;
-    let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres).map_err(|error| {
+    let plan = plan_statement_for_dialect(bound, &catalog, SqlDialect::Postgres).map_err(|error| {
         session.fail();
         statement_error("plan", error)
     })?;
@@ -750,6 +779,10 @@ fn pg_sqlstate(kind: SqlErrorKind) -> &'static str {
         DivisionByZero => "22012",
         NumericOverflow => "22003",
         InvalidSubstringLength => "22011",
+        TableAlreadyExists => "42P07",
+        ColumnAlreadyExists => "42701",
+        IndexAlreadyExists => "42P07",
+        UnknownIndex => "42704",
     }
 }
 
@@ -1090,10 +1123,11 @@ fn statement_description(
 
 /// Binds and plans rendered SQL only to read its result shape.
 fn plan_description(sql: &str, runtime: &Arc<PgsqlSqlRuntime>) -> Result<Vec<SqlColumn>, (String, String)> {
-    let bound = bind_sql_catalog(sql, &runtime.catalog, runtime.schema_version, SqlDialect::Postgres)
+    let catalog = runtime.schema.catalog();
+    let bound = bind_sql_catalog(sql, &catalog, catalog.schema_version(), SqlDialect::Postgres)
         .map_err(|error| statement_error("bind", error))?;
-    let plan = plan_statement_for_dialect(bound, &runtime.catalog, SqlDialect::Postgres)
-        .map_err(|error| statement_error("plan", error))?;
+    let plan =
+        plan_statement_for_dialect(bound, &catalog, SqlDialect::Postgres).map_err(|error| statement_error("plan", error))?;
     Ok(describe_plan(&plan))
 }
 

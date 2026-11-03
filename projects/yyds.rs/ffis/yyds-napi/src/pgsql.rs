@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use yyds_catalog::Catalog;
-use yyds_gateway::SqlCatalog;
+use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
 use yyds_gateway_pgsql::service::PgsqlService;
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle};
@@ -24,7 +24,7 @@ impl PgsqlServiceHandle {
         Ok(Self { inner: Some(service) })
     }
 
-    /// Starts a PostgreSQL listener with a YYDS SQL runtime for SELECT + DML execution.
+    /// Starts a PostgreSQL listener with a YYDS SQL runtime for SELECT, DML, and DDL execution.
     ///
     /// `catalog_path` 指向 `.yyds` catalog 文件，用于构造 SQL name-resolution 视图。
     #[napi(factory)]
@@ -36,20 +36,30 @@ impl PgsqlServiceHandle {
     ) -> Result<Self> {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let yyds_catalog = Catalog::open(&catalog_path).map_err(|msg| Error::from_reason(format!("open catalog: {msg}")))?;
-        let schema_version = yyds_catalog
-            .schema()
-            .map(|s| s.version)
-            .ok_or_else(|| Error::from_reason("YYDS catalog has no published schema"))?;
         let catalog = SqlCatalog::from_yyds_catalog(&yyds_catalog)
             .map_err(|error| Error::from_reason(format!("invalid YYDS catalog: {}", error.message)))?;
-        let service = PgsqlService::start_with_executor(
-            Arc::clone(&lease.inner),
-            address,
-            Arc::clone(&executor.inner),
-            catalog,
-            schema_version,
-        )
-        .map_err(map_io)?;
+        let service =
+            PgsqlService::start_with_executor(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), catalog)
+                .map_err(map_io)?;
+        Ok(Self { inner: Some(service) })
+    }
+
+    /// Starts a PostgreSQL listener backed by a persisted local schema registry.
+    ///
+    /// `schema_path` 指向 `yyds-sql-schema/v0` 文件，缺失时会以空 schema 启动。
+    #[napi(factory)]
+    pub fn start_with_schema(
+        lease: &NodeLeaseHandle,
+        port: u16,
+        executor: &LocalExecutorHandle,
+        schema_path: String,
+    ) -> Result<Self> {
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let schema = SqlSchemaRegistry::open(&schema_path)
+            .map_err(|error| Error::from_reason(format!("open SQL schema: {}", error.message)))?;
+        let service =
+            PgsqlService::start_with_registry(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), Arc::new(schema))
+                .map_err(map_io)?;
         Ok(Self { inner: Some(service) })
     }
 

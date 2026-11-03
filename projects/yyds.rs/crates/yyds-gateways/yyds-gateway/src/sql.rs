@@ -54,6 +54,14 @@ pub enum SqlErrorKind {
     /// Exact integer arithmetic left the `i64` range. Both dialects report SQLSTATE
     /// `22003`, but MySQL names it with its own error number `1690`.
     NumericOverflow,
+    /// `CREATE TABLE` targets a table the local schema registry already holds.
+    TableAlreadyExists,
+    /// `ALTER TABLE ADD COLUMN` targets a column the table already holds.
+    ColumnAlreadyExists,
+    /// `CREATE INDEX` reuses an index name already registered.
+    IndexAlreadyExists,
+    /// `DROP INDEX` names an index the local schema registry does not hold.
+    UnknownIndex,
 }
 
 /// Structured failure from the Oak SQL frontend or gateway binder.

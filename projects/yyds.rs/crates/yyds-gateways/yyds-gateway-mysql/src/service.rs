@@ -13,7 +13,7 @@ use std::{
 
 use yyds_control::NodeLease;
 use yyds_execution::KeyValueExecutor;
-use yyds_gateway::SqlCatalog;
+use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
 
 use crate::connection::{serve_cancellable, MysqlSqlRuntime};
 
@@ -48,16 +48,28 @@ impl MysqlService {
         Ok(Self { address, stopping, worker: Some(worker) })
     }
 
-    /// Starts a listener with a YYDS SQL runtime for SELECT + DML execution.
+    /// Starts a listener with a YYDS SQL runtime for SELECT, DML, and DDL execution.
+    pub fn start_with_registry(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        executor: Arc<dyn KeyValueExecutor>,
+        schema: Arc<SqlSchemaRegistry>,
+    ) -> io::Result<Self> {
+        let runtime = Arc::new(MysqlSqlRuntime { schema, executor });
+        Self::start(owner, address, Some(runtime))
+    }
+
+    /// Starts a listener seeded from a published catalog.
+    ///
+    /// DDL applies to an in-memory registry and is not persisted.
     pub fn start_with_executor(
         owner: Arc<NodeLease>,
         address: SocketAddr,
         executor: Arc<dyn KeyValueExecutor>,
         catalog: SqlCatalog,
-        schema_version: u32,
     ) -> io::Result<Self> {
-        let runtime = Arc::new(MysqlSqlRuntime { catalog, executor, schema_version });
-        Self::start(owner, address, Some(runtime))
+        let schema = SqlSchemaRegistry::from_catalog(&catalog).map_err(|error| io::Error::other(error.message))?;
+        Self::start_with_registry(owner, address, executor, Arc::new(schema))
     }
 
     /// Actual bound address, including the assigned port when configured with zero.

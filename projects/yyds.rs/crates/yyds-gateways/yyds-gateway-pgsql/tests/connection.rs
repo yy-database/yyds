@@ -398,7 +398,7 @@ fn standalone_offset_skips_rows_over_the_text_protocol() {
 fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;
     use yyds_execution::LocalExecutor;
-    use yyds_gateway::SqlCatalog;
+    use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
     use yyds_gateway_pgsql::connection::{serve_connection, PgsqlSqlRuntime};
     use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
@@ -451,7 +451,10 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     shards.insert(shard_id, shard);
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
-    let runtime = Arc::new(PgsqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    let runtime = Arc::new(PgsqlSqlRuntime {
+        schema: Arc::new(SqlSchemaRegistry::from_catalog(&catalog).unwrap()),
+        executor: Arc::new(executor),
+    });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
@@ -1620,6 +1623,101 @@ fn extended_protocol_executes_iris_text_predicates_case_sensitively() {
 
     // `INSTR` 是 MySQL 拼写，PostgreSQL 必须按未知函数拒绝而不是近似执行。
     assert_sqlstate(&mut client, "SELECT INSTR(name, 'x') FROM users", b"42883");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 空 schema registry 的 runtime，用于验证 DDL 自身建立 name-resolution 视图。
+fn start_server_with_empty_schema() -> (TcpStream, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlSchemaRegistry;
+    use yyds_gateway_pgsql::connection::{serve_connection, PgsqlSqlRuntime};
+    use yyds_kv::FileShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
+
+    let runtime =
+        Arc::new(PgsqlSqlRuntime { schema: Arc::new(SqlSchemaRegistry::new_in_memory()), executor: Arc::new(executor) });
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        // 保活 TempFolder：shard 文件必须在服务线程存活期间保持可用。
+        let _directory = directory;
+        let (stream, _) = listener.accept().unwrap();
+        serve_connection(stream, Some(runtime)).unwrap();
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut startup = Vec::from(0_u32.to_be_bytes());
+    startup.extend_from_slice(&PROTOCOL_V3.to_be_bytes());
+    startup.extend_from_slice(b"user\0test\0\0");
+    let length = startup.len() as u32;
+    startup[..4].copy_from_slice(&length.to_be_bytes());
+    client.write_all(&startup).unwrap();
+    let startup_responses = receive_until_ready(&mut client);
+    assert_eq!(startup_responses.last().unwrap(), &(b'Z', b"I".to_vec()));
+    (client, server)
+}
+
+/// 读取 SimpleQuery 结果集的唯一一行。
+fn single_row(client: &mut TcpStream, sql: &str) -> Vec<Option<Vec<u8>>> {
+    send_query(client, sql);
+    let responses = receive_until_ready(client);
+    assert!(!responses.iter().any(|(tag, _)| *tag == b'E'), "`{sql}` failed: {responses:?}");
+    let rows: Vec<Vec<Option<Vec<u8>>>> =
+        responses.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect();
+    assert_eq!(rows.len(), 1, "`{sql}` must return exactly one row, got {rows:?}");
+    rows.into_iter().next().unwrap()
+}
+
+#[test]
+fn pgsql_ddl_builds_the_runtime_catalog_and_reports_catalog_errors() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(&mut client, "CREATE TABLE users (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(191) NOT NULL)");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"CREATE TABLE\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    assert_sqlstate(&mut client, "CREATE TABLE users (id BIGINT NOT NULL PRIMARY KEY)", b"42P07");
+    send_query(&mut client, "CREATE TABLE IF NOT EXISTS users (id BIGINT NOT NULL PRIMARY KEY)");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+
+    send_query(&mut client, "INSERT INTO users (id, name) VALUES (1, 'alice')");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    assert_eq!(
+        single_row(&mut client, "SELECT id, name FROM users WHERE id = 1"),
+        vec![Some(b"1".to_vec()), Some(b"alice".to_vec())]
+    );
+
+    send_query(&mut client, "ALTER TABLE users ADD COLUMN age INTEGER");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"ALTER TABLE\0".to_vec()));
+    assert_eq!(single_row(&mut client, "SELECT age FROM users WHERE id = 1"), vec![None]);
+    assert_sqlstate(&mut client, "ALTER TABLE users ADD COLUMN name VARCHAR(191)", b"42701");
+
+    send_query(&mut client, "CREATE INDEX idx_users_name ON users (name)");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE INDEX\0".to_vec()));
+    assert_sqlstate(&mut client, "CREATE INDEX idx_users_name ON users (name)", b"42P07");
+    assert_sqlstate(&mut client, "DROP INDEX nope", b"42704");
+
+    // DDL 失败同样把事务置为 aborted，后续语句必须是 `25P02`。
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    assert_sqlstate_in_tx(&mut client, "CREATE TABLE users (id BIGINT NOT NULL PRIMARY KEY)", b"42P07");
+    assert_sqlstate_in_tx(&mut client, "SELECT 1", b"25P02");
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client), vec![(b'C', b"ROLLBACK\0".to_vec()), (b'Z', b"I".to_vec())]);
+
+    send_query(&mut client, "DROP TABLE users");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"DROP TABLE\0".to_vec()));
+    assert_sqlstate(&mut client, "SELECT id FROM users", b"42P01");
 
     drop(client);
     server.join().unwrap();

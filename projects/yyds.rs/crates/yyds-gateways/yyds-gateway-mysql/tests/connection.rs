@@ -109,7 +109,7 @@ fn packet_codec_output_matches_connection_packet_decoder() {
 fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;
     use yyds_execution::LocalExecutor;
-    use yyds_gateway::SqlCatalog;
+    use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
     use yyds_gateway_mysql::connection::{serve_connection, MysqlSqlRuntime};
     use yyds_kv::{FileShard, InlineValue, Key, KvStore, StoredValue};
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
@@ -149,7 +149,10 @@ fn start_server_with_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     shards.insert(shard_id, shard);
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
-    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    let runtime = Arc::new(MysqlSqlRuntime {
+        schema: Arc::new(SqlSchemaRegistry::from_catalog(&catalog).unwrap()),
+        executor: Arc::new(executor),
+    });
     spawn_runtime_server(runtime, directory)
 }
 
@@ -187,7 +190,7 @@ fn put_row(shard: &mut dyn yyds_kv::KvStore, namespace: &str, rowid: &[u8], fiel
 fn start_server_with_join_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;
     use yyds_execution::LocalExecutor;
-    use yyds_gateway::SqlCatalog;
+    use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
     use yyds_gateway_mysql::connection::MysqlSqlRuntime;
     use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
@@ -235,7 +238,10 @@ fn start_server_with_join_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     shards.insert(shard_id, shard);
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
-    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    let runtime = Arc::new(MysqlSqlRuntime {
+        schema: Arc::new(SqlSchemaRegistry::from_catalog(&catalog).unwrap()),
+        executor: Arc::new(executor),
+    });
     spawn_runtime_server(runtime, directory)
 }
 
@@ -876,7 +882,7 @@ fn mysql_insert_select_writes_rows_and_reports_affected_rows() {
 fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;
     use yyds_execution::LocalExecutor;
-    use yyds_gateway::SqlCatalog;
+    use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
     use yyds_gateway_mysql::connection::MysqlSqlRuntime;
     use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
@@ -909,7 +915,10 @@ fn start_two_client_server() -> (TcpStream, TcpStream, thread::JoinHandle<()>) {
     shards.insert(shard_id, shard);
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
-    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    let runtime = Arc::new(MysqlSqlRuntime {
+        schema: Arc::new(SqlSchemaRegistry::from_catalog(&catalog).unwrap()),
+        executor: Arc::new(executor),
+    });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
@@ -1307,7 +1316,7 @@ fn column_charset(definition: &[u8]) -> u16 {
 fn start_server_with_payload_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     use std::sync::Arc;
     use yyds_execution::LocalExecutor;
-    use yyds_gateway::SqlCatalog;
+    use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
     use yyds_gateway_mysql::connection::MysqlSqlRuntime;
     use yyds_kv::FileShard;
     use yyds_types::{ShardEpoch, ShardId, ShardMap};
@@ -1338,7 +1347,10 @@ fn start_server_with_payload_runtime() -> (TcpStream, thread::JoinHandle<()>) {
     shards.insert(shard_id, shard);
     let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
 
-    let runtime = Arc::new(MysqlSqlRuntime { catalog, schema_version: 7, executor: Arc::new(executor) });
+    let runtime = Arc::new(MysqlSqlRuntime {
+        schema: Arc::new(SqlSchemaRegistry::from_catalog(&catalog).unwrap()),
+        executor: Arc::new(executor),
+    });
     spawn_runtime_server(runtime, directory)
 }
 
@@ -1663,6 +1675,93 @@ fn prepared_statements_execute_iris_text_predicates_case_sensitively() {
 
     // `STRPOS` 是 PostgreSQL 拼写，MySQL 必须按未知函数拒绝而不是近似执行。
     assert_eq!(expect_error(&mut client, "SELECT STRPOS(name, 'lic') FROM users"), (1305, "42000".into()));
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// 空 schema registry 的 runtime，用于验证 DDL 自身建立 name-resolution 视图。
+fn start_server_with_empty_schema() -> (TcpStream, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlSchemaRegistry;
+    use yyds_gateway_mysql::connection::MysqlSqlRuntime;
+    use yyds_kv::FileShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
+
+    let runtime =
+        Arc::new(MysqlSqlRuntime { schema: Arc::new(SqlSchemaRegistry::new_in_memory()), executor: Arc::new(executor) });
+    spawn_runtime_server(runtime, directory)
+}
+
+/// 读取 SELECT 首行的每个值，`NULL` 表示缺失。
+fn expect_row_values(client: &mut TcpStream, sql: &str) -> Vec<Option<Vec<u8>>> {
+    client.write_all(&encode_packet(0, &sql_payload(sql)).unwrap()).unwrap();
+    let (_, count) = read_packet_full(client);
+    let columns = read_lenenc(&count).0 as usize;
+    for _ in 0..columns {
+        read_packet_full(client);
+    }
+    let (_, eof) = read_packet_full(client);
+    assert_eq!(eof[0], 0xFE);
+    let (_, row) = read_packet_full(client);
+    assert_ne!(row[0], 0xFE, "`{sql}` must return a row");
+    let mut values = Vec::new();
+    let mut offset = 0;
+    while offset < row.len() {
+        if row[offset] == 0xFB {
+            values.push(None);
+            offset += 1;
+            continue;
+        }
+        let (value, consumed) = read_lenenc_str(&row[offset..]);
+        values.push(Some(value.to_vec()));
+        offset += consumed;
+    }
+    let (_, eof) = read_packet_full(client);
+    assert_eq!(eof[0], 0xFE);
+    values
+}
+
+#[test]
+fn mysql_ddl_builds_the_runtime_catalog_and_reports_catalog_errors() {
+    let (mut client, server) = start_server_with_empty_schema();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(
+        &mut client,
+        "CREATE TABLE users (id BIGINT NOT NULL PRIMARY KEY, name VARCHAR(191) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+    );
+    assert_eq!(expect_error(&mut client, "CREATE TABLE users (id BIGINT NOT NULL PRIMARY KEY)"), (1050, "42S01".into()));
+    expect_ok(&mut client, "CREATE TABLE IF NOT EXISTS users (id BIGINT NOT NULL PRIMARY KEY)");
+
+    expect_ok(&mut client, "INSERT INTO users (id, name) VALUES (1, 'alice')");
+    assert_eq!(
+        expect_row_values(&mut client, "SELECT id, name FROM users WHERE id = 1"),
+        vec![Some(b"1".to_vec()), Some(b"alice".to_vec())]
+    );
+
+    expect_ok(&mut client, "ALTER TABLE users ADD COLUMN age INT NULL");
+    assert_eq!(expect_row_values(&mut client, "SELECT age FROM users WHERE id = 1"), vec![None]);
+    assert_eq!(expect_error(&mut client, "ALTER TABLE users ADD COLUMN name VARCHAR(191)"), (1060, "42S21".into()));
+
+    expect_ok(&mut client, "CREATE INDEX idx_users_name ON users (name)");
+    assert_eq!(expect_error(&mut client, "CREATE INDEX idx_users_name ON users (name)"), (1061, "42000".into()));
+    assert_eq!(expect_error(&mut client, "DROP INDEX nope ON users"), (1091, "42000".into()));
+
+    expect_ok(&mut client, "DROP TABLE users");
+    assert_eq!(expect_error(&mut client, "SELECT id FROM users"), (1146, "42S02".into()));
 
     drop(client);
     server.join().unwrap();

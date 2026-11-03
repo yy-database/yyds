@@ -23,6 +23,12 @@ export interface YydsBindings {
             executor: unknown,
             catalogPath: string,
         ): PgsqlServiceBinding;
+        startWithSchema(
+            lease: unknown,
+            port: number,
+            executor: unknown,
+            schemaPath: string,
+        ): PgsqlServiceBinding;
     };
     MysqlServiceHandle: {
         new (lease: unknown, port: number): MysqlServiceBinding;
@@ -31,6 +37,12 @@ export interface YydsBindings {
             port: number,
             executor: unknown,
             catalogPath: string,
+        ): MysqlServiceBinding;
+        startWithSchema(
+            lease: unknown,
+            port: number,
+            executor: unknown,
+            schemaPath: string,
         ): MysqlServiceBinding;
     };
     MongoServiceHandle: new (

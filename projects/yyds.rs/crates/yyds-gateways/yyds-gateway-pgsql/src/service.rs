@@ -13,6 +13,7 @@ use std::{
 
 use yyds_control::NodeLease;
 use yyds_execution::KeyValueExecutor;
+use yyds_gateway::{SqlCatalog, SqlSchemaRegistry};
 
 use crate::connection::{serve_cancellable, PgsqlSqlRuntime};
 
@@ -32,16 +33,28 @@ impl PgsqlService {
         Self::start_inner(owner, address, None)
     }
 
-    /// Starts a listener with a YYDS SQL runtime for SELECT + DML execution.
+    /// Starts a listener with a YYDS SQL runtime for SELECT, DML, and DDL execution.
+    pub fn start_with_registry(
+        owner: Arc<NodeLease>,
+        address: SocketAddr,
+        executor: Arc<dyn KeyValueExecutor>,
+        schema: Arc<SqlSchemaRegistry>,
+    ) -> io::Result<Self> {
+        let runtime = Arc::new(PgsqlSqlRuntime { schema, executor });
+        Self::start_inner(owner, address, Some(runtime))
+    }
+
+    /// Starts a listener seeded from a published catalog.
+    ///
+    /// DDL applies to an in-memory registry and is not persisted.
     pub fn start_with_executor(
         owner: Arc<NodeLease>,
         address: SocketAddr,
         executor: Arc<dyn KeyValueExecutor>,
-        catalog: yyds_gateway::SqlCatalog,
-        schema_version: u32,
+        catalog: SqlCatalog,
     ) -> io::Result<Self> {
-        let runtime = Arc::new(PgsqlSqlRuntime { catalog, executor, schema_version });
-        Self::start_inner(owner, address, Some(runtime))
+        let schema = SqlSchemaRegistry::from_catalog(&catalog).map_err(|error| io::Error::other(error.message))?;
+        Self::start_with_registry(owner, address, executor, Arc::new(schema))
     }
 
     fn start_inner(owner: Arc<NodeLease>, address: SocketAddr, runtime: Option<Arc<PgsqlSqlRuntime>>) -> io::Result<Self> {
