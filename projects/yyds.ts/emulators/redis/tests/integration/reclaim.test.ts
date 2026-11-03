@@ -68,6 +68,88 @@ test("one-shot sweepExpired reclaims elapsed records after the node stops", { ti
     }
 });
 
+test("the first background pass after a restart reclaims deadlines elapsed while down", { timeout: 120_000 }, async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "yyds-sweep-restart-"));
+    const identity = { clusterId: "cluster-sweep-restart", nodeId: "node-sweep-restart" };
+    try {
+        // Park the sweeper on a huge interval so nothing is reclaimed before the shutdown.
+        const first = await startYydsNode({ dataDir, ...identity, expirySweepIntervalMs: 3_600_000 });
+        const writer = driver(first.redis.host, first.redis.port);
+        await writer.connect();
+        await writer.set("restart-survivor", "keep");
+        await writeKeys(writer, "restart", 800, 50);
+        await sleep(150); // every short deadline elapses while the node is still up
+        await writer.close();
+        const before = await shardSize(dataDir);
+        await first.stop({ wipe: false });
+
+        // No reads after the restart: only the startup sweep can shrink the snapshot.
+        const second = await startYydsNode({ dataDir, ...identity, expirySweepIntervalMs: 50 });
+        const deadline = Date.now() + 15_000;
+        let current = before;
+        while (Date.now() < deadline) {
+            await sleep(100);
+            current = await shardSize(dataDir);
+            if (current * 2 < before) break;
+        }
+        assert.ok(current * 2 < before, `the startup pass must reclaim elapsed records (before=${before} current=${current})`);
+
+        const reader = driver(second.redis.host, second.redis.port);
+        await reader.connect();
+        try {
+            assert.equal(await reader.get("restart-survivor"), "keep");
+            assert.equal(await reader.get("restart-0"), null);
+            assert.equal(await reader.ttl("restart-0"), -2);
+        } finally {
+            await reader.close();
+            await second.stop();
+        }
+    } finally {
+        await rm(dataDir, { recursive: true, force: true });
+    }
+});
+
+test("a live rewrite without a deadline is never reclaimed", { timeout: 120_000 }, async () => {
+    const node = await startYydsNode({ expirySweepIntervalMs: 5 });
+    const writer = driver(node.redis.host, node.redis.port);
+    const prober = driver(node.redis.host, node.redis.port);
+    await writer.connect();
+    await prober.connect();
+    const keys = Array.from({ length: 64 }, (_, index) => `churn-${index}`);
+    let probing = true;
+    try {
+        const probe = (async () => {
+            while (probing) {
+                assert.equal(await prober.ping(), "PONG");
+                await sleep(10);
+            }
+        })();
+
+        // Each round arms a 2ms deadline and then rewrites the key with no deadline while
+        // the 5ms sweeper is running. A sweeper that deleted after the rewrite would lose
+        // records that are no longer expired.
+        for (let round = 0; round < 30; round += 1) {
+            await Promise.all(keys.map((key) => writer.sendCommand(["SET", key, "short", "PX", "2"])));
+            await sleep(3);
+            await Promise.all(keys.map((key) => writer.sendCommand(["SET", key, `round-${round}`])));
+            const present = Number(await writer.sendCommand(["EXISTS", ...keys]));
+            assert.equal(present, keys.length, `round ${round}: every rewritten record must survive the sweeper`);
+        }
+        probing = false;
+        await probe;
+
+        // The rewrite cleared the deadline, so the shard keeps reporting a persistent record.
+        const ttl = Number(await prober.sendCommand(["TTL", keys[0]]));
+        assert.equal(ttl, -1, `a rewrite without KEEPTTL must clear the deadline, got ${ttl}`);
+        assert.equal(await prober.get(keys[0]), "round-29");
+    } finally {
+        probing = false;
+        await writer.close();
+        await prober.close();
+        await node.stop();
+    }
+});
+
 test("background reclamation shrinks the shard without any read traffic", { timeout: 120_000 }, async () => {
     const node = await startYydsNode({ expirySweepIntervalMs: 50 });
     const client = driver(node.redis.host, node.redis.port);
