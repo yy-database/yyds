@@ -13,7 +13,8 @@ pub struct Record {
     ///
     /// `None` means the record never expires. A record whose deadline has elapsed is
     /// treated as absent by every read path (`get`, `scan`, conditional writes); the
-    /// physical bytes stay in the shard until the key is next written or deleted.
+    /// physical bytes stay in the shard until the key is next written or deleted, or until
+    /// `KvStore::sweep_expired` reclaims it.
     pub expires_at: Option<i64>,
 }
 

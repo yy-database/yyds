@@ -89,6 +89,20 @@ pub trait KvStore {
         before: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<Record>>;
+
+    /// Physically removes every record whose expiry deadline has elapsed at `now_unix_ms`
+    /// and returns how many records were reclaimed.
+    ///
+    /// Reclaim only drops records that every read path already treats as absent, so it never
+    /// changes observable data. When nothing has expired the store must not touch the disk.
+    /// File-backed stores persist the removal through the same durable atomic commit
+    /// boundary as foreground writes: a failure leaves the previous snapshot intact and
+    /// visible. Stores without a reclamation contract keep the default
+    /// `Error::Unsupported`.
+    fn sweep_expired(&mut self, now_unix_ms: i64) -> Result<usize> {
+        let _ = now_unix_ms;
+        Err(Error::Unsupported("store does not provide expiry reclamation"))
+    }
 }
 
 /// In-memory shard used by unit tests and early integrations.
@@ -140,6 +154,12 @@ impl KvStore for MemoryShard {
         limit: usize,
     ) -> Result<Vec<Record>> {
         Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
+    }
+
+    fn sweep_expired(&mut self, now_unix_ms: i64) -> Result<usize> {
+        let before = self.records.len();
+        self.records.retain(|_, record| !record.is_expired_at(now_unix_ms));
+        Ok(before - self.records.len())
     }
 }
 
@@ -283,6 +303,19 @@ impl KvStore for FileShard {
         limit: usize,
     ) -> Result<Vec<Record>> {
         Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
+    }
+
+    fn sweep_expired(&mut self, now_unix_ms: i64) -> Result<usize> {
+        let expired: Vec<Key> =
+            self.records.values().filter(|record| record.is_expired_at(now_unix_ms)).map(|record| record.key.clone()).collect();
+        if expired.is_empty() {
+            // No reclamation work: the snapshot on disk stays untouched.
+            return Ok(0);
+        }
+        let reclaimed = expired.len();
+        let changes = expired.into_iter().map(|key| ShardChange::Delete { key }).collect();
+        self.commit_changes(changes)?;
+        Ok(reclaimed)
     }
 }
 
