@@ -550,7 +550,10 @@ fn lower_expression(
             }
             let result = execute_plan(executor, transaction, &plan, dialect)?;
             if result.columns.len() != 1 {
-                return Err(execute_error("IN subquery must select exactly one column"));
+                return Err(SqlFrontendError::new(
+                    SqlErrorKind::OperandColumns,
+                    "IN subquery must select exactly one column",
+                ));
             }
             let values = result
                 .rows
@@ -580,7 +583,12 @@ fn lower_expression(
                         .map(value_to_literal)
                         .unwrap_or(SqlBoundLiteral::Null),
                 ),
-                _ => return Err(execute_error("scalar subquery returned more than one row")),
+                _ => {
+                    return Err(SqlFrontendError::new(
+                        SqlErrorKind::CardinalityViolation,
+                        "scalar subquery returned more than one row",
+                    ))
+                }
             }
         }
         SqlCatalogBoundExpression::Exists { plan, negated } => {
@@ -748,12 +756,12 @@ fn execute_read(
     let batch_result = match transaction {
         Some(handle) => handle
             .execute_read_batch(&[command.clone()])
-            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
             .execute_read_batch(None, &[command])
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
-    let result = batch_result.into_iter().next().ok_or_else(|| execute_error("KeyValueExecutor returned empty batch"))?;
+    let result = batch_result.into_iter().next().ok_or_else(|| internal_error("KeyValueExecutor returned empty batch"))?;
     let row_bytes = match result {
         yyds_types::KeyValueResult::Get(Some(bytes)) => bytes,
         _ => return Ok(SqlResult { columns: read_column_labels(plan), rows: Vec::new(), affected_rows: 0 }),
@@ -929,10 +937,10 @@ fn scan_rows(
     match transaction {
         Some(handle) => handle
             .execute_scan(namespace, prefix, after, before, limit)
-            .map_err(|e| execute_error(&format!("TransactionHandle.{operation} failed: {e}"))),
+            .map_err(|e| internal_error(&format!("TransactionHandle.{operation} failed: {e}"))),
         None => executor
             .execute_scan(None, namespace, prefix, after, before, limit)
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.{operation} failed: {e}"))),
+            .map_err(|e| internal_error(&format!("KeyValueExecutor.{operation} failed: {e}"))),
     }
 }
 
@@ -1088,7 +1096,7 @@ fn execute_scan(
                 }
                 let Some(idx) = matched_key_idx
                 else {
-                    return Err(execute_error("grouped projection references a column outside the GROUP BY key"));
+                    return Err(internal_error("grouped projection references a column outside the GROUP BY key"));
                 };
                 row_values.push(group_key_vals[idx].clone());
             }
@@ -1399,7 +1407,7 @@ fn upsert_row(
                 .write_if_unchanged(command, Some(existing_bytes))
                 .map_err(|e| write_error(format!("TransactionHandle.upsert failed: {e}"), &e))?,
             None => {
-                executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.upsert failed: {e}")))?
+                executor.execute(None, command).map_err(|e| internal_error(&format!("KeyValueExecutor.upsert failed: {e}")))?
             }
         };
         return returning_result(&plan.returning, &plan.field_types, vec![row], 1, dialect);
@@ -1423,12 +1431,12 @@ fn put_if_absent(
         action: KeyValueAction::PutIfAbsent(bytes),
     };
     let result = match transaction {
-        Some(handle) => handle.execute(command).map_err(|e| execute_error(&format!("TransactionHandle.insert failed: {e}")))?,
-        None => executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
+        Some(handle) => handle.execute(command).map_err(|e| internal_error(&format!("TransactionHandle.insert failed: {e}")))?,
+        None => executor.execute(None, command).map_err(|e| internal_error(&format!("KeyValueExecutor.insert failed: {e}")))?,
     };
     match result {
         yyds_types::KeyValueResult::PutIfAbsent { revision } => Ok(revision.is_some()),
-        other => Err(execute_error(&format!("unexpected storage result for insert: {other:?}"))),
+        other => Err(internal_error(&format!("unexpected storage result for insert: {other:?}"))),
     }
 }
 
@@ -1442,10 +1450,10 @@ fn read_row_bytes(
     let results = match transaction {
         Some(handle) => handle
             .execute_read_batch(&[command])
-            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
             .execute_read_batch(None, &[command])
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
     Ok(match results.into_iter().next() {
         Some(yyds_types::KeyValueResult::Get(bytes)) => bytes,
@@ -1553,11 +1561,11 @@ fn execute_multi_insert_atomic(
                 .collect();
             let results = executor
                 .execute_read_batch(None, &commands)
-                .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
+                .map_err(|e| internal_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?;
             for (rowid, result) in rowids.iter().zip(results) {
                 let bytes = match result {
                     yyds_types::KeyValueResult::Get(bytes) => bytes,
-                    other => return Err(execute_error(&format!("unexpected storage result for pre-read: {other:?}"))),
+                    other => return Err(internal_error(&format!("unexpected storage result for pre-read: {other:?}"))),
                 };
                 preimages.insert(rowid.clone(), bytes);
             }
@@ -1683,7 +1691,7 @@ fn execute_multi_insert_atomic(
             }
             Err(yyds_types::Error::CasConflict { .. }) => return Err(unique_conflict()),
             Err(error) => {
-                return Err(execute_error(&format!("KeyValueExecutor.commit_batch failed: {error}")));
+                return Err(internal_error(&format!("KeyValueExecutor.commit_batch failed: {error}")));
             }
         }
     }
@@ -1820,10 +1828,10 @@ fn ensure_insert_targets_absent(
     let results = match transaction {
         Some(handle) => handle
             .execute_read_batch(&commands)
-            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
             .execute_read_batch(None, &commands)
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
     if results.iter().any(|result| matches!(result, yyds_types::KeyValueResult::Get(Some(_)))) {
         return Err(conflict(first));
@@ -1872,10 +1880,10 @@ fn execute_update(
     let batch_result = match transaction {
         Some(handle) => handle
             .execute_read_batch(&[get_cmd.clone()])
-            .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
         None => executor
             .execute_read_batch(None, &[get_cmd])
-            .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+            .map_err(|e| internal_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
     };
     let existing_bytes = match batch_result.into_iter().next() {
         Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
@@ -1913,7 +1921,7 @@ fn execute_update(
             .write_if_unchanged(put_cmd, Some(existing_bytes))
             .map_err(|e| write_error(format!("TransactionHandle.update failed: {e}"), &e))?,
         // 单行 UPDATE 的自动提交只有一条命令，单命令即单提交点，无需再包一层批次。
-        None => executor.execute(None, put_cmd).map_err(|e| execute_error(&format!("KeyValueExecutor.update failed: {e}")))?,
+        None => executor.execute(None, put_cmd).map_err(|e| internal_error(&format!("KeyValueExecutor.update failed: {e}")))?,
     };
     let _ = put_result;
     Ok(SqlResult { columns: Vec::new(), rows: Vec::new(), affected_rows: 1 })
@@ -1934,10 +1942,10 @@ fn execute_delete(
         let batch_result = match transaction {
             Some(handle) => handle
                 .execute_read_batch(&[get_cmd.clone()])
-                .map_err(|e| execute_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
+                .map_err(|e| internal_error(&format!("TransactionHandle.read_batch failed: {e}")))?,
             None => executor
                 .execute_read_batch(None, &[get_cmd])
-                .map_err(|e| execute_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
+                .map_err(|e| internal_error(&format!("KeyValueExecutor.read_batch failed: {e}")))?,
         };
         let existing_bytes = match batch_result.into_iter().next() {
             Some(yyds_types::KeyValueResult::Get(Some(b))) => b,
@@ -1966,7 +1974,7 @@ fn execute_delete(
             .write_if_unchanged(command, pre_image)
             .map_err(|e| write_error(format!("TransactionHandle.delete failed: {e}"), &e))?,
         // 单行 DELETE 的自动提交同样是一条命令、一个 durable 提交点。
-        None => executor.execute(None, command).map_err(|e| execute_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
+        None => executor.execute(None, command).map_err(|e| internal_error(&format!("KeyValueExecutor.delete failed: {e}")))?,
     };
     let affected = match delete_result {
         yyds_types::KeyValueResult::Delete { removed: true } => 1,
@@ -2028,7 +2036,7 @@ fn apply_statement_changes(
                     SqlErrorKind::Conflict,
                     format!("concurrent writes to {} prevented the {operation} batch commit", namespace.0),
                 ),
-                other => execute_error(&format!("KeyValueExecutor.commit_batch failed: {other}")),
+                other => internal_error(&format!("KeyValueExecutor.commit_batch failed: {other}")),
             })?;
         }
     }
@@ -2315,19 +2323,19 @@ fn eval_window_projection(
 ) -> Result<Vec<SqlValue>, SqlFrontendError> {
     let (name, args, spec) = match expr {
         SqlCatalogBoundExpression::Function { name, args, window: Some(spec), .. } => (name, args, spec),
-        _ => return Err(execute_error(&format!("window evaluation requires a window function call: {expr:?}"))),
+        _ => return Err(internal_error(&format!("window evaluation requires a window function call: {expr:?}"))),
     };
     let ranking = SqlWindowFunction::from_name(name);
     let aggregate = SqlAggregateFunction::from_name(name);
     if ranking.is_none() && aggregate.is_none() {
-        return Err(execute_error(&format!("unknown window function: {name}")));
+        return Err(internal_error(&format!("unknown window function: {name}")));
     }
     // binder 已固定 `NTILE` / `LAG` / `LEAD` 的参数形状，这里按同一形状防御性提取，
     // 供分区循环复用；形状不符说明绑定链被绕过，显式报错而不是猜测。
     let ntile_buckets = match ranking {
         Some(SqlWindowFunction::Ntile) => match args.first() {
             Some(SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Integer(buckets))) if *buckets >= 1 => Some(*buckets),
-            _ => return Err(execute_error("window function NTILE() requires the bucket count to be an integer literal >= 1")),
+            _ => return Err(internal_error("window function NTILE() requires the bucket count to be an integer literal >= 1")),
         },
         _ => None,
     };
@@ -2335,11 +2343,11 @@ fn eval_window_projection(
         Some(SqlWindowFunction::Lag) | Some(SqlWindowFunction::Lead) => {
             let value = args
                 .first()
-                .ok_or_else(|| execute_error(&format!("window function {name}() is missing its value argument")))?;
+                .ok_or_else(|| internal_error(&format!("window function {name}() is missing its value argument")))?;
             let offset = match args.get(1) {
                 Some(SqlCatalogBoundExpression::Literal(SqlBoundLiteral::Integer(offset))) if *offset >= 0 => *offset,
                 Some(_) => {
-                    return Err(execute_error(&format!(
+                    return Err(internal_error(&format!(
                         "window function {name}() requires the row offset to be an integer literal >= 0"
                     )))
                 }
@@ -2432,13 +2440,13 @@ fn eval_window_projection(
                     // 标准公式 `floor(position * buckets / len) + 1`（position 从 0 起），
                     // 余数分给前面的桶，与 MySQL / PostgreSQL 一致；i128 中间值防溢出。
                     let buckets =
-                        ntile_buckets.ok_or_else(|| execute_error("window function NTILE() is missing its bucket count"))?;
+                        ntile_buckets.ok_or_else(|| internal_error("window function NTILE() is missing its bucket count"))?;
                     let bucket = position as i128 * buckets as i128 / ordered_rows.len() as i128 + 1;
                     SqlValue::Integer(i64::try_from(bucket).unwrap_or(i64::MAX))
                 }
                 Some(SqlWindowFunction::Lag) | Some(SqlWindowFunction::Lead) => {
                     let (value_expr, offset, default) =
-                        lag_lead.ok_or_else(|| execute_error(&format!("window function {name}() is missing its arguments")))?;
+                        lag_lead.ok_or_else(|| internal_error(&format!("window function {name}() is missing its arguments")))?;
                     let target = if matches!(ranking, Some(SqlWindowFunction::Lag)) {
                         position as i128 - offset as i128
                     }
@@ -2516,7 +2524,7 @@ fn range_frame_bounds(
     peer_end: usize,
     len: usize,
 ) -> Result<(usize, usize), SqlFrontendError> {
-    let missing_axis = || execute_error("window RANGE frame is missing its ORDER BY value axis");
+    let missing_axis = || internal_error("window RANGE frame is missing its ORDER BY value axis");
     let resolve = |bound: SqlBoundWindowFrameBound, end: bool| -> Result<usize, SqlFrontendError> {
         Ok(match bound {
             SqlBoundWindowFrameBound::UnboundedPreceding => 0,
@@ -2605,7 +2613,7 @@ impl RangeAxis {
                     integers.push(None);
                     numbers.push(None);
                 }
-                Some(_) => return Err(execute_error("window RANGE frame offsets require the ORDER BY column to be numeric")),
+                Some(_) => return Err(internal_error("window RANGE frame offsets require the ORDER BY column to be numeric")),
             }
         }
         if saw_number {
@@ -2729,18 +2737,18 @@ fn eval_aggregate(
 ) -> Result<SqlValue, SqlFrontendError> {
     let (name, args, distinct) = match expr {
         SqlCatalogBoundExpression::Function { name, args, distinct, .. } => (name.clone(), args.clone(), *distinct),
-        _ => return Err(execute_error(&format!("eval_aggregate: non-Function expression encountered: {expr:?}"))),
+        _ => return Err(internal_error(&format!("eval_aggregate: non-Function expression encountered: {expr:?}"))),
     };
 
     let agg =
-        SqlAggregateFunction::from_name(&name).ok_or_else(|| execute_error(&format!("unknown aggregate function: {name}")))?;
+        SqlAggregateFunction::from_name(&name).ok_or_else(|| internal_error(&format!("unknown aggregate function: {name}")))?;
 
     // `*` 只对 `COUNT(*)` 有意义；`SUM(*)` 一类没有可求值的列。
     if agg != SqlAggregateFunction::COUNT && args.iter().any(|arg| matches!(arg, SqlCatalogBoundExpression::Wildcard)) {
-        return Err(execute_error(&format!("{} does not accept `*` as its argument", agg.name())));
+        return Err(internal_error(&format!("{} does not accept `*` as its argument", agg.name())));
     }
     if distinct && agg != SqlAggregateFunction::COUNT {
-        return Err(execute_error(&format!("DISTINCT quantifier is only supported on COUNT for now ({})", agg.name())));
+        return Err(internal_error(&format!("DISTINCT quantifier is only supported on COUNT for now ({})", agg.name())));
     }
 
     match agg {
@@ -2751,7 +2759,7 @@ fn eval_aggregate(
             }
             else {
                 if args.len() != 1 {
-                    return Err(execute_error("COUNT accepts exactly one argument"));
+                    return Err(internal_error("COUNT accepts exactly one argument"));
                 }
                 if distinct {
                     // COUNT(DISTINCT col) — count distinct non-NULL values.
@@ -2882,11 +2890,11 @@ fn eval_expression(
         SqlCatalogBoundExpression::Column(col) => row.value_typed(col.row_id, field_types).unwrap_or(SqlValue::Null),
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Wildcard => {
-            return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
+            return Err(internal_error("wildcard `*` is only valid as the argument of COUNT"))
         }
         // 外层列应当在逐行求值时先用该行外层值替换掉，走到这里说明替换被漏掉。
         SqlCatalogBoundExpression::OuterColumn(_) => {
-            return Err(execute_error("outer column reference was not substituted before evaluation"))
+            return Err(internal_error("outer column reference was not substituted before evaluation"))
         }
         SqlCatalogBoundExpression::Unary { operator, expression } => {
             let inner = eval_expression(expression, row, field_types, dialect)?;
@@ -2899,11 +2907,11 @@ fn eval_expression(
         }
         // 窗口函数需要整列上下文，必须由窗口路径批量求值。
         SqlCatalogBoundExpression::Function { window: Some(_), .. } => {
-            return Err(execute_error("window function was not evaluated by the window pass"))
+            return Err(internal_error("window function was not evaluated by the window pass"))
         }
         SqlCatalogBoundExpression::Function { name, args, .. } => {
             let scalar = SqlScalarFunction::from_name(name)
-                .ok_or_else(|| execute_error(&format!("aggregate function {name} cannot be evaluated on a single row")))?;
+                .ok_or_else(|| internal_error(&format!("aggregate function {name} cannot be evaluated on a single row")))?;
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
                 values.push(eval_expression(arg, row, field_types, dialect)?);
@@ -2916,13 +2924,13 @@ fn eval_expression(
         }
         // 子查询应当在执行前被 materialize 成 `InValues`；走到这里说明内部计划漏了 lowering。
         SqlCatalogBoundExpression::InSubquery { .. } => {
-            return Err(execute_error("IN subquery was not materialized before execution"))
+            return Err(internal_error("IN subquery was not materialized before execution"))
         }
         SqlCatalogBoundExpression::Exists { .. } => {
-            return Err(execute_error("EXISTS predicate was not materialized before execution"))
+            return Err(internal_error("EXISTS predicate was not materialized before execution"))
         }
         SqlCatalogBoundExpression::ScalarSubquery { .. } => {
-            return Err(execute_error("scalar subquery was not evaluated before execution"))
+            return Err(internal_error("scalar subquery was not evaluated before execution"))
         }
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             eval_case(branches, else_branch, row, field_types, dialect)?
@@ -3089,7 +3097,7 @@ fn eval_case(
             SqlValue::Boolean(true) => return eval_expression(then, row, field_types, dialect),
             SqlValue::Null | SqlValue::Boolean(false) => {}
             _ => {
-                return Err(execute_error("CASE WHEN condition must be boolean"));
+                return Err(internal_error("CASE WHEN condition must be boolean"));
             }
         }
     }
@@ -3113,7 +3121,7 @@ fn eval_case_having(
             SqlValue::Boolean(true) => return eval_having(then, bucket_rows, group_exprs, field_types, dialect),
             SqlValue::Null | SqlValue::Boolean(false) => {}
             _ => {
-                return Err(execute_error("CASE WHEN condition must be boolean"));
+                return Err(internal_error("CASE WHEN condition must be boolean"));
             }
         }
     }
@@ -3851,7 +3859,7 @@ impl<'a> Cursor<'a> {
 
     fn read_u16(&mut self) -> Result<u16, SqlFrontendError> {
         if self.remaining() < 2 {
-            return Err(execute_error("row TLV truncated reading u16"));
+            return Err(internal_error("row TLV truncated reading u16"));
         }
         let value = u16::from_be_bytes([self.data[self.pos], self.data[self.pos + 1]]);
         self.pos += 2;
@@ -3860,7 +3868,7 @@ impl<'a> Cursor<'a> {
 
     fn read_u32(&mut self) -> Result<u32, SqlFrontendError> {
         if self.remaining() < 4 {
-            return Err(execute_error("row TLV truncated reading u32"));
+            return Err(internal_error("row TLV truncated reading u32"));
         }
         let bytes: [u8; 4] = self.data[self.pos..self.pos + 4].try_into().unwrap();
         let value = u32::from_be_bytes(bytes);
@@ -3870,7 +3878,7 @@ impl<'a> Cursor<'a> {
 
     fn read_u64(&mut self) -> Result<u64, SqlFrontendError> {
         if self.remaining() < 8 {
-            return Err(execute_error("row TLV truncated reading u64"));
+            return Err(internal_error("row TLV truncated reading u64"));
         }
         let bytes: [u8; 8] = self.data[self.pos..self.pos + 8].try_into().unwrap();
         let value = u64::from_be_bytes(bytes);
@@ -3880,7 +3888,7 @@ impl<'a> Cursor<'a> {
 
     fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>, SqlFrontendError> {
         if self.remaining() < len {
-            return Err(execute_error("row TLV truncated reading bytes"));
+            return Err(internal_error("row TLV truncated reading bytes"));
         }
         let out = self.data[self.pos..self.pos + len].to_vec();
         self.pos += len;
@@ -3937,11 +3945,11 @@ fn eval_having(
         }
         SqlCatalogBoundExpression::Literal(lit) => SqlValue::from_literal(lit),
         SqlCatalogBoundExpression::Wildcard => {
-            return Err(execute_error("wildcard `*` is only valid as the argument of COUNT"))
+            return Err(internal_error("wildcard `*` is only valid as the argument of COUNT"))
         }
         // 分组路径不接受相关子查询，计划期已拒绝，走到这里是内部漏检。
         SqlCatalogBoundExpression::OuterColumn(_) => {
-            return Err(execute_error("outer column reference is not allowed in a grouped expression"))
+            return Err(internal_error("outer column reference is not allowed in a grouped expression"))
         }
         SqlCatalogBoundExpression::Function { name, args, .. } => {
             if SqlAggregateFunction::from_name(name).is_some() {
@@ -3955,7 +3963,7 @@ fn eval_having(
                 eval_scalar_function(function, &values, dialect)?
             }
             else {
-                return Err(execute_error(&format!("unknown function in grouped expression: {name}")));
+                return Err(internal_error(&format!("unknown function in grouped expression: {name}")));
             }
         }
         SqlCatalogBoundExpression::Unary { operator, expression } => {
@@ -3972,13 +3980,13 @@ fn eval_having(
             eval_in_values(target, values, *negated, dialect)?
         }
         SqlCatalogBoundExpression::InSubquery { .. } => {
-            return Err(execute_error("IN subquery was not materialized before execution"))
+            return Err(internal_error("IN subquery was not materialized before execution"))
         }
         SqlCatalogBoundExpression::Exists { .. } => {
-            return Err(execute_error("EXISTS predicate was not materialized before execution"))
+            return Err(internal_error("EXISTS predicate was not materialized before execution"))
         }
         SqlCatalogBoundExpression::ScalarSubquery { .. } => {
-            return Err(execute_error("scalar subquery was not evaluated before execution"))
+            return Err(internal_error("scalar subquery was not evaluated before execution"))
         }
         SqlCatalogBoundExpression::Case { branches, else_branch } => {
             eval_case_having(branches, else_branch, bucket_rows, group_exprs, field_types, dialect)?
@@ -3990,8 +3998,8 @@ fn eval_having(
     })
 }
 
-fn execute_error(message: &str) -> SqlFrontendError {
-    SqlFrontendError::new(SqlErrorKind::Execution, message)
+fn internal_error(message: impl Into<String>) -> SqlFrontendError {
+    SqlFrontendError::internal(message)
 }
 
 fn division_by_zero_error() -> SqlFrontendError {
@@ -4008,7 +4016,7 @@ fn numeric_overflow_error(stage: &str) -> SqlFrontendError {
 fn write_error(message: String, error: &yyds_types::Error) -> SqlFrontendError {
     match error {
         yyds_types::Error::CasConflict { .. } => SqlFrontendError::new(SqlErrorKind::Conflict, message),
-        _ => SqlFrontendError::new(SqlErrorKind::Execution, message),
+        _ => SqlFrontendError::internal(message),
     }
 }
 

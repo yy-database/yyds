@@ -207,9 +207,9 @@ impl SqlSchemaRegistry {
         let path = path.into();
         let state = if path.exists() {
             let source = fs::read_to_string(&path)
-                .map_err(|error| SqlFrontendError::catalog(format!("cannot read SQL schema `{}`: {error}", path.display())))?;
+                .map_err(|error| SqlFrontendError::internal(format!("cannot read SQL schema `{}`: {error}", path.display())))?;
             let document: SchemaDocument = serde_json::from_str(&source)
-                .map_err(|error| SqlFrontendError::catalog(format!("cannot parse SQL schema `{}`: {error}", path.display())))?;
+                .map_err(|error| SqlFrontendError::internal(format!("cannot parse SQL schema `{}`: {error}", path.display())))?;
             document.into_state()?
         }
         else {
@@ -311,9 +311,9 @@ impl SqlSchemaRegistry {
             .iter_mut()
             .find(|table| table.type_id == type_id)
             .and_then(|table| table.fields.iter_mut().find(|field| field.field_id == field_id))
-            .ok_or_else(|| SqlFrontendError::catalog(format!("auto increment field {field_id} is not registered")))?;
+            .ok_or_else(|| SqlFrontendError::internal(format!("auto increment field {field_id} is not registered")))?;
         if !field.auto_increment {
-            return Err(SqlFrontendError::catalog(format!("field `{}` does not own a value sequence", field.name)));
+            return Err(SqlFrontendError::internal(format!("field `{}` does not own a value sequence", field.name)));
         }
         let value = i64::try_from(field.next_value).map_err(|_| {
             SqlFrontendError::new(SqlErrorKind::NumericOverflow, "auto increment sequence exhausted the 64-bit signed range")
@@ -654,39 +654,39 @@ fn split_type(sql_type: &str) -> (&str, Option<&str>) {
 
 fn validate_state(state: &RegistryState) -> Result<(), SqlFrontendError> {
     if state.revision == 0 {
-        return Err(SqlFrontendError::catalog("SQL schema revision must be nonzero"));
+        return Err(SqlFrontendError::internal("SQL schema revision must be nonzero"));
     }
     let mut type_ids = BTreeSet::new();
     let mut field_ids = BTreeSet::new();
     for table in &state.tables {
         if table.name.is_empty() {
-            return Err(SqlFrontendError::catalog("SQL schema table has no name"));
+            return Err(SqlFrontendError::internal("SQL schema table has no name"));
         }
         if table.type_id == 0 || !type_ids.insert(table.type_id) {
-            return Err(SqlFrontendError::catalog("invalid or duplicate SQL schema type identity"));
+            return Err(SqlFrontendError::internal("invalid or duplicate SQL schema type identity"));
         }
         for field in &table.fields {
             if field.name.is_empty() {
-                return Err(SqlFrontendError::catalog("SQL schema field has no name"));
+                return Err(SqlFrontendError::internal("SQL schema field has no name"));
             }
             if field.field_id == 0 || !field_ids.insert(field.field_id) {
-                return Err(SqlFrontendError::catalog("invalid or duplicate SQL schema field identity"));
+                return Err(SqlFrontendError::internal("invalid or duplicate SQL schema field identity"));
             }
             if field.sql_type.trim().is_empty() {
-                return Err(SqlFrontendError::catalog(format!(
+                return Err(SqlFrontendError::internal(format!(
                     "SQL schema field `{}` of table `{}` has no sql_type",
                     field.name, table.name
                 )));
             }
             if field.auto_increment {
                 if !matches!(field.field_type.inner(), SqlFieldType::Int32 | SqlFieldType::Int64) {
-                    return Err(SqlFrontendError::catalog(format!(
+                    return Err(SqlFrontendError::internal(format!(
                         "SQL schema field `{}` of table `{}` owns a sequence but is not an integer column",
                         field.name, table.name
                     )));
                 }
                 if field.next_value == 0 {
-                    return Err(SqlFrontendError::catalog(format!(
+                    return Err(SqlFrontendError::internal(format!(
                         "SQL schema field `{}` of table `{}` has a zero sequence counter",
                         field.name, table.name
                     )));
@@ -695,14 +695,14 @@ fn validate_state(state: &RegistryState) -> Result<(), SqlFrontendError> {
         }
         for constraint in &table.unique_constraints {
             if constraint.is_empty() {
-                return Err(SqlFrontendError::catalog(format!(
+                return Err(SqlFrontendError::internal(format!(
                     "SQL schema table `{}` has an empty unique constraint",
                     table.name
                 )));
             }
             for column in constraint {
                 if !table.fields.iter().any(|field| &field.name == column) {
-                    return Err(SqlFrontendError::catalog(format!(
+                    return Err(SqlFrontendError::internal(format!(
                         "unique constraint column `{column}` does not exist in table `{}`",
                         table.name
                     )));
@@ -712,11 +712,11 @@ fn validate_state(state: &RegistryState) -> Result<(), SqlFrontendError> {
     }
     let next_type_id = type_ids.iter().max().copied().unwrap_or(0) + 1;
     if state.next_type_id < next_type_id {
-        return Err(SqlFrontendError::catalog("SQL schema type identity counter would reuse a registered identity"));
+        return Err(SqlFrontendError::internal("SQL schema type identity counter would reuse a registered identity"));
     }
     let next_field_id = field_ids.iter().max().copied().unwrap_or(0) + 1;
     if state.next_field_id < next_field_id {
-        return Err(SqlFrontendError::catalog("SQL schema field identity counter would reuse a registered identity"));
+        return Err(SqlFrontendError::internal("SQL schema field identity counter would reuse a registered identity"));
     }
     Ok(())
 }
@@ -724,11 +724,11 @@ fn validate_state(state: &RegistryState) -> Result<(), SqlFrontendError> {
 fn save(path: &Path, state: &RegistryState) -> Result<(), SqlFrontendError> {
     let document = SchemaDocument::from_state(state);
     let json = serde_json::to_string_pretty(&document)
-        .map_err(|error| SqlFrontendError::catalog(format!("cannot encode SQL schema: {error}")))?;
+        .map_err(|error| SqlFrontendError::internal(format!("cannot encode SQL schema: {error}")))?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).map_err(|error| {
-                SqlFrontendError::catalog(format!("cannot create SQL schema directory `{}`: {error}", parent.display()))
+                SqlFrontendError::internal(format!("cannot create SQL schema directory `{}`: {error}", parent.display()))
             })?;
         }
     }
@@ -736,18 +736,18 @@ fn save(path: &Path, state: &RegistryState) -> Result<(), SqlFrontendError> {
     temporary.push(".tmp");
     let temporary = PathBuf::from(temporary);
     fs::write(&temporary, json)
-        .map_err(|error| SqlFrontendError::catalog(format!("cannot write SQL schema `{}`: {error}", temporary.display())))?;
+        .map_err(|error| SqlFrontendError::internal(format!("cannot write SQL schema `{}`: {error}", temporary.display())))?;
     if fs::rename(&temporary, path).is_err() {
         // Windows keeps the destination busy when another handle is open, so
         // remove it first and retry the replacement.
         if path.exists() {
             fs::remove_file(path).map_err(|error| {
-                SqlFrontendError::catalog(format!("cannot replace SQL schema `{}`: {error}", path.display()))
+                SqlFrontendError::internal(format!("cannot replace SQL schema `{}`: {error}", path.display()))
             })?;
         }
         fs::rename(&temporary, path).map_err(|error| {
             let _ = fs::remove_file(&temporary);
-            SqlFrontendError::catalog(format!("cannot replace SQL schema `{}`: {error}", path.display()))
+            SqlFrontendError::internal(format!("cannot replace SQL schema `{}`: {error}", path.display()))
         })?;
     }
     Ok(())
@@ -892,7 +892,7 @@ impl SchemaDocument {
 
     fn into_state(self) -> Result<RegistryState, SqlFrontendError> {
         if self.contract != CONTRACT_TAG {
-            return Err(SqlFrontendError::catalog(format!(
+            return Err(SqlFrontendError::internal(format!(
                 "unsupported SQL schema contract `{}`, expected `{CONTRACT_TAG}`",
                 self.contract
             )));
@@ -1164,7 +1164,7 @@ mod tests {
         let path = unique_path();
         fs::write(&path, "not a schema document").expect("write corrupt schema");
         let error = SqlSchemaRegistry::open(&path).expect_err("corrupt schema is rejected");
-        assert_eq!(error.kind, SqlErrorKind::Catalog);
+        assert_eq!(error.kind, SqlErrorKind::Internal);
         let _ = fs::remove_file(&path);
 
         let path = unique_path();
@@ -1174,7 +1174,7 @@ mod tests {
         )
         .expect("write unknown contract");
         let error = SqlSchemaRegistry::open(&path).expect_err("unknown contract is rejected");
-        assert_eq!(error.kind, SqlErrorKind::Catalog);
+        assert_eq!(error.kind, SqlErrorKind::Internal);
         assert!(error.message.contains("yyds-sql-schema/v1"), "{}", error.message);
         let _ = fs::remove_file(&path);
 
@@ -1185,7 +1185,7 @@ mod tests {
         )
         .expect("write document without sql_type");
         let error = SqlSchemaRegistry::open(&path).expect_err("missing sql_type is rejected");
-        assert_eq!(error.kind, SqlErrorKind::Catalog);
+        assert_eq!(error.kind, SqlErrorKind::Internal);
         let _ = fs::remove_file(&path);
     }
 

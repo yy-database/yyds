@@ -1751,7 +1751,7 @@ fn sql_multi_row_insert_rejects_a_store_without_durable_atomic_commit() {
 
     // 易失的 MemoryShard 没有 durable 提交边界，多行语句必须显式拒绝而不是退回逐条发布。
     let error = try_run_sql(&executor, &catalog, "INSERT INTO users VALUES (1, 'a'), (2, 'b')").expect_err("volatile store");
-    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution);
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Internal);
     assert!(error.message.contains("durable atomic commit"), "unexpected message: {}", error.message);
 }
 
@@ -3943,7 +3943,7 @@ fn sql_window_range_frame_offsets_reject_ordering_values_without_value_distance(
         let bound = yyds_gateway::bind_sql_catalog(sql, &catalog, 7, SqlDialect::Postgres).expect("shape binds");
         let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
         let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("value axis must fail");
-        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution, "{sql}: {}", error.message);
+        assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Internal, "{sql}: {}", error.message);
     }
 }
 
@@ -4119,7 +4119,7 @@ fn sql_scalar_subquery_yields_one_value_and_pins_its_cardinality() {
     .expect("bind scalar subquery");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan scalar subquery");
     let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("several rows");
-    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::Execution, "{}", error.message);
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::CardinalityViolation, "{}", error.message);
     assert!(error.message.contains("more than one row"), "{}", error.message);
 
     // 投影多列时无法作为单一值，绑定期就显式拒绝。
@@ -4128,6 +4128,25 @@ fn sql_scalar_subquery_yields_one_value_and_pins_its_cardinality() {
             .expect_err("multi column scalar subquery");
     assert_eq!(wide.kind, yyds_gateway::SqlErrorKind::Unsupported, "{}", wide.message);
     assert!(wide.message.contains("exactly one column"), "{}", wide.message);
+}
+
+/// 执行期语义错误必须带结构化类别，不能退化成通用执行错误码。
+#[test]
+fn sql_execution_semantic_errors_keep_structured_kinds() {
+    let (catalog, executor) = nullable_users();
+
+    let bound = yyds_gateway::bind_sql_catalog("SELECT id, age, COUNT(*) FROM users GROUP BY id", &catalog, 7, SqlDialect::Postgres)
+        .expect("bind grouped projection");
+    let grouping = yyds_gateway::plan_statement(bound, &catalog).expect_err("grouped projection must fail");
+    assert_eq!(grouping.kind, yyds_gateway::SqlErrorKind::InvalidGrouping, "{}", grouping.message);
+    assert!(grouping.message.contains("GROUP BY"), "{}", grouping.message);
+
+    let operand_sql = "SELECT id FROM users WHERE id IN (SELECT id, age FROM users)";
+    let bound = yyds_gateway::bind_sql_catalog(operand_sql, &catalog, 7, SqlDialect::Postgres).expect("bind IN subquery");
+    let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan IN subquery");
+    let operand = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("wide IN subquery");
+    assert_eq!(operand.kind, yyds_gateway::SqlErrorKind::OperandColumns, "{}", operand.message);
+    assert!(operand.message.contains("exactly one column"), "{}", operand.message);
 }
 
 #[test]

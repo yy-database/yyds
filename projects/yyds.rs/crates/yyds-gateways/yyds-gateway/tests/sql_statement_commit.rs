@@ -196,7 +196,7 @@ fn sql_multi_row_update_without_matches_skips_the_commit_boundary() {
 #[test]
 fn sql_multi_row_write_propagates_commit_failure_without_row_writes() {
     let statements = ["UPDATE users SET age = 7", "DELETE FROM users"];
-    let cases = [(CommitFailure::CasConflict, SqlErrorKind::Conflict), (CommitFailure::Storage, SqlErrorKind::Execution)];
+    let cases = [(CommitFailure::CasConflict, SqlErrorKind::Conflict), (CommitFailure::Storage, SqlErrorKind::Internal)];
     let catalog = catalog(USERS_SCHEMA);
     for sql in statements {
         for (failure, expected_kind) in cases {

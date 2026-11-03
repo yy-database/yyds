@@ -162,8 +162,8 @@ pub struct SqlCatalog {
 impl SqlCatalog {
     /// Builds a gateway view from the newest contract published by YYDS.
     pub fn from_yyds_catalog(catalog: &yyds_catalog::Catalog) -> Result<Self, SqlFrontendError> {
-        let schema = catalog.schema().ok_or_else(|| catalog_error("YYDS catalog has no published schema"))?;
-        let contract = catalog.resolved_contract().ok_or_else(|| catalog_error("YYDS catalog has no resolved contract"))?;
+        let schema = catalog.schema().ok_or_else(|| internal_error("YYDS catalog has no published schema"))?;
+        let contract = catalog.resolved_contract().ok_or_else(|| internal_error("YYDS catalog has no resolved contract"))?;
         Self::from_resolved_contract(schema.version, contract)
     }
 
@@ -173,11 +173,11 @@ impl SqlCatalog {
         contract: &vos::types::ResolvedContract,
     ) -> Result<Self, SqlFrontendError> {
         if schema_version == 0 {
-            return Err(catalog_error("catalog schema version must be nonzero"));
+            return Err(internal_error("catalog schema version must be nonzero"));
         }
-        let artifact = contract.to_json().map_err(|_| catalog_error("resolved contract encode failed"))?;
+        let artifact = contract.to_json().map_err(|_| internal_error("resolved contract encode failed"))?;
         vos::types::ResolvedContract::from_json(&artifact)
-            .map_err(|error| catalog_error(&format!("invalid resolved VOS contract {}: {}", error.code, error.message)))?;
+            .map_err(|error| internal_error(&format!("invalid resolved VOS contract {}: {}", error.code, error.message)))?;
         let mut type_ids = std::collections::BTreeSet::new();
         let mut field_ids = std::collections::BTreeSet::new();
         let tables = contract
@@ -186,16 +186,16 @@ impl SqlCatalog {
             .filter(|entry| entry.kind == vos::types::TypeContractKind::Table)
             .map(|entry| {
                 if entry.type_id == 0 || !type_ids.insert(entry.type_id) {
-                    return Err(catalog_error("invalid or duplicate catalog type identity"));
+                    return Err(internal_error("invalid or duplicate catalog type identity"));
                 }
                 let name =
-                    entry.canonical_path.last().cloned().ok_or_else(|| catalog_error("catalog table has no canonical name"))?;
+                    entry.canonical_path.last().cloned().ok_or_else(|| internal_error("catalog table has no canonical name"))?;
                 let fields = entry
                     .fields
                     .iter()
                     .map(|field| {
                         if field.field_id == 0 || !field_ids.insert(field.field_id) {
-                            return Err(catalog_error("invalid or duplicate catalog field identity"));
+                            return Err(internal_error("invalid or duplicate catalog field identity"));
                         }
                         let field_type = project_resolved_type(&field.canonical_type);
                         let vos_type_name = match field_type.inner() {
@@ -228,32 +228,32 @@ impl SqlCatalog {
     /// repeats the checks that keep binders from observing ambiguous tables.
     pub fn from_tables(schema_version: u32, tables: Vec<SqlCatalogTable>) -> Result<Self, SqlFrontendError> {
         if schema_version == 0 {
-            return Err(catalog_error("catalog schema version must be nonzero"));
+            return Err(internal_error("catalog schema version must be nonzero"));
         }
         let mut type_ids = std::collections::BTreeSet::new();
         let mut field_ids = std::collections::BTreeSet::new();
         for table in &tables {
             if table.name.is_empty() {
-                return Err(catalog_error("catalog table has no name"));
+                return Err(internal_error("catalog table has no name"));
             }
             if table.type_id == 0 || !type_ids.insert(table.type_id) {
-                return Err(catalog_error("invalid or duplicate catalog type identity"));
+                return Err(internal_error("invalid or duplicate catalog type identity"));
             }
             for field in &table.fields {
                 if field.name.is_empty() {
-                    return Err(catalog_error("catalog field has no name"));
+                    return Err(internal_error("catalog field has no name"));
                 }
                 if field.field_id == 0 || !field_ids.insert(field.field_id) {
-                    return Err(catalog_error("invalid or duplicate catalog field identity"));
+                    return Err(internal_error("invalid or duplicate catalog field identity"));
                 }
             }
             for constraint in &table.unique_constraints {
                 if constraint.is_empty() {
-                    return Err(catalog_error("catalog unique constraint has no columns"));
+                    return Err(internal_error("catalog unique constraint has no columns"));
                 }
                 for field_id in constraint {
                     if !table.fields.iter().any(|field| field.field_id == *field_id) {
-                        return Err(catalog_error("catalog unique constraint references an unknown field"));
+                        return Err(internal_error("catalog unique constraint references an unknown field"));
                     }
                 }
             }
@@ -708,7 +708,7 @@ pub fn bind_sql_catalog_with_variables(
     dialect: SqlDialect,
 ) -> Result<SqlCatalogBoundStatement, SqlFrontendError> {
     if catalog.schema_version != expected_schema_version {
-        return Err(catalog_error(&format!(
+        return Err(internal_error(&format!(
             "SQL catalog schema version mismatch: expected {expected_schema_version}, found {}",
             catalog.schema_version
         )));
@@ -755,7 +755,7 @@ fn bind_insert(
                 .tables
                 .iter()
                 .find(|c| c.type_id == table.type_id)
-                .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+                .ok_or_else(|| internal_error("catalog table identity is not published"))?;
             cat.fields
                 .iter()
                 .map(|f| {
@@ -1333,7 +1333,7 @@ fn field_type_of(catalog: &SqlCatalog, column: &SqlCatalogBoundColumn) -> Result
         .tables
         .iter()
         .find(|candidate| candidate.type_id == column.type_id)
-        .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+        .ok_or_else(|| internal_error("catalog table identity is not published"))?;
     Ok(table
         .fields
         .iter()
@@ -1585,7 +1585,7 @@ fn projected_field_indices(
         .tables
         .iter()
         .find(|candidate| candidate.type_id == source[0].type_id)
-        .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+        .ok_or_else(|| internal_error("catalog table identity is not published"))?;
     if matches!(projections, [SqlBoundProjection::Star]) {
         return Ok(Some((0..table.fields.len()).collect()));
     }
@@ -1637,7 +1637,7 @@ fn renamed_column_names(
         .tables
         .iter()
         .find(|candidate| candidate.type_id == table.type_id)
-        .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+        .ok_or_else(|| internal_error("catalog table identity is not published"))?;
     if columns.len() != field_indices.len() {
         return Err(unsupported_source(
             subject,
@@ -1724,7 +1724,7 @@ fn find_field_in_table(
         .tables
         .iter()
         .find(|candidate| candidate.type_id == source.type_id)
-        .ok_or_else(|| catalog_error("catalog table identity is not published"))?;
+        .ok_or_else(|| internal_error("catalog table identity is not published"))?;
     // 显式列名把输出列改名后，本 occurrence 的可见作用域整体换名：按基表字段名
     // 解析旧名会读到一个外层看不到的列，因此这里只认这一份可见名。
     let matches = table
@@ -1827,8 +1827,8 @@ pub(crate) fn collect_column_ids(expr: &SqlCatalogBoundExpression, out: &mut Vec
     }
 }
 
-fn catalog_error(message: &str) -> SqlFrontendError {
-    SqlFrontendError::catalog(message)
+fn internal_error(message: &str) -> SqlFrontendError {
+    SqlFrontendError::internal(message)
 }
 
 #[cfg(test)]

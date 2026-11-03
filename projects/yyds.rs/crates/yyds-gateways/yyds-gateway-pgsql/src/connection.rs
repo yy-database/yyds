@@ -882,13 +882,14 @@ fn pg_sqlstate(kind: SqlErrorKind) -> &'static str {
         Unsupported => "0A000",
         UnknownFunction => "42883",
         UnknownVariable => "42704",
-        Catalog => "XX000",
+        // Only failures the gateway cannot classify reach the generic SQLSTATE.
+        Internal => "XX000",
+        CardinalityViolation => "21000",
+        InvalidGrouping => "42803",
+        OperandColumns => "42601",
         Parameter => "08P01",
         DuplicateKey => "23505",
         Conflict => "40001",
-        // Execution layer failures (storage or executor errors) are distinct from
-        // catalog construction errors, and map to the PostgreSQL IO error class.
-        Execution => "58030",
         DivisionByZero => "22012",
         NumericOverflow => "22003",
         InvalidSubstringLength => "22011",
