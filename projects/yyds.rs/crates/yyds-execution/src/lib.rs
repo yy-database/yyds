@@ -305,7 +305,8 @@ where
         let decision = self.routing.route(&command.namespace.0, &command.key);
         let shard = self.shards.get(&decision.shard).ok_or(Error::Unsupported("routed shard is not mounted on this node"))?;
         let mut shard = shard.lock().map_err(|_| Error::Corrupt("local shard lock poisoned"))?;
-        let key = Key::new(command.namespace.0, command.key);
+        let namespace = command.namespace.0.clone();
+        let key = Key::new(namespace.clone(), command.key);
 
         match command.action {
             KeyValueAction::Get => {
@@ -465,6 +466,35 @@ where
                     expires_at: record.and_then(|record| record.expires_at),
                 })
             }
+            KeyValueAction::Rename { destination, if_absent } => {
+                // A rename is one shard-local commit: both keys must live on the shard that
+                // already owns the source. Cross-shard moves would need a distributed
+                // transaction, so they are rejected instead of degraded into two writes.
+                let destination_decision = self.routing.route(&namespace, &destination);
+                if destination_decision.shard != decision.shard {
+                    return Err(Error::Unsupported("rename requires both keys in the same shard"));
+                }
+                let destination_key = Key::new(namespace.clone(), destination);
+                let Some(record) = shard.get(&key)?
+                else {
+                    return Ok(KeyValueResult::Rename { source_present: false, applied: false });
+                };
+                if destination_key == key {
+                    // Redis treats the same key as already present: RENAME is a no-op success,
+                    // RENAMENX reports the destination as existing.
+                    return Ok(KeyValueResult::Rename { source_present: true, applied: !if_absent });
+                }
+                if if_absent && shard.get(&destination_key)?.is_some() {
+                    return Ok(KeyValueResult::Rename { source_present: true, applied: false });
+                }
+                // Value and deadline move together in a single durable commit; nothing is
+                // observed in a read-write-delete window.
+                shard.commit_changes(vec![
+                    ShardChange::Put { key: destination_key, value: record.value, expires_at: record.expires_at },
+                    ShardChange::Delete { key },
+                ])?;
+                Ok(KeyValueResult::Rename { source_present: true, applied: true })
+            }
         }
     }
 }
@@ -620,6 +650,7 @@ impl TransactionHandle for LocalTransactionHandle {
                 // have no buffered representation and must not silently degrade into plain writes.
                 Err(Error::Unsupported("expiry actions are not supported inside transactions"))
             }
+            KeyValueAction::Rename { .. } => Err(Error::Unsupported("rename actions are not supported inside transactions")),
         }
     }
 

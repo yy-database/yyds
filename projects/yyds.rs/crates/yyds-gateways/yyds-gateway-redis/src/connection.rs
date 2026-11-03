@@ -987,6 +987,39 @@ fn respond(
         }
         write_bulk(stream, &value)?;
     }
+    else if command.eq_ignore_ascii_case(b"RENAME") || command.eq_ignore_ascii_case(b"RENAMENX") {
+        // Session / token rotation: the record moves together with its remaining deadline in
+        // one shard-local durable commit, so no read-write-delete window can lose it and the
+        // TTL is never reset to "fresh" by the move.
+        let rename_nx = command.eq_ignore_ascii_case(b"RENAMENX");
+        let name = if rename_nx { "renamenx" } else { "rename" };
+        if request.arguments.len() != 3 {
+            write!(stream, "-ERR wrong number of arguments for '{name}' command\r\n")?;
+            return Ok(true);
+        }
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        let action = yyds_types::KeyValueAction::Rename { destination: request.arguments[2].to_vec(), if_absent: rename_nx };
+        let command = yyds_types::KeyValueCommand { namespace: namespace.clone(), key: request.arguments[1].to_vec(), action };
+        match executor.execute(None, command) {
+            Ok(yyds_types::KeyValueResult::Rename { source_present, applied }) => {
+                if !source_present {
+                    write_error(stream, "no such key")?;
+                }
+                else if rename_nx {
+                    stream.write_all(if applied { b":1\r\n" } else { b":0\r\n" })?;
+                }
+                else {
+                    stream.write_all(b"+OK\r\n")?;
+                }
+            }
+            Ok(_) => write_error(stream, "RENAME executor returned unexpected result")?,
+            Err(error) => write_error(stream, &error.to_string())?,
+        }
+    }
     else if let Some(executor) = executor {
         // --- Generic bind()-backed commands (GET, DEL, INCR, DECR, GETDEL, GETSET).
         // Expiry semantics are enforced by the KV layer: expired records read as absent
@@ -1012,10 +1045,12 @@ fn respond(
                             KeyValueResult::Delete { removed } => {
                                 stream.write_all(if removed { b":1\r\n" } else { b":0\r\n" })?
                             }
-                            // Expiry results only surface through the dedicated TTL /
-                            // PERSIST paths, never through the generic bind() commands.
-                            KeyValueResult::Expiry { .. } | KeyValueResult::ExpiryChanged { .. } => {
-                                write_error(stream, "unexpected expiry result from bind command")?;
+                            // Expiry and rename results only surface through their dedicated
+                            // paths, never through the generic bind() commands.
+                            KeyValueResult::Expiry { .. }
+                            | KeyValueResult::ExpiryChanged { .. }
+                            | KeyValueResult::Rename { .. } => {
+                                write_error(stream, "unexpected result from bind command")?;
                                 return Ok(true);
                             }
                         }
@@ -1141,6 +1176,18 @@ fn validate_command_for_queue(
         }
         if parse_integer(arguments[2]).is_none() {
             return Err(b"-ERR value is not an integer or out of range\r\n".to_vec());
+        }
+        return Ok(());
+    }
+    // RENAME / RENAMENX: exactly 3, need executor. Source presence and destination
+    // conflicts are runtime semantics and stay deferred to EXEC.
+    if command.eq_ignore_ascii_case(b"RENAME") || command.eq_ignore_ascii_case(b"RENAMENX") {
+        if executor.is_none() {
+            return Err(b"-ERR unsupported command\r\n".to_vec());
+        }
+        if count != 3 {
+            let name = if command.eq_ignore_ascii_case(b"RENAMENX") { "renamenx" } else { "rename" };
+            return Err(format!("-ERR wrong number of arguments for '{name}' command\r\n").into_bytes());
         }
         return Ok(());
     }

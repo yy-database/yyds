@@ -68,6 +68,13 @@ pub enum KeyValueAction {
     ClearExpiry,
     /// Read whether the key is present and its current expiry deadline.
     GetExpiry,
+    /// Move the record to another key in the same shard, keeping its value and deadline.
+    Rename {
+        /// Destination key bytes.
+        destination: Vec<u8>,
+        /// Move only when the destination is absent.
+        if_absent: bool,
+    },
 }
 
 /// Result of applying one [`KeyValueCommand`].
@@ -100,6 +107,13 @@ pub enum KeyValueResult {
     },
     /// Whether a [`KeyValueAction::SetExpiry`] or [`KeyValueAction::ClearExpiry`] applied to a live key.
     ExpiryChanged { applied: bool },
+    /// Whether a [`KeyValueAction::Rename`] found the source and moved it.
+    Rename {
+        /// Whether the source key had a live record when the move ran.
+        source_present: bool,
+        /// Whether the record was moved to the destination.
+        applied: bool,
+    },
 }
 
 /// Outcome of one physical expiry reclamation pass.
