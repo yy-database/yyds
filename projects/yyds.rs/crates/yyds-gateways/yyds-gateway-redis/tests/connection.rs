@@ -11,7 +11,7 @@ use yyds_gateway_redis::{
     connection::{serve_cancellable_with_executor, serve_connection},
     resp::RequestLimits,
 };
-use yyds_kv::MemoryShard;
+use yyds_kv::{FileShard, Key, KvStore, MemoryShard};
 use yyds_types::{Namespace, ShardEpoch, ShardId, ShardMap};
 
 fn exchange(chunks: &[&[u8]], limits: RequestLimits) -> Vec<u8> {
@@ -186,6 +186,32 @@ fn executor_server() -> (TcpStream, std::thread::JoinHandle<()>) {
     let client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     (client, server)
+}
+
+/// File-backed executor so cross-key commits (rename) have a durable commit boundary.
+fn file_executor_server() -> (TcpStream, std::thread::JoinHandle<()>, std::path::PathBuf) {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let directory = std::env::temp_dir().join(format!("yyds-rename-{}-{stamp}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("local-0.yykv");
+    let shard = ShardId("local".into());
+    let executor = Arc::new(
+        LocalExecutor::new(
+            ShardMap::new(ShardEpoch(1), vec![shard.clone()]).unwrap(),
+            HashMap::from([(shard, FileShard::open(&path).unwrap())]),
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
+    });
+    let client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    (client, server, path)
 }
 
 #[test]
@@ -1057,5 +1083,98 @@ fn getex_reads_and_touches_the_ttl() {
     assert_eq!(read_line(&mut client), "-ERR syntax error\r");
     send_command(&mut client, &["GETEX", "g1", "EX", "1", "PERSIST"]);
     assert_eq!(read_line(&mut client), "-ERR syntax error\r");
+    finish(client, server);
+}
+
+// ---------- RENAME / RENAMENX ----------
+
+/// 会话轮换：值与剩余截止期在同一次提交内迁移，`RENAMENX` 尊重已存在的目标。
+#[test]
+fn rename_moves_the_value_and_deadline_in_one_commit() {
+    let (mut client, server, path) = file_executor_server();
+
+    send_command(&mut client, &["SET", "src", "payload", "PX", "100000"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["SET", "dst", "old"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+
+    send_command(&mut client, &["RENAME", "src", "dst"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["GET", "dst"]);
+    assert_eq!(read_bulk(&mut client), Some(b"payload".to_vec()));
+    send_command(&mut client, &["GET", "src"]);
+    assert_eq!(read_bulk(&mut client), None);
+    send_command(&mut client, &["PTTL", "dst"]);
+    let pttl = read_integer(&mut client);
+    assert!((1..=100_000).contains(&pttl), "迁移必须保留剩余截止期，实际 {pttl} ms");
+
+    // 目标已存在时 RENAMENX 返回 0，源与目标都保持不变。
+    send_command(&mut client, &["SET", "nx-src", "keep", "PX", "100000"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["SET", "nx-dst", "blocker"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["RENAMENX", "nx-src", "nx-dst"]);
+    assert_eq!(read_integer(&mut client), 0);
+    send_command(&mut client, &["GET", "nx-src"]);
+    assert_eq!(read_bulk(&mut client), Some(b"keep".to_vec()));
+    send_command(&mut client, &["GET", "nx-dst"]);
+    assert_eq!(read_bulk(&mut client), Some(b"blocker".to_vec()));
+
+    // 目标不存在时 RENAMENX 迁移并返回 1。
+    send_command(&mut client, &["RENAMENX", "nx-src", "nx-free"]);
+    assert_eq!(read_integer(&mut client), 1);
+    send_command(&mut client, &["GET", "nx-free"]);
+    assert_eq!(read_bulk(&mut client), Some(b"keep".to_vec()));
+
+    // 同键：RENAME 是无操作成功，RENAMENX 视为目标已存在。
+    send_command(&mut client, &["SET", "same", "v", "PX", "100000"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["RENAME", "same", "same"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["RENAMENX", "same", "same"]);
+    assert_eq!(read_integer(&mut client), 0);
+    send_command(&mut client, &["GET", "same"]);
+    assert_eq!(read_bulk(&mut client), Some(b"v".to_vec()));
+
+    finish(client, server);
+    // 迁移已进入快照：重开后目标记录与截止期仍在，源键已物理消失。
+    let mut reopened = FileShard::open(&path).unwrap();
+    let destination = reopened.get(&Key::new("redis:0", b"dst")).unwrap().expect("目标记录必须在重开后存在");
+    assert!(destination.expires_at.is_some(), "剩余截止期必须随记录一起持久化");
+    assert!(reopened.get(&Key::new("redis:0", b"src")).unwrap().is_none(), "源键必须已删除");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::remove_dir(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn rename_reports_missing_source_and_arity() {
+    let (mut client, server) = executor_server();
+
+    send_command(&mut client, &["RENAME", "missing", "dest"]);
+    assert_eq!(read_line(&mut client), "-ERR no such key\r");
+    send_command(&mut client, &["RENAMENX", "missing", "dest"]);
+    assert_eq!(read_line(&mut client), "-ERR no such key\r");
+
+    send_command(&mut client, &["RENAME", "only"]);
+    assert_eq!(read_line(&mut client), "-ERR wrong number of arguments for 'rename' command\r");
+    send_command(&mut client, &["RENAMENX", "a", "b", "c"]);
+    assert_eq!(read_line(&mut client), "-ERR wrong number of arguments for 'renamenx' command\r");
+    finish(client, server);
+}
+
+/// 队列期只校验 arity，源缺失等运行期语义推迟到 EXEC，并作为数组元素返回错误。
+#[test]
+fn rename_runtime_semantics_are_deferred_to_exec() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["MULTI"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["RENAME", "missing", "dest"]);
+    assert_eq!(read_line(&mut client), "+QUEUED\r");
+    send_command(&mut client, &["PING"]);
+    assert_eq!(read_line(&mut client), "+QUEUED\r");
+    send_command(&mut client, &["EXEC"]);
+    assert_eq!(read_line(&mut client), "*2\r");
+    assert_eq!(read_line(&mut client), "-ERR no such key\r");
+    assert_eq!(read_line(&mut client), "+PONG\r");
     finish(client, server);
 }
