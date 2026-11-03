@@ -783,6 +783,7 @@ fn pg_sqlstate(kind: SqlErrorKind) -> &'static str {
         AmbiguousTable | AmbiguousColumn => "42702",
         UnknownColumn => "42703",
         TypeMismatch => "42804",
+        ValueTooLong => "22001",
         NotNullViolation => "23502",
         Unsupported => "0A000",
         UnknownFunction => "42883",

@@ -1692,6 +1692,39 @@ fn value(value: &str) -> Option<Vec<u8>> {
 }
 
 #[test]
+fn pgsql_declared_capacity_rejects_oversized_strings() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(&mut client, "CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(191) NOT NULL)");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+
+    // 191 个字符正好压在声明容量上：必须原样写入并回读。
+    let fits = "a".repeat(191);
+    send_query(&mut client, &format!("INSERT INTO users VALUES (1, '{fits}')"));
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    assert_eq!(single_row(&mut client, "SELECT name FROM users WHERE id = 1"), vec![Some(fits.into_bytes())]);
+
+    // 192 个字符越界：SQLSTATE 22001，且失败语句不得留下半行。
+    let too_long = "a".repeat(192);
+    assert_sqlstate(&mut client, &format!("INSERT INTO users VALUES (2, '{too_long}')"), b"22001");
+    let stored = rows(&mut client, "SELECT name FROM users WHERE id = 2");
+    assert!(stored.is_empty(), "oversized insert must not be stored: {stored:?}");
+
+    // 多字节字符按字符数计数，不按 octets：191 个汉字合法，192 个越界。
+    let fits_multibyte = "字".repeat(191);
+    send_query(&mut client, &format!("INSERT INTO users VALUES (3, '{fits_multibyte}')"));
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    assert_eq!(
+        single_row(&mut client, "SELECT name FROM users WHERE id = 3"),
+        vec![Some(fits_multibyte.into_bytes())]
+    );
+    assert_sqlstate(&mut client, &format!("INSERT INTO users VALUES (4, '{}')", "字".repeat(192)), b"22001");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
 fn pgsql_metadata_tables_columns_and_scalars() {
     let (mut client, server) = start_server_with_empty_schema();
 

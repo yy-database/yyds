@@ -28,6 +28,8 @@ pub enum SqlErrorKind {
     AmbiguousColumn,
     /// A write value cannot be represented by the target column type.
     TypeMismatch,
+    /// A write value exceeds the target column's declared capacity.
+    ValueTooLong,
     /// A write supplies `NULL` for a primary key.
     NotNullViolation,
     /// The statement is valid SQL but outside the gateway's supported subset.

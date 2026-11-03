@@ -994,6 +994,7 @@ fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
         AmbiguousTable | AmbiguousColumn => (1052, "23000"),
         UnknownColumn => (1054, "42S22"),
         TypeMismatch => (1366, "HY000"),
+        ValueTooLong => (1406, "22001"),
         NotNullViolation => (1048, "23000"),
         Unsupported => (1235, "42000"),
         UnknownFunction => (1305, "42000"),
