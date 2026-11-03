@@ -70,8 +70,15 @@ fn protocol_v10_handshake_accepts_charset_setup_then_rejects_sql_explicitly() {
     client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4 COLLATE utf8mb4_bin").unwrap()).unwrap();
     assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
 
-    // 大小写折叠的 collation 无法真实生效，必须显式拒绝而不是接受后近似执行。
-    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4 COLLATE utf8mb4_general_ci").unwrap()).unwrap();
+    // collation 只是会话元数据，驱动默认值与 DDL 白名单中的名称都必须能连接。
+    for collation in ["utf8mb4_general_ci", "utf8mb4_0900_ai_ci"] {
+        let statement = format!("\x03SET NAMES utf8mb4 COLLATE {collation}");
+        client.write_all(&encode_packet(0, statement.as_bytes()).unwrap()).unwrap();
+        assert_eq!(read_packet(&mut client), (1, vec![0, 0, 0, 2, 0, 0, 0]));
+    }
+
+    // 白名单之外的名字仍然显式拒绝，不静默近似。
+    client.write_all(&encode_packet(0, b"\x03SET NAMES utf8mb4 COLLATE utf8mb4_unknown_ci").unwrap()).unwrap();
     let (sequence, error) = read_packet(&mut client);
     assert_eq!(sequence, 1);
     assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1273);

@@ -88,18 +88,31 @@ pub struct DdlColumn {
 
 /// Collations the gateway accepts as metadata.
 ///
-/// Text is compared by exact code points, so only binary collations are
-/// semantically accurate. The other names are accepted because drivers emit
-/// them and the registry stores them as metadata only.
-const ACCEPTED_COLLATIONS: &[&str] = &[
+/// Text is always compared by exact code points, so the declared collation
+/// never changes query semantics. Names that drivers emit by default (for
+/// example `utf8mb4_0900_ai_ci` from mysql-connector-python) are accepted so a
+/// stock client can connect, and the registry stores them as metadata only.
+pub const ACCEPTED_COLLATIONS: &[&str] = &[
     "utf8mb4_bin",
     "utf8mb4_0900_bin",
+    "utf8mb4_0900_ai_ci",
+    "utf8mb4_0900_as_ci",
+    "utf8mb4_0900_as_cs",
     "utf8mb4_general_ci",
     "utf8mb4_unicode_ci",
+    "utf8mb4_unicode_520_ci",
     "utf8_bin",
     "utf8_general_ci",
     "utf8_unicode_ci",
 ];
+
+/// Whether `name` is an accepted UTF-8 collation name.
+///
+/// Used by both DDL (`COLLATE = ...`) and the MySQL session `SET NAMES`
+/// command so a connection and a table cannot disagree about accepted names.
+pub fn is_accepted_collation(name: &str) -> bool {
+    ACCEPTED_COLLATIONS.iter().any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
 
 /// Constraint keywords that terminate a column type.
 const CONSTRAINT_KEYWORDS: &[&str] = &[
@@ -785,12 +798,12 @@ impl Parser {
             if !accepted {
                 return Err(SqlFrontendError::unsupported(format!(
                     "table character set `{character_set}` is not supported: the gateway compares text by exact code points, use \
-                     `utf8mb4` or `utf8` with a binary collation"
+                     `utf8mb4` or `utf8`"
                 )));
             }
         }
         if let Some(name) = &collation {
-            if !ACCEPTED_COLLATIONS.iter().any(|candidate| candidate.eq_ignore_ascii_case(name)) {
+            if !is_accepted_collation(name) {
                 return Err(SqlFrontendError::unsupported(format!(
                     "table collation `{name}` is not supported: accepted collations are {}",
                     ACCEPTED_COLLATIONS.join(", ")
@@ -1194,7 +1207,7 @@ mod tests {
             parse_ddl("CREATE TABLE t (id INT) DEFAULT CHARSET=latin1", SqlDialect::Mysql).expect_err("latin1 is unsupported");
         assert_eq!(error.kind, SqlErrorKind::Unsupported);
         assert!(error.message.contains("latin1"), "{}", error.message);
-        assert!(error.message.contains("collation"), "{}", error.message);
+        assert!(error.message.contains("utf8mb4"), "{}", error.message);
     }
 
     #[test]

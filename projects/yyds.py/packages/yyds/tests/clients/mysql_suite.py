@@ -5,9 +5,10 @@
 statement path through `COM_STMT_PREPARE` and `COM_STMT_EXECUTE`. Both drivers
 run the shared case list, and the connector adds the prepared case on top.
 
-The gateway publishes `utf8mb4_general_ci` as its only supported collation, so
-the connector connects with that collation explicitly instead of its default
-`utf8mb4_0900_ai_ci`.
+The gateway accepts the UTF-8 collation names drivers emit (`utf8mb4_bin`,
+`utf8mb4_general_ci`, `utf8mb4_0900_ai_ci`) as session metadata and compares
+text by exact code points. The connector connects with an explicit accepted
+collation instead of relying on its build-specific default.
 
 Rows use the `users` table from `schema.vos`. `pymysql` owns the 200 id block
 and the connector owns 210, so the PostgreSQL suite can share the same node.

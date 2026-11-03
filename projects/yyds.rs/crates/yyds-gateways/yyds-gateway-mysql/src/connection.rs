@@ -15,10 +15,10 @@ use std::{
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
     analyze_meta_query, apply_auto_increment, bind_sql_catalog_with_variables, describe_plan, execute_plan,
-    neutralized_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect, substitute_sql_parameters,
-    SqlBoundExpression, SqlBoundLiteral, SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan,
-    SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult, SqlSchemaCheckpoint, SqlSchemaRegistry, SqlSessionCommand,
-    SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
+    is_accepted_collation, neutralized_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect,
+    substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalogBoundStatement, SqlColumn, SqlDialect,
+    SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult, SqlSchemaCheckpoint,
+    SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -488,9 +488,10 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                     {
                         write_error(&mut stream, sequence.wrapping_add(1), 1115, "42000", "unknown character set")?;
                     }
-                    // 文本按 code point 精确比较，因此唯一的真实 collation 是 `utf8mb4_bin`。
+                    // 文本按 code point 精确比较，collation 只是会话元数据；接受与 DDL
+                    // 同一份白名单，驱动默认的 `utf8mb4_0900_ai_ci` 也能建立连接。
                     Ok(Some(SqlSessionCommand::SetNames { collation, .. }))
-                        if collation.as_deref().is_none_or(|collation| collation.eq_ignore_ascii_case("utf8mb4_bin")) =>
+                        if collation.as_deref().is_none_or(is_accepted_collation) =>
                     {
                         write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
                     }
