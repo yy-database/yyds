@@ -34,6 +34,40 @@ pub enum KeyValueAction {
     Delete,
     /// Atomically add a signed delta to a decimal integer value, treating an absent key as zero.
     IncrementBy(i64),
+    /// Replace the current value with these bytes and set a wall-clock expiry (Unix epoch milliseconds).
+    PutExpiring {
+        /// Bytes to store.
+        value: Vec<u8>,
+        /// Expiry deadline in Unix epoch milliseconds.
+        expires_at: i64,
+    },
+    /// Store these bytes with an expiry only when the key is absent.
+    PutIfAbsentExpiring {
+        /// Bytes to store.
+        value: Vec<u8>,
+        /// Expiry deadline in Unix epoch milliseconds.
+        expires_at: i64,
+    },
+    /// Store these bytes with an expiry only when the key already exists.
+    PutIfPresentExpiring {
+        /// Bytes to store.
+        value: Vec<u8>,
+        /// Expiry deadline in Unix epoch milliseconds.
+        expires_at: i64,
+    },
+    /// Replace the current value with these bytes, keeping the deadline of the previous record.
+    PutKeepingExpiry(Vec<u8>),
+    /// Replace an existing key with these bytes, keeping its deadline; absent keys are left untouched.
+    PutIfPresentKeepingExpiry(Vec<u8>),
+    /// Set a wall-clock expiry (Unix epoch milliseconds) on an existing key without touching its value.
+    SetExpiry {
+        /// Expiry deadline in Unix epoch milliseconds.
+        expires_at: i64,
+    },
+    /// Remove the expiry from an existing key without touching its value.
+    ClearExpiry,
+    /// Read whether the key is present and its current expiry deadline.
+    GetExpiry,
 }
 
 /// Result of applying one [`KeyValueCommand`].
@@ -57,4 +91,13 @@ pub enum KeyValueResult {
     Delete { removed: bool },
     /// Result of an atomic signed integer increment.
     Increment { value: i64 },
+    /// Presence and expiry deadline observed by [`KeyValueAction::GetExpiry`].
+    Expiry {
+        /// Whether the key currently has a live value.
+        present: bool,
+        /// Deadline in Unix epoch milliseconds, if the live record carries one.
+        expires_at: Option<i64>,
+    },
+    /// Whether a [`KeyValueAction::SetExpiry`] or [`KeyValueAction::ClearExpiry`] applied to a live key.
+    ExpiryChanged { applied: bool },
 }

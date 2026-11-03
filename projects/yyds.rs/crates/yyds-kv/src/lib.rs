@@ -12,6 +12,6 @@ pub use crate::{
     key::Key,
     record::Record,
     replication_log::DurableReplicationLog,
-    store::{compare_and_put, FileShard, KvStore, MemoryShard, ShardChange},
+    store::{compare_and_put, now_unix_ms, FileShard, KvStore, MemoryShard, ShardChange},
     value::{InlineValue, ObjectRef, StoredValue},
 };

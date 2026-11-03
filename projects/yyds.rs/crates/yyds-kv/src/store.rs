@@ -3,13 +3,19 @@ use std::{
     fs::{self, OpenOptions},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use yyds_types::{Error, Namespace, Result};
 
 use crate::{Key, Record, StoredValue};
 
-const MAGIC: &[u8] = b"YYKV\x01";
+const MAGIC: &[u8] = b"YYKV\x02";
+
+/// Current wall clock as Unix epoch milliseconds, used for record expiry deadlines.
+pub fn now_unix_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_millis() as i64).unwrap_or(0)
+}
 
 /// One mutation inside a shard-level atomic commit.
 #[derive(Debug, Clone)]
@@ -20,6 +26,8 @@ pub enum ShardChange {
         key: Key,
         /// The post-commit value.
         value: StoredValue,
+        /// Optional wall-clock expiry as Unix epoch milliseconds; `None` clears any previous expiry.
+        expires_at: Option<i64>,
     },
     /// Remove a key when present.
     Delete {
@@ -30,11 +38,14 @@ pub enum ShardChange {
 
 /// Shard-local KV surface. Implementations back one `.yykv` shard.
 pub trait KvStore {
-    /// Returns the latest record for `key`, if present.
+    /// Returns the latest record for `key`, if present and not expired.
     fn get(&self, key: &Key) -> Result<Option<Record>>;
 
-    /// Inserts or replaces `value` and returns the new revision.
+    /// Inserts or replaces `value` and returns the new revision. Any previous expiry is cleared.
     fn put(&mut self, key: Key, value: StoredValue) -> Result<u64>;
+
+    /// Inserts or replaces `value` with a wall-clock expiry in Unix epoch milliseconds.
+    fn put_expiring(&mut self, key: Key, value: StoredValue, expires_at: i64) -> Result<u64>;
 
     /// Deletes `key` when present. Returns whether a record was removed.
     fn delete(&mut self, key: &Key) -> Result<bool>;
@@ -92,19 +103,28 @@ impl MemoryShard {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn insert(&mut self, key: Key, value: StoredValue, expires_at: Option<i64>) -> Result<u64> {
+        self.next_revision += 1;
+        let revision = self.next_revision;
+        let record = Record { key: key.clone(), value, revision, expires_at };
+        self.records.insert(key, record);
+        Ok(revision)
+    }
 }
 
 impl KvStore for MemoryShard {
     fn get(&self, key: &Key) -> Result<Option<Record>> {
-        Ok(self.records.get(key).cloned())
+        let now = now_unix_ms();
+        Ok(self.records.get(key).cloned().filter(|record| !record.is_expired_at(now)))
     }
 
     fn put(&mut self, key: Key, value: StoredValue) -> Result<u64> {
-        self.next_revision += 1;
-        let revision = self.next_revision;
-        let record = Record { key: key.clone(), value, revision };
-        self.records.insert(key, record);
-        Ok(revision)
+        self.insert(key, value, None)
+    }
+
+    fn put_expiring(&mut self, key: Key, value: StoredValue, expires_at: i64) -> Result<u64> {
+        self.insert(key, value, Some(expires_at))
     }
 
     fn delete(&mut self, key: &Key) -> Result<bool> {
@@ -165,16 +185,10 @@ impl FileShard {
         let bytes = encode_snapshot(&self.records, self.next_revision)?;
         write_snapshot_durable(&self.path, &bytes)
     }
-}
 
-impl KvStore for FileShard {
-    fn get(&self, key: &Key) -> Result<Option<Record>> {
-        Ok(self.records.get(key).cloned())
-    }
-
-    fn put(&mut self, key: Key, value: StoredValue) -> Result<u64> {
+    fn insert(&mut self, key: Key, value: StoredValue, expires_at: Option<i64>) -> Result<u64> {
         let revision = self.next_revision.checked_add(1).ok_or(Error::Corrupt("shard revision exhausted"))?;
-        let record = Record { key: key.clone(), value, revision };
+        let record = Record { key: key.clone(), value, revision, expires_at };
         let previous = self.records.insert(key.clone(), record);
         self.next_revision = revision;
         if let Err(error) = self.persist() {
@@ -190,6 +204,21 @@ impl KvStore for FileShard {
             return Err(error);
         }
         Ok(revision)
+    }
+}
+
+impl KvStore for FileShard {
+    fn get(&self, key: &Key) -> Result<Option<Record>> {
+        let now = now_unix_ms();
+        Ok(self.records.get(key).cloned().filter(|record| !record.is_expired_at(now)))
+    }
+
+    fn put(&mut self, key: Key, value: StoredValue) -> Result<u64> {
+        self.insert(key, value, None)
+    }
+
+    fn put_expiring(&mut self, key: Key, value: StoredValue, expires_at: i64) -> Result<u64> {
+        self.insert(key, value, Some(expires_at))
     }
 
     fn delete(&mut self, key: &Key) -> Result<bool> {
@@ -212,10 +241,12 @@ impl KvStore for FileShard {
         let mut staged_revision = self.next_revision;
         for change in &changes {
             match change {
-                ShardChange::Put { key, value } => {
+                ShardChange::Put { key, value, expires_at } => {
                     staged_revision = staged_revision.checked_add(1).ok_or(Error::Corrupt("shard revision exhausted"))?;
-                    staged_records
-                        .insert(key.clone(), Record { key: key.clone(), value: value.clone(), revision: staged_revision });
+                    staged_records.insert(
+                        key.clone(),
+                        Record { key: key.clone(), value: value.clone(), revision: staged_revision, expires_at: *expires_at },
+                    );
                 }
                 ShardChange::Delete { key } => {
                     staged_records.remove(key);
@@ -256,6 +287,7 @@ impl KvStore for FileShard {
 }
 
 /// Shared scan logic: filter by namespace, prefix-match, exclusive cursors (after/before), limit.
+/// Expired records are treated as absent.
 fn collect_scan(
     records: &BTreeMap<Key, Record>,
     namespace: &Namespace,
@@ -264,8 +296,12 @@ fn collect_scan(
     before: Option<&[u8]>,
     limit: usize,
 ) -> Vec<Record> {
+    let now = now_unix_ms();
     let mut out = Vec::new();
     for (key, record) in records {
+        if record.is_expired_at(now) {
+            continue;
+        }
         if key.namespace != *namespace {
             continue;
         }
@@ -300,6 +336,9 @@ fn encode_snapshot(records: &BTreeMap<Key, Record>, next_revision: u64) -> Resul
         write_bytes(&mut bytes, record.key.namespace.0.as_bytes())?;
         write_bytes(&mut bytes, &record.key.bytes)?;
         bytes.write_all(&record.revision.to_le_bytes())?;
+        // `0` is the sentinel for "no expiry"; Unix-millisecond deadlines are always positive.
+        let encoded_expiry = record.expires_at.map(|deadline| deadline as u64).unwrap_or(0);
+        bytes.write_all(&encoded_expiry.to_le_bytes())?;
         match &record.value {
             StoredValue::Inline(value) => {
                 bytes.write_all(&[0])?;
@@ -359,6 +398,8 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<FileShard> {
         if revision == 0 || revision > next_revision || !revisions.insert(revision) {
             return Err(Error::Corrupt("invalid shard revision"));
         }
+        let encoded_expiry = read_u64(&mut cursor)?;
+        let expires_at = (encoded_expiry != 0).then_some(encoded_expiry as i64);
         let value = match read_u8(&mut cursor)? {
             0 => StoredValue::Inline(crate::InlineValue(read_bytes(&mut cursor)?)),
             1 => StoredValue::Object(crate::ObjectRef {
@@ -366,7 +407,7 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<FileShard> {
             }),
             _ => return Err(Error::Corrupt("invalid shard value kind")),
         };
-        let record = Record { key: Key::new(namespace, key), value, revision };
+        let record = Record { key: Key::new(namespace, key), value, revision, expires_at };
         if records.insert(record.key.clone(), record).is_some() {
             return Err(Error::Corrupt("duplicate shard key"));
         }
