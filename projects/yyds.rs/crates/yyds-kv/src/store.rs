@@ -2,11 +2,12 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs::{self, OpenOptions},
     io::{Cursor, Read, Write},
+    ops::Bound,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use yyds_types::{Error, Namespace, Result};
+use yyds_types::{Error, Namespace, Result, SweepReport};
 
 use crate::{Key, Record, StoredValue};
 
@@ -90,8 +91,11 @@ pub trait KvStore {
         limit: usize,
     ) -> Result<Vec<Record>>;
 
-    /// Physically removes every record whose expiry deadline has elapsed at `now_unix_ms`
-    /// and returns how many records were reclaimed.
+    /// Physically removes records whose expiry deadline has elapsed at `now_unix_ms`.
+    ///
+    /// `budget` caps how many records this pass **inspects**: `Some(n)` stops after `n`
+    /// records and leaves a resumable key cursor, `None` scans the whole shard. The cursor is
+    /// process-local and never part of the snapshot, so a reopen starts from the shard head.
     ///
     /// Reclaim only drops records that every read path already treats as absent, so it never
     /// changes observable data. When nothing has expired the store must not touch the disk.
@@ -99,8 +103,8 @@ pub trait KvStore {
     /// boundary as foreground writes: a failure leaves the previous snapshot intact and
     /// visible. Stores without a reclamation contract keep the default
     /// `Error::Unsupported`.
-    fn sweep_expired(&mut self, now_unix_ms: i64) -> Result<usize> {
-        let _ = now_unix_ms;
+    fn sweep_expired(&mut self, now_unix_ms: i64, budget: Option<usize>) -> Result<SweepReport> {
+        let _ = (now_unix_ms, budget);
         Err(Error::Unsupported("store does not provide expiry reclamation"))
     }
 }
@@ -110,6 +114,8 @@ pub trait KvStore {
 pub struct MemoryShard {
     records: BTreeMap<Key, Record>,
     next_revision: u64,
+    /// Resume point for a budgeted expiry pass; process-local and not observable.
+    sweep_cursor: Option<Key>,
 }
 
 impl MemoryShard {
@@ -156,10 +162,15 @@ impl KvStore for MemoryShard {
         Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
     }
 
-    fn sweep_expired(&mut self, now_unix_ms: i64) -> Result<usize> {
-        let before = self.records.len();
-        self.records.retain(|_, record| !record.is_expired_at(now_unix_ms));
-        Ok(before - self.records.len())
+    fn sweep_expired(&mut self, now_unix_ms: i64, budget: Option<usize>) -> Result<SweepReport> {
+        let (expired, examined, next_cursor, capped) =
+            collect_expired(&self.records, now_unix_ms, budget, self.sweep_cursor.as_ref());
+        self.sweep_cursor = if capped { next_cursor.or_else(|| self.sweep_cursor.clone()) } else { None };
+        let reclaimed = expired.len();
+        for key in expired {
+            self.records.remove(&key);
+        }
+        Ok(SweepReport { examined, reclaimed })
     }
 }
 
@@ -169,6 +180,8 @@ pub struct FileShard {
     path: PathBuf,
     records: BTreeMap<Key, Record>,
     next_revision: u64,
+    /// Resume point for a budgeted expiry pass; process-local and not persisted.
+    sweep_cursor: Option<Key>,
 }
 
 impl FileShard {
@@ -185,7 +198,7 @@ impl FileShard {
                     fs::create_dir_all(parent)?;
                 }
             }
-            let shard = Self { path, records: BTreeMap::new(), next_revision: 0 };
+            let shard = Self { path, records: BTreeMap::new(), next_revision: 0, sweep_cursor: None };
             shard.persist()?;
             Ok(shard)
         }
@@ -305,18 +318,54 @@ impl KvStore for FileShard {
         Ok(collect_scan(&self.records, namespace, prefix, after, before, limit))
     }
 
-    fn sweep_expired(&mut self, now_unix_ms: i64) -> Result<usize> {
-        let expired: Vec<Key> =
-            self.records.values().filter(|record| record.is_expired_at(now_unix_ms)).map(|record| record.key.clone()).collect();
+    fn sweep_expired(&mut self, now_unix_ms: i64, budget: Option<usize>) -> Result<SweepReport> {
+        let (expired, examined, next_cursor, capped) =
+            collect_expired(&self.records, now_unix_ms, budget, self.sweep_cursor.as_ref());
+        // The cursor only advances after a successful commit, so a storage failure retries
+        // the same batch instead of skipping records that are still on disk.
         if expired.is_empty() {
+            self.sweep_cursor = if capped { next_cursor.or_else(|| self.sweep_cursor.clone()) } else { None };
             // No reclamation work: the snapshot on disk stays untouched.
-            return Ok(0);
+            return Ok(SweepReport { examined, reclaimed: 0 });
         }
         let reclaimed = expired.len();
         let changes = expired.into_iter().map(|key| ShardChange::Delete { key }).collect();
         self.commit_changes(changes)?;
-        Ok(reclaimed)
+        self.sweep_cursor = if capped { next_cursor.or_else(|| self.sweep_cursor.clone()) } else { None };
+        Ok(SweepReport { examined, reclaimed })
     }
+}
+
+/// Selects expired records for one budgeted pass.
+///
+/// Returns the expired keys, how many records were inspected, the new resume cursor and
+/// whether the budget stopped the pass before the shard end.
+fn collect_expired(
+    records: &BTreeMap<Key, Record>,
+    now_unix_ms: i64,
+    budget: Option<usize>,
+    cursor: Option<&Key>,
+) -> (Vec<Key>, usize, Option<Key>, bool) {
+    let mut expired = Vec::new();
+    let mut examined = 0;
+    let mut last_examined = None;
+    let mut capped = false;
+    let iterator = match cursor {
+        Some(cursor) => records.range((Bound::Excluded(cursor), Bound::Unbounded)),
+        None => records.range(..),
+    };
+    for (key, record) in iterator {
+        if budget.is_some_and(|limit| examined >= limit) {
+            capped = true;
+            break;
+        }
+        examined += 1;
+        last_examined = Some(key.clone());
+        if record.is_expired_at(now_unix_ms) {
+            expired.push(key.clone());
+        }
+    }
+    (expired, examined, last_examined, capped)
 }
 
 /// Shared scan logic: filter by namespace, prefix-match, exclusive cursors (after/before), limit.
@@ -448,7 +497,7 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<FileShard> {
     if cursor.position() != bytes.len() as u64 {
         return Err(Error::Corrupt("trailing shard bytes"));
     }
-    Ok(FileShard { path: path.to_path_buf(), records, next_revision })
+    Ok(FileShard { path: path.to_path_buf(), records, next_revision, sweep_cursor: None })
 }
 
 fn write_count(bytes: &mut Vec<u8>, count: usize) -> Result<()> {

@@ -112,13 +112,13 @@ fn sweep_expired_removes_only_elapsed_records() {
     shard.put_expiring(stale.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now).unwrap();
 
     // The deadline itself counts as elapsed, matching the read-path filter.
-    assert_eq!(shard.sweep_expired(now).unwrap(), 2);
+    assert_eq!(shard.sweep_expired(now, None).unwrap(), yyds_types::SweepReport { examined: 4, reclaimed: 2 });
     assert!(shard.get(&live).unwrap().is_some());
     assert!(shard.get(&fresh).unwrap().is_some());
     assert!(shard.get(&gone).unwrap().is_none());
     assert!(shard.get(&stale).unwrap().is_none());
     // A second sweep is a no-op.
-    assert_eq!(shard.sweep_expired(now).unwrap(), 0);
+    assert_eq!(shard.sweep_expired(now, None).unwrap(), yyds_types::SweepReport { examined: 2, reclaimed: 0 });
 }
 
 #[test]
@@ -131,6 +131,49 @@ fn sweep_expired_does_not_extend_revisions() {
     let fresh_revision =
         shard.put_expiring(fresh.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
 
-    assert_eq!(shard.sweep_expired(now).unwrap(), 1);
+    assert_eq!(shard.sweep_expired(now, None).unwrap().reclaimed, 1);
     assert_eq!(shard.get(&fresh).unwrap().unwrap().revision, fresh_revision, "reclaim must not renumber surviving records");
+}
+
+#[test]
+fn sweep_budget_resumes_from_the_key_cursor_without_skipping_records() {
+    let mut shard = MemoryShard::new();
+    let now = now_unix_ms();
+    for index in 0..10 {
+        let key = Key::new("ns", format!("k{index:02}").into_bytes());
+        shard.put_expiring(key, StoredValue::Inline(InlineValue(b"v".to_vec())), now - 1).unwrap();
+    }
+
+    let mut passes = 0;
+    let mut reclaimed = 0;
+    while reclaimed < 10 {
+        let report = shard.sweep_expired(now, Some(3)).unwrap();
+        assert!(report.examined <= 3, "one pass must stop at the budget");
+        assert!(report.reclaimed > 0, "each working pass makes progress");
+        passes += 1;
+        reclaimed += report.reclaimed;
+    }
+    // 10 records at a budget of 3 take four passes; the fourth pass sees the last record.
+    assert_eq!(passes, 4, "the cursor must resume instead of restarting every pass");
+    assert_eq!(reclaimed, 10, "every expired record is reclaimed exactly once");
+    assert_eq!(shard.sweep_expired(now, Some(3)).unwrap(), yyds_types::SweepReport::default());
+}
+
+#[test]
+fn sweep_uses_the_supplied_clock_and_does_not_resurrect_records() {
+    let mut shard = MemoryShard::new();
+    let now = now_unix_ms();
+    let gone = Key::new("ns", b"gone");
+    let later = Key::new("ns", b"later");
+    shard.put_expiring(gone.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now - 1).unwrap();
+    shard.put_expiring(later.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
+
+    assert_eq!(shard.sweep_expired(now, None).unwrap().reclaimed, 1, "the elapsed record is reclaimed");
+
+    // A backward clock jump must not restore the physically deleted record, and must not
+    // reclaim a record whose deadline is still ahead of the supplied clock.
+    let rollback = shard.sweep_expired(now - 120_000, None).unwrap();
+    assert_eq!(rollback, yyds_types::SweepReport { examined: 1, reclaimed: 0 });
+    assert!(shard.get(&gone).unwrap().is_none(), "physical deletion is irreversible");
+    assert!(shard.get(&later).unwrap().is_some(), "a future deadline survives a rollback");
 }

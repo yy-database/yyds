@@ -1218,9 +1218,11 @@ fn sweep_expired_reclaims_across_mounted_shards() {
     // Route one expired key per shard plus one live key, proving the total aggregates
     // per-shard reclamation and survivors stay readable.
     let mut expired_on_b = None;
+    let mut copies_per_shard: HashMap<ShardId, usize> = HashMap::new();
     for index in 0..200 {
         let key = format!("sweep-{index}").into_bytes();
         let decision = executor.routing().route("redis:0", &key);
+        *copies_per_shard.entry(decision.shard.clone()).or_default() += 1;
         executor
             .execute(None, command(KeyValueAction::PutExpiring { value: b"v".to_vec(), expires_at: now - 1 }, &key))
             .unwrap();
@@ -1229,11 +1231,16 @@ fn sweep_expired_reclaims_across_mounted_shards() {
         }
     }
     executor.execute(None, command(KeyValueAction::Put(b"keep".to_vec()), b"survivor")).unwrap();
+    let survivor_shard = executor.routing().route("redis:0", b"survivor").shard;
+    *copies_per_shard.entry(survivor_shard).or_default() += 1;
     let expired_on_b = expired_on_b.expect("some key must route to shard-b");
 
-    let reclaimed = executor.sweep_expired().unwrap();
+    let expected_examined: usize = copies_per_shard.values().map(|count| (*count).min(8)).sum();
+    let first = executor.sweep_expired(Some(8)).unwrap();
+    assert_eq!(first.examined, expected_examined, "the budget applies per mounted shard");
+    let reclaimed = first.reclaimed + executor.sweep_expired(None).unwrap().reclaimed;
     assert_eq!(reclaimed, 200, "every elapsed record on every mounted shard is reclaimed");
-    assert_eq!(executor.sweep_expired().unwrap(), 0, "a second sweep finds nothing left");
+    assert_eq!(executor.sweep_expired(None).unwrap().reclaimed, 0, "a second sweep finds nothing left");
     assert_eq!(
         executor.execute(None, command(KeyValueAction::Get, b"survivor")).unwrap(),
         KeyValueResult::Get(Some(b"keep".to_vec()))
@@ -1266,7 +1273,7 @@ fn expiry_sweeper_reclaims_in_the_background() {
     // The background worker reclaims without any read traffic: once it has run, a manual
     // sweep finds nothing left.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while executor.sweep_expired().unwrap() != 0 {
+    while executor.sweep_expired(None).unwrap().reclaimed != 0 {
         assert!(std::time::Instant::now() < deadline, "the sweeper did not reclaim within the deadline");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }

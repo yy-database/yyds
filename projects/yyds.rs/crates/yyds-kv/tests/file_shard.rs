@@ -171,11 +171,15 @@ fn file_shard_sweep_expired_reclaims_elapsed_records_durably() {
     shard.put_expiring(fresh.clone(), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
     shard.put_expiring(gone.clone(), StoredValue::Inline(InlineValue(b"payload".to_vec())), now - 1).unwrap();
 
-    assert_eq!(shard.sweep_expired(now).expect("sweep"), 1);
+    assert_eq!(shard.sweep_expired(now, None).expect("sweep").reclaimed, 1);
     // Reclaim must survive reopen: the expired key is physically gone, not just filtered.
     drop(shard);
     let mut reopened = FileShard::open(&path).expect("reopen after sweep");
-    assert_eq!(reopened.sweep_expired(now).unwrap(), 0, "a reopened shard has nothing left to reclaim");
+    assert_eq!(
+        reopened.sweep_expired(now, None).unwrap(),
+        yyds_types::SweepReport { examined: 2, reclaimed: 0 },
+        "a reopened shard has nothing left to reclaim"
+    );
     assert!(reopened.get(&live).unwrap().is_some());
     assert!(reopened.get(&fresh).unwrap().is_some());
     assert!(reopened.get(&gone).unwrap().is_none());
@@ -191,7 +195,7 @@ fn file_shard_sweep_without_expired_records_leaves_the_snapshot_untouched() {
     shard.put_expiring(Key::new("ns", b"fresh"), StoredValue::Inline(InlineValue(b"v".to_vec())), now + 60_000).unwrap();
     let published = fs::read(&path).unwrap();
 
-    assert_eq!(shard.sweep_expired(now).unwrap(), 0);
+    assert_eq!(shard.sweep_expired(now, None).unwrap(), yyds_types::SweepReport { examined: 2, reclaimed: 0 });
     assert_eq!(fs::read(&path).unwrap(), published, "a no-op sweep must not rewrite the snapshot");
     cleanup(&path);
 }
@@ -210,7 +214,7 @@ fn file_shard_failed_sweep_preserves_the_previous_snapshot() {
     fs::rename(&path, &backup).unwrap();
     fs::create_dir(&path).unwrap();
 
-    assert!(shard.sweep_expired(now).is_err(), "the reclaim must fail when the snapshot cannot be replaced");
+    assert!(shard.sweep_expired(now, None).is_err(), "the reclaim must fail when the snapshot cannot be replaced");
     // The in-memory state is not published either: both records stay in their pre-sweep
     // shape (the expired one still filtered from reads, the live one intact).
     assert!(shard.get(&gone).unwrap().is_none());
@@ -220,9 +224,29 @@ fn file_shard_failed_sweep_preserves_the_previous_snapshot() {
     fs::remove_dir(&path).unwrap();
     fs::rename(&backup, &path).unwrap();
     // After the storage fault clears, the same shard can reclaim again.
-    assert_eq!(shard.sweep_expired(now).unwrap(), 1);
+    assert_eq!(shard.sweep_expired(now, None).unwrap().reclaimed, 1);
     drop(shard);
     let mut reopened = FileShard::open(&path).unwrap();
-    assert_eq!(reopened.sweep_expired(now).unwrap(), 0);
+    assert_eq!(reopened.sweep_expired(now, None).unwrap().reclaimed, 0);
+    cleanup(&path);
+}
+
+#[test]
+fn file_shard_budgeted_sweep_persists_partial_progress() {
+    let path = temp_path("sweep-budget");
+    let mut shard = FileShard::open(&path).expect("open");
+    let now = yyds_kv::now_unix_ms();
+    for index in 0..6 {
+        let key = Key::new("ns", format!("k{index}").into_bytes());
+        shard.put_expiring(key, StoredValue::Inline(InlineValue(b"v".to_vec())), now - 1).unwrap();
+    }
+
+    let first = shard.sweep_expired(now, Some(2)).unwrap();
+    assert_eq!(first, yyds_types::SweepReport { examined: 2, reclaimed: 2 });
+    // The partial pass is durable: a reopen sees exactly four expired records left.
+    drop(shard);
+    let mut reopened = FileShard::open(&path).expect("reopen after budgeted sweep");
+    assert_eq!(reopened.sweep_expired(now, None).unwrap(), yyds_types::SweepReport { examined: 4, reclaimed: 4 });
+    assert_eq!(reopened.sweep_expired(now, None).unwrap(), yyds_types::SweepReport::default());
     cleanup(&path);
 }

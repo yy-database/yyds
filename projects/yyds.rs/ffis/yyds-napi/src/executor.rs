@@ -31,9 +31,12 @@ impl LocalExecutorHandle {
 
     /// Reclaims every record whose expiry deadline has elapsed, returning how many
     /// records were physically removed across all mounted shards.
+    ///
+    /// This is the unbounded maintenance entry: it scans every shard completely. The node's
+    /// background sweeper uses a per-shard budget instead so its CPU share stays bounded.
     #[napi]
     pub fn sweep_expired(&self) -> Result<u32> {
-        let reclaimed = self.inner.sweep_expired().map_err(|error| Error::from_reason(error.to_string()))?;
+        let reclaimed = self.inner.sweep_expired(None).map_err(|error| Error::from_reason(error.to_string()))?.reclaimed;
         u32::try_from(reclaimed).map_err(|_| Error::from_reason("reclaimed record count exceeds u32"))
     }
 }

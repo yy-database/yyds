@@ -12,6 +12,14 @@ use std::{
 
 use crate::KeyValueExecutor;
 
+/// Records inspected per shard per background pass.
+///
+/// Together with the interval this caps the sweeper's CPU share: at the default 100ms tick a
+/// shard scans at most 10 * 256 = 2560 records per second, and an N-record shard is fully
+/// inspected in roughly N / 2560 seconds. A pass that exhausts the budget resumes from its key
+/// cursor on the next tick, so the tail of a large shard is never starved.
+pub const DEFAULT_SWEEP_BUDGET_PER_SHARD: usize = 256;
+
 /// Periodically reclaims expired records through a key-value executor.
 ///
 /// The sweeper owns one worker thread that calls [`KeyValueExecutor::sweep_expired`] once
@@ -33,7 +41,7 @@ impl ExpirySweeper {
         let signal = Arc::clone(&stopping);
         let worker = thread::Builder::new().name("yyds-expiry-sweeper".into()).spawn(move || {
             while !signal.load(Ordering::Acquire) {
-                let _ = executor.sweep_expired();
+                let _ = executor.sweep_expired(Some(DEFAULT_SWEEP_BUDGET_PER_SHARD));
                 thread::sleep(interval);
             }
         })?;
