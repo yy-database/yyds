@@ -64,6 +64,7 @@ const dataDir = mkdtempSync(join(tmpdir(), "yyds-sql-smoke-"));
 const clusterId = `smoke-cluster-${process.pid}`;
 const nodeId = `smoke-node-${process.pid}`;
 const schemaPath = join(dataDir, "sql-schema.v0.json");
+const recoveryStatePath = join(dataDir, "recovery-state.json");
 const host = "127.0.0.1";
 const python = process.env.YYDS_PYTHON ?? "python";
 
@@ -107,6 +108,10 @@ async function stopNode() {
     nodeProcess = null;
 }
 
+function sleep(ms) {
+    return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
 async function waitUntilReady() {
     const deadline = Date.now() + START_TIMEOUT_MS;
     let announced = false;
@@ -125,13 +130,42 @@ async function waitUntilReady() {
             }
             announced = true;
         }
-        if (announced && (await portOpen(pgPort)) && (await portOpen(mysqlPort))) {
+        if (announced && (await portOpen(pgPort)) && (await portOpen(mysqlPort)) && (await portOpen(redisPort))) {
             console.log(`[yyds] running pgsql=${pgPort} mysql=${mysqlPort} redis=${redisPort}`);
             return;
         }
-        await new Promise((r) => setTimeout(r, 50));
+        await sleep(50);
     }
     throw new Error(`node did not accept SQL connections within ${START_TIMEOUT_MS / 1000}s\n${nodeLogs()}`);
+}
+
+async function startNode() {
+    stdoutLines.length = 0;
+    stderrLines.length = 0;
+    console.log(`[yyds] ${[process.execPath, ...nodeArgs].join(" ")}`);
+    nodeProcess = spawn(process.execPath, nodeArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    nodeProcess.stdout.setEncoding("utf8");
+    nodeProcess.stderr.setEncoding("utf8");
+    nodeProcess.stdout.on("data", (chunk) => {
+        for (const line of chunk.split(/\r?\n/)) {
+            if (line.length > 0) stdoutLines.push(line);
+        }
+    });
+    nodeProcess.stderr.on("data", (chunk) => {
+        for (const line of chunk.split(/\r?\n/)) {
+            if (line.length > 0) stderrLines.push(line);
+        }
+    });
+    await waitUntilReady();
+}
+
+async function waitPortClosed(port) {
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+        if (!(await portOpen(port))) return;
+        await sleep(50);
+    }
+    throw new Error(`port ${port} stayed open after yyds stop`);
 }
 
 function runSuite(label, command, args, env) {
@@ -155,21 +189,7 @@ try {
     console.log(`[yyds] init exit=${init.code}`);
     if (init.code !== 0) throw new Error(`yyds init failed: ${init.stderr.trim()}`);
 
-    console.log(`[yyds] ${[process.execPath, ...nodeArgs].join(" ")}`);
-    nodeProcess = spawn(process.execPath, nodeArgs, { stdio: ["ignore", "pipe", "pipe"] });
-    nodeProcess.stdout.setEncoding("utf8");
-    nodeProcess.stderr.setEncoding("utf8");
-    nodeProcess.stdout.on("data", (chunk) => {
-        for (const line of chunk.split(/\r?\n/)) {
-            if (line.length > 0) stdoutLines.push(line);
-        }
-    });
-    nodeProcess.stderr.on("data", (chunk) => {
-        for (const line of chunk.split(/\r?\n/)) {
-            if (line.length > 0) stderrLines.push(line);
-        }
-    });
-    await waitUntilReady();
+    await startNode();
 
     const env = { ...process.env, YYDS_HOST: host, YYDS_PG_PORT: String(pgPort), YYDS_MYSQL_PORT: String(mysqlPort) };
     let failures = 0;
@@ -184,8 +204,29 @@ try {
     if (!existsSync(schemaPath)) throw new Error(`schema registry was not persisted at ${schemaPath}`);
     console.log(`[schema] ${schemaPath} (${statSync(schemaPath).size} bytes)`);
 
+    // 重新启动同一数据目录，验证行、序列、唯一键和 Redis 截止期都真正落盘。
+    const recoveryEnv = {
+        ...env,
+        YYDS_REDIS_PORT: String(redisPort),
+        YYDS_RECOVERY_STATE: recoveryStatePath,
+    };
+    failures += await runSuite("recovery-seed", python, [join(ROOT, "e2e/recovery.py")], {
+        ...recoveryEnv,
+        YYDS_RECOVERY_PHASE: "seed",
+    });
+
+    console.log("[restart] stopping node and restarting on the same data directory");
+    await stopNode();
+    for (const port of [redisPort, pgPort, mysqlPort]) await waitPortClosed(port);
+    await startNode();
+
+    failures += await runSuite("recovery-verify", python, [join(ROOT, "e2e/recovery.py")], {
+        ...recoveryEnv,
+        YYDS_RECOVERY_PHASE: "verify",
+    });
+
     exitCode = failures === 0 ? 0 : 1;
-    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=2 failed=${failures}`);
+    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=4 failed=${failures}`);
 } catch (error) {
     console.error(`[smoke] error: ${error.message}`);
     console.error(nodeLogs());
