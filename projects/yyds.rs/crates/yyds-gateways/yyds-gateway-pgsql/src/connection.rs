@@ -18,7 +18,7 @@ use yyds_gateway::{
     neutralized_sql_parameters, nulled_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect,
     substitute_sql_parameters, DiscardTarget, SqlBoundExpression, SqlBoundLiteral, SqlColumn, SqlDialect, SqlErrorKind,
     SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSchemaRegistry, SqlSessionCommand,
-    SqlTransactionAction, SqlValue, PG_SERVER_VERSION,
+    SqlTransactionAction, SqlValue, PG_SERVER_VERSION, split_sql_batch,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -396,6 +396,54 @@ fn run_session_command(
 }
 
 fn handle_simple_query(
+    stream: &mut impl Write,
+    sql: &str,
+    session: &mut TransactionSession,
+    extended: &mut ExtendedSession,
+    runtime: Option<&Arc<PgsqlSqlRuntime>>,
+) -> io::Result<()> {
+    let statements = match split_sql_batch(sql) {
+        Ok(statements) => statements,
+        Err(error) => {
+            session.fail();
+            return write_error_response(stream, pg_sqlstate(error.kind), &format!("SQL batch error: {}", error.message));
+        }
+    };
+    if statements.len() <= 1 {
+        let single = statements.first().map(|statement| statement.text.as_str()).unwrap_or(sql);
+        return handle_single_statement(stream, single, session, extended, runtime);
+    }
+    // PostgreSQL parses the whole string and stops at the first failing
+    // statement. Earlier statements are their own implicit transactions unless
+    // the batch opened or continued a transaction, so the registry checkpoint
+    // exists only in the transactional case.
+    let mut checkpoint: Option<yyds_gateway::SqlSchemaCheckpoint> = None;
+    for (index, statement) in statements.iter().enumerate() {
+        if checkpoint.is_none() && session.in_transaction() {
+            checkpoint = runtime.map(|rt| rt.schema.checkpoint());
+        }
+        let mut buffer = Vec::new();
+        handle_single_statement(&mut buffer, &statement.text, session, extended, runtime)?;
+        match annotate_batch_error(&buffer, index + 1, statements.len(), statement.offset) {
+            Some(annotated) => {
+                stream.write_all(&annotated)?;
+                if let Some(checkpoint) = checkpoint {
+                    if let Some(rt) = runtime {
+                        rt.schema.restore(checkpoint).map_err(|error| io::Error::other(error.message))?;
+                    }
+                }
+                return Ok(());
+            }
+            None => stream.write_all(&buffer)?,
+        }
+    }
+    Ok(())
+}
+
+/// Executes one already-split statement. This is the former single-statement
+/// body: DDL is resolved before the session parser, then session commands and
+/// finally SQL execution.
+fn handle_single_statement(
     stream: &mut impl Write,
     sql: &str,
     session: &mut TransactionSession,
@@ -1699,6 +1747,66 @@ fn write_error_response(stream: &mut impl Write, code: &str, message: &str) -> i
     payload.extend_from_slice(message.as_bytes());
     payload.extend_from_slice(b"\0\0");
     write_message(stream, b'E', &payload)
+}
+
+/// Annotates the first ErrorResponse in a buffered statement response with its
+/// batch position and string offset.
+///
+/// Returns `None` when the statement produced no ErrorResponse, in which case
+/// the buffer can be forwarded unchanged.
+fn annotate_batch_error(buffer: &[u8], index: usize, total: usize, offset: usize) -> Option<Vec<u8>> {
+    let mut cursor = 0usize;
+    while cursor + 5 <= buffer.len() {
+        let length = u32::from_be_bytes([buffer[cursor + 1], buffer[cursor + 2], buffer[cursor + 3], buffer[cursor + 4]]) as usize;
+        if length < 4 || cursor + 1 + length > buffer.len() {
+            return None;
+        }
+        let payload_start = cursor + 5;
+        let payload_end = cursor + 1 + length;
+        if buffer[cursor] == b'E' {
+            let prefix = format!("statement {index} of {total} failed at batch offset {offset}: ");
+            let payload = annotate_error_payload(&buffer[payload_start..payload_end], &prefix);
+            let mut output = Vec::with_capacity(buffer.len() + prefix.len());
+            output.extend_from_slice(&buffer[..cursor]);
+            output.push(b'E');
+            output.extend_from_slice(&((payload.len() as u32) + 4).to_be_bytes());
+            output.extend_from_slice(&payload);
+            output.extend_from_slice(&buffer[payload_end..]);
+            return Some(output);
+        }
+        cursor = payload_end;
+    }
+    None
+}
+
+/// Prepends `prefix` to the `M` (message) field of an ErrorResponse payload.
+fn annotate_error_payload(payload: &[u8], prefix: &str) -> Vec<u8> {
+    let mut fields: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < payload.len() && payload[cursor] != 0 {
+        let code = payload[cursor];
+        let start = cursor + 1;
+        let mut end = start;
+        while end < payload.len() && payload[end] != 0 {
+            end += 1;
+        }
+        if end >= payload.len() {
+            break;
+        }
+        fields.push((code, payload[start..end].to_vec()));
+        cursor = end + 1;
+    }
+    let mut output = Vec::with_capacity(payload.len() + prefix.len());
+    for (code, value) in fields {
+        output.push(code);
+        if code == b'M' {
+            output.extend_from_slice(prefix.as_bytes());
+        }
+        output.extend_from_slice(&value);
+        output.push(0);
+    }
+    output.push(0);
+    output
 }
 
 fn write_fatal(stream: &mut impl Write, code: &str, message: &str) -> io::Result<()> {
