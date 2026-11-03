@@ -154,10 +154,7 @@ fn skip_block_comment(sql: &str, start: usize) -> Result<usize, SqlFrontendError
         }
         index += 1;
     }
-    Err(SqlFrontendError::new(
-        SqlErrorKind::Syntax,
-        format!("unterminated block comment starting at byte offset {start}"),
-    ))
+    Err(SqlFrontendError::new(SqlErrorKind::Syntax, format!("unterminated block comment starting at byte offset {start}")))
 }
 
 /// 若 `start` 处的 `$` 是一个美元引用标记的开头，返回标记结束位置（`$tag$` 之后的字节）。
@@ -207,7 +204,10 @@ mod tests {
         assert_eq!(statements.len(), 3);
         assert!(statements[0].text.starts_with("CREATE TABLE IF NOT EXISTS"));
         assert!(statements[1].text.contains("UNIQUE (\"operation_id\", \"entity_version\")"));
-        assert_eq!(statements[2].text, "CREATE INDEX IF NOT EXISTS \"_iris_outbox_seq\" ON \"_iris_outbox\" (\"shard\", \"seq\")");
+        assert_eq!(
+            statements[2].text,
+            "CREATE INDEX IF NOT EXISTS \"_iris_outbox_seq\" ON \"_iris_outbox\" (\"shard\", \"seq\")"
+        );
         assert_eq!(statements[0].offset, 0);
         assert!(statements[1].offset > statements[0].offset);
     }

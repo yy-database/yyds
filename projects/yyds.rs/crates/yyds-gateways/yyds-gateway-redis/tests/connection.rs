@@ -54,18 +54,12 @@ fn command_errors_do_not_desynchronize_pipeline() {
 fn hello_negotiates_resp_protocol_and_rejects_unknown_version() {
     let resp3 = exchange(&[b"*2\r\n$5\r\nHELLO\r\n$1\r\n3\r\n*1\r\n$4\r\nPING\r\n"], RequestLimits::default());
     assert!(resp3.starts_with(b"%7\r\n"), "{resp3:?}");
-    assert!(
-        resp3.windows(15).any(|window| window == b"$5\r\nproto\r\n:3\r\n"),
-        "HELLO 3 must report proto=3: {resp3:?}"
-    );
+    assert!(resp3.windows(15).any(|window| window == b"$5\r\nproto\r\n:3\r\n"), "HELLO 3 must report proto=3: {resp3:?}");
     assert!(resp3.ends_with(b"+PONG\r\n"), "connection must stay usable after HELLO: {resp3:?}");
 
     let resp2 = exchange(&[b"*2\r\n$5\r\nHELLO\r\n$1\r\n2\r\n"], RequestLimits::default());
     assert!(resp2.starts_with(b"*14\r\n"), "{resp2:?}");
-    assert!(
-        resp2.windows(15).any(|window| window == b"$5\r\nproto\r\n:2\r\n"),
-        "HELLO 2 must report proto=2: {resp2:?}"
-    );
+    assert!(resp2.windows(15).any(|window| window == b"$5\r\nproto\r\n:2\r\n"), "HELLO 2 must report proto=2: {resp2:?}");
 
     assert_eq!(
         exchange(&[b"*2\r\n$5\r\nHELLO\r\n$1\r\n4\r\n"], RequestLimits::default()),
