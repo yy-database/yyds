@@ -45,8 +45,23 @@ pub struct MetaQuery {
     limit: Option<usize>,
     like: Option<String>,
     with_pk: bool,
-    pk_constraint: Option<String>,
+    pk: Option<PkProbe>,
     scalar: Option<ScalarKind>,
+}
+
+/// Accepted `EXISTS` primary-key probe over `information_schema.columns`.
+///
+/// Iris correlates `column_name` between `key_column_usage` and the outer row,
+/// while other clients correlate `table_schema` / `table_name` on
+/// `table_constraints`. Both bounded variants are recorded here so the
+/// synthesized `is_pk` column stays faithful to the probe.
+struct PkProbe {
+    /// `tc.constraint_name = '<literal>'` filter.
+    constraint: Option<String>,
+    /// `tc.table_schema = '<literal>'` filter inside the subquery.
+    schema: Option<String>,
+    /// `kcu.column_name = c.column_name`, which makes `is_pk` per column.
+    column_correlated: bool,
 }
 
 struct MetaColumn {
@@ -472,7 +487,7 @@ fn scalar_query(dialect: SqlDialect, kind: ScalarKind, label: String) -> MetaQue
         limit: None,
         like: None,
         with_pk: false,
-        pk_constraint: None,
+        pk: None,
         scalar: Some(kind),
     }
 }
@@ -506,7 +521,7 @@ fn analyze_show(show: &oak_sql::ast::ShowStatement, dialect: SqlDialect) -> Resu
             limit: None,
             like: show.like.as_ref().map(|pattern| pattern.to_string()),
             with_pk: false,
-            pk_constraint: None,
+            pk: None,
             scalar: None,
         })),
         "TABLES" => Err(unsupported(format!(
@@ -577,9 +592,9 @@ fn analyze_select(select: &SelectStatement, dialect: SqlDialect, sql: &str) -> R
             shapes(dialect)
         )));
     }
-    let pk_constraint = if with_pk { validate_pk_exists(select, table.alias.as_deref(), dialect, sql)? } else { None };
+    let pk = if with_pk { Some(validate_pk_exists(select, table.alias.as_deref(), dialect, sql)?) } else { None };
     let columns = projection_ids.into_iter().map(|(id, name)| MetaColumn { id, name, field_type: field_type(id) }).collect();
-    Ok(Some(MetaQuery { view, dialect, columns, filters, order, limit, like: None, with_pk, pk_constraint, scalar: None }))
+    Ok(Some(MetaQuery { view, dialect, columns, filters, order, limit, like: None, with_pk, pk, scalar: None }))
 }
 
 fn analyze_scalar_select(select: &SelectStatement, dialect: SqlDialect) -> Result<Option<MetaQuery>, SqlFrontendError> {
@@ -946,14 +961,15 @@ fn parse_limit(select: &SelectStatement, dialect: SqlDialect) -> Result<Option<u
     }
 }
 
-/// Validates the single `EXISTS` primary-key shape Iris emits and returns an
-/// optional constraint-name filter.
+/// Accepted shapes:
+/// - `tc.table_schema = 'public'`, `tc.constraint_type = 'PRIMARY KEY'`, `tc.table_name = c.table_name`, and `kcu.column_name = c.column_name` (Iris verbatim form).
+/// - `tc.constraint_name = kcu.constraint_name`, `tc.table_schema = kcu.table_schema`, `tc.constraint_type = 'PRIMARY KEY'`, and `table_schema` / `table_name` correlated with the outer row.
 fn validate_pk_exists(
     outer: &SelectStatement,
     outer_alias: Option<&str>,
     dialect: SqlDialect,
     sql: &str,
-) -> Result<Option<String>, SqlFrontendError> {
+) -> Result<PkProbe, SqlFrontendError> {
     let Some(query) = outer.items.iter().find_map(|item| match item {
         SelectItem::Expression { expr: Expression::Exists { query, negated, .. }, .. } if !*negated => Some(query.as_ref()),
         _ => None,
@@ -1029,7 +1045,7 @@ fn validate_pk_exists(
     let mut inner_correlations = Vec::new();
     let mut outer_correlations = Vec::new();
     let mut saw_primary_type = false;
-    let mut constraint_filter = None;
+    let mut probe = PkProbe { constraint: None, schema: None, column_correlated: false };
     let conditions = join.on.iter().chain(query.expr.iter()).flat_map(conjuncts).collect::<Vec<_>>();
     for condition in conditions {
         let Expression::Binary { left, op: BinaryOperator::Equal, right, .. } = condition
@@ -1053,8 +1069,7 @@ fn validate_pk_exists(
                             )));
                         }
                     }
-                    (Some(InnerSide::Outer), Some(InnerSide::Tc | InnerSide::Kcu))
-                    | (Some(InnerSide::Tc | InnerSide::Kcu), Some(InnerSide::Outer)) => {
+                    (Some(InnerSide::Outer), Some(InnerSide::Tc)) | (Some(InnerSide::Tc), Some(InnerSide::Outer)) => {
                         if !left_column.eq_ignore_ascii_case(&right_column)
                             || !matches!(left_column.to_ascii_lowercase().as_str(), "table_schema" | "table_name")
                         {
@@ -1064,6 +1079,17 @@ fn validate_pk_exists(
                             )));
                         }
                         outer_correlations.push(left_column.to_ascii_lowercase());
+                    }
+                    (Some(InnerSide::Outer), Some(InnerSide::Kcu)) | (Some(InnerSide::Kcu), Some(InnerSide::Outer)) => {
+                        // Iris 逐字形态用 `kcu.column_name = c.column_name`，`is_pk` 必须逐列判定。
+                        if !left_column.eq_ignore_ascii_case(&right_column) || !left_column.eq_ignore_ascii_case("column_name")
+                        {
+                            return Err(unsupported(format!(
+                                "primary-key `EXISTS` must correlate `column_name` with `key_column_usage`; {}",
+                                shapes(dialect)
+                            )));
+                        }
+                        probe.column_correlated = true;
                     }
                     _ => {
                         return Err(unsupported(format!(
@@ -1094,10 +1120,24 @@ fn validate_pk_exists(
                     && column.eq_ignore_ascii_case("constraint_name") =>
             {
                 match right.as_ref() {
-                    Expression::Literal(Literal::String(value, _)) => constraint_filter = Some(value.to_string()),
+                    Expression::Literal(Literal::String(value, _)) => probe.constraint = Some(value.to_string()),
                     _ => {
                         return Err(unsupported(format!(
                             "primary-key `EXISTS` constraint-name filter must be a string literal; {}",
+                            shapes(dialect)
+                        )))
+                    }
+                }
+            }
+            (Some((alias, column)), None)
+                if side(&alias, &tc, &kcu, outer_alias) == Some(InnerSide::Tc)
+                    && column.eq_ignore_ascii_case("table_schema") =>
+            {
+                match right.as_ref() {
+                    Expression::Literal(Literal::String(value, _)) => probe.schema = Some(value.to_string()),
+                    _ => {
+                        return Err(unsupported(format!(
+                            "primary-key `EXISTS` schema filter must be a string literal; {}",
                             shapes(dialect)
                         )))
                     }
@@ -1117,7 +1157,7 @@ fn validate_pk_exists(
             shapes(dialect)
         )));
     }
-    for required in ["constraint_name", "table_schema", "table_name"] {
+    for required in ["constraint_name", "table_schema"] {
         if !inner_correlations.iter().any(|column| column == required) {
             return Err(unsupported(format!(
                 "primary-key `EXISTS` must compare `{required}` between table_constraints and key_column_usage; {}",
@@ -1125,15 +1165,21 @@ fn validate_pk_exists(
             )));
         }
     }
-    if !outer_correlations.iter().any(|column| column == "table_schema")
-        || !outer_correlations.iter().any(|column| column == "table_name")
-    {
+    if !outer_correlations.iter().any(|column| column == "table_name") {
         return Err(unsupported(format!(
-            "primary-key `EXISTS` must correlate both `table_schema` and `table_name` with the outer row; {}",
+            "primary-key `EXISTS` must correlate `table_name` with the outer row; {}",
             shapes(dialect)
         )));
     }
-    Ok(constraint_filter)
+    // 没有外层 `table_schema` 关联时，schema 必须由子查询里的字面量钉住，
+    // 否则 `is_pk` 会跨 schema 误报。
+    if !outer_correlations.iter().any(|column| column == "table_schema") && probe.schema.is_none() {
+        return Err(unsupported(format!(
+            "primary-key `EXISTS` must pin the schema by correlation or a literal filter; {}",
+            shapes(dialect)
+        )));
+    }
+    Ok(probe)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1221,11 +1267,16 @@ fn build_rows(query: &MetaQuery, state: &RegistryState, schema: &str) -> Vec<Vec
         }
         View::PgColumns => {
             for table in &state.tables {
-                let is_pk = !table.primary_key.is_empty()
-                    && query
-                        .pk_constraint
-                        .as_ref()
-                        .map_or(true, |name| name.eq_ignore_ascii_case(&format!("{}_pkey", table.name.to_ascii_lowercase())));
+                let schema_matches = query
+                    .pk
+                    .as_ref()
+                    .and_then(|probe| probe.schema.as_ref())
+                    .map_or(true, |name| name.eq_ignore_ascii_case(schema));
+                let constraint_matches = query
+                    .pk
+                    .as_ref()
+                    .and_then(|probe| probe.constraint.as_ref())
+                    .map_or(true, |name| name.eq_ignore_ascii_case(&format!("{}_pkey", table.name.to_ascii_lowercase())));
                 for (index, field) in table.fields.iter().enumerate() {
                     let (data_type, udt_name) = postgres_type(&field.sql_type);
                     let mut row = vec![
@@ -1243,6 +1294,12 @@ fn build_rows(query: &MetaQuery, state: &RegistryState, schema: &str) -> Vec<Vec
                         (ColumnId::NumericScale, SqlValue::Null),
                     ];
                     if query.with_pk {
+                        // `kcu.column_name = c.column_name` 让 `is_pk` 逐列判定。
+                        let column_matches = query.pk.as_ref().map_or(true, |probe| {
+                            !probe.column_correlated
+                                || table.primary_key.iter().any(|column| column.eq_ignore_ascii_case(&field.name))
+                        });
+                        let is_pk = !table.primary_key.is_empty() && schema_matches && constraint_matches && column_matches;
                         row.push((ColumnId::IsPk, SqlValue::Boolean(is_pk)));
                     }
                     rows.push(row);

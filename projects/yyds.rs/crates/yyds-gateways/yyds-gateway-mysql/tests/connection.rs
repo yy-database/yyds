@@ -2006,6 +2006,73 @@ fn mysql_metadata_prepared_columns_query_describes_and_filters() {
     server.join().unwrap();
 }
 
+/// Iris MySQL 适配器 `conn.exec` 的逐字 4 列 `information_schema.COLUMNS`。
+#[test]
+fn mysql_metadata_iris_verbatim_columns_query_reports_key_and_nullability() {
+    let (mut client, server) = start_server_with_empty_schema();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+    init_db(&mut client, "yyds");
+
+    expect_ok(
+        &mut client,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(191) NOT NULL, active TINYINT(1), score DOUBLE PRECISION)",
+    );
+
+    let sql = "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
+    let (statement_id, columns, parameters, names, _) = prepare(&mut client, sql);
+    assert_eq!((columns, parameters), (4, 1));
+    assert_eq!(names, vec!["COLUMN_NAME", "DATA_TYPE", "IS_NULLABLE", "COLUMN_KEY"]);
+
+    let parameter = lenenc_bytes(b"users");
+    let payload = execute_payload(statement_id, &[(0xFD, false)], &[Some(&parameter)], true);
+    let (_, count) = execute(&mut client, &payload);
+    assert_eq!(read_lenenc(&count).0, 4);
+    for _ in 0..4 {
+        read_packet_full(&mut client);
+    }
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    let mut rows = Vec::new();
+    for _ in 0..4 {
+        let (_, packet) = read_packet_full(&mut client);
+        assert_eq!(packet[0], 0x00, "binary row header");
+        let bitmap_len = (4 + 2_usize).div_ceil(8);
+        let bitmap = &packet[1..1 + bitmap_len];
+        let mut offset = 1 + bitmap_len;
+        let mut values = Vec::new();
+        for index in 0..4 {
+            let bit = index + 2;
+            if bitmap[bit / 8] & (1 << (bit % 8)) != 0 {
+                values.push(None);
+                continue;
+            }
+            let (value, consumed) = read_lenenc_str(&packet[offset..]);
+            values.push(Some(value.to_vec()));
+            offset += consumed;
+        }
+        rows.push(values);
+    }
+    let (_, eof) = read_packet_full(&mut client);
+    assert_eq!(eof[0], 0xFE);
+
+    assert_eq!(
+        rows,
+        vec![
+            vec![text("id"), text("bigint"), text("NO"), text("PRI")],
+            vec![text("email"), text("varchar"), text("NO"), text("")],
+            vec![text("active"), text("tinyint"), text("YES"), text("")],
+            vec![text("score"), text("double"), text("YES"), text("")],
+        ]
+    );
+
+    drop(client);
+    server.join().unwrap();
+}
+
 /// 读取二进制协议结果集：列 0/1/3/4 是字符串，列 2 是 `LONG` 或 NULL。
 fn read_binary_metadata_rows(client: &mut TcpStream, expected: usize) -> Vec<Vec<Option<Vec<u8>>>> {
     let mut rows = Vec::new();

@@ -1930,6 +1930,76 @@ fn pgsql_metadata_tables_columns_and_scalars() {
     server.join().unwrap();
 }
 
+/// Iris PostgreSQL 适配器的两跳 inspect：先列出 `information_schema.tables`，
+/// 再用逐字 `EXISTS` 主键探测读取每张表的列。
+#[test]
+fn pgsql_iris_inspect_two_hop_reports_tables_then_primary_keys() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    for sql in [
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(191) NOT NULL, active BOOLEAN)",
+        "CREATE TABLE posts (id BIGINT PRIMARY KEY, title TEXT)",
+        "CREATE TABLE \"_iris_outbox\" (id BIGSERIAL PRIMARY KEY, operation_id TEXT NOT NULL, entity_version BIGINT NOT NULL, payload TEXT NOT NULL, UNIQUE (operation_id, entity_version))",
+        "CREATE TABLE \"_iris_commit\" (id BIGINT PRIMARY KEY, shard TEXT NOT NULL, seq BIGINT NOT NULL)",
+    ] {
+        send_query(&mut client, sql);
+        assert_eq!(receive_until_ready(&mut client)[0].0, b'C', "{sql}");
+    }
+
+    // 第一跳：Iris `client.query` 的逐字 SQL（无参数）。
+    let tables = extended_rows(
+        &mut client,
+        "t1",
+        "SELECT table_name
+         FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+         ORDER BY table_name",
+        &[],
+    );
+    assert_eq!(
+        tables,
+        vec![vec![value("_iris_commit")], vec![value("_iris_outbox")], vec![value("posts")], vec![value("users")]]
+    );
+
+    // 第二跳：Iris 逐字的 `EXISTS` 主键探测，`$1` 为表名。
+    let sql = "SELECT
+            c.column_name,
+            c.udt_name,
+            c.is_nullable,
+            EXISTS (
+                SELECT 1
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_schema = 'public'
+                  AND tc.table_name = c.table_name
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                  AND kcu.column_name = c.column_name
+            ) AS is_pk
+         FROM information_schema.columns c
+         WHERE c.table_schema = 'public' AND c.table_name = $1
+         ORDER BY c.ordinal_position";
+    assert_eq!(
+        extended_rows(&mut client, "u1", sql, &["users"]),
+        vec![
+            vec![value("id"), value("int8"), value("NO"), value("t")],
+            vec![value("email"), value("varchar"), value("NO"), value("f")],
+            vec![value("active"), value("bool"), value("YES"), value("f")],
+        ]
+    );
+    assert_eq!(
+        extended_rows(&mut client, "p1", sql, &["posts"]),
+        vec![
+            vec![value("id"), value("int8"), value("NO"), value("t")],
+            vec![value("title"), value("text"), value("YES"), value("f")],
+        ]
+    );
+
+    drop(client);
+    server.join().unwrap();
+}
+
 #[test]
 fn pgsql_metadata_catalog_views_and_rejections() {
     let (mut client, server) = start_server_with_empty_schema();
