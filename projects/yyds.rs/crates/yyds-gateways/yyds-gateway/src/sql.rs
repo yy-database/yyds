@@ -2171,14 +2171,16 @@ pub fn is_binary_type_name(target: &str) -> bool {
     matches!(base, "BYTEA" | "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "BYTES")
 }
 
-/// Rejects the `::<type>` cast operator when it names a binary type.
+/// Rejects the `::<type>` cast operator.
 ///
-/// Oak's SQL surface lexes `::` but does not build a cast node, so `'…'::bytea`
-/// binds as a plain string and would be stored as UTF-8 text instead of the raw
-/// octets the client meant to send. The gateway refuses that spelling instead of
-/// accepting a lossy value. Only code positions are inspected, so `::` inside
-/// string literals, quoted identifiers and comments is left alone.
-pub fn reject_binary_cast_operator(sql: &str) -> Result<(), SqlFrontendError> {
+/// Oak's SQL surface lexes `::` but does not build a cast node, so the suffix
+/// is dropped at bind time. Accepting it would silently change both the
+/// projected column name and the declared type, and `'…'::bytea` would be
+/// stored as UTF-8 text instead of the raw octets the client meant to send.
+/// The gateway refuses every `::` spelling instead of returning wrong metadata
+/// or a lossy value. Only code positions are inspected, so `::` inside string
+/// literals, quoted identifiers and comments is left alone.
+pub fn reject_cast_operator(sql: &str) -> Result<(), SqlFrontendError> {
     let bytes = sql.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -2208,7 +2210,9 @@ pub fn reject_binary_cast_operator(sql: &str) -> Result<(), SqlFrontendError> {
                         "`::{target}` casts to a binary type are not supported, send the binary wire format or a hexadecimal `CAST(... AS {target})`"
                     )));
                 }
-                index += 2;
+                return Err(SqlFrontendError::unsupported(format!(
+                    "the `::{target}` cast operator is not supported, write `CAST(<expression> AS {target})`"
+                )));
             }
             _ => index += 1,
         }
