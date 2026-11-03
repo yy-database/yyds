@@ -7,6 +7,9 @@ export interface YydsBindings {
         acquire(dataDir: string, identity: unknown): unknown;
     };
     LocalExecutorHandle: new (dataDir: string, catalogPath?: string | null) => LocalExecutorBinding;
+    SqlSchemaRegistryHandle: {
+        open(path: string): unknown;
+    };
     ExpirySweeperHandle: {
         start(executor: LocalExecutorBinding, intervalMs: number): ExpirySweeperBinding;
     };
@@ -23,11 +26,11 @@ export interface YydsBindings {
             executor: unknown,
             catalogPath: string,
         ): PgsqlServiceBinding;
-        startWithSchema(
+        startWithSharedSchema(
             lease: unknown,
             port: number,
             executor: unknown,
-            schemaPath: string,
+            schema: unknown,
         ): PgsqlServiceBinding;
     };
     MysqlServiceHandle: {
@@ -38,11 +41,11 @@ export interface YydsBindings {
             executor: unknown,
             catalogPath: string,
         ): MysqlServiceBinding;
-        startWithSchema(
+        startWithSharedSchema(
             lease: unknown,
             port: number,
             executor: unknown,
-            schemaPath: string,
+            schema: unknown,
         ): MysqlServiceBinding;
     };
     MongoServiceHandle: new (
