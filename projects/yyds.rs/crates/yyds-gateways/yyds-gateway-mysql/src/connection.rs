@@ -14,10 +14,10 @@ use std::{
 
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_ddl, parse_session_command,
-    plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral, SqlCatalogBoundStatement,
-    SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult,
-    SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
+    analyze_meta_query, bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_ddl,
+    parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral,
+    SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
+    SqlParameterStyle, SqlResult, SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -199,11 +199,14 @@ struct MysqlTransactionSession {
     /// Whether `autocommit` session variable is ON (default). `SET autocommit = OFF`
     /// clears the `SERVER_STATUS_AUTOCOMMIT` flag on subsequent OK / EOF responses.
     autocommit: bool,
+    /// Schema selected by the handshake database field or `COM_INIT_DB`, used
+    /// verbatim by `DATABASE()` and the synthesized `TABLE_SCHEMA` columns.
+    schema: String,
 }
 
 impl MysqlTransactionSession {
     fn new() -> Self {
-        Self { executor: None, handle: None, failed: false, autocommit: true }
+        Self { executor: None, handle: None, failed: false, autocommit: true, schema: String::new() }
     }
 
     fn fail(&mut self) {
@@ -254,6 +257,7 @@ fn reset_connection_session(session: &mut MysqlTransactionSession, statements: &
     session.executor = None;
     session.failed = false;
     session.autocommit = true;
+    session.schema.clear();
     statements.entries.clear();
 }
 
@@ -298,7 +302,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
         Some(_) => return Err(invalid_data("invalid MySQL handshake sequence")),
         None => return Ok(()),
     };
-    let (username, empty_password) = match parse_handshake_response(&response) {
+    let (username, empty_password, database) = match parse_handshake_response(&response) {
         Ok(parsed) => parsed,
         Err(error) => {
             write_error(&mut stream, 2, 1043, "08S01", error)?;
@@ -309,6 +313,7 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
         write_error(&mut stream, 2, 1045, "28000", "access denied: loopback accepts only an empty password")?;
         return Ok(());
     }
+    session.schema = database.unwrap_or_default();
     write_ok(&mut stream, 2, session.status_flags())?;
 
     loop {
@@ -328,10 +333,19 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
             COM_QUIT => return Ok(()),
             // Drivers issue COM_PING to prove liveness before creating a cursor
             // and COM_INIT_DB when switching schema. The gateway keeps a single
-            // catalog, so `COM_INIT_DB` only acknowledges the new default schema
-            // and must not reset any session state, while `COM_PING` is a
-            // no-op. Both are answered with the protocol OK packet.
-            COM_PING | COM_INIT_DB => write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?,
+            // catalog, so `COM_INIT_DB` only records the new default schema and
+            // must not reset any session state, while `COM_PING` is a no-op.
+            // Both are answered with the protocol OK packet.
+            COM_PING => write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?,
+            COM_INIT_DB => match std::str::from_utf8(&payload[1..]) {
+                Ok(schema) => {
+                    session.schema = schema.to_string();
+                    write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?;
+                }
+                Err(_) => {
+                    write_error(&mut stream, sequence.wrapping_add(1), 1049, "42000", "database name is not valid UTF-8")?
+                }
+            },
             // Connection pools (mysql-connector, SQLAlchemy `reset`) use this to
             // return an idle connection to its initial state. The socket and the
             // authentication stay untouched; only session state is reset.
@@ -399,6 +413,39 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<MysqlSqlRunt
                             Ok(_) => write_ok(&mut stream, sequence.wrapping_add(1), session.status_flags())?,
                             Err(error) => write_statement_error(&mut stream, sequence.wrapping_add(1), "ddl", error)?,
                         }
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
+                // Metadata views never touch the executor or the session
+                // transaction: they are synthesized from the local schema registry.
+                match analyze_meta_query(sql, SqlDialect::Mysql) {
+                    Err(error) => {
+                        session.fail();
+                        write_statement_error(&mut stream, sequence.wrapping_add(1), "metadata", error)?;
+                        continue;
+                    }
+                    Ok(Some(meta)) => {
+                        let Some(rt) = runtime.as_ref()
+                        else {
+                            write_error(&mut stream, sequence.wrapping_add(1), 1235, "42000", "no SQL runtime")?;
+                            continue;
+                        };
+                        let described = meta.describe();
+                        let result = meta.execute(&rt.schema, &session.schema);
+                        let column_types: Vec<u8> =
+                            described.iter().map(|column| mysql_field_type(&column.field_type)).collect();
+                        let column_nullables: Vec<bool> =
+                            described.iter().map(|column| column.field_type.is_nullable()).collect();
+                        write_result_set(
+                            &mut stream,
+                            sequence.wrapping_add(1),
+                            &result,
+                            &column_types,
+                            &column_nullables,
+                            false,
+                            session.status_flags(),
+                        )?;
                         continue;
                     }
                     Ok(None) => {}
@@ -711,7 +758,7 @@ fn handshake() -> Vec<u8> {
     payload
 }
 
-fn parse_handshake_response(payload: &[u8]) -> Result<(String, bool), &'static str> {
+fn parse_handshake_response(payload: &[u8]) -> Result<(String, bool, Option<String>), &'static str> {
     if payload.len() < 32 {
         return Err("truncated handshake response");
     }
@@ -737,14 +784,19 @@ fn parse_handshake_response(payload: &[u8]) -> Result<(String, bool), &'static s
     else {
         take_nul_bytes(payload, &mut cursor)?
     };
+    let mut database = None;
     if capabilities & CLIENT_CONNECT_WITH_DB != 0 {
-        let _ = take_nul_bytes(payload, &mut cursor)?;
+        let value = take_nul_bytes(payload, &mut cursor)?;
+        let value = String::from_utf8(value.to_vec()).map_err(|_| "database is not UTF-8")?;
+        if !value.is_empty() {
+            database = Some(value);
+        }
     }
     if capabilities & CLIENT_PLUGIN_AUTH != 0 && cursor < payload.len() {
         let _ = take_nul_bytes(payload, &mut cursor)?;
     }
     let username = String::from_utf8(username.to_vec()).map_err(|_| "username is not UTF-8")?;
-    Ok((username, auth_response.is_empty()))
+    Ok((username, auth_response.is_empty(), database))
 }
 
 fn take_nul_bytes<'a>(payload: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], &'static str> {
@@ -852,6 +904,31 @@ fn execute_sql(
     binary_rows: bool,
     column_nullables: &[bool],
 ) -> io::Result<()> {
+    match analyze_meta_query(sql, SqlDialect::Mysql) {
+        Err(error) => {
+            session.fail();
+            write_statement_error(stream, sequence, "metadata", error)?;
+            return Ok(());
+        }
+        Ok(Some(meta)) => {
+            let described = meta.describe();
+            let result = meta.execute(&runtime.schema, &session.schema);
+            let declared_types: Vec<u8> = described.iter().map(|column| mysql_field_type(&column.field_type)).collect();
+            let declared_nullables: Vec<bool> = described.iter().map(|column| column.field_type.is_nullable()).collect();
+            let column_types = if column_types.is_empty() { &declared_types } else { column_types };
+            let column_nullables = if column_nullables.is_empty() { &declared_nullables } else { column_nullables };
+            return write_result_set(
+                stream,
+                sequence,
+                &result,
+                column_types,
+                column_nullables,
+                binary_rows,
+                session.status_flags(),
+            );
+        }
+        Ok(None) => {}
+    }
     let catalog = runtime.schema.catalog();
     let bound = match bind_sql_catalog_with_variables(
         sql,
@@ -975,35 +1052,45 @@ fn handle_prepare(
             return Ok(());
         }
     };
-    let catalog = runtime.schema.catalog();
-    let bound = match bind_sql_catalog_with_variables(
-        &neutral,
-        &catalog,
-        catalog.schema_version(),
-        &mysql_system_variable,
-        SqlDialect::Mysql,
-    ) {
-        Ok(bound) => bound,
+    let description = match analyze_meta_query(&neutral, SqlDialect::Mysql) {
         Err(error) => {
             session.fail();
-            write_statement_error(stream, sequence, "bind", error)?;
+            write_statement_error(stream, sequence, "metadata", error)?;
             return Ok(());
         }
-    };
-    // 写入语句的值类型检查推迟到 execute，因为只有执行时才知道参数的真实类型，
-    // 因此这里只为 SELECT 推导结果列。
-    let description = match bound {
-        SqlCatalogBoundStatement::Select(_) | SqlCatalogBoundStatement::SetOperation(_) => {
-            match plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql) {
-                Ok(plan) => describe_plan(&plan),
+        Ok(Some(meta)) => meta.describe(),
+        Ok(None) => {
+            let catalog = runtime.schema.catalog();
+            let bound = match bind_sql_catalog_with_variables(
+                &neutral,
+                &catalog,
+                catalog.schema_version(),
+                &mysql_system_variable,
+                SqlDialect::Mysql,
+            ) {
+                Ok(bound) => bound,
                 Err(error) => {
                     session.fail();
-                    write_statement_error(stream, sequence, "plan", error)?;
+                    write_statement_error(stream, sequence, "bind", error)?;
                     return Ok(());
                 }
+            };
+            // 写入语句的值类型检查推迟到 execute，因为只有执行时才知道参数的真实类型，
+            // 因此这里只为 SELECT 推导结果列。
+            match bound {
+                SqlCatalogBoundStatement::Select(_) | SqlCatalogBoundStatement::SetOperation(_) => {
+                    match plan_statement_for_dialect(bound, &catalog, SqlDialect::Mysql) {
+                        Ok(plan) => describe_plan(&plan),
+                        Err(error) => {
+                            session.fail();
+                            write_statement_error(stream, sequence, "plan", error)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => Vec::new(),
             }
         }
-        _ => Vec::new(),
     };
 
     let id = statements.allocate();

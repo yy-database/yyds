@@ -14,6 +14,7 @@ mod sql;
 mod sql_ddl;
 mod sql_describe;
 mod sql_execute;
+mod sql_meta;
 mod sql_parameters;
 mod sql_planner;
 mod sql_schema;
@@ -28,6 +29,7 @@ pub use crate::{
     sql_ddl::{is_ddl_statement, parse_ddl, DdlColumn, SqlDdlStatement},
     sql_describe::{describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
+    sql_meta::{analyze_meta_query, mysql_data_type, postgres_type, MetaQuery, PG_SERVER_VERSION},
     sql_parameters::{neutralized_sql_parameters, nulled_sql_parameters, substitute_sql_parameters, SqlParameterStyle},
     sql_planner::{
         plan_select, plan_select_for_dialect, plan_statement, plan_statement_for_dialect, DeletePlan, InsertSelectColumn,
