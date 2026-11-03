@@ -23,7 +23,7 @@ pub use crate::{
     },
     errors::{Error, Result},
     identity::{Namespace, ShardId, CATALOG_SUFFIX, SHARD_SUFFIX},
-    key_value::{KeyValueAction, KeyValueCommand, KeyValueResult},
+    key_value::{KeyValueAction, KeyValueCommand, KeyValueResult, SweepReport},
     replication::{FenceToken, LeaderTerm, OwnerEntry, ReplicaError, ReplicaMember, ReplicaNodeId, ReplicaRole, ReplicaSet},
     replication_log::{LogIndex, ReplicaLog, ReplicationEntry, ReplicationError},
     routing::{RouteDecision, RoutingError, ShardEpoch, ShardMap},
