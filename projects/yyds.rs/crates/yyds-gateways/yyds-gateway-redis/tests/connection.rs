@@ -8,7 +8,7 @@ use std::{
 use yyds_execution::{KeyValueExecutor, LocalExecutor};
 use yyds_gateway_redis::{
     bind::bind,
-    connection::{KeyExpiryTable, serve_cancellable_with_executor, serve_connection},
+    connection::{serve_cancellable_with_executor, serve_connection},
     resp::RequestLimits,
 };
 use yyds_kv::MemoryShard;
@@ -19,7 +19,7 @@ fn exchange(chunks: &[&[u8]], limits: RequestLimits) -> Vec<u8> {
     let address = listener.local_addr().unwrap();
     let worker = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_connection(stream, limits, Arc::new(KeyExpiryTable::default())).unwrap();
+        serve_connection(stream, limits).unwrap();
     });
     let mut client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -88,14 +88,7 @@ fn executor_backed_session_runs_binary_set_get_and_delete_pipeline() {
     let address = listener.local_addr().unwrap();
     let worker = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_cancellable_with_executor(
-            stream,
-            RequestLimits::default(),
-            Arc::new(AtomicBool::new(false)),
-            executor,
-            Arc::new(KeyExpiryTable::default()),
-        )
-        .unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
     });
     let mut client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -131,14 +124,7 @@ fn executor_backed_mget_returns_ordered_duplicate_and_null_values() {
     let address = listener.local_addr().unwrap();
     let worker = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_cancellable_with_executor(
-            stream,
-            RequestLimits::default(),
-            Arc::new(AtomicBool::new(false)),
-            executor,
-            Arc::new(KeyExpiryTable::default()),
-        )
-        .unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
     });
     let mut client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -165,14 +151,7 @@ fn select_changes_the_namespace_for_the_connection() {
     let address = listener.local_addr().unwrap();
     let worker = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_cancellable_with_executor(
-            stream,
-            RequestLimits::default(),
-            Arc::new(AtomicBool::new(false)),
-            executor,
-            Arc::new(KeyExpiryTable::default()),
-        )
-        .unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
     });
     let mut client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -202,14 +181,7 @@ fn executor_server() -> (TcpStream, std::thread::JoinHandle<()>) {
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
-        serve_cancellable_with_executor(
-            stream,
-            RequestLimits::default(),
-            Arc::new(AtomicBool::new(false)),
-            executor,
-            Arc::new(KeyExpiryTable::default()),
-        )
-        .unwrap();
+        serve_cancellable_with_executor(stream, RequestLimits::default(), Arc::new(AtomicBool::new(false)), executor).unwrap();
     });
     let client = TcpStream::connect(address).unwrap();
     client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -727,7 +699,6 @@ fn multi_exec_session_isolation_two_clients_does_not_leak_state() {
     let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_b = Arc::clone(&stopping);
     let exec_a = Arc::clone(&executor);
-    let expiries_a = Arc::new(KeyExpiryTable::default());
 
     let server = std::thread::spawn(move || {
         while !stop_b.load(std::sync::atomic::Ordering::Acquire) {
@@ -735,15 +706,8 @@ fn multi_exec_session_isolation_two_clients_does_not_leak_state() {
                 Ok((stream, _)) => {
                     let cancel = Arc::clone(&stop_b);
                     let exec_clone = Arc::clone(&exec_a);
-                    let expiry_clone = Arc::clone(&expiries_a);
                     std::thread::spawn(move || {
-                        let _ = serve_cancellable_with_executor(
-                            stream,
-                            RequestLimits::default(),
-                            cancel,
-                            exec_clone,
-                            expiry_clone,
-                        );
+                        let _ = serve_cancellable_with_executor(stream, RequestLimits::default(), cancel, exec_clone);
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -830,9 +794,9 @@ fn multi_exec_queue_set_and_expire_executes_expiry_correctly() {
     assert!((0..=2).contains(&ttl_val), "TTL out of range: {ttl_val}");
 }
 
-// ---------- service-level expiry table (shared across connections) ----------
+// ---------- record-level expiry (shared across connections) ----------
 
-/// 启动一个 listener：每条连接共享同一个执行器与同一张服务级过期表。
+/// 启动一个 listener：每条连接共享同一个执行器，过期时间随 KV 记录保存。
 fn shared_expiry_server() -> (std::net::SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
     let shard = ShardId("local".into());
     let executor = Arc::new(
@@ -843,7 +807,6 @@ fn shared_expiry_server() -> (std::net::SocketAddr, Arc<AtomicBool>, std::thread
         )
         .unwrap(),
     );
-    let expiries = Arc::new(KeyExpiryTable::default());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -856,15 +819,8 @@ fn shared_expiry_server() -> (std::net::SocketAddr, Arc<AtomicBool>, std::thread
                     Ok((stream, _)) => {
                         let cancel = Arc::clone(&stopping);
                         let executor = Arc::clone(&executor);
-                        let expiries = Arc::clone(&expiries);
                         std::thread::spawn(move || {
-                            let _ = serve_cancellable_with_executor(
-                                stream,
-                                RequestLimits::default(),
-                                cancel,
-                                executor,
-                                expiries,
-                            );
+                            let _ = serve_cancellable_with_executor(stream, RequestLimits::default(), cancel, executor);
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -935,4 +891,61 @@ fn ttl_survives_the_disconnect_of_the_setting_connection() {
 
     drop(client_b);
     stop_shared_server(&stopping, server);
+}
+
+// ---------- PERSIST / SETEX / APPEND expiry rules ----------
+
+/// `PERSIST` 清除过期时间；对无过期或不存在的键返回 `0`。
+#[test]
+fn persist_clears_the_expiry_of_a_key() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "p1", "v", "EX", "100"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["PERSIST", "p1"]);
+    assert_eq!(read_integer(&mut client), 1);
+    send_command(&mut client, &["TTL", "p1"]);
+    assert_eq!(read_integer(&mut client), -1);
+    send_command(&mut client, &["PERSIST", "p1"]);
+    assert_eq!(read_integer(&mut client), 0);
+    send_command(&mut client, &["PERSIST", "missing"]);
+    assert_eq!(read_integer(&mut client), 0);
+    finish(client, server);
+}
+
+/// `SETEX` 等价 `SET` + `EX`；非正或非整数 TTL 被拒绝且不写入。
+#[test]
+fn setex_writes_value_with_expiry_and_rejects_bad_ttl() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SETEX", "s1", "100", "payload"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["GET", "s1"]);
+    assert_eq!(read_bulk(&mut client), Some(b"payload".to_vec()));
+    send_command(&mut client, &["TTL", "s1"]);
+    let ttl = read_integer(&mut client);
+    assert!((95..=100).contains(&ttl), "SETEX must leave about 100 seconds of TTL, got {ttl}");
+    send_command(&mut client, &["SETEX", "bad", "0", "v"]);
+    assert_eq!(read_line(&mut client), "-ERR invalid expire time in 'setex' command\r");
+    send_command(&mut client, &["SETEX", "bad", "abc", "v"]);
+    assert_eq!(read_line(&mut client), "-ERR invalid expire time in 'setex' command\r");
+    send_command(&mut client, &["GET", "bad"]);
+    assert_eq!(read_bulk(&mut client), None);
+    finish(client, server);
+}
+
+/// `APPEND` 保留已有 TTL；键不存在时新建无过期键。
+#[test]
+fn append_keeps_the_existing_ttl() {
+    let (mut client, server) = executor_server();
+    send_command(&mut client, &["SET", "a1", "hello", "EX", "100"]);
+    assert_eq!(read_line(&mut client), "+OK\r");
+    send_command(&mut client, &["APPEND", "a1", " world"]);
+    assert_eq!(read_integer(&mut client), 11);
+    send_command(&mut client, &["TTL", "a1"]);
+    let ttl = read_integer(&mut client);
+    assert!((95..=100).contains(&ttl), "APPEND must keep the TTL, got {ttl}");
+    send_command(&mut client, &["APPEND", "fresh", "seed"]);
+    assert_eq!(read_integer(&mut client), 4);
+    send_command(&mut client, &["TTL", "fresh"]);
+    assert_eq!(read_integer(&mut client), -1);
+    finish(client, server);
 }

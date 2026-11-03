@@ -42,6 +42,32 @@ fn file_shard_round_trips_records_and_revisions() {
 }
 
 #[test]
+fn file_shard_persists_expiry_across_reopen() {
+    let path = temp_path("expiry");
+    let mut shard = FileShard::open(&path).expect("open");
+    let live_key = Key::new("tenant-a", b"live".to_vec());
+    let gone_key = Key::new("tenant-a", b"gone".to_vec());
+    let now = yyds_kv::now_unix_ms();
+    shard.put_expiring(live_key.clone(), StoredValue::Inline(InlineValue(b"live".to_vec())), now + 60_000).expect("put live");
+    shard.put_expiring(gone_key.clone(), StoredValue::Inline(InlineValue(b"gone".to_vec())), now - 1).expect("put gone");
+    // An already-elapsed deadline reads as absent immediately.
+    assert!(shard.get(&gone_key).unwrap().is_none());
+    drop(shard);
+
+    let mut reopened = FileShard::open(&path).expect("reopen");
+    let live = reopened.get(&live_key).unwrap().expect("live record survives reopen");
+    assert_eq!(live.expires_at, Some(now + 60_000), "the wall-clock deadline must round-trip the snapshot");
+    assert!(reopened.get(&gone_key).unwrap().is_none(), "an expired record stays absent after reopen");
+    // A plain put clears the persisted expiry.
+    reopened.put(live_key.clone(), StoredValue::Inline(InlineValue(b"plain".to_vec()))).expect("plain put");
+    drop(reopened);
+
+    let reopened = FileShard::open(&path).expect("reopen after plain put");
+    assert_eq!(reopened.get(&live_key).unwrap().unwrap().expires_at, None);
+    cleanup(&path);
+}
+
+#[test]
 fn file_shard_rejects_corrupt_bytes() {
     let path = temp_path("corrupt");
     let shard = FileShard::open(&path).expect("open");

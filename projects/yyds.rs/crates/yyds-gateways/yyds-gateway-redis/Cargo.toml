@@ -15,6 +15,4 @@ yyds-gateway = { workspace = true }
 yyds-types = { workspace = true }
 yyds-control = { workspace = true }
 yyds-execution = { workspace = true }
-
-[dev-dependencies]
 yyds-kv = { workspace = true }

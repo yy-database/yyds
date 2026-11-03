@@ -353,16 +353,94 @@ where
                 Ok(KeyValueResult::Delete { removed })
             }
             KeyValueAction::IncrementBy(delta) => {
-                let current = match shard.get(&key)? {
-                    None => 0,
-                    Some(record) => match record.value {
-                        StoredValue::Inline(value) => parse_integer(&value.0)?,
-                        StoredValue::Object(_) => return Err(Error::Unsupported("object values cannot be incremented")),
-                    },
+                let record = shard.get(&key)?;
+                let (current, expires_at) = match record {
+                    None => (0, None),
+                    Some(record) => {
+                        let parsed = match record.value {
+                            StoredValue::Inline(value) => parse_integer(&value.0)?,
+                            StoredValue::Object(_) => return Err(Error::Unsupported("object values cannot be incremented")),
+                        };
+                        (parsed, record.expires_at)
+                    }
                 };
                 let value = current.checked_add(delta).ok_or(Error::IntegerOverflow)?;
-                shard.put(key, StoredValue::Inline(InlineValue(value.to_string().into_bytes())))?;
+                let stored = StoredValue::Inline(InlineValue(value.to_string().into_bytes()));
+                // Redis-style counters keep their deadline across increments.
+                match expires_at {
+                    Some(deadline) => shard.put_expiring(key, stored, deadline)?,
+                    None => shard.put(key, stored)?,
+                };
                 Ok(KeyValueResult::Increment { value })
+            }
+            KeyValueAction::PutExpiring { value, expires_at } => {
+                let revision = shard.put_expiring(key, StoredValue::Inline(InlineValue(value)), expires_at)?;
+                Ok(KeyValueResult::Put { revision })
+            }
+            KeyValueAction::PutIfAbsentExpiring { value, expires_at } => {
+                if shard.get(&key)?.is_some() {
+                    Ok(KeyValueResult::PutIfAbsent { revision: None })
+                }
+                else {
+                    let revision = shard.put_expiring(key, StoredValue::Inline(InlineValue(value)), expires_at)?;
+                    Ok(KeyValueResult::PutIfAbsent { revision: Some(revision) })
+                }
+            }
+            KeyValueAction::PutIfPresentExpiring { value, expires_at } => {
+                if shard.get(&key)?.is_none() {
+                    Ok(KeyValueResult::PutIfPresent { revision: None })
+                }
+                else {
+                    let revision = shard.put_expiring(key, StoredValue::Inline(InlineValue(value)), expires_at)?;
+                    Ok(KeyValueResult::PutIfPresent { revision: Some(revision) })
+                }
+            }
+            KeyValueAction::PutKeepingExpiry(value) => {
+                let expires_at = shard.get(&key)?.and_then(|record| record.expires_at);
+                let stored = StoredValue::Inline(InlineValue(value));
+                let revision = match expires_at {
+                    Some(deadline) => shard.put_expiring(key, stored, deadline)?,
+                    None => shard.put(key, stored)?,
+                };
+                Ok(KeyValueResult::Put { revision })
+            }
+            KeyValueAction::PutIfPresentKeepingExpiry(value) => {
+                let expires_at = match shard.get(&key)? {
+                    None => return Ok(KeyValueResult::PutIfPresent { revision: None }),
+                    Some(record) => record.expires_at,
+                };
+                let stored = StoredValue::Inline(InlineValue(value));
+                let revision = match expires_at {
+                    Some(deadline) => shard.put_expiring(key, stored, deadline)?,
+                    None => shard.put(key, stored)?,
+                };
+                Ok(KeyValueResult::PutIfPresent { revision: Some(revision) })
+            }
+            KeyValueAction::SetExpiry { expires_at } => {
+                let Some(record) = shard.get(&key)?
+                else {
+                    return Ok(KeyValueResult::ExpiryChanged { applied: false });
+                };
+                shard.put_expiring(key, record.value, expires_at)?;
+                Ok(KeyValueResult::ExpiryChanged { applied: true })
+            }
+            KeyValueAction::ClearExpiry => {
+                let Some(record) = shard.get(&key)?
+                else {
+                    return Ok(KeyValueResult::ExpiryChanged { applied: false });
+                };
+                if record.expires_at.is_none() {
+                    return Ok(KeyValueResult::ExpiryChanged { applied: false });
+                }
+                shard.put(key, record.value)?;
+                Ok(KeyValueResult::ExpiryChanged { applied: true })
+            }
+            KeyValueAction::GetExpiry => {
+                let record = shard.get(&key)?;
+                Ok(KeyValueResult::Expiry {
+                    present: record.is_some(),
+                    expires_at: record.and_then(|record| record.expires_at),
+                })
             }
         }
     }
@@ -506,6 +584,18 @@ impl TransactionHandle for LocalTransactionHandle {
                 let mut buffer = self.buffer.lock().map_err(|_| Error::Corrupt("transaction buffer poisoned"))?;
                 buffer.insert((namespace.0, key), BufferedState::Value(value.to_string().into_bytes(), None));
                 Ok(KeyValueResult::Increment { value })
+            }
+            KeyValueAction::PutExpiring { .. }
+            | KeyValueAction::PutIfAbsentExpiring { .. }
+            | KeyValueAction::PutIfPresentExpiring { .. }
+            | KeyValueAction::PutKeepingExpiry(_)
+            | KeyValueAction::PutIfPresentKeepingExpiry(_)
+            | KeyValueAction::SetExpiry { .. }
+            | KeyValueAction::ClearExpiry
+            | KeyValueAction::GetExpiry => {
+                // The buffered commit path only carries Put/Delete change sets; expiry mutations
+                // have no buffered representation and must not silently degrade into plain writes.
+                Err(Error::Unsupported("expiry actions are not supported inside transactions"))
             }
         }
     }
@@ -813,7 +903,7 @@ where
                 let key = Key::new(entry.command.namespace.0, entry.command.key);
                 match entry.command.action {
                     KeyValueAction::Put(value) => {
-                        changes.push(ShardChange::Put { key, value: StoredValue::Inline(InlineValue(value)) })
+                        changes.push(ShardChange::Put { key, value: StoredValue::Inline(InlineValue(value)), expires_at: None })
                     }
                     KeyValueAction::Delete => changes.push(ShardChange::Delete { key }),
                     _ => {
