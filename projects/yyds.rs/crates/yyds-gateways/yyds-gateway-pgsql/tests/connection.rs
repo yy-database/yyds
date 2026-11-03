@@ -1852,3 +1852,91 @@ fn pgsql_ddl_builds_the_runtime_catalog_and_reports_catalog_errors() {
     drop(client);
     server.join().unwrap();
 }
+
+#[test]
+fn pgsql_runs_a_multi_statement_simple_query_batch() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    let commit = "CREATE TABLE IF NOT EXISTS \"_iris_commit\" (\"shard\" TEXT PRIMARY KEY NOT NULL, \"value\" TEXT NOT NULL)";
+    let outbox = "CREATE TABLE IF NOT EXISTS \"_iris_outbox\" (\"id\" BIGSERIAL PRIMARY KEY, \"shard\" TEXT NOT NULL, \"seq\" BIGINT NOT NULL, \"operation_id\" TEXT NOT NULL, \"table_name\" TEXT NOT NULL, \"entity_id\" TEXT NOT NULL, \"entity_version\" BIGINT NOT NULL, \"effect\" TEXT NOT NULL, UNIQUE (\"operation_id\", \"entity_version\"))";
+    let index = "CREATE INDEX IF NOT EXISTS \"_iris_outbox_seq\" ON \"_iris_outbox\" (\"shard\", \"seq\")";
+    send_query(&mut client, &format!("{commit};\n{outbox};\n{index};"));
+
+    let responses = receive_until_ready(&mut client);
+    assert_eq!(responses.len(), 4);
+    assert_eq!(responses[0], (b'C', b"CREATE TABLE\0".to_vec()));
+    assert_eq!(responses[1], (b'C', b"CREATE TABLE\0".to_vec()));
+    assert_eq!(responses[2], (b'C', b"CREATE INDEX\0".to_vec()));
+    assert_eq!(responses[3], (b'Z', b"I".to_vec()));
+
+    // 两条 DDL 都真实落到 registry：两个表都可查询。
+    assert!(rows(&mut client, "SELECT \"shard\" FROM \"_iris_commit\"").is_empty());
+    assert!(rows(&mut client, "SELECT \"seq\" FROM \"_iris_outbox\"").is_empty());
+    assert_eq!(single_row(&mut client, "SELECT COUNT(*) FROM \"_iris_outbox\""), vec![Some(b"0".to_vec())]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn pgsql_batch_reports_statement_index_and_offset() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    let first = "CREATE TABLE IF NOT EXISTS \"_iris_commit\" (\"shard\" TEXT PRIMARY KEY NOT NULL)";
+    let second = "CREATE TABLE \"_iris_outbox\" (\"id\" BIGSERIAL PRIMARY KEY) GENERATED ALWAYS AS IDENTITY";
+    let third = "CREATE TABLE never_runs (\"id\" BIGINT)";
+    let sql = format!("{first}; {second}; {third}");
+    send_query(&mut client, &sql);
+
+    let responses = receive_until_ready(&mut client);
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0], (b'C', b"CREATE TABLE\0".to_vec()));
+    assert_eq!(responses[1].0, b'E');
+    let message = error_message(&responses[1].1);
+    assert!(message.contains("statement 2 of 3 failed at batch offset"), "{message}");
+    let expected_offset = first.len() + 2;
+    assert!(message.contains(&format!("offset {expected_offset}")), "{message}");
+    assert_eq!(responses[2], (b'Z', b"I".to_vec()));
+
+    // 批次在失败语句处停止：第三条从未执行。
+    assert_sqlstate(&mut client, "SELECT \"id\" FROM never_runs", b"42P01");
+    // 事务外批次按自动提交语义保留第一条 DDL。
+    assert!(rows(&mut client, "SELECT \"shard\" FROM \"_iris_commit\"").is_empty());
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn pgsql_aborted_batch_discards_schema_inside_a_transaction() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+
+    let sql = "CREATE TABLE batch_users (\"id\" BIGINT PRIMARY KEY); CREATE TABLE batch_users (\"id\" BIGINT PRIMARY KEY)";
+    send_query(&mut client, sql);
+    let responses = receive_until_ready(&mut client);
+    assert_eq!(responses[0], (b'C', b"CREATE TABLE\0".to_vec()));
+    assert_eq!(responses[1].0, b'E');
+    assert!(error_message(&responses[1].1).contains("statement 2 of 2"));
+    assert_eq!(responses[2], (b'Z', b"E".to_vec()));
+
+    // 事务被中止：SQL 一律 `25P02`。
+    assert_sqlstate_in_tx(&mut client, "SELECT \"id\" FROM batch_users", b"25P02");
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"ROLLBACK\0".to_vec()));
+
+    // 批次内第一条 DDL 也必须被回滚：catalog 与数据都不留痕迹。
+    assert_sqlstate(&mut client, "SELECT \"id\" FROM batch_users", b"42P01");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+fn error_message(payload: &[u8]) -> String {
+    let marker = b"\0M";
+    let start = payload.windows(2).position(|window| window == marker).expect("ErrorResponse message field") + 2;
+    let end = payload[start..].iter().position(|byte| *byte == 0).unwrap() + start;
+    String::from_utf8_lossy(&payload[start..end]).into_owned()
+}

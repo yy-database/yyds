@@ -128,6 +128,13 @@ pub struct SqlSchemaRegistry {
     path: Option<PathBuf>,
 }
 
+/// Opaque registry snapshot used to discard DDL from a failed batch or a
+/// rolled-back transaction.
+#[derive(Debug, Clone)]
+pub struct SqlSchemaCheckpoint {
+    state: RegistryState,
+}
+
 impl SqlSchemaRegistry {
     /// Creates an empty in-memory registry at revision `1` without persistence.
     pub fn new_in_memory() -> Self {
@@ -195,6 +202,29 @@ impl SqlSchemaRegistry {
     /// Cloned registry state for read-only metadata synthesis.
     pub(crate) fn snapshot(&self) -> RegistryState {
         self.lock().clone()
+    }
+
+    /// Captures the whole registry state so a failed batch or aborted
+    /// transaction can discard every DDL change made since the capture.
+    ///
+    /// The checkpoint is opaque: it is a full state copy, not a delta, and it
+    /// is never merged with a newer state.
+    pub fn checkpoint(&self) -> SqlSchemaCheckpoint {
+        SqlSchemaCheckpoint { state: self.snapshot() }
+    }
+
+    /// Restores a previously captured checkpoint and persists the restored
+    /// state when the registry is file-backed.
+    ///
+    /// Callers restore only on an explicit rollback path. Committing a
+    /// transaction never needs to restore a checkpoint.
+    pub fn restore(&self, checkpoint: SqlSchemaCheckpoint) -> Result<(), SqlFrontendError> {
+        let mut guard = self.lock();
+        *guard = checkpoint.state;
+        if let Some(path) = &self.path {
+            save(path, &guard)?;
+        }
+        Ok(())
     }
 
     /// Applies one DDL statement and persists the result when the state changed.

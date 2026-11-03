@@ -11,6 +11,7 @@ mod catalog_bind;
 mod config;
 mod kind;
 mod sql;
+mod sql_batch;
 mod sql_ddl;
 mod sql_describe;
 mod sql_execute;
@@ -26,6 +27,7 @@ pub use crate::{
         SqlCatalogBoundSetOperation, SqlCatalogBoundStatement, SqlCatalogBoundTable, SqlCatalogField, SqlCatalogOuterColumn,
         SqlCatalogTable, SqlFieldType,
     },
+    sql_batch::{split_sql_batch, SqlBatchStatement},
     sql_ddl::{is_ddl_statement, parse_ddl, DdlColumn, SqlDdlStatement},
     sql_describe::{describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
@@ -36,7 +38,7 @@ pub use crate::{
         InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, SqlSetOrderByItem,
         UpdatePlan, WritePlan,
     },
-    sql_schema::{SqlDdlOutcome, SqlSchemaRegistry},
+    sql_schema::{SqlDdlOutcome, SqlSchemaCheckpoint, SqlSchemaRegistry},
 };
 
 pub use crate::{
