@@ -4,3 +4,4 @@ packages:
   - "projects/yyds.ts/emulators/*"
   - "projects/yyds.ts/packages/yyds/tests/support/*"
   - "projects/yyds.ts/homepage"
+  - "e2e"
