@@ -260,13 +260,17 @@ fn handle_set(
     stream.write_all(b"+OK\r\n")
 }
 
-/// Absolute Unix-millisecond deadline for a relative SET expiry option, unless it overflows.
+/// Absolute Unix-millisecond deadline for a SET expiry option, unless it overflows.
+///
+/// `EX` / `PX` are offsets from the server's current time; `EXAT` / `PXAT`
+/// name the deadline directly (records carry wall-clock deadlines).
 fn set_deadline(expiry: SetExpiry) -> Option<i64> {
-    let delta_ms = match expiry {
-        SetExpiry::Seconds(seconds) => seconds.checked_mul(1000)?,
-        SetExpiry::Milliseconds(milliseconds) => milliseconds,
-    };
-    now_unix_ms().checked_add(i64::try_from(delta_ms).ok()?)
+    match expiry {
+        SetExpiry::Seconds(seconds) => now_unix_ms().checked_add(i64::try_from(seconds.checked_mul(1000)?).ok()?),
+        SetExpiry::Milliseconds(milliseconds) => now_unix_ms().checked_add(i64::try_from(milliseconds).ok()?),
+        SetExpiry::AtSeconds(seconds) => i64::try_from(seconds).ok()?.checked_mul(1000),
+        SetExpiry::AtMilliseconds(milliseconds) => i64::try_from(milliseconds).ok(),
+    }
 }
 
 /// `CLIENT SETNAME` / `CLIENT GETNAME` / `CLIENT SETINFO`.
@@ -491,6 +495,73 @@ fn respond(
             Ok(KeyValueResult::ExpiryChanged { applied }) => applied,
             Ok(_) => {
                 write_error(stream, "EXPIRE executor returned unexpected result")?;
+                return Ok(true);
+            }
+            Err(error) => {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        };
+        stream.write_all(if applied { b":1\r\n" } else { b":0\r\n" })?;
+    }
+    else if command.eq_ignore_ascii_case(b"EXPIREAT") || command.eq_ignore_ascii_case(b"PEXPIREAT") {
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        if count != 3 {
+            stream.write_all(b"-ERR wrong number of arguments for 'expireat' command\r\n")?;
+            return Ok(true);
+        }
+        let key = request.arguments[1];
+        let at = match parse_integer(request.arguments[2]) {
+            Some(v) => v,
+            None => {
+                stream.write_all(b"-ERR value is not an integer or out of range\r\n")?;
+                return Ok(true);
+            }
+        };
+        // Non-positive absolute deadlines delete the key, matching Redis.
+        if at <= 0 {
+            let removed = match executor.execute(
+                None,
+                yyds_types::KeyValueCommand {
+                    namespace: namespace.clone(),
+                    key: key.to_vec(),
+                    action: yyds_types::KeyValueAction::Delete,
+                },
+            ) {
+                Ok(KeyValueResult::Delete { removed }) => removed,
+                Ok(_) => {
+                    write_error(stream, "EXPIREAT executor returned unexpected result")?;
+                    return Ok(true);
+                }
+                Err(error) => {
+                    write_error(stream, &error.to_string())?;
+                    return Ok(true);
+                }
+            };
+            stream.write_all(if removed { b":1\r\n" } else { b":0\r\n" })?;
+            return Ok(true);
+        }
+        let unit_ms: i64 = if command.eq_ignore_ascii_case(b"PEXPIREAT") { 1 } else { 1000 };
+        let Some(expires_at) = at.checked_mul(unit_ms)
+        else {
+            stream.write_all(b"-ERR invalid expire time in 'expireat' command\r\n")?;
+            return Ok(true);
+        };
+        let applied = match executor.execute(
+            None,
+            yyds_types::KeyValueCommand {
+                namespace: namespace.clone(),
+                key: key.to_vec(),
+                action: yyds_types::KeyValueAction::SetExpiry { expires_at },
+            },
+        ) {
+            Ok(KeyValueResult::ExpiryChanged { applied }) => applied,
+            Ok(_) => {
+                write_error(stream, "EXPIREAT executor returned unexpected result")?;
                 return Ok(true);
             }
             Err(error) => {
@@ -809,6 +880,113 @@ fn respond(
             }
         }
     }
+    else if command.eq_ignore_ascii_case(b"GETEX") {
+        let Some(executor) = executor
+        else {
+            stream.write_all(b"-ERR unsupported command\r\n")?;
+            return Ok(true);
+        };
+        if count < 2 {
+            stream.write_all(b"-ERR wrong number of arguments for 'getex' command\r\n")?;
+            return Ok(true);
+        }
+        // At most one expiry option, validated before anything is read so a
+        // malformed command changes no state. `Some(None)` is `PERSIST`.
+        let mut touch: Option<Option<i64>> = None;
+        let mut index = 2;
+        while index < count {
+            let option = request.arguments[index];
+            if touch.is_some() {
+                stream.write_all(b"-ERR syntax error\r\n")?;
+                return Ok(true);
+            }
+            if option.eq_ignore_ascii_case(b"PERSIST") {
+                touch = Some(None);
+                index += 1;
+            }
+            else if option.eq_ignore_ascii_case(b"EX")
+                || option.eq_ignore_ascii_case(b"PX")
+                || option.eq_ignore_ascii_case(b"EXAT")
+                || option.eq_ignore_ascii_case(b"PXAT")
+            {
+                let Some(raw) = request.arguments.get(index + 1)
+                else {
+                    stream.write_all(b"-ERR syntax error\r\n")?;
+                    return Ok(true);
+                };
+                let Some(value) = parse_integer(raw)
+                else {
+                    stream.write_all(b"-ERR value is not an integer or out of range\r\n")?;
+                    return Ok(true);
+                };
+                if value <= 0 {
+                    stream.write_all(b"-ERR invalid expire time in 'getex' command\r\n")?;
+                    return Ok(true);
+                }
+                let expires_at = if option.eq_ignore_ascii_case(b"EX") {
+                    value.checked_mul(1000).and_then(|delta_ms| now_unix_ms().checked_add(delta_ms))
+                }
+                else if option.eq_ignore_ascii_case(b"PX") {
+                    now_unix_ms().checked_add(value)
+                }
+                else if option.eq_ignore_ascii_case(b"EXAT") {
+                    value.checked_mul(1000)
+                }
+                else {
+                    Some(value)
+                };
+                let Some(expires_at) = expires_at
+                else {
+                    stream.write_all(b"-ERR invalid expire time in 'getex' command\r\n")?;
+                    return Ok(true);
+                };
+                touch = Some(Some(expires_at));
+                index += 2;
+            }
+            else {
+                stream.write_all(b"-ERR syntax error\r\n")?;
+                return Ok(true);
+            }
+        }
+        let key = request.arguments[1];
+        let value = match executor.execute(
+            None,
+            yyds_types::KeyValueCommand {
+                namespace: namespace.clone(),
+                key: key.to_vec(),
+                action: yyds_types::KeyValueAction::Get,
+            },
+        ) {
+            Ok(KeyValueResult::Get(value)) => value,
+            Ok(_) => {
+                write_error(stream, "GETEX executor returned unexpected result")?;
+                return Ok(true);
+            }
+            Err(error) => {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        };
+        // An absent (or expired) key returns nil and nothing is touched.
+        let Some(value) = value
+        else {
+            stream.write_all(b"$-1\r\n")?;
+            return Ok(true);
+        };
+        if let Some(deadline) = touch {
+            let action = match deadline {
+                Some(expires_at) => yyds_types::KeyValueAction::SetExpiry { expires_at },
+                None => yyds_types::KeyValueAction::ClearExpiry,
+            };
+            if let Err(error) =
+                executor.execute(None, yyds_types::KeyValueCommand { namespace: namespace.clone(), key: key.to_vec(), action })
+            {
+                write_error(stream, &error.to_string())?;
+                return Ok(true);
+            }
+        }
+        write_bulk(stream, &value)?;
+    }
     else if let Some(executor) = executor {
         // --- Generic bind()-backed commands (GET, DEL, INCR, DECR, GETDEL, GETSET).
         // Expiry semantics are enforced by the KV layer: expired records read as absent
@@ -950,6 +1128,59 @@ fn validate_command_for_queue(
         }
         if parse_integer(arguments[2]).is_none() {
             return Err(b"-ERR value is not an integer or out of range\r\n".to_vec());
+        }
+        return Ok(());
+    }
+    // EXPIREAT / PEXPIREAT: exactly 3, need executor, integer check
+    if command.eq_ignore_ascii_case(b"EXPIREAT") || command.eq_ignore_ascii_case(b"PEXPIREAT") {
+        if executor.is_none() {
+            return Err(b"-ERR unsupported command\r\n".to_vec());
+        }
+        if count != 3 {
+            return Err(b"-ERR wrong number of arguments for 'expireat' command\r\n".to_vec());
+        }
+        if parse_integer(arguments[2]).is_none() {
+            return Err(b"-ERR value is not an integer or out of range\r\n".to_vec());
+        }
+        return Ok(());
+    }
+    // GETEX: at least 2, needs executor, at most one well-formed expiry option
+    if command.eq_ignore_ascii_case(b"GETEX") {
+        if executor.is_none() {
+            return Err(b"-ERR unsupported command\r\n".to_vec());
+        }
+        if count < 2 {
+            return Err(b"-ERR wrong number of arguments for 'getex' command\r\n".to_vec());
+        }
+        let mut seen_option = false;
+        let mut index = 2;
+        while index < count {
+            let option = arguments[index];
+            if seen_option {
+                return Err(b"-ERR syntax error\r\n".to_vec());
+            }
+            if option.eq_ignore_ascii_case(b"PERSIST") {
+                seen_option = true;
+                index += 1;
+            }
+            else if option.eq_ignore_ascii_case(b"EX")
+                || option.eq_ignore_ascii_case(b"PX")
+                || option.eq_ignore_ascii_case(b"EXAT")
+                || option.eq_ignore_ascii_case(b"PXAT")
+            {
+                let Some(raw) = arguments.get(index + 1)
+                else {
+                    return Err(b"-ERR syntax error\r\n".to_vec());
+                };
+                if parse_integer(raw).is_none() {
+                    return Err(b"-ERR value is not an integer or out of range\r\n".to_vec());
+                }
+                seen_option = true;
+                index += 2;
+            }
+            else {
+                return Err(b"-ERR syntax error\r\n".to_vec());
+            }
         }
         return Ok(());
     }

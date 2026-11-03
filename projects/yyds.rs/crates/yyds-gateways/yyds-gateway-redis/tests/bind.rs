@@ -107,7 +107,12 @@ fn unsupported_shapes_are_rejected_before_execution() {
         (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"1", b"KEEPTTL"], BindError::Syntax),
         (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"abc"], BindError::InvalidInteger),
         (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"-1"], BindError::InvalidExpire),
-        (vec![b"SET".as_slice(), b"key", b"value", b"EXAT", b"1"], BindError::UnsupportedOptions),
+        // 绝对时间戳选项与相对选项同一套语法矩阵。
+        (vec![b"SET".as_slice(), b"key", b"value", b"EXAT", b"0"], BindError::InvalidExpire),
+        (vec![b"SET".as_slice(), b"key", b"value", b"PXAT", b"abc"], BindError::InvalidInteger),
+        (vec![b"SET".as_slice(), b"key", b"value", b"EX", b"1", b"EXAT", b"1"], BindError::Syntax),
+        (vec![b"SET".as_slice(), b"key", b"value", b"PXAT"], BindError::Syntax),
+        (vec![b"SET".as_slice(), b"key", b"value", b"IDLE", b"1"], BindError::UnsupportedOptions),
         (vec![b"DEL".as_slice(), b"one", b"two"], BindError::WrongArity),
         (vec![b"INCR".as_slice()], BindError::WrongArity),
         (vec![b"INCRBY".as_slice(), b"key", b"01"], BindError::InvalidInteger),
@@ -140,6 +145,12 @@ fn set_options_are_parsed_into_an_explicit_bind_structure() {
     let parsed = bind_set(&[b"SET", b"key", b"value", b"KEEPTTL"]).unwrap();
     assert!(parsed.keep_ttl);
     assert_eq!(parsed.expiry, None);
+
+    // 绝对截止期直接以时间戳形式进入绑定结构，不再换算。
+    let parsed = bind_set(&[b"SET", b"key", b"value", b"EXAT", b"1700000000"]).unwrap();
+    assert_eq!(parsed.expiry, Some(SetExpiry::AtSeconds(1700000000)));
+    let parsed = bind_set(&[b"SET", b"key", b"value", b"pxat", b"1700000000123"]).unwrap();
+    assert_eq!(parsed.expiry, Some(SetExpiry::AtMilliseconds(1700000000123)));
 
     // 绑定层只携带写条件：TTL 属于连接层状态，不进入 `KeyValueAction`。
     assert_eq!(

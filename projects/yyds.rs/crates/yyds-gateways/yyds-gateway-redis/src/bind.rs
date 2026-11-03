@@ -34,18 +34,21 @@ pub enum SetCondition {
     IfPresent,
 }
 
-/// Relative expiry requested by `SET ... EX <seconds>` / `PX <milliseconds>`.
+/// Expiry requested by `SET ... EX <s> | PX <ms> | EXAT <s> | PXAT <ms>`.
 ///
-/// Absolute forms (`EXAT` / `PXAT`) are deliberately absent: this gateway tracks
-/// expiry as a monotonic-clock deadline shared across connections, so it cannot
-/// honour an absolute wall-clock deadline without inventing clock semantics it does
-/// not verify.
+/// Expiry is a wall-clock Unix-millisecond deadline stored on the KV record
+/// itself, so the absolute forms are honoured directly: `EXAT` / `PXAT` name
+/// the deadline, `EX` / `PX` are offsets from the server's current time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetExpiry {
-    /// `EX <seconds>`
+    /// `EX <seconds>` relative to now.
     Seconds(u64),
-    /// `PX <milliseconds>`
+    /// `PX <milliseconds>` relative to now.
     Milliseconds(u64),
+    /// `EXAT <unix-seconds>` absolute deadline.
+    AtSeconds(u64),
+    /// `PXAT <unix-milliseconds>` absolute deadline.
+    AtMilliseconds(u64),
 }
 
 /// Parsed `SET key value [NX|XX] [EX <s>|PX <ms>] [KEEPTTL]` request.
@@ -104,7 +107,11 @@ pub fn bind_set(arguments: &[&[u8]]) -> Result<SetRequest, BindError> {
             keep_ttl = true;
             index += 1;
         }
-        else if option.eq_ignore_ascii_case(b"EX") || option.eq_ignore_ascii_case(b"PX") {
+        else if option.eq_ignore_ascii_case(b"EX")
+            || option.eq_ignore_ascii_case(b"PX")
+            || option.eq_ignore_ascii_case(b"EXAT")
+            || option.eq_ignore_ascii_case(b"PXAT")
+        {
             if expiry.is_some() || keep_ttl {
                 return Err(BindError::Syntax);
             }
@@ -123,15 +130,21 @@ pub fn bind_set(arguments: &[&[u8]]) -> Result<SetRequest, BindError> {
             expiry = Some(if option.eq_ignore_ascii_case(b"PX") {
                 SetExpiry::Milliseconds(magnitude)
             }
+            else if option.eq_ignore_ascii_case(b"EXAT") {
+                SetExpiry::AtSeconds(magnitude)
+            }
+            else if option.eq_ignore_ascii_case(b"PXAT") {
+                SetExpiry::AtMilliseconds(magnitude)
+            }
             else {
                 SetExpiry::Seconds(magnitude)
             });
             index += 2;
         }
         else {
-            // `EXAT` / `PXAT` / `GET` / `IDLE` and any other option would require
-            // semantics this gateway does not implement, so they are refused
-            // explicitly rather than dropped.
+            // `GET` / `IDLE` and any other option would require semantics this
+            // gateway does not implement, so they are refused explicitly rather
+            // than dropped.
             return Err(BindError::UnsupportedOptions);
         }
     }
