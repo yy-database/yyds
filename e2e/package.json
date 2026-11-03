@@ -1,0 +1,12 @@
+{
+    "name": "@yydb/yyds-sql-smoke",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "smoke": "node run.mjs"
+    },
+    "devDependencies": {
+        "mysql2": "^3.24.6",
+        "pg": "^8.23.1"
+    }
+}
