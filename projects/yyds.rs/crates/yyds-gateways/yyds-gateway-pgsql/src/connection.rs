@@ -14,11 +14,11 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
-    analyze_meta_query, bind_sql_catalog, describe_plan, detect_session_reset_statement, encode_hex, execute_plan,
-    neutralized_sql_parameters, nulled_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect,
-    substitute_sql_parameters, DiscardTarget, SqlBoundExpression, SqlBoundLiteral, SqlColumn, SqlDialect, SqlErrorKind,
-    SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSchemaRegistry, SqlSessionCommand,
-    SqlTransactionAction, SqlValue, PG_SERVER_VERSION, split_sql_batch,
+    analyze_meta_query, apply_auto_increment, bind_sql_catalog, describe_plan, detect_session_reset_statement, encode_hex,
+    execute_plan, neutralized_sql_parameters, nulled_sql_parameters, parse_ddl, parse_session_command,
+    plan_statement_for_dialect, split_sql_batch, substitute_sql_parameters, DiscardTarget, SqlBoundExpression, SqlBoundLiteral,
+    SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle,
+    SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, PG_SERVER_VERSION,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -774,6 +774,13 @@ fn run_statement(
     }
     let catalog = runtime.schema.catalog();
     let bound = bind_sql_catalog(sql, &catalog, catalog.schema_version(), SqlDialect::Postgres).map_err(|error| {
+        session.fail();
+        statement_error("bind", error)
+    })?;
+    // Sequence-owning columns default at write time. Allocation advances and
+    // persists the counter before execution, so a failed or rolled-back
+    // statement never reuses the value, matching PostgreSQL `nextval`.
+    let bound = apply_auto_increment(&runtime.schema, bound).map_err(|error| {
         session.fail();
         statement_error("bind", error)
     })?;
@@ -1757,7 +1764,8 @@ fn write_error_response(stream: &mut impl Write, code: &str, message: &str) -> i
 fn annotate_batch_error(buffer: &[u8], index: usize, total: usize, offset: usize) -> Option<Vec<u8>> {
     let mut cursor = 0usize;
     while cursor + 5 <= buffer.len() {
-        let length = u32::from_be_bytes([buffer[cursor + 1], buffer[cursor + 2], buffer[cursor + 3], buffer[cursor + 4]]) as usize;
+        let length =
+            u32::from_be_bytes([buffer[cursor + 1], buffer[cursor + 2], buffer[cursor + 3], buffer[cursor + 4]]) as usize;
         if length < 4 || cursor + 1 + length > buffer.len() {
             return None;
         }

@@ -19,6 +19,7 @@ mod sql_meta;
 mod sql_parameters;
 mod sql_planner;
 mod sql_schema;
+mod sql_serial;
 
 pub use crate::{
     catalog_bind::{
@@ -38,7 +39,8 @@ pub use crate::{
         InsertSelectPlan, JoinPlan, JoinSourcePlan, ReadPlan, ScanPlan, SetOperationPlan, SqlExecutionPlan, SqlSetOrderByItem,
         UpdatePlan, WritePlan,
     },
-    sql_schema::{SqlDdlOutcome, SqlSchemaCheckpoint, SqlSchemaRegistry},
+    sql_schema::{SqlAutoIncrementField, SqlDdlOutcome, SqlSchemaCheckpoint, SqlSchemaRegistry},
+    sql_serial::apply_auto_increment,
 };
 
 pub use crate::{

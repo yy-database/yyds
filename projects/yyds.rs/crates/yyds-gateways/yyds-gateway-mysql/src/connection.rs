@@ -14,10 +14,11 @@ use std::{
 
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
-    analyze_meta_query, bind_sql_catalog_with_variables, describe_plan, execute_plan, neutralized_sql_parameters, parse_ddl,
-    parse_session_command, plan_statement_for_dialect, substitute_sql_parameters, SqlBoundExpression, SqlBoundLiteral,
-    SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError,
-    SqlParameterStyle, SqlResult, SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, MYSQL_BLOB_CAPACITY,
+    analyze_meta_query, apply_auto_increment, bind_sql_catalog_with_variables, describe_plan, execute_plan,
+    neutralized_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect, substitute_sql_parameters,
+    SqlBoundExpression, SqlBoundLiteral, SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan,
+    SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlResult, SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction,
+    SqlValue, MYSQL_BLOB_CAPACITY,
 };
 
 use crate::wire::{encode_packet, PacketError, MAX_PACKET_PAYLOAD};
@@ -937,6 +938,17 @@ fn execute_sql(
         &mysql_system_variable,
         SqlDialect::Mysql,
     ) {
+        Ok(bound) => bound,
+        Err(error) => {
+            session.fail();
+            write_statement_error(stream, sequence, "bind", error)?;
+            return Ok(());
+        }
+    };
+    // `AUTO_INCREMENT` / serial columns default at write time, after binding and
+    // before planning. The counter is consumed before execution and survives a
+    // rollback, matching both MySQL and PostgreSQL sequence semantics.
+    let bound = match apply_auto_increment(&runtime.schema, bound) {
         Ok(bound) => bound,
         Err(error) => {
             session.fail();

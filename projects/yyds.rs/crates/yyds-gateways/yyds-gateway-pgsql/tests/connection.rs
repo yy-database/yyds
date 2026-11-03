@@ -1714,13 +1714,134 @@ fn pgsql_declared_capacity_rejects_oversized_strings() {
     let fits_multibyte = "字".repeat(191);
     send_query(&mut client, &format!("INSERT INTO users VALUES (3, '{fits_multibyte}')"));
     assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
-    assert_eq!(
-        single_row(&mut client, "SELECT name FROM users WHERE id = 3"),
-        vec![Some(fits_multibyte.into_bytes())]
-    );
+    assert_eq!(single_row(&mut client, "SELECT name FROM users WHERE id = 3"), vec![Some(fits_multibyte.into_bytes())]);
     assert_sqlstate(&mut client, &format!("INSERT INTO users VALUES (4, '{}')", "字".repeat(192)), b"22001");
 
     drop(client);
+    server.join().unwrap();
+}
+
+/// 启动一个共享同一 schema registry 的服务器，接受 `connections` 个客户端。
+///
+/// 值序列必须跨连接共享同一个 registry，否则两个连接会各自从 1 开始发号。
+fn start_shared_schema_server(connections: usize) -> (Vec<TcpStream>, thread::JoinHandle<()>) {
+    use std::sync::Arc;
+    use yyds_execution::LocalExecutor;
+    use yyds_gateway::SqlSchemaRegistry;
+    use yyds_gateway_pgsql::connection::{serve_connection, PgsqlSqlRuntime};
+    use yyds_kv::FileShard;
+    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+
+    let directory = boost_fs::temp::create_folder().expect("temp folder");
+    let shard = FileShard::open(directory.path().join("s1.yykv")).expect("open file shard");
+    let shard_id = ShardId("s1".into());
+    let routing = ShardMap::new(ShardEpoch(1), vec![shard_id.clone()]).expect("routing");
+    let mut shards = std::collections::HashMap::new();
+    shards.insert(shard_id, shard);
+    let executor = LocalExecutor::new(routing, shards, Vec::new()).expect("executor");
+    let runtime =
+        Arc::new(PgsqlSqlRuntime { schema: Arc::new(SqlSchemaRegistry::new_in_memory()), executor: Arc::new(executor) });
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        // 保活 TempFolder：shard 文件必须在 worker 存活期间保持可用。
+        let _directory = directory;
+        let mut workers = Vec::new();
+        for _ in 0..connections {
+            let (stream, _) = listener.accept().unwrap();
+            let runtime = Arc::clone(&runtime);
+            workers.push(thread::spawn(move || serve_connection(stream, Some(runtime)).unwrap()));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    });
+    let clients = (0..connections).map(|_| connect_client(address)).collect();
+    (clients, server)
+}
+
+/// 完成 protocol-v3 startup 并等待 `ReadyForQuery`。
+fn connect_client(address: std::net::SocketAddr) -> TcpStream {
+    let mut client = TcpStream::connect(address).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut startup = Vec::from(0_u32.to_be_bytes());
+    startup.extend_from_slice(&PROTOCOL_V3.to_be_bytes());
+    startup.extend_from_slice(b"user\0test\0\0");
+    let length = startup.len() as u32;
+    startup[..4].copy_from_slice(&length.to_be_bytes());
+    client.write_all(&startup).unwrap();
+    let startup_responses = receive_until_ready(&mut client);
+    assert_eq!(startup_responses.last().unwrap(), &(b'Z', b"I".to_vec()));
+    client
+}
+
+/// 执行一条 `INSERT ... RETURNING "id"` 并读出返回的整数。
+fn insert_returning_id(client: &mut TcpStream, sql: &str) -> i64 {
+    send_query(client, sql);
+    let responses = receive_until_ready(client);
+    assert!(!responses.iter().any(|(tag, _)| *tag == b'E'), "`{sql}` failed: {responses:?}");
+    let row = responses
+        .iter()
+        .find(|(tag, _)| *tag == b'D')
+        .map(|(_, payload)| parse_data_row(payload))
+        .expect("RETURNING statement must return one row");
+    let text = String::from_utf8_lossy(row[0].as_deref().expect("id must not be null")).into_owned();
+    text.parse().expect("id is an integer")
+}
+
+#[test]
+fn pgsql_bigserial_allocates_ids_and_does_not_rewind_on_rollback() {
+    let (mut client, server) = start_server_with_empty_schema();
+    send_query(&mut client, "CREATE TABLE \"_iris_outbox\" (\"id\" BIGSERIAL PRIMARY KEY, \"operation_id\" TEXT NOT NULL)");
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+
+    // 连续插入：省略 `id` 时由 registry 分配 1、2、3。
+    for expected in 1..=3 {
+        let id =
+            insert_returning_id(&mut client, "INSERT INTO \"_iris_outbox\" (\"operation_id\") VALUES ('op') RETURNING \"id\"");
+        assert_eq!(id, expected);
+    }
+
+    // `nextval` 不回滚：事务内分配后回滚，下一个值继续前进，不复用 4。
+    send_query(&mut client, "BEGIN");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"T".to_vec()));
+    let rolled_back =
+        insert_returning_id(&mut client, "INSERT INTO \"_iris_outbox\" (\"operation_id\") VALUES ('rolled') RETURNING \"id\"");
+    assert_eq!(rolled_back, 4);
+    send_query(&mut client, "ROLLBACK");
+    assert_eq!(receive_until_ready(&mut client).last().unwrap(), &(b'Z', b"I".to_vec()));
+    assert_eq!(
+        insert_returning_id(
+            &mut client,
+            "INSERT INTO \"_iris_outbox\" (\"operation_id\") VALUES ('committed') RETURNING \"id\"",
+        ),
+        5
+    );
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn pgsql_two_connections_never_allocate_the_same_serial_value() {
+    let (mut clients, server) = start_shared_schema_server(2);
+    send_query(&mut clients[0], "CREATE TABLE \"_iris_outbox\" (\"id\" BIGSERIAL PRIMARY KEY, \"operation_id\" TEXT NOT NULL)");
+    assert_eq!(receive_until_ready(&mut clients[0])[0], (b'C', b"CREATE TABLE\0".to_vec()));
+
+    let mut allocated = Vec::new();
+    for _ in 0..5 {
+        for client in clients.iter_mut() {
+            allocated.push(insert_returning_id(
+                client,
+                "INSERT INTO \"_iris_outbox\" (\"operation_id\") VALUES ('op') RETURNING \"id\"",
+            ));
+        }
+    }
+    allocated.sort_unstable();
+    assert_eq!(allocated, (1..=10).collect::<Vec<_>>());
+
+    drop(clients);
     server.join().unwrap();
 }
 

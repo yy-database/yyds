@@ -1795,14 +1795,36 @@ fn mysql_declared_capacity_rejects_oversized_strings() {
     // 多字节字符按字符数计数，不按 octets：191 个汉字合法，192 个越界。
     let fits_multibyte = "字".repeat(191);
     expect_ok(&mut client, &format!("INSERT INTO users (id, name) VALUES (3, '{fits_multibyte}')"));
-    assert_eq!(
-        expect_row_values(&mut client, "SELECT name FROM users WHERE id = 3"),
-        vec![text(&fits_multibyte)]
-    );
+    assert_eq!(expect_row_values(&mut client, "SELECT name FROM users WHERE id = 3"), vec![text(&fits_multibyte)]);
     assert_eq!(
         expect_error(&mut client, &format!("INSERT INTO users (id, name) VALUES (4, '{}')", "字".repeat(192))),
         (1406, "22001".into())
     );
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn mysql_auto_increment_fills_omitted_ids() {
+    let (mut client, server) = start_server_with_empty_schema();
+    let _ = read_packet_full(&mut client); // handshake
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet_full(&mut client).1[0], 0x00);
+    expect_ok(&mut client, "SET NAMES utf8mb4");
+
+    expect_ok(
+        &mut client,
+        "CREATE TABLE jobs (id BIGINT NOT NULL AUTO_INCREMENT, name VARCHAR(64) NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+    );
+    expect_ok(&mut client, "INSERT INTO jobs (name) VALUES ('first')");
+    expect_ok(&mut client, "INSERT INTO jobs (name) VALUES ('second')");
+    assert_eq!(read_result_set(&mut client, "SELECT id FROM jobs ORDER BY id").1, vec![vec![text("1")], vec![text("2")]]);
+
+    // 显式写入 `id` 不推进序列，下一个自动值仍是 3。
+    expect_ok(&mut client, "INSERT INTO jobs (id, name) VALUES (10, 'explicit')");
+    expect_ok(&mut client, "INSERT INTO jobs (name) VALUES ('third')");
+    assert_eq!(expect_row_values(&mut client, "SELECT id FROM jobs WHERE name = 'third'"), vec![text("3")]);
 
     drop(client);
     server.join().unwrap();

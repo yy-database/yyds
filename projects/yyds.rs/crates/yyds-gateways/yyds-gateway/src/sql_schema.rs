@@ -79,6 +79,12 @@ pub(crate) struct SchemaField {
     pub(crate) capacity: Option<u32>,
     pub(crate) sql_type: String,
     pub(crate) default: Option<String>,
+    /// Whether writes that omit this column allocate a value from an owned
+    /// sequence: PostgreSQL `SERIAL` / `BIGSERIAL` or MySQL `AUTO_INCREMENT`.
+    pub(crate) auto_increment: bool,
+    /// Next value the owned sequence hands out. Persisted with the schema so a
+    /// restart never repeats a value the client already observed.
+    pub(crate) next_value: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +125,16 @@ impl RegistryState {
     fn table_index(&self, name: &str) -> Option<usize> {
         self.tables.iter().position(|table| table.name == name)
     }
+
+    /// Next sequence value of one field, when it owns a sequence.
+    fn next_value(&self, type_id: u64, field_id: u64) -> Option<u64> {
+        self.tables
+            .iter()
+            .find(|table| table.type_id == type_id)
+            .and_then(|table| table.fields.iter().find(|field| field.field_id == field_id))
+            .filter(|field| field.auto_increment)
+            .map(|field| field.next_value)
+    }
 }
 
 /// Local schema registry shared by a gateway runtime.
@@ -133,6 +149,17 @@ pub struct SqlSchemaRegistry {
 #[derive(Debug, Clone)]
 pub struct SqlSchemaCheckpoint {
     state: RegistryState,
+}
+
+/// One registered column that owns a value sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlAutoIncrementField {
+    /// Stable YYDS field identity.
+    pub field_id: u64,
+    /// Catalog field name.
+    pub name: String,
+    /// Declared character/octet capacity of the column.
+    pub capacity: Option<u32>,
 }
 
 impl SqlSchemaRegistry {
@@ -163,6 +190,8 @@ impl SqlSchemaRegistry {
                         capacity: field.capacity,
                         sql_type: canonical_sql_type(&field.field_type).to_string(),
                         default: None,
+                        auto_increment: false,
+                        next_value: 1,
                     })
                     .collect(),
             })
@@ -218,13 +247,83 @@ impl SqlSchemaRegistry {
     ///
     /// Callers restore only on an explicit rollback path. Committing a
     /// transaction never needs to restore a checkpoint.
+    ///
+    /// Sequence counters are the one exception to a full restore: PostgreSQL
+    /// `nextval` and MySQL `AUTO_INCREMENT` allocations survive a rollback, so
+    /// the restored fields keep the higher counter the rollback already
+    /// consumed instead of handing the same value out twice.
     pub fn restore(&self, checkpoint: SqlSchemaCheckpoint) -> Result<(), SqlFrontendError> {
         let mut guard = self.lock();
-        *guard = checkpoint.state;
+        let current = guard.clone();
+        let mut restored = checkpoint.state;
+        for table in &mut restored.tables {
+            for field in &mut table.fields {
+                if let Some(consumed) = current.next_value(table.type_id, field.field_id) {
+                    field.next_value = field.next_value.max(consumed);
+                }
+            }
+        }
+        *guard = restored;
         if let Some(path) = &self.path {
             save(path, &guard)?;
         }
         Ok(())
+    }
+
+    /// Returns every column of `type_id` that owns a value sequence.
+    ///
+    /// The gateway calls this after binding an INSERT: a column that the client
+    /// omitted is filled from the registry, exactly as PostgreSQL defaults a
+    /// serial column and MySQL defaults an `AUTO_INCREMENT` column.
+    pub fn auto_increment_fields(&self, type_id: u64) -> Vec<SqlAutoIncrementField> {
+        let guard = self.lock();
+        guard
+            .tables
+            .iter()
+            .find(|table| table.type_id == type_id)
+            .map(|table| {
+                table
+                    .fields
+                    .iter()
+                    .filter(|field| field.auto_increment)
+                    .map(|field| SqlAutoIncrementField {
+                        field_id: field.field_id,
+                        name: field.name.clone(),
+                        capacity: field.capacity,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Allocates the next value from the sequence owned by one column.
+    ///
+    /// The counter advances before the caller executes the write and the new
+    /// value is persisted immediately, so neither a failed statement nor a
+    /// rolled-back transaction reuses it. That is PostgreSQL's `nextval`
+    /// contract and MySQL's `AUTO_INCREMENT` contract for a committed-value
+    /// sequence.
+    pub fn allocate_auto_increment(&self, type_id: u64, field_id: u64) -> Result<i64, SqlFrontendError> {
+        let mut guard = self.lock();
+        let mut next = guard.clone();
+        let field = next
+            .tables
+            .iter_mut()
+            .find(|table| table.type_id == type_id)
+            .and_then(|table| table.fields.iter_mut().find(|field| field.field_id == field_id))
+            .ok_or_else(|| SqlFrontendError::catalog(format!("auto increment field {field_id} is not registered")))?;
+        if !field.auto_increment {
+            return Err(SqlFrontendError::catalog(format!("field `{}` does not own a value sequence", field.name)));
+        }
+        let value = i64::try_from(field.next_value).map_err(|_| {
+            SqlFrontendError::new(SqlErrorKind::NumericOverflow, "auto increment sequence exhausted the 64-bit signed range")
+        })?;
+        field.next_value += 1;
+        if let Some(path) = &self.path {
+            save(path, &next)?;
+        }
+        *guard = next;
+        Ok(value)
     }
 
     /// Applies one DDL statement and persists the result when the state changed.
@@ -356,6 +455,8 @@ fn apply_ddl(state: &mut RegistryState, statement: &SqlDdlStatement) -> Result<(
                     capacity,
                     sql_type: column.sql_type.clone(),
                     default: column.default.clone(),
+                    auto_increment: column.auto_increment,
+                    next_value: 1,
                 });
             }
             let type_id = state.next_type_id;
@@ -399,6 +500,8 @@ fn apply_ddl(state: &mut RegistryState, statement: &SqlDdlStatement) -> Result<(
                 capacity,
                 sql_type: column.sql_type.clone(),
                 default: column.default.clone(),
+                auto_increment: column.auto_increment,
+                next_value: 1,
             });
             if column.inline_primary_key {
                 state.tables[index].primary_key.push(column.name.clone());
@@ -499,8 +602,10 @@ fn map_sql_type(sql_type: &str) -> Result<(SqlFieldType, Option<u32>), SqlFronte
     let field_type = match base {
         "TINYINT" if parameters == Some("1") => SqlFieldType::Bool,
         "BOOL" | "BOOLEAN" => SqlFieldType::Bool,
-        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "INT2" | "INT4" => SqlFieldType::Int32,
-        "BIGINT" | "INT8" | "SERIAL" | "BIGSERIAL" => SqlFieldType::Int64,
+        "TINYINT" | "SMALLINT" | "MEDIUMINT" | "INT" | "INTEGER" | "INT2" | "INT4" | "SMALLSERIAL" | "SERIAL" => {
+            SqlFieldType::Int32
+        }
+        "BIGINT" | "INT8" | "BIGSERIAL" => SqlFieldType::Int64,
         "FLOAT" | "REAL" | "DOUBLE" | "DOUBLE PRECISION" | "FLOAT4" | "FLOAT8" => SqlFieldType::Float64,
         "VARCHAR" | "CHAR" | "CHARACTER" | "CHARACTER VARYING" => SqlFieldType::String,
         "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => SqlFieldType::String,
@@ -562,6 +667,20 @@ fn validate_state(state: &RegistryState) -> Result<(), SqlFrontendError> {
                     "SQL schema field `{}` of table `{}` has no sql_type",
                     field.name, table.name
                 )));
+            }
+            if field.auto_increment {
+                if !matches!(field.field_type.inner(), SqlFieldType::Int32 | SqlFieldType::Int64) {
+                    return Err(SqlFrontendError::catalog(format!(
+                        "SQL schema field `{}` of table `{}` owns a sequence but is not an integer column",
+                        field.name, table.name
+                    )));
+                }
+                if field.next_value == 0 {
+                    return Err(SqlFrontendError::catalog(format!(
+                        "SQL schema field `{}` of table `{}` has a zero sequence counter",
+                        field.name, table.name
+                    )));
+                }
             }
         }
     }
@@ -642,6 +761,15 @@ struct FieldDocument {
     sql_type: String,
     #[serde(default)]
     default: Option<String>,
+    #[serde(default)]
+    auto_increment: bool,
+    #[serde(default = "initial_next_value")]
+    next_value: u64,
+}
+
+/// First value handed out by a freshly created owned sequence.
+fn initial_next_value() -> u64 {
+    1
 }
 
 #[derive(Serialize, Deserialize)]
@@ -717,6 +845,8 @@ impl SchemaDocument {
                             capacity: field.capacity,
                             sql_type: field.sql_type.clone(),
                             default: field.default.clone(),
+                            auto_increment: field.auto_increment,
+                            next_value: field.next_value,
                         })
                         .collect(),
                 })
@@ -766,6 +896,8 @@ impl SchemaDocument {
                                 capacity: field.capacity,
                                 sql_type: field.sql_type,
                                 default: field.default,
+                                auto_increment: field.auto_increment,
+                                next_value: field.next_value,
                             }
                         })
                         .collect(),
@@ -790,7 +922,14 @@ mod tests {
     use crate::sql_ddl::DdlColumn;
 
     fn column(name: &str, sql_type: &str, not_null: bool) -> DdlColumn {
-        DdlColumn { name: name.to_string(), sql_type: sql_type.to_string(), not_null, inline_primary_key: false, default: None }
+        DdlColumn {
+            name: name.to_string(),
+            sql_type: sql_type.to_string(),
+            not_null,
+            inline_primary_key: false,
+            auto_increment: false,
+            default: None,
+        }
     }
 
     fn create_users() -> SqlDdlStatement {
@@ -1042,6 +1181,8 @@ mod tests {
                     capacity: None,
                     sql_type: "BIGINT".to_string(),
                     default: None,
+                    auto_increment: false,
+                    next_value: 1,
                 }],
             }],
             indexes: Vec::new(),
