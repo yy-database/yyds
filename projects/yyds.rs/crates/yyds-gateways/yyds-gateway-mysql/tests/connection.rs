@@ -401,8 +401,28 @@ fn mysql_system_variable_probes_return_single_row() {
     let (_, row) = read_packet_full(&mut client);
     let packet_size = read_lenenc_str(&row).0;
     let packet_size: u64 = std::str::from_utf8(packet_size).unwrap().parse().unwrap();
-    assert!(packet_size > 0);
+    // 宣告值必须等于实际强制上限，驱动才不会发一个必被拒的帧。
+    assert_eq!(packet_size, 1_048_576);
     let _ = read_packet_full(&mut client); // EOF
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn oversized_request_packet_is_rejected_with_1153() {
+    let (mut client, server) = start_server();
+    let _ = read_packet(&mut client);
+    client.write_all(&encode_packet(1, &handshake_response(&[])).unwrap()).unwrap();
+    assert_eq!(read_packet(&mut client), (2, vec![0, 0, 0, 2, 0, 0, 0]));
+
+    // 只发帧头，声明 1 MiB + 1 字节；服务端必须在读取 payload 前拒绝。
+    client.write_all(&[0x01, 0x00, 0x10, 0x00]).unwrap();
+    let (sequence, error) = read_packet(&mut client);
+    assert_eq!(sequence, 1);
+    assert_eq!(error[0], 0xff);
+    assert_eq!(u16::from_le_bytes([error[1], error[2]]), 1153);
+    assert_eq!(&error[3..9], b"#08S01");
 
     drop(client);
     server.join().unwrap();
