@@ -1013,7 +1013,7 @@ fn mysql_error_code(kind: SqlErrorKind) -> (u16, &'static str) {
         UnknownVariable => (1193, "HY000"),
         Catalog => (1105, "HY000"),
         Parameter => (1210, "HY000"),
-        UniqueViolation => (1062, "23000"),
+        DuplicateKey => (1062, "23000"),
         Conflict => (1213, "40001"),
         // Execution layer failures are distinct from catalog construction errors.
         Execution => (1296, "HY000"),

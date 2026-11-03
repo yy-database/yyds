@@ -42,8 +42,10 @@ pub enum SqlErrorKind {
     Catalog,
     /// Parameter substitution or a bind parameter position is invalid.
     Parameter,
-    /// A write would create a duplicate primary key.
-    UniqueViolation,
+    /// A write would create a duplicate key: the primary key or a declared
+    /// `UNIQUE` constraint. PostgreSQL maps this to `23505`, MySQL to
+    /// `1062` with SQLSTATE `23000`.
+    DuplicateKey,
     /// Optimistic concurrency rejected a read-modify-write.
     Conflict,
     /// The storage layer failed while executing the statement.

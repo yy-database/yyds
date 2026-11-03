@@ -375,6 +375,16 @@ fn catalog_from_state(state: &RegistryState) -> SqlCatalog {
                     capacity: field.capacity,
                 })
                 .collect(),
+            unique_constraints: table
+                .unique_constraints
+                .iter()
+                .map(|constraint| {
+                    constraint
+                        .iter()
+                        .filter_map(|name| table.fields.iter().find(|field| &field.name == name).map(|field| field.field_id))
+                        .collect()
+                })
+                .collect(),
         })
         .collect();
     SqlCatalog::assemble(state.revision, tables)
@@ -679,6 +689,22 @@ fn validate_state(state: &RegistryState) -> Result<(), SqlFrontendError> {
                     return Err(SqlFrontendError::catalog(format!(
                         "SQL schema field `{}` of table `{}` has a zero sequence counter",
                         field.name, table.name
+                    )));
+                }
+            }
+        }
+        for constraint in &table.unique_constraints {
+            if constraint.is_empty() {
+                return Err(SqlFrontendError::catalog(format!(
+                    "SQL schema table `{}` has an empty unique constraint",
+                    table.name
+                )));
+            }
+            for column in constraint {
+                if !table.fields.iter().any(|field| &field.name == column) {
+                    return Err(SqlFrontendError::catalog(format!(
+                        "unique constraint column `{column}` does not exist in table `{}`",
+                        table.name
                     )));
                 }
             }

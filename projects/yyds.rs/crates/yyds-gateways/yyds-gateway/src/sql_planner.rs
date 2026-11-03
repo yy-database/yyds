@@ -553,8 +553,19 @@ pub fn plan_insert(
     let SqlCatalogBoundInsert { table: _, fields: target_fields, rows, select, conflict, returning } = insert;
     let conflict = plan_on_conflict(conflict, table, dialect)?;
     let returning = plan_returning(returning, table, dialect)?;
+    let unique_constraints = unique_constraints_of(table);
     if let Some(select) = select {
-        return plan_insert_select(*select, target_fields, namespace, field_types, catalog, dialect, conflict, returning);
+        return plan_insert_select(
+            *select,
+            target_fields,
+            namespace,
+            field_types,
+            unique_constraints,
+            catalog,
+            dialect,
+            conflict,
+            returning,
+        );
     }
 
     let mut plans = Vec::with_capacity(rows.len());
@@ -585,6 +596,7 @@ pub fn plan_insert(
             field_types: field_types.clone(),
             conflict: conflict.clone(),
             returning: returning.clone(),
+            unique_constraints: unique_constraints.clone(),
         });
     }
     if plans.len() == 1 {
@@ -633,13 +645,8 @@ fn plan_on_conflict(
                 if column.field_id == pk.field_id {
                     return Err(SqlFrontendError::unsupported("ON CONFLICT DO UPDATE cannot reassign the table primary key"));
                 }
-                let field = table
-                    .fields
-                    .iter()
-                    .find(|field| field.field_id == column.field_id);
-                let field_type = field
-                    .map(|field| field.field_type.clone())
-                    .unwrap_or(SqlFieldType::Unknown);
+                let field = table.fields.iter().find(|field| field.field_id == column.field_id);
+                let field_type = field.map(|field| field.field_type.clone()).unwrap_or(SqlFieldType::Unknown);
                 let capacity = field.and_then(|field| field.capacity);
                 check_conflict_value(&expression)?;
                 // 字面量在计划期就能按列类型判定，引用列的形态要等实际值算出来。
@@ -755,6 +762,7 @@ fn plan_insert_select(
     target_fields: Vec<crate::catalog_bind::SqlCatalogBoundColumn>,
     namespace: String,
     field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    unique_constraints: Vec<UniqueConstraintPlan>,
     catalog: &SqlCatalog,
     dialect: SqlDialect,
     conflict: Option<ConflictPolicy>,
@@ -785,7 +793,12 @@ fn plan_insert_select(
                 ),
             ));
         }
-        fields.push(InsertSelectColumn { field_id: field.field_id, field_name: field.field_name.clone(), field_type, capacity: field.capacity });
+        fields.push(InsertSelectColumn {
+            field_id: field.field_id,
+            field_name: field.field_name.clone(),
+            field_type,
+            capacity: field.capacity,
+        });
     }
     Ok(SqlExecutionPlan::InsertSelect(InsertSelectPlan {
         namespace,
@@ -794,6 +807,7 @@ fn plan_insert_select(
         field_types,
         conflict,
         returning,
+        unique_constraints,
     }))
 }
 
@@ -822,6 +836,7 @@ pub fn plan_update(
     let pk_field = primary_key_of(table)?;
     let field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType> =
         table.fields.iter().map(|f| (f.field_id, f.field_type.clone())).collect();
+    let unique_constraints = unique_constraints_of(table);
 
     let mut write_fields = Vec::new();
     for (field, value_expr) in &update.assignments {
@@ -841,6 +856,7 @@ pub fn plan_update(
             fields: write_fields,
             predicate: None,
             field_types,
+            unique_constraints,
         }));
     };
 
@@ -852,6 +868,7 @@ pub fn plan_update(
             fields: write_fields,
             remaining_predicate: remaining,
             field_types,
+            unique_constraints,
         }));
     }
     Ok(SqlExecutionPlan::UpdateScan(UpdateScanPlan {
@@ -862,6 +879,7 @@ pub fn plan_update(
         fields: write_fields,
         predicate: remaining,
         field_types,
+        unique_constraints,
     }))
 }
 
@@ -1221,6 +1239,8 @@ pub struct WritePlan {
     pub conflict: Option<ConflictPolicy>,
     /// `RETURNING` 投影，`None` 表示语句不返回结果集。
     pub returning: Option<ReturningProjections>,
+    /// 该表声明的 `UNIQUE` 约束，执行层在写入前逐条校验。
+    pub unique_constraints: Vec<UniqueConstraintPlan>,
 }
 
 /// `RETURNING` 投影：对最终落库行求值的表达式 + 展示列名。
@@ -1257,6 +1277,15 @@ pub struct ConflictAssignment {
     pub value: SqlCatalogBoundExpression,
 }
 
+/// 一条 `UNIQUE` 约束的绑定结果。
+///
+/// `columns` 非空：catalog 与 schema 校验都拒绝空约束。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueConstraintPlan {
+    /// 参与列 `(field_id, 列名)`，按约束声明顺序排列。
+    pub columns: Vec<(u64, String)>,
+}
+
 /// `INSERT ... SELECT` 执行计划：源查询先按读路径执行，再逐行对齐写入。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InsertSelectPlan {
@@ -1272,6 +1301,8 @@ pub struct InsertSelectPlan {
     pub conflict: Option<ConflictPolicy>,
     /// `RETURNING` 投影，`None` 表示语句不返回结果集。
     pub returning: Option<ReturningProjections>,
+    /// 该表声明的 `UNIQUE` 约束，执行层在写入前逐条校验。
+    pub unique_constraints: Vec<UniqueConstraintPlan>,
 }
 
 /// `INSERT ... SELECT` 的一个目标列绑定。
@@ -1301,6 +1332,8 @@ pub struct UpdatePlan {
     pub remaining_predicate: Option<SqlCatalogBoundExpression>,
     /// field_id → SqlFieldType 映射，execute 层 eval predicate 用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    /// 该表声明的 `UNIQUE` 约束，执行层在写入前逐条校验。
+    pub unique_constraints: Vec<UniqueConstraintPlan>,
 }
 
 /// 一个要写入的字段。
@@ -1345,6 +1378,8 @@ pub struct UpdateScanPlan {
     pub predicate: Option<SqlCatalogBoundExpression>,
     /// field_id → SqlFieldType 映射，execute 层解码与求值用。
     pub field_types: std::collections::BTreeMap<u64, crate::catalog_bind::SqlFieldType>,
+    /// 该表声明的 `UNIQUE` 约束，执行层在写入前逐条校验。
+    pub unique_constraints: Vec<UniqueConstraintPlan>,
 }
 
 /// 多行 DELETE 执行计划：扫描 rowid 区间，逐行评估完整 WHERE 后删除。
@@ -1569,6 +1604,25 @@ fn rowid_decrement(rowid: &[u8]) -> Vec<u8> {
 fn primary_key_of(table: &crate::SqlCatalogTable) -> Result<&crate::SqlCatalogField, SqlFrontendError> {
     // VOS 约定：第一个字段是主键（通常名为 @@id）。
     table.fields.first().ok_or_else(|| planner_error(&format!("table `{}` has no fields", table.name)))
+}
+
+/// 绑定表声明的次要 `UNIQUE` 约束。
+///
+/// catalog 已校验约束只引用本表字段，这里把 field_id 映射成 `(field_id, 列名)`。
+fn unique_constraints_of(table: &crate::SqlCatalogTable) -> Vec<UniqueConstraintPlan> {
+    table
+        .unique_constraints
+        .iter()
+        .map(|constraint| UniqueConstraintPlan {
+            columns: constraint
+                .iter()
+                .filter_map(|field_id| {
+                    table.fields.iter().find(|field| field.field_id == *field_id).map(|field| (*field_id, field.name.clone()))
+                })
+                .collect(),
+        })
+        .filter(|constraint| !constraint.columns.is_empty())
+        .collect()
 }
 
 fn find_table(catalog: &SqlCatalog, type_id: u64) -> Result<&crate::SqlCatalogTable, SqlFrontendError> {

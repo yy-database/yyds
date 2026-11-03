@@ -1846,6 +1846,50 @@ fn pgsql_two_connections_never_allocate_the_same_serial_value() {
 }
 
 #[test]
+fn pgsql_unique_constraint_reports_23505_and_keeps_the_row_set() {
+    let (mut client, server) = start_server_with_empty_schema();
+    send_query(
+        &mut client,
+        "CREATE TABLE \"_iris_outbox\" (\"id\" BIGSERIAL PRIMARY KEY, \"operation_id\" TEXT NOT NULL, \
+         \"entity_version\" BIGINT NOT NULL, \"payload\" TEXT, UNIQUE (\"operation_id\", \"entity_version\"))",
+    );
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+
+    send_query(
+        &mut client,
+        "INSERT INTO \"_iris_outbox\" (\"operation_id\", \"entity_version\", \"payload\") VALUES ('op-1', 1, 'first')",
+    );
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+
+    // 组合键重复必须以 `23505` 拒绝，不能静默写入第二行。
+    assert_sqlstate(
+        &mut client,
+        "INSERT INTO \"_iris_outbox\" (\"operation_id\", \"entity_version\", \"payload\") VALUES ('op-1', 1, 'duplicate')",
+        b"23505",
+    );
+    assert_eq!(rows(&mut client, "SELECT \"payload\" FROM \"_iris_outbox\""), vec![vec![Some(b"first".to_vec())]]);
+
+    send_query(
+        &mut client,
+        "INSERT INTO \"_iris_outbox\" (\"operation_id\", \"entity_version\", \"payload\") VALUES ('op-2', 1, 'second')",
+    );
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"INSERT 0 1\0".to_vec()));
+    // UPDATE 撞上同一组合键同样返回 `23505`，且旧行保持原值。
+    assert_sqlstate(
+        &mut client,
+        "UPDATE \"_iris_outbox\" SET \"operation_id\" = 'op-1' WHERE \"operation_id\" = 'op-2'",
+        b"23505",
+    );
+    assert_eq!(
+        rows(&mut client, "SELECT \"operation_id\", \"entity_version\" FROM \"_iris_outbox\" ORDER BY \"id\""),
+        vec![vec![Some(b"op-1".to_vec()), Some(b"1".to_vec())], vec![Some(b"op-2".to_vec()), Some(b"1".to_vec())],]
+    );
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
 fn pgsql_metadata_tables_columns_and_scalars() {
     let (mut client, server) = start_server_with_empty_schema();
 

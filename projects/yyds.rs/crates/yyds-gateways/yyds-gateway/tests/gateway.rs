@@ -44,6 +44,25 @@ fn catalog(source: &str) -> yyds_gateway::SqlCatalog {
     yyds_gateway::SqlCatalog::from_resolved_contract(7, &contract).expect("gateway catalog")
 }
 
+/// 由 DDL 建出的 catalog，会带上 `UNIQUE` 约束与序列列。
+fn ddl_catalog(source: &str) -> yyds_gateway::SqlCatalog {
+    let registry = yyds_gateway::SqlSchemaRegistry::new_in_memory();
+    let statement = yyds_gateway::parse_ddl(source, SqlDialect::Postgres).expect("DDL parses").expect("DDL statement");
+    registry.apply_ddl(&statement).expect("DDL applies");
+    registry.catalog()
+}
+
+/// 用 catalog 自带的 schema version 绑定，避免固定版本号。
+fn run_catalog_sql(
+    executor: &dyn yyds_execution::KeyValueExecutor,
+    catalog: &yyds_gateway::SqlCatalog,
+    sql: &str,
+) -> Result<yyds_gateway::SqlResult, yyds_gateway::SqlFrontendError> {
+    let bound = yyds_gateway::bind_sql_catalog(sql, catalog, catalog.schema_version(), SqlDialect::Postgres)?;
+    let plan = yyds_gateway::plan_statement(bound, catalog)?;
+    yyds_gateway::execute_plan(executor, None, &plan, SqlDialect::Postgres)
+}
+
 #[test]
 fn sql_catalog_binding_consumes_published_yyds_identity() {
     let mut yyds_catalog = yyds_catalog::Catalog::open_memory();
@@ -1085,6 +1104,65 @@ fn sql_insert_select_rejects_incompatible_column_types() {
 }
 
 #[test]
+fn sql_unique_constraint_rejects_duplicate_insert_and_update() {
+    let catalog = ddl_catalog(
+        "CREATE TABLE \"_iris_outbox\" (\"id\" BIGSERIAL PRIMARY KEY, \"operation_id\" TEXT NOT NULL, \
+         \"entity_version\" BIGINT NOT NULL, \"payload\" TEXT, UNIQUE (\"operation_id\", \"entity_version\"))",
+    );
+    let executor = empty_executor();
+    run_catalog_sql(
+        &executor,
+        &catalog,
+        "INSERT INTO \"_iris_outbox\" (\"id\", \"operation_id\", \"entity_version\", \"payload\") VALUES (1, 'op-1', 1, 'first')",
+    )
+    .expect("first insert");
+
+    // 相同 (operation_id, entity_version) 必须报 DuplicateKey，而不是静默写入第二行。
+    let error = run_catalog_sql(
+        &executor,
+        &catalog,
+        "INSERT INTO \"_iris_outbox\" (\"id\", \"operation_id\", \"entity_version\", \"payload\") VALUES (2, 'op-1', 1, 'duplicate')",
+    )
+    .expect_err("duplicate composite unique key");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::DuplicateKey);
+    assert!(error.message.contains("UNIQUE (operation_id, entity_version)"), "unexpected message: {}", error.message);
+
+    // Iris 幂等去重：失败插入不改变行集，仍只有第一条 payload。
+    let rows =
+        run_catalog_sql(&executor, &catalog, "SELECT \"operation_id\", \"entity_version\", \"payload\" FROM \"_iris_outbox\"")
+            .expect("select");
+    assert_eq!(
+        rows.rows,
+        vec![vec![
+            yyds_gateway::SqlValue::String("op-1".into()),
+            yyds_gateway::SqlValue::Integer(1),
+            yyds_gateway::SqlValue::String("first".into()),
+        ]]
+    );
+
+    run_catalog_sql(
+        &executor,
+        &catalog,
+        "INSERT INTO \"_iris_outbox\" (\"id\", \"operation_id\", \"entity_version\", \"payload\") VALUES (3, 'op-2', 1, 'second')",
+    )
+    .expect("second insert");
+    // UPDATE 把 op-2 的组合改成与 op-1 相同，也必须被拒绝且不落盘。
+    let error = run_catalog_sql(
+        &executor,
+        &catalog,
+        "UPDATE \"_iris_outbox\" SET \"operation_id\" = 'op-1' WHERE \"operation_id\" = 'op-2'",
+    )
+    .expect_err("duplicate composite unique key on update");
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::DuplicateKey);
+    let rows = run_catalog_sql(&executor, &catalog, "SELECT \"operation_id\" FROM \"_iris_outbox\" ORDER BY \"id\"")
+        .expect("select after rejected update");
+    assert_eq!(
+        rows.rows,
+        vec![vec![yyds_gateway::SqlValue::String("op-1".into())], vec![yyds_gateway::SqlValue::String("op-2".into())],]
+    );
+}
+
+#[test]
 fn sql_insert_select_unique_conflict_publishes_nothing() {
     let catalog = catalog("table users { @@id: i64, name: utf8 }\ntable admins { @@id: i64, name: utf8 }\n");
     let executor = empty_executor();
@@ -1101,7 +1179,7 @@ fn sql_insert_select_unique_conflict_publishes_nothing() {
     .expect("bind");
     let plan = yyds_gateway::plan_statement(bound, &catalog).expect("plan");
     let error = yyds_gateway::execute_plan(&executor, None, &plan, SqlDialect::Postgres).expect_err("duplicate primary key");
-    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::DuplicateKey);
 
     // 第一条冲突时整条语句不发布，id=2 不能落到目标表。
     let admins = run_sql(&executor, None, &catalog, "SELECT id FROM admins");
@@ -1636,7 +1714,7 @@ fn sql_multi_row_insert_rejects_intra_statement_duplicate_rowid_without_publishi
 
     let error = try_run_sql(&executor, &catalog, "INSERT INTO users VALUES (1, 'first'), (1, 'second')")
         .expect_err("duplicate primary key inside one statement");
-    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::DuplicateKey);
 
     // 旧逐条路径会把第一行留在基存里；原子边界必须让整条语句一行都不发布。
     drop(executor);
@@ -1654,7 +1732,7 @@ fn sql_multi_row_insert_rejects_existing_row_without_publishing_later_rows() {
 
     let error = try_run_sql(&executor, &catalog, "INSERT INTO users VALUES (2, 'bob'), (1, 'zed')")
         .expect_err("second row collides with the stored row");
-    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::UniqueViolation);
+    assert_eq!(error.kind, yyds_gateway::SqlErrorKind::DuplicateKey);
 
     drop(executor);
     let reopened = file_empty_executor(directory.path());
