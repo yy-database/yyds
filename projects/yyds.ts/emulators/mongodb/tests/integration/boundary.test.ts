@@ -36,7 +36,7 @@ test("mongodb boundary surface covers handshake docs, id overwrite, cursors and 
     assert.equal(isMaster.ok, 1);
     assert.equal(isMaster.isWritablePrimary, true);
 
-    const collection = db.collection("boundary");
+    const collection = db.collection<{ _id?: string; v?: number; a?: number }>("boundary");
 
     // An explicit _id write twice silently overwrites the stored document.
     const first = await collection.insertOne({ _id: "fixed", v: 1 });
@@ -68,8 +68,8 @@ test("mongodb boundary surface covers handshake docs, id overwrite, cursors and 
     assert.deepEqual(await collection.find({}).toArray(), []);
 
     // Namespaces are `db.collection`, so the same id in another database is absent.
-    await db.collection("iso").insertOne({ _id: "iso", v: "here" });
-    assert.deepEqual(await client.db("other").collection("iso").find({ _id: "iso" }).toArray(), []);
+    await db.collection<{ _id: string; v: string }>("iso").insertOne({ _id: "iso", v: "here" });
+    assert.deepEqual(await client.db("other").collection<{ _id: string }>("iso").find({ _id: "iso" }).toArray(), []);
 
     // Unimplemented verbs fail with the gateway's unsupported code 59.
     for (const command of [
