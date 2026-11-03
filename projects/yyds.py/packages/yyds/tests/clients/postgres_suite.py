@@ -12,6 +12,7 @@ the MySQL suite at 200 and 210.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from functools import partial
 
@@ -57,16 +58,24 @@ def _fetch(connection, sql: str, parameters=None) -> list[tuple]:
         return cursor.fetchall()
 
 
-def _expect_sqlstate(connection, sql: str, sqlstate: str, parameters=None) -> None:
+def _expect_error(connection, sql: str, sqlstate: str, message: str, parameters=None) -> None:
+    """Asserts the SQLSTATE and the readable text the driver surfaces.
+
+    `psycopg2` exposes `pgcode` while `psycopg3` exposes `sqlstate` the two
+    names are checked in that order so one case list covers both drivers.
+    """
+
     try:
         with connection.cursor() as cursor:
             cursor.execute(sql, parameters)
-    except Exception as error:  # noqa: BLE001 - the SQLSTATE is the assertion
+    except Exception as error:  # noqa: BLE001 - the SQLSTATE and message are the assertions
         state = getattr(error, "pgcode", None) or getattr(error, "sqlstate", None)
+        text = str(error)
         check(
             state == sqlstate,
-            f"expected SQLSTATE {sqlstate}, got {state!r} from {type(error).__name__}: {error}",
+            f"expected SQLSTATE {sqlstate}, got {state!r} from {type(error).__name__}: {text}",
         )
+        check(re.search(message, text, re.IGNORECASE) is not None, f"expected message matching /{message}/, got {text!r}")
         return
     raise AssertionError(f"expected SQLSTATE {sqlstate}, but the statement succeeded")
 
@@ -144,17 +153,17 @@ def _case_affected_rows(node: YydsNode, connect, base: int) -> None:
 
 def _case_error_unknown_table(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_sqlstate(connection, "SELECT id FROM missing_table", "42P01")
+        _expect_error(connection, "SELECT id FROM missing_table", "42P01", r"unknown SQL table")
 
 
 def _case_error_unknown_column(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_sqlstate(connection, "SELECT missing_column FROM users", "42703")
+        _expect_error(connection, "SELECT missing_column FROM users", "42703", r"unknown SQL column")
 
 
 def _case_error_syntax(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_sqlstate(connection, "SELEC 1", "42601")
+        _expect_error(connection, "SELEC 1", "42601", r".*")
 
 
 def _case_error_unique_violation(node: YydsNode, connect, base: int) -> None:
@@ -162,7 +171,58 @@ def _case_error_unique_violation(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
         with connection.cursor() as cursor:
             cursor.execute(INSERT_USER, (identifier, "unique", 25, 1.0, True, None))
-        _expect_sqlstate(connection, INSERT_USER, "23505", (identifier, "unique-again", 26, 2.0, False, None))
+        _expect_error(
+            connection,
+            INSERT_USER,
+            "23505",
+            r"duplicate key",
+            (identifier, "unique-again", 26, 2.0, False, None),
+        )
+
+
+def _case_error_grouping(node: YydsNode, connect, base: int) -> None:
+    identifier = base + 9
+    with _session(node, connect) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(INSERT_USER, (identifier, "grouping", 28, 1.75, True, None))
+        _expect_error(connection, "SELECT id, name, COUNT(*) FROM users GROUP BY id", "42803", r"GROUP BY")
+
+
+def _case_error_subquery_operand_columns(node: YydsNode, connect, base: int) -> None:
+    with _session(node, connect) as connection:
+        _expect_error(
+            connection,
+            "SELECT id FROM users WHERE id IN (SELECT id, name FROM users)",
+            "42601",
+            r"exactly one column",
+        )
+
+
+def _case_error_scalar_subquery_cardinality(node: YydsNode, connect, base: int) -> None:
+    first = base + 20
+    second = base + 21
+    with _session(node, connect) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(INSERT_USER, (first, "cardinality", 29, 2.5, True, None))
+            cursor.execute(INSERT_USER, (second, "cardinality", 30, 2.75, False, None))
+        _expect_error(
+            connection,
+            "SELECT id FROM users WHERE id = (SELECT id FROM users)",
+            "21000",
+            r"more than one row",
+        )
+
+
+def _case_error_batch_statement_index(node: YydsNode, connect, base: int) -> None:
+    """A failing statement in a SimpleQuery batch keeps its SQLSTATE and index."""
+
+    with _session(node, connect) as connection:
+        _expect_error(
+            connection,
+            "SELECT 1; SELECT id FROM missing_table",
+            "42P01",
+            r"statement 2 of 2 failed at batch offset",
+        )
 
 
 def _case_reconnect(node: YydsNode, connect, base: int) -> None:
@@ -189,6 +249,10 @@ CASES = [
     ("error_unknown_column", _case_error_unknown_column),
     ("error_syntax", _case_error_syntax),
     ("error_unique_violation", _case_error_unique_violation),
+    ("error_grouping", _case_error_grouping),
+    ("error_subquery_operand_columns", _case_error_subquery_operand_columns),
+    ("error_scalar_subquery_cardinality", _case_error_scalar_subquery_cardinality),
+    ("error_batch_statement_index", _case_error_batch_statement_index),
     ("reconnect", _case_reconnect),
 ]
 
