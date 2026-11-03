@@ -16,6 +16,7 @@ and the connector owns 210, so the PostgreSQL suite can share the same node.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from functools import partial
 
@@ -82,15 +83,41 @@ def _errno(error) -> int | None:
     return None
 
 
-def _expect_errno(connection, sql: str, errno: int, parameters=None) -> None:
+def _error_message(error) -> str:
+    message = getattr(error, "msg", None)
+    return message if isinstance(message, str) else str(error)
+
+
+def _error_sqlstate(error) -> str | None:
+    state = getattr(error, "sqlstate", None)
+    return state if isinstance(state, str) and state else None
+
+
+def _expect_cursor_error(cursor, sql: str, errno: int, sqlstate: str, message: str, parameters=None) -> None:
+    """Asserts the MySQL errno and readable text, plus SQLSTATE when the driver exposes it.
+
+    `pymysql` keeps only `(errno, message)` and `mysql-connector` does not
+    always attach the wire SQLSTATE, so the SQLSTATE is checked only when the
+    driver surfaces it. The errno is the stable cross-driver assertion.
+    """
+
     try:
-        with connection.cursor() as cursor:
-            cursor.execute(sql, parameters)
-    except Exception as error:  # noqa: BLE001 - the errno is the assertion
+        cursor.execute(sql, parameters)
+    except Exception as error:  # noqa: BLE001 - the errno and message are the assertions
         code = _errno(error)
-        check(code == errno, f"expected error {errno}, got {code!r}: {type(error).__name__}: {error}")
+        text = _error_message(error)
+        check(code == errno, f"expected error {errno}, got {code!r}: {type(error).__name__}: {text}")
+        check(re.search(message, text, re.IGNORECASE) is not None, f"expected message matching /{message}/, got {text!r}")
+        state = _error_sqlstate(error)
+        if state is not None:
+            check(state == sqlstate, f"expected SQLSTATE {sqlstate}, got {state!r}")
         return
     raise AssertionError(f"expected error {errno}, but the statement succeeded")
+
+
+def _expect_error(connection, sql: str, errno: int, sqlstate: str, message: str, parameters=None) -> None:
+    with connection.cursor() as cursor:
+        _expect_cursor_error(cursor, sql, errno, sqlstate, message, parameters)
 
 
 def _case_connect_and_select_literal(node: YydsNode, connect, base: int) -> None:
@@ -166,17 +193,17 @@ def _case_affected_rows(node: YydsNode, connect, base: int) -> None:
 
 def _case_error_unknown_table(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_errno(connection, "SELECT id FROM missing_table", 1146)
+        _expect_error(connection, "SELECT id FROM missing_table", 1146, "42S02", r"unknown SQL table")
 
 
 def _case_error_unknown_column(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_errno(connection, "SELECT missing_column FROM users", 1054)
+        _expect_error(connection, "SELECT missing_column FROM users", 1054, "42S22", r"unknown SQL column")
 
 
 def _case_error_syntax(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_errno(connection, "SELEC 1", 1064)
+        _expect_error(connection, "SELEC 1", 1064, "42000", r".*")
 
 
 def _case_error_unique_violation(node: YydsNode, connect, base: int) -> None:
@@ -184,7 +211,49 @@ def _case_error_unique_violation(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
         with connection.cursor() as cursor:
             cursor.execute(INSERT_USER, (identifier, "unique", 25, 1.0, True, None))
-        _expect_errno(connection, INSERT_USER, 1062, (identifier, "unique-again", 26, 2.0, False, None))
+        _expect_error(
+            connection,
+            INSERT_USER,
+            1062,
+            "23000",
+            r"duplicate key",
+            (identifier, "unique-again", 26, 2.0, False, None),
+        )
+
+
+def _case_error_grouping(node: YydsNode, connect, base: int) -> None:
+    identifier = base + 9
+    with _session(node, connect) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(INSERT_USER, (identifier, "grouping", 28, 1.75, True, None))
+        _expect_error(connection, "SELECT id, name, COUNT(*) FROM users GROUP BY id", 1055, "42000", r"GROUP BY")
+
+
+def _case_error_subquery_operand_columns(node: YydsNode, connect, base: int) -> None:
+    with _session(node, connect) as connection:
+        _expect_error(
+            connection,
+            "SELECT id FROM users WHERE id IN (SELECT id, name FROM users)",
+            1241,
+            "21000",
+            r"exactly one column",
+        )
+
+
+def _case_error_scalar_subquery_cardinality(node: YydsNode, connect, base: int) -> None:
+    first = base + 20
+    second = base + 21
+    with _session(node, connect) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(INSERT_USER, (first, "cardinality", 29, 2.5, True, None))
+            cursor.execute(INSERT_USER, (second, "cardinality", 30, 2.75, False, None))
+        _expect_error(
+            connection,
+            "SELECT id FROM users WHERE id = (SELECT id FROM users)",
+            1242,
+            "21000",
+            r"more than one row",
+        )
 
 
 def _case_reconnect(node: YydsNode, connect, base: int) -> None:
@@ -217,6 +286,14 @@ def _case_prepared_statement(node: YydsNode, connect, base: int) -> None:
     check(isinstance(rows[0][1], float) and rows[0][1] == 3.75, f"prepared REAL column returned {rows[0][1]!r}")
 
 
+def _case_prepared_error_unknown_table(node: YydsNode, connect, base: int) -> None:
+    """`COM_STMT_PREPARE` classifies a missing table exactly like `COM_QUERY`."""
+
+    with _session(node, connect) as connection:
+        with connection.cursor(prepared=True) as cursor:
+            _expect_cursor_error(cursor, "SELECT id FROM missing_table", 1146, "42S02", r"unknown SQL table")
+
+
 CASES = [
     ("connect_and_select_literal", _case_connect_and_select_literal),
     ("result_types", _case_result_types),
@@ -228,10 +305,18 @@ CASES = [
     ("error_unknown_column", _case_error_unknown_column),
     ("error_syntax", _case_error_syntax),
     ("error_unique_violation", _case_error_unique_violation),
+    ("error_grouping", _case_error_grouping),
+    ("error_subquery_operand_columns", _case_error_subquery_operand_columns),
+    ("error_scalar_subquery_cardinality", _case_error_scalar_subquery_cardinality),
     ("reconnect", _case_reconnect),
 ]
 
-EXTRA_CASES = {"mysql-connector": [("prepared_statement", _case_prepared_statement)]}
+EXTRA_CASES = {
+    "mysql-connector": [
+        ("prepared_statement", _case_prepared_statement),
+        ("prepared_error_unknown_table", _case_prepared_error_unknown_table),
+    ]
+}
 
 
 def run_mysql(node: YydsNode) -> list[CaseResult]:
