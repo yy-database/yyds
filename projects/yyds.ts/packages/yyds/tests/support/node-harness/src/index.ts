@@ -25,6 +25,13 @@ export interface StartYydsNodeOptions {
     /** Starts the MongoDB handshake probe. Enabled by `mongoPort`. */
     mongo?: boolean;
     startupTimeoutMs?: number;
+    /** Reuses an existing node directory instead of creating a temporary one. */
+    dataDir?: string;
+    /** Overrides the generated cluster/node identity (required when reusing `dataDir`). */
+    clusterId?: string;
+    nodeId?: string;
+    /** Background expiry reclamation period forwarded to `yyds start`. */
+    expirySweepIntervalMs?: number;
 }
 
 export interface YydsNode {
@@ -35,7 +42,13 @@ export interface YydsNode {
     mysql: YydsAddress;
     pgsql: YydsAddress;
     mongo?: YydsAddress;
-    stop: () => Promise<void>;
+    stop: (options?: StopYydsNodeOptions) => Promise<void>;
+}
+
+export interface StopYydsNodeOptions {
+    /** Removes the data directory after the node stops. Defaults to true for
+     * harness-created temporary directories and false for caller-provided ones. */
+    wipe?: boolean;
 }
 
 interface CliResult {
@@ -159,7 +172,13 @@ interface NodePorts {
     mongoPort?: number;
 }
 
-function startChild(dataDir: string, clusterId: string, nodeId: string, ports: NodePorts) {
+function startChild(
+    dataDir: string,
+    clusterId: string,
+    nodeId: string,
+    ports: NodePorts,
+    expirySweepIntervalMs?: number,
+) {
     const args = [
         "--experimental-strip-types",
         REPO_CLI,
@@ -178,6 +197,8 @@ function startChild(dataDir: string, clusterId: string, nodeId: string, ports: N
         String(ports.mysqlPort),
     ];
     if (ports.mongoPort !== undefined) args.push("--mongo-port", String(ports.mongoPort));
+    if (expirySweepIntervalMs !== undefined)
+        args.push("--expiry-sweep-interval-ms", String(expirySweepIntervalMs));
     const child = spawn(process.execPath, args, { windowsHide: true });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
@@ -232,22 +253,23 @@ export async function startYydsNode(options: StartYydsNodeOptions = {}): Promise
             : undefined;
     const ports: NodePorts = { redisPort, mysqlPort, pgsqlPort, mongoPort };
     const startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const dataDir = await mkdtemp(join(tmpdir(), "yyds-node-"));
-    const clusterId = `cluster-${Date.now()}`;
-    const nodeId = `node-${process.pid}`;
+    const reusedDataDir = options.dataDir !== undefined;
+    const dataDir = options.dataDir ?? (await mkdtemp(join(tmpdir(), "yyds-node-")));
+    const clusterId = options.clusterId ?? `cluster-${Date.now()}`;
+    const nodeId = options.nodeId ?? `node-${process.pid}`;
 
     const init = await runCli(
         ["init", "--data-dir", dataDir, "--cluster-id", clusterId, "--node-id", nodeId],
         10_000,
     );
     if (init.code !== 0) {
-        await rm(dataDir, { recursive: true, force: true });
+        if (!reusedDataDir) await rm(dataDir, { recursive: true, force: true });
         throw new Error(`init exited with ${init.code}: ${describeFailure(init.stderr, init.stdout)}`);
     }
 
-    const { child, output } = startChild(dataDir, clusterId, nodeId, ports);
+    const { child, output } = startChild(dataDir, clusterId, nodeId, ports, options.expirySweepIntervalMs);
     let stopped = false;
-    const stop = async () => {
+    const stop = async (stopOptions: StopYydsNodeOptions = {}) => {
         if (stopped) return;
         stopped = true;
         try {
@@ -268,7 +290,8 @@ export async function startYydsNode(options: StartYydsNodeOptions = {}): Promise
         }
         killChild(child);
         await sleep(50);
-        await rm(dataDir, { recursive: true, force: true });
+        const wipe = stopOptions.wipe ?? !reusedDataDir;
+        if (wipe) await rm(dataDir, { recursive: true, force: true });
     };
 
     try {
