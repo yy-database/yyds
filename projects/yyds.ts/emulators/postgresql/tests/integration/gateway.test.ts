@@ -31,25 +31,54 @@ test("pg drives startup, simple and extended queries, and protocol transactions"
         await node.stop();
     });
 
-    // Simple query protocol reaches the gateway and fails before planning,
-    // because the CLI starts a protocol listener without a SQL runtime.
-    await assert.rejects(client.query("SELECT 1 AS value"), expectSqlState("0A000"));
+    // The shipped CLI mounts a SQL runtime by default, so the simple query
+    // protocol executes and returns a real result set. A bare integer literal
+    // describes as `Int64` (OID 20), which `pg` renders as a string.
+    const simple = await client.query("SELECT 1 AS value");
+    assert.deepEqual(simple.rows, [{ value: "1" }]);
 
-    // Extended query protocol (Parse/Bind/Execute) reports the same boundary and
-    // therefore never produces a RowDescription for the driver to map.
-    await assert.rejects(
-        client.query("SELECT $1::int AS value", [1]),
-        expectSqlState("0A000"),
-    );
+    // Extended query protocol (Parse/Bind/Execute) binds a parameter into the
+    // statement text before planning.
+    const extended = await client.query("SELECT $1 AS value", [7]);
+    assert.deepEqual(extended.rows, [{ value: "7" }]);
 
-    // Protocol-only transaction handling survives without a runtime.
+    // `::` has no Oak AST node, so the gateway refuses it instead of silently
+    // dropping the cast and the column alias.
+    await assert.rejects(client.query("SELECT 1::int AS value"), expectSqlState("0A000"));
+
+    await client.query("CREATE TABLE users (id BIGINT PRIMARY KEY, name VARCHAR(191))");
+    await client.query("INSERT INTO users (id, name) VALUES (1, 'ada')");
+    const updated = await client.query("UPDATE users SET name = 'grace' WHERE id = 1");
+    assert.equal(updated.rowCount, 1);
+    const found = await client.query("SELECT name FROM users WHERE id = 1");
+    assert.deepEqual(found.rows, [{ name: "grace" }]);
+
+    // ROLLBACK discards the statement written inside the transaction.
     await client.query("BEGIN");
-    await assert.rejects(client.query("SELECT 1"), expectSqlState("0A000"));
-    await assert.rejects(client.query("SELECT 2"), expectSqlState("25P02"));
+    await client.query("INSERT INTO users (id, name) VALUES (2, 'lin')");
+    await client.query("ROLLBACK");
+    const afterRollback = await client.query("SELECT name FROM users ORDER BY id");
+    assert.deepEqual(afterRollback.rows, [{ name: "grace" }]);
+
+    // COMMIT makes the statement visible to later sessions of the same node.
+    await client.query("BEGIN");
+    await client.query("INSERT INTO users (id, name) VALUES (3, 'mika')");
+    await client.query("COMMIT");
+    const afterCommit = await client.query("SELECT name FROM users ORDER BY id");
+    assert.deepEqual(afterCommit.rows, [{ name: "grace" }, { name: "mika" }]);
+
+    // A duplicate key aborts the open transaction until ROLLBACK clears it.
+    await client.query("BEGIN");
+    await assert.rejects(
+        client.query("INSERT INTO users (id, name) VALUES (1, 'duplicate')"),
+        expectSqlState("23505"),
+    );
+    await assert.rejects(client.query("SELECT 1"), expectSqlState("25P02"));
     await client.query("ROLLBACK");
 
-    // After ROLLBACK the aborted state is cleared and the next failure is 0A000.
-    await assert.rejects(client.query("SELECT 3"), expectSqlState("0A000"));
+    // After ROLLBACK the aborted state is cleared and statements execute again.
+    const recovered = await client.query("SELECT 2 AS value");
+    assert.deepEqual(recovered.rows, [{ value: "2" }]);
 
     await client.query("BEGIN");
     await client.query("COMMIT");
@@ -81,6 +110,7 @@ test("pg drives startup, simple and extended queries, and protocol transactions"
         database: "yyds",
     });
     await unauthenticated.connect();
-    await assert.rejects(unauthenticated.query("SELECT 1"), expectSqlState("0A000"));
+    const anonymous = await unauthenticated.query("SELECT 1 AS value");
+    assert.deepEqual(anonymous.rows, [{ value: "1" }]);
     await unauthenticated.end();
 });

@@ -36,10 +36,11 @@ test("MySQL session surface covers collations, variables and rejected statements
 
     await connection.ping();
 
-    // Only utf8mb4_general_ci is accepted as an explicit collation.
+    // UTF-8 collation names are session metadata; common driver defaults are accepted.
     await connection.query("SET NAMES utf8mb4 COLLATE utf8mb4_general_ci");
+    await connection.query("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
     await assert.rejects(
-        connection.query("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"),
+        connection.query("SET NAMES utf8mb4 COLLATE utf8mb4_unknown_ci"),
         expectServerFailure(1273, "HY000", "unsupported utf8mb4 collation"),
     );
 
@@ -65,11 +66,13 @@ test("MySQL session surface covers collations, variables and rejected statements
         ["version", "version_comment"],
     );
 
-    // MySQL-only statements the gateway refuses with distinct 1064 messages.
-    await assert.rejects(
-        connection.query("SHOW DATABASES"),
-        expectServerFailure(1064, "42000", "MySQL requires SHOW VARIABLES instead of SHOW DATABASES"),
-    );
+    // Unsupported metadata views are refused with the shared metadata error code.
+    await assert.rejects(connection.query("SHOW DATABASES"), (error: ServerError) => {
+        assert.equal(error.errno, 1235, error.message);
+        assert.equal(error.sqlState, "42000");
+        assert.match(error.sqlMessage ?? "", /not a supported metadata view/);
+        return true;
+    });
     await assert.rejects(
         connection.query("PRAGMA foreign_keys = OFF"),
         expectServerFailure(1064, "42000", "PRAGMA is not MySQL syntax"),
@@ -87,9 +90,7 @@ test("MySQL session surface covers collations, variables and rejected statements
     const [rolledBack] = await connection.query("ROLLBACK");
     assert.equal((rolledBack as { affectedRows?: number }).affectedRows, 0);
 
-    // Prepared statements still require a SQL runtime the harness node does not have.
-    await assert.rejects(
-        connection.execute("SELECT 1 AS value"),
-        expectServerFailure(1235, "42000", "YYDS MySQL SQL execution is not implemented (no SQL runtime)"),
-    );
+    // Prepared statements run against the mounted SQL runtime.
+    const [prepared] = await connection.execute("SELECT 1 AS value");
+    assert.deepEqual(prepared, [{ value: 1 }]);
 });
