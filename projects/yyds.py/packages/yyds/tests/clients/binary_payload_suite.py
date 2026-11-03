@@ -333,7 +333,9 @@ def _case_mysql_non_hex_literal(node: YydsNode, connect, base: int) -> None:
 def _case_mysql_oversize_rejected(node: YydsNode, connect, base: int) -> None:
     identifier = base + 6
     with _session(node, connect) as connection:
-        _expect_errno(connection, MYSQL_INSERT_CAST, 1366, (identifier, OVERSIZE_HEX))
+        # MySQL reports an over-long column value as `1406` / SQLSTATE `22001`,
+        # not as the encoding error `1366`.
+        _expect_errno(connection, MYSQL_INSERT_CAST, 1406, (identifier, OVERSIZE_HEX))
 
 
 def _case_mysql_prepared_text_safe_roundtrip(node: YydsNode, connect, base: int) -> None:
