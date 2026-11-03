@@ -404,7 +404,45 @@ fn respond(
 
     // ---- Below is the normal, command-by-command execution path.
 
-    if command.eq_ignore_ascii_case(b"PING") {
+    if command.eq_ignore_ascii_case(b"HELLO") {
+        // Modern clients (redis-py 8, ioredis, redis-cli) send `HELLO 3` on
+        // connect. The gateway answers this subset with RESP2 scalar replies,
+        // which RESP3 parsers read unchanged, so both versions are accepted and
+        // reported back so the client can finish its handshake.
+        let protocol = match request.arguments.get(1) {
+            None => 2,
+            Some(raw) => match parse_integer(raw) {
+                Some(2) => 2,
+                Some(3) => 3,
+                Some(_) => {
+                    stream.write_all(b"-NOPROTO unsupported protocol version\r\n")?;
+                    return Ok(true);
+                }
+                None => {
+                    stream.write_all(b"-ERR Protocol version is not an integer or out of range\r\n")?;
+                    return Ok(true);
+                }
+            },
+        };
+        let mut index = 2;
+        while index < count {
+            let option = request.arguments[index];
+            if option.eq_ignore_ascii_case(b"AUTH") && index + 2 < count {
+                // The local gateway has no credential model, so HELLO AUTH is accepted
+                // for the same reason `yyds` accepts any MySQL user.
+                index += 3;
+            }
+            else if option.eq_ignore_ascii_case(b"SETNAME") && index + 1 < count {
+                index += 2;
+            }
+            else {
+                stream.write_all(b"-ERR Syntax error in HELLO option\r\n")?;
+                return Ok(true);
+            }
+        }
+        write_hello(stream, protocol)?;
+    }
+    else if command.eq_ignore_ascii_case(b"PING") {
         match count {
             1 => stream.write_all(b"+PONG\r\n")?,
             2 => write_bulk(stream, request.arguments[1])?,
@@ -1378,4 +1416,24 @@ fn write_bulk(stream: &mut dyn Write, bytes: &[u8]) -> io::Result<()> {
     write!(stream, "${}\r\n", bytes.len())?;
     stream.write_all(bytes)?;
     stream.write_all(b"\r\n")
+}
+
+/// Writes the `HELLO` reply in the protocol version the client asked for:
+/// a RESP3 map for `HELLO 3`, or the same key/value pairs as a flat RESP2 array.
+fn write_hello(stream: &mut dyn Write, protocol: u8) -> io::Result<()> {
+    stream.write_all(if protocol == 3 { b"%7\r\n" as &[u8] } else { b"*14\r\n" })?;
+    write_bulk(stream, b"server")?;
+    write_bulk(stream, b"yyds")?;
+    write_bulk(stream, b"version")?;
+    write_bulk(stream, env!("CARGO_PKG_VERSION").as_bytes())?;
+    write_bulk(stream, b"proto")?;
+    write!(stream, ":{protocol}\r\n")?;
+    write_bulk(stream, b"id")?;
+    stream.write_all(b":0\r\n")?;
+    write_bulk(stream, b"mode")?;
+    write_bulk(stream, b"standalone")?;
+    write_bulk(stream, b"role")?;
+    write_bulk(stream, b"master")?;
+    write_bulk(stream, b"modules")?;
+    stream.write_all(b"*0\r\n")
 }
