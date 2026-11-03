@@ -1679,6 +1679,103 @@ fn single_row(client: &mut TcpStream, sql: &str) -> Vec<Option<Vec<u8>>> {
     rows.into_iter().next().unwrap()
 }
 
+/// 读取 SimpleQuery 结果集的所有行。
+fn rows(client: &mut TcpStream, sql: &str) -> Vec<Vec<Option<Vec<u8>>>> {
+    send_query(client, sql);
+    let responses = receive_until_ready(client);
+    assert!(!responses.iter().any(|(tag, _)| *tag == b'E'), "`{sql}` failed: {responses:?}");
+    responses.iter().filter(|(tag, _)| *tag == b'D').map(|(_, payload)| parse_data_row(payload)).collect()
+}
+
+fn value(value: &str) -> Option<Vec<u8>> {
+    Some(value.as_bytes().to_vec())
+}
+
+#[test]
+fn pgsql_metadata_tables_columns_and_scalars() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(
+        &mut client,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(191) NOT NULL, active BOOLEAN, score DOUBLE PRECISION)",
+    );
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+
+    assert_eq!(
+        rows(
+            &mut client,
+            "SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
+        ),
+        vec![vec![value("public"), value("users"), value("BASE TABLE")]]
+    );
+
+    let columns = extended_rows(
+        &mut client,
+        "m1",
+        "SELECT column_name, udt_name, is_nullable, character_maximum_length FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position",
+        &["users"],
+    );
+    assert_eq!(
+        columns,
+        vec![
+            vec![value("id"), value("int8"), value("NO"), None],
+            vec![value("email"), value("varchar"), value("NO"), value("191")],
+            vec![value("active"), value("bool"), value("YES"), None],
+            vec![value("score"), value("float8"), value("YES"), None],
+        ]
+    );
+
+    assert_eq!(single_row(&mut client, "SELECT current_schema()"), vec![value("public")]);
+    assert_eq!(single_row(&mut client, "SELECT version()"), vec![value(yyds_gateway::PG_SERVER_VERSION)]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn pgsql_metadata_catalog_views_and_rejections() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(
+        &mut client,
+        "CREATE TABLE users (id BIGINT PRIMARY KEY, email VARCHAR(191) NOT NULL, active BOOLEAN, score DOUBLE PRECISION)",
+    );
+    assert_eq!(receive_until_ready(&mut client)[0], (b'C', b"CREATE TABLE\0".to_vec()));
+
+    assert_eq!(
+        rows(
+            &mut client,
+            "SELECT attname, atttypid, attnotnull, attnum FROM pg_catalog.pg_attribute WHERE attrelid = 1 ORDER BY attnum",
+        ),
+        vec![
+            vec![value("id"), value("20"), value("t"), value("1")],
+            vec![value("email"), value("1043"), value("t"), value("2")],
+            vec![value("active"), value("16"), value("f"), value("3")],
+            vec![value("score"), value("701"), value("f"), value("4")],
+        ]
+    );
+
+    assert_eq!(
+        rows(&mut client, "SELECT oid, typname FROM pg_catalog.pg_type ORDER BY oid"),
+        vec![
+            vec![value("16"), value("bool")],
+            vec![value("20"), value("int8")],
+            vec![value("701"), value("float8")],
+            vec![value("1043"), value("varchar")],
+        ]
+    );
+
+    // pg_catalog join 超出支持形状，必须显式 0A000 而不是近似执行。
+    assert_sqlstate(
+        &mut client,
+        "SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace",
+        b"0A000",
+    );
+
+    drop(client);
+    server.join().unwrap();
+}
+
 #[test]
 fn pgsql_ddl_builds_the_runtime_catalog_and_reports_catalog_errors() {
     let (mut client, server) = start_server_with_empty_schema();

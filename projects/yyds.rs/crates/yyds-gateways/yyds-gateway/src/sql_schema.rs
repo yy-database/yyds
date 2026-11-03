@@ -72,36 +72,38 @@ impl SqlDdlOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SchemaField {
-    name: String,
-    field_id: u64,
-    field_type: SqlFieldType,
-    capacity: Option<u32>,
+pub(crate) struct SchemaField {
+    pub(crate) name: String,
+    pub(crate) field_id: u64,
+    pub(crate) field_type: SqlFieldType,
+    pub(crate) capacity: Option<u32>,
+    pub(crate) sql_type: String,
+    pub(crate) default: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SchemaTable {
-    name: String,
-    type_id: u64,
-    primary_key: Vec<String>,
-    unique_constraints: Vec<Vec<String>>,
-    fields: Vec<SchemaField>,
+pub(crate) struct SchemaTable {
+    pub(crate) name: String,
+    pub(crate) type_id: u64,
+    pub(crate) primary_key: Vec<String>,
+    pub(crate) unique_constraints: Vec<Vec<String>>,
+    pub(crate) fields: Vec<SchemaField>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SchemaIndex {
-    name: String,
-    table: String,
-    unique: bool,
-    columns: Vec<String>,
+pub(crate) struct SchemaIndex {
+    pub(crate) name: String,
+    pub(crate) table: String,
+    pub(crate) unique: bool,
+    pub(crate) columns: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RegistryState {
+pub(crate) struct RegistryState {
     revision: u32,
     next_type_id: u64,
     next_field_id: u64,
-    tables: Vec<SchemaTable>,
+    pub(crate) tables: Vec<SchemaTable>,
     indexes: Vec<SchemaIndex>,
 }
 
@@ -152,6 +154,8 @@ impl SqlSchemaRegistry {
                         field_id: field.field_id,
                         field_type: field.field_type.clone(),
                         capacity: field.capacity,
+                        sql_type: canonical_sql_type(&field.field_type).to_string(),
+                        default: None,
                     })
                     .collect(),
             })
@@ -186,6 +190,11 @@ impl SqlSchemaRegistry {
     /// Returns a consistent snapshot of the registered schema.
     pub fn catalog(&self) -> SqlCatalog {
         catalog_from_state(&self.lock())
+    }
+
+    /// Cloned registry state for read-only metadata synthesis.
+    pub(crate) fn snapshot(&self) -> RegistryState {
+        self.lock().clone()
     }
 
     /// Applies one DDL statement and persists the result when the state changed.
@@ -310,7 +319,14 @@ fn apply_ddl(state: &mut RegistryState, statement: &SqlDdlStatement) -> Result<(
                 let field_type = if not_null { base } else { SqlFieldType::Optional(Box::new(base)) };
                 let field_id = state.next_field_id;
                 state.next_field_id += 1;
-                fields.push(SchemaField { name: column.name.clone(), field_id, field_type, capacity });
+                fields.push(SchemaField {
+                    name: column.name.clone(),
+                    field_id,
+                    field_type,
+                    capacity,
+                    sql_type: column.sql_type.clone(),
+                    default: column.default.clone(),
+                });
             }
             let type_id = state.next_type_id;
             state.next_type_id += 1;
@@ -346,7 +362,14 @@ fn apply_ddl(state: &mut RegistryState, statement: &SqlDdlStatement) -> Result<(
             let field_type = if not_null { base } else { SqlFieldType::Optional(Box::new(base)) };
             let field_id = state.next_field_id;
             state.next_field_id += 1;
-            state.tables[index].fields.push(SchemaField { name: column.name.clone(), field_id, field_type, capacity });
+            state.tables[index].fields.push(SchemaField {
+                name: column.name.clone(),
+                field_id,
+                field_type,
+                capacity,
+                sql_type: column.sql_type.clone(),
+                default: column.default.clone(),
+            });
             if column.inline_primary_key {
                 state.tables[index].primary_key.push(column.name.clone());
             }
@@ -416,6 +439,19 @@ fn apply_ddl(state: &mut RegistryState, statement: &SqlDdlStatement) -> Result<(
                 None => Err(SqlFrontendError::new(SqlErrorKind::UnknownIndex, format!("index `{name}` does not exist"))),
             }
         }
+    }
+}
+
+/// SQL type text reported for a catalog-seeded canonical field type.
+fn canonical_sql_type(field_type: &SqlFieldType) -> &'static str {
+    match field_type.inner() {
+        SqlFieldType::Int32 => "INTEGER",
+        SqlFieldType::Int64 => "BIGINT",
+        SqlFieldType::Float64 => "DOUBLE PRECISION",
+        SqlFieldType::String => "TEXT",
+        SqlFieldType::Bool => "BOOLEAN",
+        SqlFieldType::Bytes => "BYTEA",
+        SqlFieldType::Unknown | SqlFieldType::Optional(_) => "TEXT",
     }
 }
 
@@ -490,6 +526,12 @@ fn validate_state(state: &RegistryState) -> Result<(), SqlFrontendError> {
             }
             if field.field_id == 0 || !field_ids.insert(field.field_id) {
                 return Err(SqlFrontendError::catalog("invalid or duplicate SQL schema field identity"));
+            }
+            if field.sql_type.trim().is_empty() {
+                return Err(SqlFrontendError::catalog(format!(
+                    "SQL schema field `{}` of table `{}` has no sql_type",
+                    field.name, table.name
+                )));
             }
         }
     }
@@ -566,6 +608,10 @@ struct FieldDocument {
     field_type: FieldTypeDocument,
     nullable: bool,
     capacity: Option<u32>,
+    #[serde(rename = "sql_type")]
+    sql_type: String,
+    #[serde(default)]
+    default: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -639,6 +685,8 @@ impl SchemaDocument {
                             field_type: FieldTypeDocument::of(&field.field_type),
                             nullable: field.field_type.is_nullable(),
                             capacity: field.capacity,
+                            sql_type: field.sql_type.clone(),
+                            default: field.default.clone(),
                         })
                         .collect(),
                 })
@@ -681,7 +729,14 @@ impl SchemaDocument {
                         .map(|field| {
                             let base = field.field_type.base();
                             let field_type = if field.nullable { SqlFieldType::Optional(Box::new(base)) } else { base };
-                            SchemaField { name: field.name, field_id: field.field_id, field_type, capacity: field.capacity }
+                            SchemaField {
+                                name: field.name,
+                                field_id: field.field_id,
+                                field_type,
+                                capacity: field.capacity,
+                                sql_type: field.sql_type,
+                                default: field.default,
+                            }
                         })
                         .collect(),
                 })
@@ -895,7 +950,9 @@ mod tests {
         assert_eq!(document["tables"][0]["unique_constraints"][0][0], "email");
         assert_eq!(document["tables"][0]["fields"][1]["type"], "string");
         assert_eq!(document["tables"][0]["fields"][1]["capacity"], 191);
+        assert_eq!(document["tables"][0]["fields"][1]["sql_type"], "VARCHAR(191)");
         assert_eq!(document["tables"][0]["fields"][2]["nullable"], true);
+        assert_eq!(document["tables"][0]["fields"][3]["sql_type"], "INT");
 
         let reopened = SqlSchemaRegistry::open(&path).expect("reopen registry");
         assert_eq!(reopened.revision(), 3);
@@ -925,6 +982,16 @@ mod tests {
         assert_eq!(error.kind, SqlErrorKind::Catalog);
         assert!(error.message.contains("yyds-sql-schema/v1"), "{}", error.message);
         let _ = fs::remove_file(&path);
+
+        let path = unique_path();
+        fs::write(
+            &path,
+            r#"{"contract":"yyds-sql-schema/v0","revision":1,"next_type_id":1,"next_field_id":1,"tables":[{"name":"users","type_id":1,"primary_key":[],"unique_constraints":[],"fields":[{"name":"id","field_id":1,"type":"int64","nullable":false,"capacity":null}]}],"indexes":[]}"#,
+        )
+        .expect("write document without sql_type");
+        let error = SqlSchemaRegistry::open(&path).expect_err("missing sql_type is rejected");
+        assert_eq!(error.kind, SqlErrorKind::Catalog);
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -943,6 +1010,8 @@ mod tests {
                     field_id: 1,
                     field_type: SqlFieldType::Int64,
                     capacity: None,
+                    sql_type: "BIGINT".to_string(),
+                    default: None,
                 }],
             }],
             indexes: Vec::new(),

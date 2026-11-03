@@ -14,10 +14,11 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
-    bind_sql_catalog, describe_plan, detect_session_reset_statement, encode_hex, execute_plan, neutralized_sql_parameters,
-    nulled_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect, substitute_sql_parameters,
-    DiscardTarget, SqlBoundExpression, SqlBoundLiteral, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType,
-    SqlFrontendError, SqlParameterStyle, SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    analyze_meta_query, bind_sql_catalog, describe_plan, detect_session_reset_statement, encode_hex, execute_plan,
+    neutralized_sql_parameters, nulled_sql_parameters, parse_ddl, parse_session_command, plan_statement_for_dialect,
+    substitute_sql_parameters, DiscardTarget, SqlBoundExpression, SqlBoundLiteral, SqlColumn, SqlDialect, SqlErrorKind,
+    SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle, SqlSchemaRegistry, SqlSessionCommand,
+    SqlTransactionAction, SqlValue, PG_SERVER_VERSION,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -31,10 +32,6 @@ const OID_TEXT: u32 = 25;
 const OID_FLOAT4: u32 = 700;
 const OID_FLOAT8: u32 = 701;
 const OID_VARCHAR: u32 = 1043;
-
-/// Reported gateway version — YYDS crate version surfaced both in the startup
-/// `server_version` parameter and `SHOW server_version` so the two sources agree.
-const PG_SERVER_VERSION: &str = concat!("YYDS ", env!("CARGO_PKG_VERSION"));
 
 const PROTOCOL_V3: u32 = 196_608;
 const SSL_REQUEST: u32 = 80_877_103;
@@ -109,6 +106,8 @@ fn serve_session(mut stream: impl Read + Write, runtime: Option<Arc<PgsqlSqlRunt
             }
         }
     };
+
+    session.database = parameters.get("database").unwrap_or("postgres").to_string();
 
     send_authentication_ok(&mut stream)?;
     send_parameter(&mut stream, "server_version", PG_SERVER_VERSION)?;
@@ -213,6 +212,8 @@ struct TransactionSession {
     /// `search_path` as last set via `SET search_path = ...`. Defaults to the
     /// PostgreSQL convention `"$user, public"`.
     search_path: String,
+    /// Startup `database` parameter, reported by synthesized `current_database()`.
+    database: String,
 }
 
 impl TransactionSession {
@@ -223,6 +224,7 @@ impl TransactionSession {
             protocol_only_transaction: false,
             failed: false,
             search_path: DEFAULT_SEARCH_PATH.to_string(),
+            database: "postgres".to_string(),
         }
     }
 
@@ -700,6 +702,22 @@ fn run_statement(
     runtime: &Arc<PgsqlSqlRuntime>,
     session: &mut TransactionSession,
 ) -> Result<ExecutionOutcome, (String, String)> {
+    // Metadata views are synthesized from the local schema registry. They never
+    // bind into the catalog or touch the executor, so they branch off before the
+    // regular session-command/bind path.
+    let meta = match analyze_meta_query(sql, SqlDialect::Postgres) {
+        Ok(meta) => meta,
+        Err(error) => {
+            session.fail();
+            return Err(statement_error("metadata", error));
+        }
+    };
+    if let Some(meta) = meta {
+        let description = meta.describe();
+        let result = meta.execute(&runtime.schema, "public");
+        let command_tag = format!("SELECT {}", result.rows.len());
+        return Ok(ExecutionOutcome { is_read: true, description, rows: result.rows, command_tag });
+    }
     // 扩展查询不经过 `handle_simple_query`，语法错误必须在这里映射为 `42601`
     // 而不是被后面的 catalog 绑定错误统一归为 `42P01`。
     if parse_session_command(sql).is_err() {
@@ -1109,10 +1127,20 @@ fn statement_description(
     if let Some(parameters) = parameters {
         let rendered = substitute_sql_parameters(sql, parameters, SqlParameterStyle::DollarNumber)
             .map_err(|error| statement_error("parameter", error))?;
+        if let Some(meta) =
+            analyze_meta_query(&rendered, SqlDialect::Postgres).map_err(|error| statement_error("metadata", error))?
+        {
+            return Ok(meta.describe());
+        }
         return plan_description(&rendered, runtime);
     }
     let (neutral_sql, _) = neutralized_sql_parameters(sql, SqlParameterStyle::DollarNumber)
         .map_err(|error| statement_error("parameter", error))?;
+    if let Some(meta) =
+        analyze_meta_query(&neutral_sql, SqlDialect::Postgres).map_err(|error| statement_error("metadata", error))?
+    {
+        return Ok(meta.describe());
+    }
     if let Ok(description) = plan_description(&neutral_sql, runtime) {
         return Ok(description);
     }
