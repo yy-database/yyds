@@ -189,7 +189,7 @@ fn write_set_error(stream: &mut dyn Write, error: BindError) -> io::Result<()> {
         BindError::Syntax => stream.write_all(b"-ERR syntax error\r\n"),
         BindError::InvalidInteger => stream.write_all(b"-ERR value is not an integer or out of range\r\n"),
         BindError::InvalidExpire => stream.write_all(b"-ERR invalid expire time in 'set' command\r\n"),
-        BindError::UnsupportedOptions => stream.write_all(b"-ERR unsupported SET option\r\n"),
+        BindError::UnsupportedOptions => stream.write_all(b"-ERR unsupported SET options\r\n"),
         BindError::EmptyCommand => stream.write_all(b"-ERR empty command\r\n"),
         BindError::UnsupportedCommand => stream.write_all(b"-ERR unsupported command\r\n"),
     }
