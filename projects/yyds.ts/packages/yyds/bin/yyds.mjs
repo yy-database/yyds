@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { loadYydsNative } from "../src/node/load.ts";
 import { parseStartOptions, runNodeStart } from "../src/node/runtime.ts";
@@ -137,6 +138,19 @@ function runCatalog(native, args) {
     console.log(`published schema version ${schemaVersion} into ${catalogPath}`);
 }
 
+function requireDataDir(dataDir) {
+    if (!existsSync(dataDir)) {
+        throw new Error(
+            `data directory does not exist: ${resolve(dataDir)} (run \`yyds init --data-dir ${dataDir} --cluster-id <id> --node-id <id>\` first)`,
+        );
+    }
+}
+
+function stopTimeoutMessage(runtime, error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `node pid=${runtime.pid ?? "unknown"} generation=${runtime.generation ?? "unknown"} did not stop within 10s: ${message}`;
+}
+
 async function main(args) {
     const command = args[0];
     const rest = args.slice(1);
@@ -163,6 +177,7 @@ async function main(args) {
             return;
         }
         case "start":
+            requireDataDir(options.dataDir);
             await runNodeStart({
                 dataDir: options.dataDir,
                 clusterId: options.clusterId,
@@ -177,6 +192,7 @@ async function main(args) {
             });
             return;
         case "status": {
+            requireDataDir(options.dataDir);
             const snapshot = native.nodeInspect(options.dataDir);
             console.log(
                 JSON.stringify({
@@ -190,12 +206,27 @@ async function main(args) {
             return;
         }
         case "stop": {
+            requireDataDir(options.dataDir);
             const snapshot = native.nodeInspect(options.dataDir);
-            if (snapshot.ownership === "available") throw new Error("node is not running");
+            if (snapshot.ownership === "available") {
+                // 停止是幂等的：未运行时返回成功，但陈旧 runtime 状态要明确点出，
+                // 不能被当成「当前有节点在跑」。
+                const stale = snapshot.runtime ? JSON.parse(snapshot.runtime) : null;
+                console.log(
+                    stale
+                        ? `already stopped (stale runtime status from pid=${stale.pid ?? "unknown"} is still on disk)`
+                        : "already stopped",
+                );
+                return;
+            }
             const runtime = snapshot.runtime ? JSON.parse(snapshot.runtime) : null;
             if (!runtime) throw new Error("node owner has not published runtime status");
             native.nodeRequestStop(options.dataDir, runtime.generation);
-            native.nodeWaitUntilStopped(options.dataDir, runtime.generation, 10_000);
+            try {
+                native.nodeWaitUntilStopped(options.dataDir, runtime.generation, 10_000);
+            } catch (error) {
+                throw new Error(stopTimeoutMessage(runtime, error));
+            }
             console.log("stopped");
             return;
         }
