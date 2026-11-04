@@ -74,6 +74,20 @@ export interface ServiceBinding {
 export interface LocalExecutorBinding {
     /** Reclaims every expired record once and returns how many were removed. */
     sweepExpired(): number;
+    /**
+     * Runs one budgeted reclamation pass, inspecting at most `budgetPerShard`
+     * records per shard. A pass that hits the budget resumes from its key
+     * cursor on the next call instead of re-scanning the shard head.
+     */
+    sweepExpiredBudgeted(budgetPerShard: number): SweepOutcomeBinding;
+}
+
+/** One budgeted reclamation pass. */
+export interface SweepOutcomeBinding {
+    /** Records inspected in this pass. */
+    examined: number;
+    /** Records physically removed in this pass. */
+    reclaimed: number;
 }
 
 export interface ExpirySweeperBinding {
