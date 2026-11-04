@@ -30,6 +30,8 @@ CASES = (
     "08-mongo-find-cursor/mongo/sorted-window",
     "08-mongo-find-cursor/mongo/non-id-filter",
     "08-mongo-find-cursor/mongo/empty-batch",
+    "08-mongo-find-cursor/mongo/range-filter-1000",
+    "08-mongo-find-cursor/mongo/full-sort-1000",
     "08-mongo-find-cursor/mongo/batch-size",
     "08-mongo-find-cursor/mongo/engine-parity",
 )
@@ -50,6 +52,9 @@ def _facts(database, scale: int) -> dict:
     ]
     filtered = [document["_id"] for document in collection.find({"n": scale // 2})]
     empty = [document["_id"] for document in collection.find({"n": scale + 1})]
+    # Return order without `sort` is unspecified, so compare as a set of ids.
+    range_filtered = sorted(document["_id"] for document in collection.find({"n": {"$gte": scale // 2}}))
+    full_sorted = [document["n"] for document in collection.find({}, sort=[("n", 1)])]
 
     reply = database.command({"find": COLLECTION, "batchSize": BATCH_SIZE})
     cursor = reply["cursor"]
@@ -69,6 +74,8 @@ def _facts(database, scale: int) -> dict:
         "skipped_window": skipped_window,
         "filtered": filtered,
         "empty": empty,
+        "range_filtered": range_filtered,
+        "full_sorted": full_sorted,
         "first_batch": first_batch,
         "cursor_opened": cursor_id != 0 or first_batch < scale,
         "drained": drained,
@@ -99,7 +106,9 @@ def run(scale: int = 1000) -> list[CaseResult]:
                     gateway["sorted_window"] == list(range(10)),
                     f"`sort` by `n` returned {gateway['sorted_window']}, expected the ten smallest values",
                 )
-                expected_ids = list(range(scale - 1, scale - 11, -1))
+                # Sorted by `n` ascending, `_id` descends: `scale-1, scale-2, ...`.
+                # Skipping `scale-10` leaves the last ten of that sequence.
+                expected_ids = list(range(scale - 1, -1, -1))[-10:]
                 confirm(
                     gateway["skipped_window"] == expected_ids,
                     f"`skip` returned {gateway['skipped_window']}, expected {expected_ids}",
@@ -114,6 +123,27 @@ def run(scale: int = 1000) -> list[CaseResult]:
             def empty_batch() -> None:
                 confirm(gateway["empty"] == [], f"a filter with no match returned {len(gateway['empty'])} documents")
 
+            def range_filter_1000() -> None:
+                expected_ids = list(range(scale // 2))
+                confirm(
+                    len(gateway["range_filtered"]) == scale // 2,
+                    f"`$gte` matched {len(gateway['range_filtered'])} of {scale} documents, expected {scale // 2}",
+                )
+                confirm(
+                    gateway["range_filtered"] == expected_ids,
+                    f"`$gte` returned ids {gateway['range_filtered'][:5]}..., expected {expected_ids[:5]}...",
+                )
+
+            def full_sort_1000() -> None:
+                confirm(
+                    len(gateway["full_sorted"]) == scale,
+                    f"sorting returned {len(gateway['full_sorted'])} of {scale} documents",
+                )
+                confirm(
+                    gateway["full_sorted"] == list(range(scale)),
+                    f"sorting the full collection returned {gateway['full_sorted'][:5]}..., expected 0..{scale - 1}",
+                )
+
             def batch_size() -> None:
                 confirm(
                     gateway["first_batch"] == BATCH_SIZE,
@@ -126,7 +156,9 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 (CASES[0], sorted_window),
                 (CASES[1], filtered),
                 (CASES[2], empty_batch),
-                (CASES[3], batch_size),
+                (CASES[3], range_filter_1000),
+                (CASES[4], full_sort_1000),
+                (CASES[5], batch_size),
             ):
                 try:
                     case()
@@ -139,7 +171,7 @@ def run(scale: int = 1000) -> list[CaseResult]:
 
         engine = oracle_mongo()
         if engine is None:
-            results.append(no_oracle(CASES[4], MONGO_URL_ENV))
+            results.append(no_oracle(CASES[6], MONGO_URL_ENV))
         else:
             try:
                 engine_facts = _engine_facts(engine, scale)
@@ -147,7 +179,7 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 engine.close()
             results.append(
                 compare_facts(
-                    CASES[4],
+                    CASES[6],
                     gateway,
                     engine_facts,
                     (
@@ -155,6 +187,8 @@ def run(scale: int = 1000) -> list[CaseResult]:
                         "skipped_window",
                         "filtered",
                         "empty",
+                        "range_filtered",
+                        "full_sorted",
                         "first_batch",
                         "cursor_opened",
                         "drained",

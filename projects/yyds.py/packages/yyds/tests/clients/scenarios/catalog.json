@@ -103,6 +103,8 @@
         "08-mongo-find-cursor/mongo/sorted-window",
         "08-mongo-find-cursor/mongo/non-id-filter",
         "08-mongo-find-cursor/mongo/empty-batch",
+        "08-mongo-find-cursor/mongo/range-filter-1000",
+        "08-mongo-find-cursor/mongo/full-sort-1000",
         "08-mongo-find-cursor/mongo/batch-size",
         "08-mongo-find-cursor/mongo/engine-parity"
       ]
