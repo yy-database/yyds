@@ -7,9 +7,8 @@ on:
     branches: [dev]
     paths:
       - "projects/yyds.py/**"
-      - "projects/yyds.rs/ffis/yyds-pyo3/**"
-      - "projects/yyds.rs/ffis/yyds-napi/**"
-      - "projects/yyds.rs/crates/yyds-gateways/**"
+      - "projects/yyds.rs/yyds-pyo3/**"
+      - "projects/yyds.rs/yyds-napi/**"
       - "projects/yyds.rs/Cargo.toml"
       - "projects/yyds.ts/packages/yyds/**"
       - "projects/yyds.py/packages/yyds/tests/clients/**"
@@ -21,9 +20,8 @@ on:
     branches: [dev]
     paths:
       - "projects/yyds.py/**"
-      - "projects/yyds.rs/ffis/yyds-pyo3/**"
-      - "projects/yyds.rs/ffis/yyds-napi/**"
-      - "projects/yyds.rs/crates/yyds-gateways/**"
+      - "projects/yyds.rs/yyds-pyo3/**"
+      - "projects/yyds.rs/yyds-napi/**"
       - "projects/yyds.rs/Cargo.toml"
       - "projects/yyds.ts/packages/yyds/**"
       - "projects/yyds.py/packages/yyds/tests/clients/**"
