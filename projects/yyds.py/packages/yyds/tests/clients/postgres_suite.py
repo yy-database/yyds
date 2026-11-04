@@ -238,6 +238,43 @@ def _case_reconnect(node: YydsNode, connect, base: int) -> None:
     check(rows == [(27,)], f"row written before the disconnect is not readable after reconnecting: {rows!r}")
 
 
+def _case_error_failed_transaction(node: YydsNode, connect, base: int) -> None:
+    """A duplicate key inside a transaction leaves the session in `25P02`."""
+
+    identifier = base + 30
+    with _session(node, connect) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("BEGIN")
+            try:
+                cursor.execute(INSERT_USER, (identifier, "failed-transaction", 40, 1.0, True, None))
+                cursor.execute(INSERT_USER, (identifier, "failed-transaction", 41, 2.0, True, None))
+            except Exception:  # noqa: BLE001 - the duplicate is the trigger, not the assertion
+                pass
+        _expect_error(connection, "SELECT id FROM users", "25P02", r"current transaction is aborted")
+
+
+def _case_information_schema_projection(node: YydsNode, connect, base: int) -> None:
+    """`public` schema projections expose the published `users` relation."""
+
+    with _session(node, connect) as connection:
+        tables = _fetch(
+            connection,
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name",
+        )
+        columns = _fetch(
+            connection,
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = 'users' ORDER BY ordinal_position",
+        )
+    check(("users",) in tables, f"information_schema.tables omitted users: {tables!r}")
+    names = [row[0] for row in columns]
+    check(
+        names == ["id", "name", "age", "score", "active", "tag"],
+        f"information_schema.columns returned {names!r}",
+    )
+
+
 CASES = [
     ("connect_and_select_literal", _case_connect_and_select_literal),
     ("result_types", _case_result_types),
@@ -253,6 +290,8 @@ CASES = [
     ("error_subquery_operand_columns", _case_error_subquery_operand_columns),
     ("error_scalar_subquery_cardinality", _case_error_scalar_subquery_cardinality),
     ("error_batch_statement_index", _case_error_batch_statement_index),
+    ("error_failed_transaction", _case_error_failed_transaction),
+    ("information_schema_projection", _case_information_schema_projection),
     ("reconnect", _case_reconnect),
 ]
 

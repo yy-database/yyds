@@ -294,6 +294,37 @@ def _case_prepared_error_unknown_table(node: YydsNode, connect, base: int) -> No
             _expect_cursor_error(cursor, "SELECT id FROM missing_table", 1146, "42S02", r"unknown SQL table")
 
 
+def _case_information_schema_tables(node: YydsNode, connect, base: int) -> None:
+    """`information_schema.TABLES` lists the published relation for the session database."""
+
+    with _session(node, connect) as connection:
+        rows = _fetch(
+            connection,
+            "SELECT TABLE_NAME FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+        )
+    names = [bytes(row[0]).decode("utf-8") if isinstance(row[0], (bytes, bytearray)) else row[0] for row in rows]
+    check("users" in names, f"information_schema.TABLES omitted users: {names!r}")
+
+
+def _case_prepared_information_schema_columns(node: YydsNode, connect, base: int) -> None:
+    """`COM_STMT_PREPARE` serves the parameterised `information_schema.COLUMNS` projection."""
+
+    with _session(node, connect) as connection:
+        with connection.cursor(prepared=True) as cursor:
+            cursor.execute(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION",
+                ("users",),
+            )
+            rows = cursor.fetchall()
+    names = [bytes(row[0]).decode("utf-8") if isinstance(row[0], (bytes, bytearray)) else row[0] for row in rows]
+    check(
+        names == ["id", "name", "age", "score", "active", "tag"],
+        f"information_schema.COLUMNS returned {names!r}",
+    )
+
+
 CASES = [
     ("connect_and_select_literal", _case_connect_and_select_literal),
     ("result_types", _case_result_types),
@@ -308,6 +339,7 @@ CASES = [
     ("error_grouping", _case_error_grouping),
     ("error_subquery_operand_columns", _case_error_subquery_operand_columns),
     ("error_scalar_subquery_cardinality", _case_error_scalar_subquery_cardinality),
+    ("information_schema_tables", _case_information_schema_tables),
     ("reconnect", _case_reconnect),
 ]
 
@@ -315,6 +347,7 @@ EXTRA_CASES = {
     "mysql-connector": [
         ("prepared_statement", _case_prepared_statement),
         ("prepared_error_unknown_table", _case_prepared_error_unknown_table),
+        ("prepared_information_schema_columns", _case_prepared_information_schema_columns),
     ]
 }
 
