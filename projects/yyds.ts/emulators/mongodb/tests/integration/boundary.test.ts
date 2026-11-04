@@ -83,3 +83,51 @@ test("mongodb boundary surface covers handshake docs, id overwrite, cursors and 
         });
     }
 });
+
+test("mongodb answers an empty collection name with 73 and never reports 11000 for a duplicate _id", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode({ mongo: true });
+    assert.ok(node.mongo);
+    const client = new MongoClient(`mongodb://${node.mongo.host}:${node.mongo.port}`, {
+        directConnection: true,
+        serverApi: { version: "1", strict: false, deprecationErrors: false },
+        serverSelectionTimeoutMS: 10_000,
+        retryWrites: false,
+        retryReads: false,
+    });
+    await client.connect();
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const db = client.db("yyds");
+
+    // A missing or empty collection name is `InvalidNamespace` (73), never a
+    // silently-created collection: the response must carry the numeric code so
+    // drivers surface it as MongoServerError rather than an empty result.
+    for (const command of [
+        { insert: "", documents: [{ v: 1 }] },
+        { find: "", filter: {} },
+        { delete: "", deletes: [{ q: {}, limit: 0 }] },
+    ]) {
+        await assert.rejects(db.command(command), (error: unknown) => {
+            assert.equal((error as ServerCodeFailure).code, 73, `expected code 73 for ${JSON.stringify(command)}`);
+            return true;
+        });
+    }
+
+    // The executor has no unique-index machinery, so a repeated explicit `_id`
+    // overwrites in place. Asserting the absence of a thrown duplicate-key error
+    // is the contract: a 11000 reply here would be a fabricated MongoDB semantic.
+    const collection = db.collection<{ _id: string; v: number }>("dup");
+    await collection.insertOne({ _id: "fixed", v: 1 });
+    let duplicateError: ServerCodeFailure | undefined;
+    try {
+        await collection.insertOne({ _id: "fixed", v: 2 });
+    } catch (error) {
+        duplicateError = error as ServerCodeFailure;
+    }
+    assert.equal(duplicateError, undefined, `a duplicate _id must not fail, got ${duplicateError?.message}`);
+    assert.notEqual(duplicateError?.code, 11000, "the gateway must not fabricate a duplicate-key error");
+    assert.equal((await collection.find({ _id: "fixed" }).toArray())[0]?.v, 2, "the second insert must overwrite the first");
+});
