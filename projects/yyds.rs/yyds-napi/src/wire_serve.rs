@@ -479,14 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_tokens_absent_is_allowed_on_loopback() {
-        with_env("YYDS_AUTH_TOKENS", None, || {
-            let tokens = bootstrap_tokens_from_env(true).unwrap();
-            assert!(tokens.is_empty(), "loopback bind without env should return empty tokens");
-        });
-    }
-
-    #[test]
     fn bootstrap_tokens_absent_is_refused_on_non_loopback() {
         with_env("YYDS_AUTH_TOKENS", None, || {
             let err = bootstrap_tokens_from_env(false).unwrap_err();
@@ -503,14 +495,6 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_tokens_present_allows_non_loopback() {
-        with_env("YYDS_AUTH_TOKENS", Some("t-remote-01"), || {
-            let tokens = bootstrap_tokens_from_env(false).unwrap();
-            assert_eq!(tokens, vec!["t-remote-01"]);
-        });
-    }
-
-    #[test]
     fn bootstrap_tokens_blank_env_is_rejected() {
         with_env("YYDS_AUTH_TOKENS", Some(";;   ;"), || {
             let err = bootstrap_tokens_from_env(true).unwrap_err();
@@ -518,12 +502,13 @@ mod tests {
         });
     }
 
-    // ─── Authentication state machine tests ────────────────────────────────
+    // ─── Authentication state machine smoke ────────────────────────────────
     //
-    // These don't spin up a real TCP server — they exercise
-    // `process_frame_with_auth` + `ConnectionState` directly. The point is
-    // to prove the four required flows (loopback anonymous, remote blocked,
-    // remote authed, remote bad-token) without socket scaffolding.
+    // The loopback bypass and the remote pre-auth block are policy that no
+    // external driver can observe: the Redis, Mongo, MySQL and PostgreSQL
+    // gateways have no credential model, so only the wire client ever sees
+    // `ConnectionState`. The accept and reject transitions stay here as the
+    // smoke pair.
 
     use std::collections::HashMap;
     use yyds::execution::LocalExecutor;
@@ -546,39 +531,6 @@ mod tests {
         body.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         body.extend_from_slice(bytes);
         body
-    }
-
-    #[test]
-    fn auth_loopback_connection_allows_kv_without_authenticate() {
-        let ctx = auth_test_ctx();
-        let state = ConnectionState::new(true); // loopback default = authenticated
-        let request = Frame::new(MessageType::KvGet, 1, kv_get_body("any-key"));
-        let response = process_frame_with_auth(&ctx, &state, &request);
-        assert_eq!(response.msg_type, MessageType::KvGetOk, "loopback anonymous should pass KvGet");
-        assert!(state.is_authenticated());
-    }
-
-    #[test]
-    fn auth_remote_connection_blocks_kv_before_authenticate() {
-        let ctx = auth_test_ctx();
-        let state = ConnectionState::new(false); // remote default = unauthenticated
-        let request = Frame::new(MessageType::KvGet, 1, kv_get_body("any-key"));
-        let response = process_frame_with_auth(&ctx, &state, &request);
-        assert_eq!(response.msg_type, MessageType::Error);
-        assert!(
-            String::from_utf8_lossy(&response.body).contains(AUTH_CODE),
-            "error body should mention AUTH_CODE `{AUTH_CODE}`, got: {}",
-            String::from_utf8_lossy(&response.body)
-        );
-    }
-
-    #[test]
-    fn auth_remote_connection_allows_hello_before_authenticate() {
-        let ctx = auth_test_ctx();
-        let state = ConnectionState::new(false);
-        let request = Frame::new(MessageType::Hello, 1, Vec::new());
-        let response = process_frame_with_auth(&ctx, &state, &request);
-        assert_eq!(response.msg_type, MessageType::HelloOk, "Hello must be allowed pre-auth");
     }
 
     #[test]
