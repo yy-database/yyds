@@ -59,7 +59,7 @@ function runCli(args, timeout) {
     return { code: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-const [redisPort, pgPort, mysqlPort] = await Promise.all([freePort(), freePort(), freePort()]);
+const [redisPort, pgPort, mysqlPort, mongoPort] = await Promise.all([freePort(), freePort(), freePort(), freePort()]);
 const dataDir = mkdtempSync(join(tmpdir(), "yyds-sql-smoke-"));
 const clusterId = `smoke-cluster-${process.pid}`;
 const nodeId = `smoke-node-${process.pid}`;
@@ -84,6 +84,8 @@ const nodeArgs = [
     String(pgPort),
     "--mysql-port",
     String(mysqlPort),
+    "--mongo-port",
+    String(mongoPort),
 ];
 
 const stdoutLines = [];
@@ -130,8 +132,14 @@ async function waitUntilReady() {
             }
             announced = true;
         }
-        if (announced && (await portOpen(pgPort)) && (await portOpen(mysqlPort)) && (await portOpen(redisPort))) {
-            console.log(`[yyds] running pgsql=${pgPort} mysql=${mysqlPort} redis=${redisPort}`);
+        if (
+            announced
+            && (await portOpen(pgPort))
+            && (await portOpen(mysqlPort))
+            && (await portOpen(redisPort))
+            && (await portOpen(mongoPort))
+        ) {
+            console.log(`[yyds] running pgsql=${pgPort} mysql=${mysqlPort} redis=${redisPort} mongo=${mongoPort}`);
             return;
         }
         await sleep(50);
@@ -191,7 +199,14 @@ try {
 
     await startNode();
 
-    const env = { ...process.env, YYDS_HOST: host, YYDS_PG_PORT: String(pgPort), YYDS_MYSQL_PORT: String(mysqlPort) };
+    const env = {
+        ...process.env,
+        YYDS_HOST: host,
+        YYDS_PG_PORT: String(pgPort),
+        YYDS_MYSQL_PORT: String(mysqlPort),
+        YYDS_REDIS_PORT: String(redisPort),
+        YYDS_MONGO_PORT: String(mongoPort),
+    };
     let failures = 0;
     failures += await runSuite(
         "ts",
@@ -207,6 +222,8 @@ try {
         env,
     );
     failures += await runSuite("examples-py", python, [join(ROOT, "projects/yyds.py/examples/bulk.py")], env);
+    failures += await runSuite("examples-redis-py", python, [join(ROOT, "projects/yyds.py/examples/redis_roundtrip.py")], env);
+    failures += await runSuite("examples-mongo-py", python, [join(ROOT, "projects/yyds.py/examples/mongo.py")], env);
 
     if (!existsSync(schemaPath)) throw new Error(`schema registry was not persisted at ${schemaPath}`);
     console.log(`[schema] ${schemaPath} (${statSync(schemaPath).size} bytes)`);
@@ -214,7 +231,6 @@ try {
     // 重新启动同一数据目录，验证行、序列、唯一键和 Redis 截止期都真正落盘。
     const recoveryEnv = {
         ...env,
-        YYDS_REDIS_PORT: String(redisPort),
         YYDS_RECOVERY_STATE: recoveryStatePath,
     };
     failures += await runSuite("recovery-seed", python, [join(ROOT, "e2e/recovery.py")], {
@@ -224,7 +240,7 @@ try {
 
     console.log("[restart] stopping node and restarting on the same data directory");
     await stopNode();
-    for (const port of [redisPort, pgPort, mysqlPort]) await waitPortClosed(port);
+    for (const port of [redisPort, pgPort, mysqlPort, mongoPort]) await waitPortClosed(port);
     await startNode();
 
     failures += await runSuite("recovery-verify", python, [join(ROOT, "e2e/recovery.py")], {
@@ -233,7 +249,7 @@ try {
     });
 
     exitCode = failures === 0 ? 0 : 1;
-    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=6 failed=${failures}`);
+    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=8 failed=${failures}`);
 } catch (error) {
     console.error(`[smoke] error: ${error.message}`);
     console.error(nodeLogs());
