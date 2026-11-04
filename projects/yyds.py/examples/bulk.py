@@ -105,9 +105,83 @@ def bulk_mysql() -> None:
         reopened.close()
 
 
+PG_ERR_TABLE = "example_err_pg_py"
+MYSQL_ERR_TABLE = "example_err_mysql_py"
+
+
+def pg_expect(connection: psycopg.Connection, label: str, sql: str, expected: str) -> None:
+    """只断言驱动侧 SQLSTATE，不看网关错误文案与内部枚举。"""
+    try:
+        connection.execute(sql)
+    except psycopg.Error as error:
+        check(error.sqlstate == expected, f"{label}: expected SQLSTATE {expected}, got {error.sqlstate}")
+        return
+    raise AssertionError(f"{label}: expected SQLSTATE {expected}, no error raised")
+
+
+def mysql_expect(connection: pymysql.connections.Connection, label: str, sql: str, errno: int, sqlstate: str) -> None:
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(sql)
+    except pymysql.err.MySQLError as error:
+        observed = error.args[0] if error.args else None
+        check(observed == errno, f"{label}: expected errno {errno}, got {observed}")
+        check(getattr(error, "sqlstate", None) == sqlstate, f"{label}: expected SQLSTATE {sqlstate}, got {error.sqlstate}")
+        return
+    raise AssertionError(f"{label}: expected errno {errno}, no error raised")
+
+
+def errors_pg() -> None:
+    with pg_connect() as connection:
+        connection.execute(f"DROP TABLE IF EXISTS {PG_ERR_TABLE}")
+        connection.execute(
+            f"CREATE TABLE {PG_ERR_TABLE} (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL, "
+            "code VARCHAR(8), note TEXT, UNIQUE (email))"
+        )
+        connection.execute(f"INSERT INTO {PG_ERR_TABLE} (id, email, code, note) VALUES (1, 'dup@example.test', 'ok', 'n1')")
+        connection.execute(f"INSERT INTO {PG_ERR_TABLE} (id, email, code, note) VALUES (2, 'two@example.test', 'ok', 'n2')")
+
+        pg_expect(connection, "duplicate-key", f"INSERT INTO {PG_ERR_TABLE} (id, email, code, note) VALUES (3, 'dup@example.test', 'ok', 'n3')", "23505")
+        pg_expect(connection, "value-too-long", f"INSERT INTO {PG_ERR_TABLE} (id, email, code, note) VALUES (4, 'long@example.test', '0123456789abcdef', 'n4')", "22001")
+        pg_expect(connection, "invalid-grouping", f"SELECT email, note FROM {PG_ERR_TABLE} GROUP BY email", "42803")
+        pg_expect(connection, "scalar-subquery-multi-row", f"SELECT (SELECT email FROM {PG_ERR_TABLE}) AS x", "21000")
+        pg_expect(connection, "in-subquery-multi-column", f"SELECT id FROM {PG_ERR_TABLE} WHERE id IN (SELECT id, email FROM {PG_ERR_TABLE})", "42601")
+
+        pg_expect(connection, "unsupported-temporary-table", f"CREATE TEMPORARY TABLE {PG_ERR_TABLE}_tmp (id BIGINT)", "0A000")
+        pg_expect(connection, "unsupported-distinct-on", f"SELECT DISTINCT ON (email) id FROM {PG_ERR_TABLE} ORDER BY email", "0A000")
+        pg_expect(connection, "set-operation-column-count", f"SELECT id FROM {PG_ERR_TABLE} UNION SELECT id, email FROM {PG_ERR_TABLE}", "42601")
+        pg_expect(connection, "cross-database-reference", f"SELECT id FROM other.public.{PG_ERR_TABLE}", "42P01")
+
+
+def errors_mysql() -> None:
+    connection = mysql_connect()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(f"DROP TABLE IF EXISTS {MYSQL_ERR_TABLE}")
+            cursor.execute(
+                f"CREATE TABLE {MYSQL_ERR_TABLE} (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, "
+                "email VARCHAR(191) NOT NULL, code VARCHAR(8), note TEXT, UNIQUE KEY uq_error_email (email))"
+            )
+            cursor.execute(f"INSERT INTO {MYSQL_ERR_TABLE} (id, email, code, note) VALUES (1, 'dup@example.test', 'ok', 'n1')")
+            cursor.execute(f"INSERT INTO {MYSQL_ERR_TABLE} (id, email, code, note) VALUES (2, 'two@example.test', 'ok', 'n2')")
+
+        mysql_expect(connection, "duplicate-key", f"INSERT INTO {MYSQL_ERR_TABLE} (id, email, code, note) VALUES (3, 'dup@example.test', 'ok', 'n3')", 1062, "23000")
+        mysql_expect(connection, "value-too-long", f"INSERT INTO {MYSQL_ERR_TABLE} (id, email, code, note) VALUES (4, 'long@example.test', '0123456789abcdef', 'n4')", 1406, "22001")
+        mysql_expect(connection, "invalid-grouping", f"SELECT email, note FROM {MYSQL_ERR_TABLE} GROUP BY email", 1055, "42000")
+        mysql_expect(connection, "scalar-subquery-multi-row", f"SELECT (SELECT email FROM {MYSQL_ERR_TABLE}) AS x", 1242, "21000")
+        mysql_expect(connection, "in-subquery-multi-column", f"SELECT id FROM {MYSQL_ERR_TABLE} WHERE id IN (SELECT id, email FROM {MYSQL_ERR_TABLE})", 1241, "21000")
+
+        mysql_expect(connection, "unsupported-temporary-table", f"CREATE TEMPORARY TABLE {MYSQL_ERR_TABLE}_tmp (id BIGINT)", 1235, "42000")
+        mysql_expect(connection, "unsupported-distinct-on", f"SELECT DISTINCT ON (email) id FROM {MYSQL_ERR_TABLE} ORDER BY email", 1235, "42000")
+        mysql_expect(connection, "set-operation-column-count", f"SELECT id FROM {MYSQL_ERR_TABLE} UNION SELECT id, email FROM {MYSQL_ERR_TABLE}", 1064, "42000")
+        mysql_expect(connection, "cross-database-reference", f"SELECT id FROM other.public.{MYSQL_ERR_TABLE}", 1146, "42S02")
+    finally:
+        connection.close()
+
+
 def main() -> int:
     failed = 0
-    for name, body in (("pg", bulk_pg), ("mysql", bulk_mysql)):
+    for name, body in (("pg", bulk_pg), ("mysql", bulk_mysql), ("pg-errors", errors_pg), ("mysql-errors", errors_mysql)):
         try:
             body()
         except Exception as error:  # noqa: BLE001 - the example reports any driver failure
