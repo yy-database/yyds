@@ -29,13 +29,14 @@ import sys
 import binary_payload_suite
 import mongo_suite
 import mysql_suite
+import oracle_nosql
 import oracle_parity
 import postgres_suite
 import redis_suite
 from harness import CaseResult, NodeFailure, attach_node, start_node
 
 GATEWAYS = {"postgresql": postgres_suite.run_postgresql, "mysql": mysql_suite.run_mysql}
-SUITES = ("matrix", "payloads", "redis", "mongo", "oracle")
+SUITES = ("matrix", "payloads", "redis", "mongo", "oracle", "oracle-nosql")
 
 
 def _parse_arguments(argv: list[str]) -> argparse.Namespace:
@@ -58,6 +59,8 @@ def _parse_arguments(argv: list[str]) -> argparse.Namespace:
         parser.error("--suite redis always starts its own redis-only node")
     if arguments.suite == "mongo" and (arguments.gateway != "all" or arguments.postgresql_port or arguments.mysql_port):
         parser.error("--suite mongo always starts its own mongo-only node")
+    if arguments.suite == "oracle-nosql" and (arguments.gateway != "all" or arguments.postgresql_port or arguments.mysql_port):
+        parser.error("--suite oracle-nosql always starts its own redis and mongo nodes")
     return arguments
 
 
@@ -106,6 +109,28 @@ def main(argv: list[str] | None = None) -> int:
         failures = [result for result in results if result.status != "pass"]
         print(f"{len(results) - len(failures)}/{len(results)} cases passed")
         return 1 if failures else 0
+
+    if arguments.suite == "oracle-nosql":
+        try:
+            results = oracle_nosql.run_parity()
+        except NodeFailure as error:
+            print(error, file=sys.stderr)
+            return 2
+        for result in results:
+            detail = f" - {result.detail}" if result.detail else ""
+            print(f"{result.status.upper()} {result.name}{detail}")
+        failures = [result for result in results if result.status == "fail"]
+        unverified = [result for result in results if result.status == "unverified"]
+        verified = len(results) - len(failures) - len(unverified)
+        print(f"{verified} engine-parity probes passed, {len(failures)} divergent, {len(unverified)} unverified")
+        if unverified:
+            print(
+                "unverified probes have only driver-level evidence: set `YYDS_ORACLE_*` and rerun to compare against a real engine",
+                file=sys.stderr,
+            )
+        if failures:
+            return 1
+        return 1 if (unverified and arguments.require_oracle) else 0
 
     attached = arguments.postgresql_port is not None or arguments.mysql_port is not None
     if attached and (arguments.postgresql_port is None or arguments.mysql_port is None):
