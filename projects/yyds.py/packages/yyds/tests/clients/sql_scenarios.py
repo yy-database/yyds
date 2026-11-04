@@ -238,7 +238,10 @@ def _transactions_rollback_registry(engine: str, connect: Callable[..., Any], ta
         connection.rollback()
         rows = _query(engine, connection, f"SELECT id, name FROM {table} ORDER BY id")
         aggregate = _query(engine, connection, f"SELECT COUNT(*) FROM {table}")
-        extra_outcome = _exec(engine, connection, f"SELECT id FROM {extra}")
+        try:
+            extra_outcome = ("rows", _query(engine, connection, f"SELECT id FROM {extra}"))
+        except Exception as error:  # noqa: BLE001 - the missing table is the observation
+            extra_outcome = ("error", getattr(error, "errno", None) if engine == "mysql" else getattr(error, "sqlstate", None))
     finally:
         connection.close()
     _drop(connect, engine, extra)
@@ -366,6 +369,7 @@ def _prepared_loop_1000(engine: str, connect: Callable[..., Any], table: str) ->
         connection.close()
     check(len(rows) == 1000, f"prepared loop stored {len(rows)} rows")
     check(rows[0] == (1, "n0") and rows[-1] == (1000, "n999"), f"prepared loop ids are {rows[0]!r}..{rows[-1]!r}")
+    check([row[0] for row in rows] == list(range(1, 1001)), "prepared loop ids contain a gap")
     check(selected == [("n499", 499.0)], f"parameterised SELECT returned {selected!r}")
     return {"rows": rows, "selected": selected, "rows_written": len(rows)}
 
@@ -381,10 +385,14 @@ def _concurrent_two_connections(engine: str, connect: Callable[..., Any], table:
     def writer(base: int) -> None:
         connection = connect()
         try:
-            for chunk in range(10):
-                values = ",".join(f"('c{base + chunk * 100 + row}', {base + chunk * 100 + row})" for row in range(100))
-                outcome = _exec(engine, connection, f"INSERT INTO {table} (name, score) VALUES {values}")
-                check(outcome[0] == "ok", f"concurrent insert returned {outcome!r}")
+            # Parameterised rows: PostgreSQL renders `$1`/`$2` and therefore
+            # exercises the extended-protocol describe path, where an omitted
+            # `BIGSERIAL` column must not be mistaken for a missing primary key.
+            cursor = connection.cursor(prepared=True) if engine == "mysql" else connection.cursor()
+            with cursor:
+                for row in range(1000):
+                    score = base + row
+                    cursor.execute(f"INSERT INTO {table} (name, score) VALUES (%s, %s)", (f"c{score}", score))
         finally:
             connection.close()
 
@@ -403,11 +411,22 @@ def _concurrent_two_connections(engine: str, connect: Callable[..., Any], table:
         connection.close()
     check(aggregate[0][0] == 2000 and aggregate[0][1] == 1 and aggregate[0][2] == 2000, f"concurrent aggregate {aggregate!r}")
     check(distinct == [(2000, 2000)], f"concurrent ids or names are not unique: {distinct!r}")
-    # Which connection wins which id is timing dependent, but every row's name
-    # and score must still describe the same logical insert.
+    # Which connection wins which id is timing dependent, so the generated ids
+    # cannot be compared across two independent servers. The deterministic
+    # observations are the id set itself and the `(name, score)` pairs; the
+    # gateway-local check below still ties each name to its own score.
+    rows = sorted(rows, key=lambda row: row[1])
     mismatched = [row for row in rows if row[1] != f"c{int(row[2])}"]
     check(not mismatched, f"concurrent writes paired the wrong name and score: {mismatched[:3]!r}")
-    return {"aggregate": aggregate, "distinct": distinct, "rows": rows, "rows_written": 2000}
+    ids = tuple(sorted(row[0] for row in rows))
+    check(ids == tuple(range(1, 2001)), "concurrent ids are not 1..2000 without gaps")
+    return {
+        "aggregate": aggregate,
+        "distinct": distinct,
+        "ids": ids,
+        "rows": [(row[1], row[2]) for row in rows],
+        "rows_written": 2000,
+    }
 
 
 @scenario("metadata_projection_paging")
@@ -490,7 +509,13 @@ def _run_scenario(scenario_spec: Scenario, engine: str, connect: Callable[..., A
 
 
 def _restart_after_1000(engine: str, seed: YydsNode) -> CaseResult:
-    """Runs the restart scenario on its own data directory in catalog mode."""
+    """Runs the restart scenario on its own persisted registry directory.
+
+    Catalog-mode DDL is intentionally in-memory, so a restart there loses every
+    table the client created. Sequence durability is a registry property and is
+    therefore exercised on the persisted registry, the same path the restart
+    parity probe uses.
+    """
 
     import os
     import tempfile
@@ -500,7 +525,7 @@ def _restart_after_1000(engine: str, seed: YydsNode) -> CaseResult:
     data_dir = Path(tempfile.mkdtemp(prefix=f"yyds-scenario-{engine}-restart-"))
     cluster_id = f"scenario-cluster-{os.getpid()}"
     node_id = f"scenario-node-{os.getpid()}"
-    node = start_node(data_dir=data_dir, cluster_id=cluster_id, node_id=node_id)
+    node = start_node(data_dir=data_dir, cluster_id=cluster_id, node_id=node_id, use_catalog=False)
     try:
         connection = _factory(engine, _node_endpoint(engine, node))()
         try:
@@ -511,18 +536,22 @@ def _restart_after_1000(engine: str, seed: YydsNode) -> CaseResult:
             connection.close()
         check(len(rows) == 1000, f"restart fixture stored {len(rows)} rows")
         node.stop(wipe=False)
-        node = start_node(data_dir=data_dir, cluster_id=cluster_id, node_id=node_id)
+        node = start_node(data_dir=data_dir, cluster_id=cluster_id, node_id=node_id, use_catalog=False)
         connection = _factory(engine, _node_endpoint(engine, node))()
         try:
+            # Parameterised on purpose: the extended-protocol describe path must
+            # allocate the sequence value at execute time, not mistake the
+            # omitted primary key for a missing column.
             if engine == "mysql":
-                with connection.cursor() as cursor:
-                    cursor.execute(f"INSERT INTO {table} (name, score) VALUES ('after', 1000)")
+                with connection.cursor(prepared=True) as cursor:
+                    cursor.execute(f"INSERT INTO {table} (name, score) VALUES (%s, %s)", ("after", 1000))
                     next_id = cursor.lastrowid
             else:
                 with connection.cursor() as cursor:
-                    cursor.execute(f"INSERT INTO {table} (name, score) VALUES ('after', 1000) RETURNING id")
+                    cursor.execute(f"INSERT INTO {table} (name, score) VALUES (%s, %s) RETURNING id", ("after", 1000))
                     next_id = cursor.fetchone()[0]
             count = _query(engine, connection, f"SELECT COUNT(*) FROM {table}")
+            ids = _query(engine, connection, f"SELECT id FROM {table} ORDER BY id")
         finally:
             connection.close()
     except Exception as error:  # noqa: BLE001 - the observed value is the assertion
@@ -532,9 +561,9 @@ def _restart_after_1000(engine: str, seed: YydsNode) -> CaseResult:
             node.stop()
         except Exception:  # noqa: BLE001 - an already stopped node still leaves results
             pass
-    if next_id == 1001 and count == [(1001,)]:
+    if next_id == 1001 and count == [(1001,)] and [row[0] for row in ids] == list(range(1, 1002)):
         return CaseResult(label, "pass", "ids continued at 1001 after a node restart")
-    return CaseResult(label, "fail", f"next id was {next_id!r} and count {count!r}; expected 1001")
+    return CaseResult(label, "fail", f"next id was {next_id!r} and count {count!r}; expected 1001 with no gap")
 
 
 def run_scenarios(node: YydsNode) -> list[CaseResult]:
