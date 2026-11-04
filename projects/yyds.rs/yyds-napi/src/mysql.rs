@@ -39,7 +39,7 @@ impl MysqlServiceHandle {
         let catalog = SqlCatalog::from_yyds_catalog(&yyds_catalog)
             .map_err(|error| Error::from_reason(format!("invalid YYDS catalog: {}", error.message)))?;
         let service =
-            MysqlService::start_with_executor(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), catalog)
+            MysqlService::start_with_executor_lane(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), catalog, 1)
                 .map_err(map_io)?;
         Ok(Self { inner: Some(service) })
     }

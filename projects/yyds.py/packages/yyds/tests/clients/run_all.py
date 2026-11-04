@@ -33,10 +33,11 @@ import oracle_nosql
 import oracle_parity
 import postgres_suite
 import redis_suite
+import sql_scenarios
 from harness import CaseResult, NodeFailure, attach_node, start_node
 
 GATEWAYS = {"postgresql": postgres_suite.run_postgresql, "mysql": mysql_suite.run_mysql}
-SUITES = ("matrix", "payloads", "redis", "mongo", "oracle", "oracle-nosql")
+SUITES = ("matrix", "payloads", "redis", "mongo", "oracle", "oracle-nosql", "sql-scenarios")
 
 
 def _parse_arguments(argv: list[str]) -> argparse.Namespace:
@@ -159,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
             results.extend(binary_payload_suite.run_binary_payloads(node))
         elif arguments.suite == "oracle":
             results.extend(oracle_parity.run_parity(node))
+        elif arguments.suite == "sql-scenarios":
+            results.extend(sql_scenarios.run_scenarios(node))
         else:
             for gateway in _selected_gateways(arguments.gateway):
                 results.extend(GATEWAYS[gateway](node))
@@ -183,6 +186,37 @@ def main(argv: list[str] | None = None) -> int:
         if failures and node is not None:
             print(node.logs(), file=sys.stderr)
         if failures:
+            return 1
+        return 1 if (unverified and arguments.require_oracle) else 0
+
+    if arguments.suite == "sql-scenarios":
+        failures = [result for result in results if result.status == "fail"]
+        unverified = [result for result in results if result.status == "unverified"]
+        verified = len(results) - len(failures) - len(unverified)
+        print(f"{verified} scenario observations matched the engine, {len(failures)} divergent, {len(unverified)} unverified")
+        try:
+            catalog = sql_scenarios.load_catalog()
+        except AssertionError as error:
+            print(f"scenario catalog rejected: {error}", file=sys.stderr)
+            return 1
+        covered = {
+            (engine, spec.name)
+            for engine in sql_scenarios.ENGINES
+            for spec in catalog
+            if any(result.name.startswith(f"{engine}/scenario/{spec.name}") for result in results)
+        }
+        expected = len(sql_scenarios.ENGINES) * len(catalog)
+        if len(covered) != expected:
+            print(f"scenario suite covered {len(covered)} of {expected} engine and scenario pairs", file=sys.stderr)
+            return 1
+        if unverified:
+            print(
+                "unverified scenarios have only driver-level evidence: set `YYDS_ORACLE_*` and rerun to compare against a real engine",
+                file=sys.stderr,
+            )
+        if failures:
+            if node is not None:
+                print(node.logs(), file=sys.stderr)
             return 1
         return 1 if (unverified and arguments.require_oracle) else 0
 
