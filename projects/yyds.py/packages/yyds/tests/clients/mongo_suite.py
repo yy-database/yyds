@@ -10,7 +10,7 @@ this gateway does not implement.
 from __future__ import annotations
 
 from pymongo import MongoClient
-from pymongo.errors import OperationFailure
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from pymongo.server_api import ServerApi
 
 from harness import CaseResult, NodeFailure, YydsNode, check, run_cases, start_mongo_node
@@ -50,6 +50,15 @@ def _case_crud(node: YydsNode) -> None:
         # section folding and not just the inline array path.
         collection.insert_one({"_id": "fixed", "v": 1})
         check(collection.find_one({"_id": "fixed"}) == {"_id": "fixed", "v": 1}, "the inserted document must round-trip")
+
+        # The real server rejects a repeated `_id` with E11000 and keeps the original.
+        try:
+            collection.insert_one({"_id": "fixed", "v": 9})
+        except DuplicateKeyError as error:
+            check(error.code == 11000, f"a duplicate _id must answer code 11000, got {error.code}")
+        else:
+            raise AssertionError("a duplicate _id must be refused with code 11000")
+        check(collection.find_one({"_id": "fixed"}) == {"_id": "fixed", "v": 1}, "the rejected insert must not overwrite")
 
         generated = collection.insert_one({"v": 2}).inserted_id
         check(generated is not None, "the gateway must assign an _id when one is missing")
