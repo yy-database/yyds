@@ -8,7 +8,7 @@ interface ServerCodeFailure extends Error {
     code?: number;
 }
 
-test("mongodb boundary surface covers handshake docs, id overwrite, cursors and unsupported verbs", { timeout: 60_000 }, async (t) => {
+test("mongodb boundary surface covers handshake docs, unique _id, cursors and unsupported verbs", { timeout: 60_000 }, async (t) => {
     const node = await startYydsNode({ mongo: true });
     assert.ok(node.mongo);
     const client = new MongoClient(`mongodb://${node.mongo.host}:${node.mongo.port}`, {
@@ -38,22 +38,28 @@ test("mongodb boundary surface covers handshake docs, id overwrite, cursors and 
 
     const collection = db.collection<{ _id?: string; v?: number; a?: number }>("boundary");
 
-    // An explicit _id write twice silently overwrites the stored document.
+    // An explicit `_id` is unique: the second write is E11000 and the first document
+    // stays unchanged, matching the real server instead of an implicit overwrite.
     const first = await collection.insertOne({ _id: "fixed", v: 1 });
     assert.equal(first.insertedId, "fixed");
     assert.equal((await collection.find({ _id: "fixed" }).toArray())[0]?.v, 1);
-    await collection.insertOne({ _id: "fixed", v: 2 });
-    assert.equal((await collection.find({ _id: "fixed" }).toArray())[0]?.v, 2);
+    await assert.rejects(collection.insertOne({ _id: "fixed", v: 2 }), (error: unknown) => {
+        assert.equal((error as ServerCodeFailure).code, 11000);
+        return true;
+    });
+    assert.equal((await collection.find({ _id: "fixed" }).toArray())[0]?.v, 1);
 
-    // The driver's `insertMany` encodes documents as an OP_MSG sequence section,
-    // which the gateway does not parse; the inline `documents` array does work.
-    await assert.rejects(collection.insertMany([{ a: 9 }]), /'documents' array/i);
+    // The driver's `insertMany` encodes documents as an OP_MSG document-sequence
+    // section. The gateway folds that section back into `documents`, so the driver
+    // path and the inline raw command path must store the same payload.
+    const inserted = await collection.insertMany([{ a: 9 }]);
+    assert.equal(inserted.insertedCount, 1);
     const many = await db.command({ insert: "boundary", documents: [{ a: 1 }, { a: 2 }, { a: 3 }] });
     assert.equal(many.ok, 1);
     assert.equal(many.n, 3);
 
     // Multi-document reads and limits run over the scan path.
-    assert.equal((await collection.find({}).toArray()).length, 4);
+    assert.equal((await collection.find({}).toArray()).length, 5);
     assert.equal((await collection.find({}).limit(2).toArray()).length, 2);
 
     // The raw find reply carries the namespaced cursor even for empty batches.
@@ -64,7 +70,7 @@ test("mongodb boundary surface covers handshake docs, id overwrite, cursors and 
     // Delete boundaries: missing id deletes nothing, limit 1 drops one, limit 0 drops all.
     assert.equal((await collection.deleteOne({ _id: "missing" })).deletedCount, 0);
     assert.equal((await collection.deleteOne({})).deletedCount, 1);
-    assert.equal((await collection.deleteMany({})).deletedCount, 3);
+    assert.equal((await collection.deleteMany({})).deletedCount, 4);
     assert.deepEqual(await collection.find({}).toArray(), []);
 
     // Namespaces are `db.collection`, so the same id in another database is absent.
@@ -84,7 +90,7 @@ test("mongodb boundary surface covers handshake docs, id overwrite, cursors and 
     }
 });
 
-test("mongodb answers an empty collection name with 73 and never reports 11000 for a duplicate _id", { timeout: 60_000 }, async (t) => {
+test("mongodb answers an empty collection name with 73 and a duplicate _id with 11000", { timeout: 60_000 }, async (t) => {
     const node = await startYydsNode({ mongo: true });
     assert.ok(node.mongo);
     const client = new MongoClient(`mongodb://${node.mongo.host}:${node.mongo.port}`, {
@@ -116,17 +122,13 @@ test("mongodb answers an empty collection name with 73 and never reports 11000 f
         });
     }
 
-    // The executor has no unique-index machinery, so a repeated explicit `_id`
-    // overwrites in place. Asserting the absence of a thrown duplicate-key error
-    // is the contract: a 11000 reply here would be a fabricated MongoDB semantic.
+    // MongoDB's `_id` is a unique key: a repeated value must surface E11000 and the
+    // first document must survive. Silent overwrite would be a fabricated semantic.
     const collection = db.collection<{ _id: string; v: number }>("dup");
     await collection.insertOne({ _id: "fixed", v: 1 });
-    let duplicateError: unknown;
-    try {
-        await collection.insertOne({ _id: "fixed", v: 2 });
-    } catch (error) {
-        duplicateError = error;
-    }
-    assert.equal(duplicateError, undefined, `a duplicate _id must not fail, so no 11000 either: ${String(duplicateError)}`);
-    assert.equal((await collection.find({ _id: "fixed" }).toArray())[0]?.v, 2, "the second insert must overwrite the first");
+    await assert.rejects(collection.insertOne({ _id: "fixed", v: 2 }), (error: unknown) => {
+        assert.equal((error as ServerCodeFailure).code, 11000, "a duplicate _id must surface code 11000");
+        return true;
+    });
+    assert.equal((await collection.find({ _id: "fixed" }).toArray())[0]?.v, 1, "the rejected insert must not overwrite");
 });
