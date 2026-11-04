@@ -7,6 +7,6 @@ mongod --data-dir DIR --cluster-id ID --node-id ID --port 27017
 mongo --host 127.0.0.1 --port 27017 ping
 ```
 
-`mongod` starts the YYDS node including its other protocol listeners and does not create a MongoDB-only supervisor. The probe answers `hello` / `ping` and explicitly rejects every collection command rather than fabricating results. Pass `--data-dir`, `--cluster-id`, and `--node-id`; set `YYDS_CLI_PATH` when the executable is not on `PATH`.
+`mongod` starts the YYDS node including its other protocol listeners and does not create a MongoDB-only supervisor. The probe answers `hello` / `ping` plus `insert`, `find`, `count`, `aggregate` (only `$match`, constant-`_id` `$group` counting and `$project`), `delete`, `getMore` and `killCursors`; other commands answer `59` instead of fabricating results. Cursors live in the node process and are reclaimed lazily after ten idle minutes, on the next cursor operation rather than by a background timer. Pass `--data-dir`, `--cluster-id`, and `--node-id`; set `YYDS_CLI_PATH` when the executable is not on `PATH`.
 
 The package API re-exports `@yyds/yyds` unchanged.
