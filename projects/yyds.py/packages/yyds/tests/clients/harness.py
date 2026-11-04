@@ -194,21 +194,38 @@ def _wait_until_ready(node: YydsNode, timeout: float) -> None:
     raise NodeFailure(f"node did not accept SQL connections within {timeout:.0f}s\n{node.logs()}")
 
 
-def start_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS, schema_path: Path = SCHEMA_PATH) -> YydsNode:
+def start_node(
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    schema_path: Path = SCHEMA_PATH,
+    data_dir: Path | None = None,
+    cluster_id: str | None = None,
+    node_id: str | None = None,
+    use_catalog: bool = True,
+) -> YydsNode:
     """Starts one node with both SQL gateways mounted from a published catalog.
 
     `schema_path` selects the VOS catalog the node publishes. The binary payload
     suite needs its own `payloads` table, so it passes its own schema file while
     the regular matrix keeps `schema.vos`.
+
+    Passing `data_dir` reuses an existing node directory (restart cycles). The
+    identity arguments are then required too, and the caller decides when to
+    wipe the directory via `node.stop(wipe=...)`. `use_catalog=False` starts the
+    node on its own persisted schema registry and skips the `catalog` step, so
+    tables created through DDL survive the restart.
     """
 
     reserved: set[int] = set()
     redis_port = _free_port(reserved)
     pgsql_port = _free_port(reserved)
     mysql_port = _free_port(reserved)
-    data_dir = Path(tempfile.mkdtemp(prefix="yyds-sql-clients-"))
-    cluster_id = f"cluster-{os.getpid()}-{int(time.time())}"
-    node_id = f"node-{os.getpid()}"
+    if data_dir is None:
+        data_dir = Path(tempfile.mkdtemp(prefix="yyds-sql-clients-"))
+        cluster_id = f"cluster-{os.getpid()}-{int(time.time())}"
+        node_id = f"node-{os.getpid()}"
+    if cluster_id is None or node_id is None:
+        raise NodeFailure("reusing a data directory requires both cluster_id and node_id")
 
     node = YydsNode(
         host="127.0.0.1",
@@ -223,41 +240,43 @@ def start_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS, schema_path: Path = 
         if init.returncode != 0:
             raise NodeFailure(f"yyds init exited with code {init.returncode}: {init.stderr.strip()}")
         catalog_path = data_dir / "catalog.yyds"
-        publish = _run_cli(
-            [
-                "catalog",
-                "--catalog-path",
-                str(catalog_path),
-                "--schema-file",
-                str(schema_path),
-                "--schema-version",
-                str(SCHEMA_VERSION),
-            ],
-            30.0,
-        )
-        if publish.returncode != 0:
-            raise NodeFailure(f"yyds catalog exited with code {publish.returncode}: {publish.stderr.strip()}")
-
-        node.process = subprocess.Popen(
-            _cli_arguments(
+        # `catalog` rewrites the catalog file from the VOS document, so a restart
+        # that reuses the directory must not run it again.
+        if use_catalog:
+            publish = _run_cli(
                 [
-                    "start",
-                    "--data-dir",
-                    str(data_dir),
-                    "--cluster-id",
-                    cluster_id,
-                    "--node-id",
-                    node_id,
+                    "catalog",
                     "--catalog-path",
                     str(catalog_path),
-                    "--redis-port",
-                    str(redis_port),
-                    "--pgsql-port",
-                    str(pgsql_port),
-                    "--mysql-port",
-                    str(mysql_port),
-                ]
-            ),
+                    "--schema-file",
+                    str(schema_path),
+                    "--schema-version",
+                    str(SCHEMA_VERSION),
+                ],
+                30.0,
+            )
+            if publish.returncode != 0:
+                raise NodeFailure(f"yyds catalog exited with code {publish.returncode}: {publish.stderr.strip()}")
+
+        start_arguments = [
+            "start",
+            "--data-dir",
+            str(data_dir),
+            "--cluster-id",
+            cluster_id,
+            "--node-id",
+            node_id,
+            "--redis-port",
+            str(redis_port),
+            "--pgsql-port",
+            str(pgsql_port),
+            "--mysql-port",
+            str(mysql_port),
+        ]
+        if use_catalog:
+            start_arguments += ["--catalog-path", str(catalog_path)]
+        node.process = subprocess.Popen(
+            _cli_arguments(start_arguments),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
