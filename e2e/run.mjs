@@ -224,6 +224,18 @@ try {
     failures += await runSuite("examples-py", python, [join(ROOT, "projects/yyds.py/examples/bulk.py")], env);
     failures += await runSuite("examples-redis-py", python, [join(ROOT, "projects/yyds.py/examples/redis_roundtrip.py")], env);
     failures += await runSuite("examples-mongo-py", python, [join(ROOT, "projects/yyds.py/examples/mongo.py")], env);
+    failures += await runSuite(
+        "examples-redis-ts",
+        process.execPath,
+        ["--experimental-strip-types", join(ROOT, "projects/yyds.ts/examples/redis.ts")],
+        env,
+    );
+    failures += await runSuite(
+        "examples-mongo-ts",
+        process.execPath,
+        ["--experimental-strip-types", join(ROOT, "projects/yyds.ts/examples/mongo.ts")],
+        env,
+    );
 
     if (!existsSync(schemaPath)) throw new Error(`schema registry was not persisted at ${schemaPath}`);
     console.log(`[schema] ${schemaPath} (${statSync(schemaPath).size} bytes)`);
@@ -249,7 +261,7 @@ try {
     });
 
     exitCode = failures === 0 ? 0 : 1;
-    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=8 failed=${failures}`);
+    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=10 failed=${failures}`);
 } catch (error) {
     console.error(`[smoke] error: ${error.message}`);
     console.error(nodeLogs());

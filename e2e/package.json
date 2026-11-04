@@ -6,6 +6,8 @@
         "smoke": "node run.mjs"
     },
     "devDependencies": {
+        "ioredis": "^5.8.1",
+        "mongodb": "^7.7.0",
         "mysql2": "^3.24.6",
         "pg": "^8.23.1"
     }
