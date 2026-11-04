@@ -121,13 +121,12 @@ test("mongodb answers an empty collection name with 73 and never reports 11000 f
     // is the contract: a 11000 reply here would be a fabricated MongoDB semantic.
     const collection = db.collection<{ _id: string; v: number }>("dup");
     await collection.insertOne({ _id: "fixed", v: 1 });
-    let duplicateError: ServerCodeFailure | undefined;
+    let duplicateError: unknown;
     try {
         await collection.insertOne({ _id: "fixed", v: 2 });
     } catch (error) {
-        duplicateError = error as ServerCodeFailure;
+        duplicateError = error;
     }
-    assert.equal(duplicateError, undefined, `a duplicate _id must not fail, got ${duplicateError?.message}`);
-    assert.notEqual(duplicateError?.code, 11000, "the gateway must not fabricate a duplicate-key error");
+    assert.equal(duplicateError, undefined, `a duplicate _id must not fail, so no 11000 either: ${String(duplicateError)}`);
     assert.equal((await collection.find({ _id: "fixed" }).toArray())[0]?.v, 2, "the second insert must overwrite the first");
 });

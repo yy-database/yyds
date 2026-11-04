@@ -15,6 +15,15 @@ pub struct LocalExecutorHandle {
     pub(crate) inner: Arc<dyn KeyValueExecutor>,
 }
 
+/// Outcome of one budgeted reclamation pass.
+#[napi(object)]
+pub struct SweepOutcome {
+    /// Records inspected in this pass.
+    pub examined: u32,
+    /// Records physically removed in this pass.
+    pub reclaimed: u32,
+}
+
 #[napi]
 impl LocalExecutorHandle {
     /// Opens the executor for one node directory with catalog-driven routing.
@@ -38,6 +47,23 @@ impl LocalExecutorHandle {
     pub fn sweep_expired(&self) -> Result<u32> {
         let reclaimed = self.inner.sweep_expired(None).map_err(|error| Error::from_reason(error.to_string()))?.reclaimed;
         u32::try_from(reclaimed).map_err(|_| Error::from_reason("reclaimed record count exceeds u32"))
+    }
+
+    /// Runs one budgeted reclamation pass and reports what it inspected.
+    ///
+    /// `budget_per_shard` caps the records inspected per shard, mirroring the
+    /// background sweeper's bound. A pass stopped by the budget resumes from its
+    /// key cursor on the next call, so the shard tail is never starved.
+    #[napi]
+    pub fn sweep_expired_budgeted(&self, budget_per_shard: u32) -> Result<SweepOutcome> {
+        let report = self
+            .inner
+            .sweep_expired(Some(budget_per_shard as usize))
+            .map_err(|error| Error::from_reason(error.to_string()))?;
+        Ok(SweepOutcome {
+            examined: u32::try_from(report.examined).map_err(|_| Error::from_reason("examined record count exceeds u32"))?,
+            reclaimed: u32::try_from(report.reclaimed).map_err(|_| Error::from_reason("reclaimed record count exceeds u32"))?,
+        })
     }
 }
 

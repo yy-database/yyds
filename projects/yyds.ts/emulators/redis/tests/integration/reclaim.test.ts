@@ -150,6 +150,58 @@ test("a live rewrite without a deadline is never reclaimed", { timeout: 120_000 
     }
 });
 
+test("a budgeted pass stops at the budget and resumes from the shard cursor", { timeout: 120_000 }, async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "yyds-sweep-budget-"));
+    // The persistent head sorts before every expired record, so a pass that restarts from
+    // the shard head instead of resuming would inspect the same 256 live keys forever and
+    // reclaim nothing.
+    const persistent = 256;
+    const expiring = 300;
+    try {
+        const node = await startYydsNode({
+            dataDir,
+            clusterId: "cluster-sweep-budget",
+            nodeId: "node-sweep-budget",
+            // Park the background sweeper so only the explicit passes below reclaim.
+            expirySweepIntervalMs: 3_600_000,
+        });
+        const client = driver(node.redis.host, node.redis.port);
+        await client.connect();
+        const writes: Promise<unknown>[] = [];
+        for (let index = 0; index < persistent; index += 1) {
+            writes.push(client.set(`a-${String(index).padStart(3, "0")}`, "keep"));
+        }
+        for (let index = 0; index < expiring; index += 1) {
+            writes.push(client.sendCommand(["SET", `b-${String(index).padStart(3, "0")}`, "gone", "PX", "50"]));
+        }
+        const replies = await Promise.all(writes);
+        assert.ok(replies.every((reply) => reply === "OK"), "every seeded write must be acked");
+        await sleep(200); // every short deadline elapses and no read touches the keys again
+        await client.close();
+        await node.stop({ wipe: false });
+
+        const native = loadYydsNative();
+        const executor = new native.LocalExecutorHandle(dataDir, null);
+        const first = executor.sweepExpiredBudgeted(persistent);
+        assert.equal(first.examined, persistent, "the budget must cap inspection at exactly 256 records");
+        assert.equal(first.reclaimed, 0, "the pass stops inside the persistent head, so nothing is reclaimed");
+
+        const second = executor.sweepExpiredBudgeted(persistent);
+        assert.equal(second.examined, persistent, "the resumed pass inspects the next 256 records, not the head again");
+        assert.equal(second.reclaimed, persistent, "the resumed window reclaims every expired record it inspects");
+
+        const third = executor.sweepExpiredBudgeted(expiring * 2);
+        assert.equal(third.examined, expiring - persistent, "the tail is the only work left after the resumed window");
+        assert.equal(third.reclaimed, expiring - persistent, "the tail reclaims the remaining expired records");
+
+        const fourth = executor.sweepExpiredBudgeted(persistent);
+        assert.equal(fourth.examined, persistent, "a finished pass resets the cursor and the next pass starts at the head");
+        assert.equal(fourth.reclaimed, 0, "the survivors are never reclaimed");
+    } finally {
+        await rm(dataDir, { recursive: true, force: true });
+    }
+});
+
 test("background reclamation shrinks the shard without any read traffic", { timeout: 120_000 }, async () => {
     const node = await startYydsNode({ expirySweepIntervalMs: 50 });
     const client = driver(node.redis.host, node.redis.port);
