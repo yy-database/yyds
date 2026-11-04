@@ -462,14 +462,19 @@ mod tests {
     fn with_env<F: FnOnce()>(name: &str, value: Option<&str>, body: F) {
         let _g = env_guard().lock().unwrap();
         let prev = env::var_os(name);
-        match value {
-            Some(v) => env::set_var(name, v),
-            None => env::remove_var(name),
+        // The mutex above serializes every env mutation in this test module.
+        unsafe {
+            match value {
+                Some(v) => env::set_var(name, v),
+                None => env::remove_var(name),
+            }
         }
         body();
-        match prev {
-            Some(v) => env::set_var(name, v),
-            None => env::remove_var(name),
+        unsafe {
+            match prev {
+                Some(v) => env::set_var(name, v),
+                None => env::remove_var(name),
+            }
         }
     }
 
