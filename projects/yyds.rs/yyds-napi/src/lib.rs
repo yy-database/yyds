@@ -3,7 +3,7 @@
 #![deny(clippy::all)]
 
 use napi_derive::napi;
-use yyds_types::version;
+use yyds::types::version;
 
 mod catalog;
 mod executor;

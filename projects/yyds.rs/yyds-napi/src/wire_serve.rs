@@ -521,9 +521,9 @@ mod tests {
     // remote authed, remote bad-token) without socket scaffolding.
 
     use std::collections::HashMap;
-    use yyds_execution::LocalExecutor;
-    use yyds_kv::MemoryShard;
-    use yyds_types::{ShardEpoch, ShardId, ShardMap};
+    use yyds::execution::LocalExecutor;
+    use yyds::kv::MemoryShard;
+    use yyds::types::{ShardEpoch, ShardId, ShardMap};
 
     fn auth_test_ctx() -> WireContext {
         let routing = ShardMap::new(ShardEpoch(1), vec![ShardId("local-0".into())]).unwrap();

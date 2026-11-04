@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds_gateway::SqlSchemaRegistry;
+use yyds::gateway::SqlSchemaRegistry;
 
 /// One persisted SQL schema registry shared by every gateway of a node.
 ///

@@ -2,29 +2,29 @@ use std::{net::SocketAddr, sync::Arc};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds_catalog::Catalog;
-use yyds_gateway::SqlCatalog;
-use yyds_gateway_mysql::service::MysqlService;
+use yyds::catalog::Catalog;
+use yyds::gateway::SqlCatalog;
+use yyds::gateway::pgsql::service::PgsqlService;
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle, schema::SqlSchemaRegistryHandle};
 
-/// Loopback MySQL protocol listener bound to a node lease.
+/// Loopback PostgreSQL protocol listener bound to a node lease.
 #[napi]
-pub struct MysqlServiceHandle {
-    inner: Option<MysqlService>,
+pub struct PgsqlServiceHandle {
+    inner: Option<PgsqlService>,
 }
 
 #[napi]
-impl MysqlServiceHandle {
-    /// Starts a protocol-only MySQL listener (no SQL runtime).
+impl PgsqlServiceHandle {
+    /// Starts a protocol-only PostgreSQL listener (no SQL runtime).
     #[napi(constructor)]
     pub fn start(lease: &NodeLeaseHandle, port: u16) -> Result<Self> {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let service = MysqlService::start(Arc::clone(&lease.inner), address, None).map_err(map_io)?;
+        let service = PgsqlService::start(Arc::clone(&lease.inner), address).map_err(map_io)?;
         Ok(Self { inner: Some(service) })
     }
 
-    /// Starts a MySQL listener with a YYDS SQL runtime for SELECT, DML, and DDL execution.
+    /// Starts a PostgreSQL listener with a YYDS SQL runtime for SELECT, DML, and DDL execution.
     ///
     /// `catalog_path` 指向 `.yyds` catalog 文件，用于构造 SQL name-resolution 视图。
     #[napi(factory)]
@@ -39,12 +39,12 @@ impl MysqlServiceHandle {
         let catalog = SqlCatalog::from_yyds_catalog(&yyds_catalog)
             .map_err(|error| Error::from_reason(format!("invalid YYDS catalog: {}", error.message)))?;
         let service =
-            MysqlService::start_with_executor(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), catalog)
+            PgsqlService::start_with_executor(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), catalog)
                 .map_err(map_io)?;
         Ok(Self { inner: Some(service) })
     }
 
-    /// Starts a MySQL listener on a registry shared with the other SQL gateway.
+    /// Starts a PostgreSQL listener on a registry shared with the other SQL gateway.
     ///
     /// The node opens one persisted registry per data directory, so PostgreSQL
     /// and MySQL allocate disjoint type ids and persist the same schema state.
@@ -56,7 +56,7 @@ impl MysqlServiceHandle {
         schema: &SqlSchemaRegistryHandle,
     ) -> Result<Self> {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let service = MysqlService::start_with_registry(
+        let service = PgsqlService::start_with_registry(
             Arc::clone(&lease.inner),
             address,
             Arc::clone(&executor.inner),
@@ -73,7 +73,7 @@ impl MysqlServiceHandle {
 
     #[napi]
     pub fn is_finished(&self) -> Result<bool> {
-        self.inner.as_ref().map(MysqlService::is_finished).ok_or_else(missing)
+        self.inner.as_ref().map(PgsqlService::is_finished).ok_or_else(missing)
     }
 
     #[napi]
@@ -84,7 +84,7 @@ impl MysqlServiceHandle {
 }
 
 fn missing() -> Error {
-    Error::from_reason("mysql service is not running")
+    Error::from_reason("postgresql service is not running")
 }
 
 fn map_io(error: std::io::Error) -> Error {

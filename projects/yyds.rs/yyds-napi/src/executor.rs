@@ -7,7 +7,7 @@ use std::{
 use crate::node_runtime::open_executor;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds_execution::{ExpirySweeper, KeyValueExecutor};
+use yyds::execution::{ExpirySweeper, KeyValueExecutor};
 
 /// Local key-value executor for one node directory.
 #[napi]

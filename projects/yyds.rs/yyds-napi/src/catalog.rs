@@ -2,7 +2,7 @@
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds_catalog::Catalog;
+use yyds::catalog::Catalog;
 
 /// Publishes a VOS schema document into a `.yyds` catalog file.
 ///
