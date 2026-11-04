@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { RUST_WS_DIR } from "./rust-manifest.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const napiDir = join(root, RUST_WS_DIR, "ffis/yyds-napi");
+const napiDir = join(root, RUST_WS_DIR, "yyds-napi");
 
 /** @type {Record<string, { packageDir: string; fileName: string }>} */
 const ARTIFACTS = {
