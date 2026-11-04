@@ -123,3 +123,5 @@ jobs:
         run: python projects/yyds.py/packages/yyds/tests/clients/run_all.py --suite redis
       - name: Run the MongoDB real-client suite
         run: python projects/yyds.py/packages/yyds/tests/clients/run_all.py --suite mongo
+      - name: Gate on the Redis and MongoDB case counts
+        run: node scripts/assert-test-count.mjs redis-py mongo-py
