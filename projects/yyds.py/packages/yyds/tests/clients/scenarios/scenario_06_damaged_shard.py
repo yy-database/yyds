@@ -13,12 +13,13 @@ the damaged bytes untouched. Our own decoder is never used as the judge.
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-from harness import CaseResult, _run_cli, start_redis_node
+from harness import CaseResult, NodeFailure, start_redis_node
 from scenarios.support import confirm, digest, redis_client, run_module
 
 SCENARIO_ID = "06-damaged-shard"
@@ -83,24 +84,22 @@ def _damage_case(name: str, mutate, expected_tokens: tuple[str, ...], scale: int
         mutate(shard)
         damaged_digest = digest([shard.read_bytes()])
 
-        # `yyds init` is the real process that opens the shard, and the CLI is invoked
-        # directly here: the shared harness wipes a caller-owned directory on a failed
-        # start, which would destroy the damaged bytes before they can be compared.
-        refusal = _run_cli(
-            [
-                "init",
-                "--data-dir",
-                str(data_dir),
-                "--cluster-id",
-                identity["cluster_id"],
-                "--node-id",
-                identity["node_id"],
-            ],
-            60.0,
-        )
+        # The failing start goes through the shared harness on purpose: a refused
+        # start must never delete the caller's data directory, so the damaged bytes
+        # are still here to compare after the refusal.
+        failure: NodeFailure | None = None
+        try:
+            started = start_redis_node(data_dir=data_dir, sweep_interval_ms=50, **identity)
+        except NodeFailure as error:
+            failure = error
+        else:
+            started.stop(wipe=False)
 
-        confirm(refusal.returncode != 0, "a node accepted a damaged shard and opened it")
-        message = f"exit {refusal.returncode}: {refusal.stderr.strip()}"
+        confirm(failure is not None, "a node accepted a damaged shard and started serving")
+        message = str(failure)
+        exit_match = re.search(r"exited with code (\d+)", message)
+        confirm(exit_match is not None, f"the failed start did not report an exit code: {message[-400:]}")
+        confirm(int(exit_match.group(1)) != 0, f"the damaged shard start exited with code {exit_match.group(1)}")
         lowered = message.lower()
         missing = [token for token in expected_tokens if token not in lowered]
         confirm(not missing, f"the refusal message never mentions {missing}: {message[-400:]}")

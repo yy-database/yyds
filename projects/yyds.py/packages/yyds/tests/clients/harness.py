@@ -127,7 +127,9 @@ class YydsNode:
         stderr = "\n".join(self.stderr_lines)
         return f"--- node stdout ---\n{stdout}\n--- node stderr ---\n{stderr}"
 
-    def stop(self, *, wipe: bool = True) -> None:
+    def stop(self, *, wipe: bool = False) -> None:
+        """Stops the node. Never deletes data unless `wipe=True` is passed explicitly."""
+
         if self.attached:
             return
         process = self.process
@@ -147,6 +149,7 @@ class YydsNode:
                     process.wait(timeout=10.0)
         self.process = None
         if wipe and self.data_dir is not None and self.data_dir.exists():
+            print(f"removing node data directory {self.data_dir.resolve()}", file=sys.stderr)
             shutil.rmtree(self.data_dir, ignore_errors=True)
             self.data_dir = None
 
@@ -220,7 +223,8 @@ def start_node(
     redis_port = _free_port(reserved)
     pgsql_port = _free_port(reserved)
     mysql_port = _free_port(reserved)
-    if data_dir is None:
+    owns_dir = data_dir is None
+    if owns_dir:
         data_dir = Path(tempfile.mkdtemp(prefix="yyds-sql-clients-"))
         cluster_id = f"cluster-{os.getpid()}-{int(time.time())}"
         node_id = f"node-{os.getpid()}"
@@ -290,7 +294,7 @@ def start_node(
         _wait_until_ready(node, timeout)
         return node
     except Exception:
-        node.stop()
+        node.stop(wipe=owns_dir)
         raise
 
 
@@ -343,7 +347,7 @@ def start_mongo_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> YydsNode:
             time.sleep(PROBE_INTERVAL_SECONDS)
         raise NodeFailure(f"node did not accept MongoDB connections within {timeout:.0f}s\n{node.logs()}")
     except Exception:
-        node.stop()
+        node.stop(wipe=True)
         raise
 
 
@@ -393,7 +397,8 @@ def start_redis_node(
 
     reserved: set[int] = set()
     redis_port = _free_port(reserved)
-    if data_dir is None:
+    owns_dir = data_dir is None
+    if owns_dir:
         data_dir = Path(tempfile.mkdtemp(prefix="yyds-redis-clients-"))
         cluster_id = f"cluster-{os.getpid()}-{int(time.time())}"
         node_id = f"node-{os.getpid()}"
@@ -433,7 +438,7 @@ def start_redis_node(
         _wait_for_redis(node, timeout)
         return node
     except Exception:
-        node.stop()
+        node.stop(wipe=owns_dir)
         raise
 
 
@@ -453,7 +458,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     finally:
-        node.stop()
+        node.stop(wipe=True)
 
 
 if __name__ == "__main__":
