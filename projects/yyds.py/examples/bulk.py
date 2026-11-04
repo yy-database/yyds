@@ -47,11 +47,8 @@ def bulk_pg() -> None:
         connection.execute(
             f"CREATE TABLE {PG_TABLE} (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL, note TEXT, UNIQUE (email))"
         )
-        for index, (email, note) in enumerate(zip(EMAILS, NOTES), start=1):
-            # 显式主键：示例只验收批写批读，不绑定网关的序列分配路径。
-            connection.execute(
-                f"INSERT INTO {PG_TABLE} (id, email, note) VALUES (%s, %s, %s)", (index, email, note)
-            )
+        for email, note in zip(EMAILS, NOTES):
+            connection.execute(f"INSERT INTO {PG_TABLE} (email, note) VALUES (%s, %s)", (email, note))
         row = connection.execute(
             f"SELECT count(*), min(id), max(id) FROM {PG_TABLE}"
         ).fetchone()

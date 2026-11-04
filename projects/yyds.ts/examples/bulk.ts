@@ -50,9 +50,7 @@ async function bulkPg() {
             `CREATE TABLE ${PG_TABLE} (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL, note TEXT, UNIQUE (email))`,
         );
         for (let index = 0; index < ROWS; index += 1) {
-            // 显式主键：示例只验收批写批读，不绑定网关的序列分配路径。
-            await client.query(`INSERT INTO ${PG_TABLE} (id, email, note) VALUES ($1, $2, $3)`, [
-                index + 1,
+            await client.query(`INSERT INTO ${PG_TABLE} (email, note) VALUES ($1, $2)`, [
                 emails[index],
                 notes[index],
             ]);
