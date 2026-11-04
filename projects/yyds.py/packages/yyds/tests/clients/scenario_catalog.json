@@ -64,9 +64,9 @@
     {
       "name": "sequence_after_1000_restart",
       "feature": "AUTO_INCREMENT and BIGSERIAL continuation after 1000 rows and a node restart",
-      "risk": "sequence durability across a catalog-derived node restart",
+      "risk": "sequence durability across a node restart on the persisted registry",
       "rows": 1000,
-      "shape": "1000 rows, node stop, node start on the same data directory, one more insert",
+      "shape": "1000 literal rows, node stop, node start on the same persisted registry directory, then a parameterised insert that omits the sequence column",
       "external": "real engine restart evidence: MySQL 8.0.44 and PostgreSQL 16.15 continued at 1001 after a restart",
       "cases": {
         "python": "scenarios/sequence_after_1000_restart",
