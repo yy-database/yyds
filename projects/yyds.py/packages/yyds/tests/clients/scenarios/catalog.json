@@ -1,0 +1,137 @@
+{
+  "minimum_scale": 1000,
+  "scenarios": [
+    {
+      "id": "01-single-shard",
+      "module": "scenario_01_single_shard",
+      "feature": "redis/key-space at scale",
+      "risk": "shard threshold and split: four-digit key counts could be silently lost or unreadable, or a second shard file could appear that no routing map published",
+      "scale": 1000,
+      "oracle": "redis",
+      "cases": [
+        "01-single-shard/redis/1000-keys-write-read",
+        "01-single-shard/redis/one-published-shard",
+        "01-single-shard/redis/engine-parity"
+      ]
+    },
+    {
+      "id": "02-expiry-sweep-budget",
+      "module": "scenario_02_expiry_sweep",
+      "feature": "redis/expiry reclamation",
+      "risk": "`sweep_expired` inspects 256 records per shard per tick: five `EXPIREAT` batches need several ticks, and a cursor that restarts at the shard head starves the tail forever",
+      "scale": 1000,
+      "oracle": "redis",
+      "cases": [
+        "02-expiry-sweep-budget/redis/five-expireat-batches",
+        "02-expiry-sweep-budget/redis/sweep-tail-cursor",
+        "02-expiry-sweep-budget/redis/engine-parity"
+      ]
+    },
+    {
+      "id": "03-rename-rotation",
+      "module": "scenario_03_rename_rotation",
+      "feature": "redis/RENAME and RENAMENX",
+      "risk": "deadline migration at scale: a rotation that resets the TTL, loses the value or leaves the source behind",
+      "scale": 1000,
+      "oracle": "redis",
+      "cases": [
+        "03-rename-rotation/redis/1000-key-rotation",
+        "03-rename-rotation/redis/renamenx-at-scale",
+        "03-rename-rotation/redis/engine-parity"
+      ]
+    },
+    {
+      "id": "04-restart-persistence",
+      "module": "scenario_04_restart_persistence",
+      "feature": "redis/restart persistence",
+      "risk": "state rebuild and TTL monotonicity: content lost or a deadline resurrected above its previous remaining time after a restart",
+      "scale": 1000,
+      "oracle": "client-only",
+      "cases": [
+        "04-restart-persistence/redis/keys-and-checksum",
+        "04-restart-persistence/redis/ttl-monotonic"
+      ]
+    },
+    {
+      "id": "05-oversize-value",
+      "module": "scenario_05_oversize_value",
+      "feature": "redis/frame limits",
+      "risk": "1 MiB inbound frame cap: a large value must round-trip below the cap and be refused above it without killing the node or the other keys",
+      "scale": 1000,
+      "oracle": "redis",
+      "cases": [
+        "05-oversize-value/redis/1000-keys-with-large-value",
+        "05-oversize-value/redis/above-frame-cap",
+        "05-oversize-value/redis/engine-parity"
+      ]
+    },
+    {
+      "id": "06-damaged-shard",
+      "module": "scenario_06_damaged_shard",
+      "feature": "redis/.yykv integrity",
+      "risk": "checksum and version gates: a flipped byte, a truncated body or a legacy v2 header must be refused by a real node process without rewriting the file",
+      "scale": 1000,
+      "oracle": "client-only",
+      "cases": [
+        "06-damaged-shard/redis/bit-flip",
+        "06-damaged-shard/redis/truncated",
+        "06-damaged-shard/redis/legacy-v2"
+      ]
+    },
+    {
+      "id": "07-mongo-batch-insert",
+      "module": "scenario_07_mongo_batch_insert",
+      "feature": "mongo/insert",
+      "risk": "duplicate `_id` inside a 1000-document batch: code 11000, `n=0` for an ordered abort, first document preserved, and unordered batches must not drop later valid documents",
+      "scale": 1000,
+      "oracle": "mongo",
+      "cases": [
+        "07-mongo-batch-insert/mongo/1000-documents",
+        "07-mongo-batch-insert/mongo/duplicate-id-ordered",
+        "07-mongo-batch-insert/mongo/duplicate-id-unordered",
+        "07-mongo-batch-insert/mongo/engine-parity"
+      ]
+    },
+    {
+      "id": "08-mongo-find-cursor",
+      "module": "scenario_08_mongo_find_cursor",
+      "feature": "mongo/find",
+      "risk": "cursor semantics: `sort`, `skip`, non-`_id` filter, empty result and `batchSize` must shape the first batch, not just return every document",
+      "scale": 1000,
+      "oracle": "mongo",
+      "cases": [
+        "08-mongo-find-cursor/mongo/sorted-window",
+        "08-mongo-find-cursor/mongo/non-id-filter",
+        "08-mongo-find-cursor/mongo/empty-batch",
+        "08-mongo-find-cursor/mongo/batch-size",
+        "08-mongo-find-cursor/mongo/engine-parity"
+      ]
+    },
+    {
+      "id": "09-mongo-delete-namespace",
+      "module": "scenario_09_mongo_delete_namespace",
+      "feature": "mongo/delete",
+      "risk": "delete counts and scope: 0/1/all removals must follow the filter, not the scan head, and two databases must stay isolated",
+      "scale": 1000,
+      "oracle": "mongo",
+      "cases": [
+        "09-mongo-delete-namespace/mongo/delete-zero-one-all",
+        "09-mongo-delete-namespace/mongo/cross-database-isolation",
+        "09-mongo-delete-namespace/mongo/engine-parity"
+      ]
+    },
+    {
+      "id": "10-mongo-error-codes",
+      "module": "scenario_10_mongo_error_codes",
+      "feature": "mongo/error codes",
+      "risk": "error-code truth: an unknown command must answer 59 and an invalid namespace must answer 73, including at a namespace name the real engine refuses",
+      "scale": 1000,
+      "oracle": "mongo",
+      "cases": [
+        "10-mongo-error-codes/mongo/unknown-command-59",
+        "10-mongo-error-codes/mongo/invalid-namespace-73",
+        "10-mongo-error-codes/mongo/engine-parity"
+      ]
+    }
+  ]
+}
