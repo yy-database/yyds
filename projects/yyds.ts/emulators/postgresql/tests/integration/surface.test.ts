@@ -12,6 +12,8 @@ function expectSqlState(state: string, message?: RegExp) {
     return (error: unknown) => {
         const failure = error as PgFailure;
         assert.equal(failure.code, state, `expected SQLSTATE ${state}, got ${failure.message}`);
+        // Engine wording is asserted only where the gateway reproduces it
+        // verbatim; elsewhere the SQLSTATE is the contract.
         if (message) assert.match(failure.message, message);
         return true;
     };
@@ -26,21 +28,23 @@ test("pg session surface covers parameters, dialect rejections and empty queries
     });
     await client.connect();
 
-    // SHOW server_version agrees with the startup ParameterStatus "YYDS <version>" shape.
+    // Gateway identity, not an engine value: the emulated server advertises
+    // itself as `YYDS <version>` instead of claiming a PostgreSQL release.
     const version = await client.query("SHOW server_version");
     assert.equal(version.rows.length, 1);
     assert.match(String(version.rows[0]?.server_version), /^YYDS \d+\.\d+/);
 
-    // search_path follows the most recent SET and defaults to the PostgreSQL convention.
+    // search_path follows the most recent SET and defaults to the PostgreSQL
+    // convention, which prints `$user` quoted because it is an identifier.
     const initialPath = await client.query("SHOW search_path");
-    assert.equal(String(initialPath.rows[0]?.search_path), "$user, public");
+    assert.equal(String(initialPath.rows[0]?.search_path), '"$user", public');
     await client.query("SET search_path = 'yyds_schema'");
     const movedPath = await client.query("SHOW search_path");
     assert.equal(String(movedPath.rows[0]?.search_path), "yyds_schema");
 
     await assert.rejects(
         client.query("SET search_path = 123"),
-        expectSqlState("22P02", /invalid value for parameter "search_path": expected string literal/),
+        expectSqlState("22023", /invalid value for parameter "search_path": "123"/),
     );
 
     await assert.rejects(
@@ -58,19 +62,19 @@ test("pg session surface covers parameters, dialect rejections and empty queries
 
     await assert.rejects(
         client.query("SHOW VARIABLES"),
-        expectSqlState("42601", /SHOW VARIABLES is MySQL syntax/),
+        expectSqlState("42601"),
     );
     await assert.rejects(
         client.query("PRAGMA foreign_keys = OFF"),
-        expectSqlState("42601", /PRAGMA is not PostgreSQL syntax/),
+        expectSqlState("42601"),
     );
     await assert.rejects(
         client.query("SAVEPOINT sp_one"),
-        expectSqlState("25001", /SAVEPOINT is only valid inside a transaction/),
+        expectSqlState("25P01"),
     );
     await assert.rejects(
         client.query("SELEKT 1"),
-        expectSqlState("42601", /Oak could not parse/),
+        expectSqlState("42601"),
     );
 
     // An empty simple query answers EmptyQueryResponse instead of a parse error.
