@@ -17,11 +17,11 @@ from pymongo import MongoClient
 from harness import CaseResult, start_mongo_node
 from scenarios.support import (
     MONGO_URL_ENV,
-    compare_facts,
     confirm,
     mongo_client,
-    no_oracle,
     oracle_mongo,
+    parity_against_oracle,
+    run_cases,
     run_module,
 )
 
@@ -33,9 +33,11 @@ CASES = (
     "08-mongo-find-cursor/mongo/range-filter-1000",
     "08-mongo-find-cursor/mongo/full-sort-1000",
     "08-mongo-find-cursor/mongo/count-1000",
+    "08-mongo-find-cursor/mongo/count-skip-limit-boundary",
     "08-mongo-find-cursor/mongo/aggregate-count-1000",
     "08-mongo-find-cursor/mongo/aggregate-project",
     "08-mongo-find-cursor/mongo/batch-size",
+    "08-mongo-find-cursor/mongo/find-skip-beyond-window",
     "08-mongo-find-cursor/mongo/engine-parity",
 )
 
@@ -99,6 +101,23 @@ def _facts(database, scale: int) -> dict:
         ]
     )
 
+    # Boundary windows: a skip past the end must count and return nothing rather
+    # than clamp to a plausible slice, and `limit: 0` means "no limit" in both
+    # `count` and `find`.
+    count_boundaries = {
+        "skip_tail_limit_more": _probe(
+            lambda: database.command({"count": COLLECTION, "query": {}, "skip": scale - 100, "limit": 200})["n"]
+        ),
+        "skip_exact_end": _probe(lambda: database.command({"count": COLLECTION, "query": {}, "skip": scale})["n"]),
+        "skip_beyond_end": _probe(lambda: database.command({"count": COLLECTION, "query": {}, "skip": scale * 2})["n"]),
+        "limit_zero": _probe(lambda: database.command({"count": COLLECTION, "query": {}, "limit": 0})["n"]),
+        "skip_half_limit_zero": _probe(
+            lambda: database.command({"count": COLLECTION, "query": {}, "skip": scale // 2, "limit": 0})["n"]
+        ),
+    }
+    beyond_window = _probe(lambda: [document["_id"] for document in collection.find({}, skip=scale + 1)])
+    unlimited_window = _probe(lambda: len(list(collection.find({}, limit=0))))
+
     reply = database.command({"find": COLLECTION, "batchSize": BATCH_SIZE})
     cursor = reply["cursor"]
     first_batch = len(cursor["firstBatch"])
@@ -122,6 +141,9 @@ def _facts(database, scale: int) -> dict:
         "count_all": count_all,
         "count_range": count_range,
         "count_documents_range": count_documents_range,
+        "count_boundaries": count_boundaries,
+        "beyond_window": beyond_window,
+        "unlimited_window": unlimited_window,
         "aggregate_count": aggregate_count,
         "projected": projected,
         "first_batch": first_batch,
@@ -206,6 +228,30 @@ def run(scale: int = 1000) -> list[CaseResult]:
                     f"`count_documents` returned {gateway['count_documents_range']}, expected {scale // 2}",
                 )
 
+            def count_skip_limit_boundary() -> None:
+                expected = {
+                    "skip_tail_limit_more": 100,
+                    "skip_exact_end": 0,
+                    "skip_beyond_end": 0,
+                    "limit_zero": scale,
+                    "skip_half_limit_zero": scale - scale // 2,
+                }
+                for name, value in expected.items():
+                    confirm(
+                        gateway["count_boundaries"][name] == value,
+                        f"`count` boundary `{name}` returned {gateway['count_boundaries'][name]!r}, expected {value}",
+                    )
+
+            def find_skip_beyond_window() -> None:
+                confirm(
+                    gateway["beyond_window"] == [],
+                    f"`skip` past the end returned {gateway['beyond_window']}, expected no documents",
+                )
+                confirm(
+                    gateway["unlimited_window"] == scale,
+                    f"`limit: 0` returned {gateway['unlimited_window']}/{scale} documents",
+                )
+
             def aggregate_count_1000() -> None:
                 confirm(
                     gateway["aggregate_count"] == scale // 2,
@@ -227,58 +273,59 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 confirm(gateway["cursor_opened"], "a 1000-document scan must leave a live cursor after the first batch")
                 confirm(gateway["drained"] == scale, f"draining the cursor yielded {gateway['drained']}/{scale} documents")
 
-            for name, case in (
-                (CASES[0], sorted_window),
-                (CASES[1], filtered),
-                (CASES[2], empty_batch),
-                (CASES[3], range_filter_1000),
-                (CASES[4], full_sort_1000),
-                (CASES[5], count_1000),
-                (CASES[6], aggregate_count_1000),
-                (CASES[7], aggregate_project),
-                (CASES[8], batch_size),
-            ):
-                try:
-                    case()
-                except Exception as error:  # noqa: BLE001
-                    results.append(CaseResult(name, "fail", f"{type(error).__name__}: {error}"))
-                else:
-                    results.append(CaseResult(name, "pass", f"{scale}-document scan behaves as declared"))
+            results.extend(
+                run_cases(
+                    (
+                        (CASES[0], sorted_window),
+                        (CASES[1], filtered),
+                        (CASES[2], empty_batch),
+                        (CASES[3], range_filter_1000),
+                        (CASES[4], full_sort_1000),
+                        (CASES[5], count_1000),
+                        (CASES[6], count_skip_limit_boundary),
+                        (CASES[7], aggregate_count_1000),
+                        (CASES[8], aggregate_project),
+                        (CASES[9], batch_size),
+                        (CASES[10], find_skip_beyond_window),
+                    ),
+                    detail=f"{scale}-document scan behaves as declared",
+                )
+            )
         finally:
             client.close()
 
-        engine = oracle_mongo()
-        if engine is None:
-            results.append(no_oracle(CASES[9], MONGO_URL_ENV))
-        else:
-            try:
-                engine_facts = _engine_facts(engine, scale)
-            finally:
-                engine.close()
-            results.append(
-                compare_facts(
-                    CASES[9],
-                    gateway,
-                    engine_facts,
-                    (
-                        "sorted_window",
-                        "skipped_window",
-                        "filtered",
-                        "empty",
-                        "range_filtered",
-                        "full_sorted",
-                        "count_all",
-                        "count_range",
-                        "count_documents_range",
-                        "aggregate_count",
-                        "projected",
-                        "first_batch",
-                        "cursor_opened",
-                        "drained",
-                        "documents",
-                    ),
-                )
+        results.append(
+            parity_against_oracle(
+                CASES[11],
+                gateway,
+                oracle_mongo,
+                _engine_facts,
+                (
+                    "sorted_window",
+                    "skipped_window",
+                    "filtered",
+                    "empty",
+                    "range_filtered",
+                    "full_sorted",
+                    "count_all",
+                    "count_range",
+                    "count_documents_range",
+                    # `count_boundaries` stays out on purpose: they exercise the
+                    # legacy `count` command, whose availability depends on the
+                    # server version, and the gateway behaviour is pinned locally.
+                    "aggregate_count",
+                    "projected",
+                    "first_batch",
+                    "cursor_opened",
+                    "drained",
+                    "documents",
+                    "beyond_window",
+                    "unlimited_window",
+                ),
+                scale,
+                MONGO_URL_ENV,
             )
+        )
     finally:
         node.stop()
 

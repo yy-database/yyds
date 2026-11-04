@@ -96,7 +96,7 @@
       "id": "08-mongo-find-cursor",
       "module": "scenario_08_mongo_find_cursor",
       "feature": "mongo/find",
-      "risk": "cursor semantics and counters: `sort`, `skip`, non-`_id` filter, empty result, `batchSize` and `count`/`aggregate` must shape the result, not just return every document",
+      "risk": "cursor semantics and counters: `sort`, `skip`, non-`_id` filter, empty result, `batchSize`, count/aggregate shaping, and the window boundaries where `skip` passes the end or `limit` is zero must shape the result, not just return every document",
       "scale": 1000,
       "oracle": "mongo",
       "cases": [
@@ -106,9 +106,11 @@
         "08-mongo-find-cursor/mongo/range-filter-1000",
         "08-mongo-find-cursor/mongo/full-sort-1000",
         "08-mongo-find-cursor/mongo/count-1000",
+        "08-mongo-find-cursor/mongo/count-skip-limit-boundary",
         "08-mongo-find-cursor/mongo/aggregate-count-1000",
         "08-mongo-find-cursor/mongo/aggregate-project",
         "08-mongo-find-cursor/mongo/batch-size",
+        "08-mongo-find-cursor/mongo/find-skip-beyond-window",
         "08-mongo-find-cursor/mongo/engine-parity"
       ]
     },
@@ -137,6 +139,22 @@
         "10-mongo-error-codes/mongo/invalid-namespace-73",
         "10-mongo-error-codes/mongo/unsupported-stage-59",
         "10-mongo-error-codes/mongo/engine-parity"
+      ]
+    },
+    {
+      "id": "11-mongo-aggregate-surface",
+      "module": "scenario_11_mongo_aggregate_surface",
+      "feature": "mongo/aggregate",
+      "risk": "stage admission: every pipeline stage outside `$match`, `$group` and `$project` must answer 59 instead of an empty or partial batch, and the implemented stages must keep their exact documents at 1000 scale — `$group` on an empty input, `$project` exclusion, and a three-stage chain",
+      "scale": 1000,
+      "oracle": "mongo",
+      "cases": [
+        "11-mongo-aggregate-surface/mongo/unimplemented-stages-59",
+        "11-mongo-aggregate-surface/mongo/rejected-after-match-59",
+        "11-mongo-aggregate-surface/mongo/group-empty-input",
+        "11-mongo-aggregate-surface/mongo/project-exclusion-1000",
+        "11-mongo-aggregate-surface/mongo/group-project-chain",
+        "11-mongo-aggregate-surface/mongo/engine-parity"
       ]
     }
   ]
