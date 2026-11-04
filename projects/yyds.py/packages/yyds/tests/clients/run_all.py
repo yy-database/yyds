@@ -11,6 +11,12 @@ reuses an already running node instead.
 `--suite redis` and `--suite mongo` each start their own gateway-only node and
 drive it with the real Python client for that protocol.
 
+`--suite oracle` compares the emulated gateways against real engines: it
+re-runs the same probe against the MySQL/PostgreSQL endpoint named by
+`YYDS_ORACLE_*` and the node under test, and reports every capability whose
+outcome differs. Without oracle endpoints the probes stay `unverified` and
+must not be counted as passed. `--require-oracle` turns that into a failure.
+
 Exit codes: 0 every case passed, 1 at least one case failed, 2 the node never
 became usable.
 """
@@ -23,12 +29,13 @@ import sys
 import binary_payload_suite
 import mongo_suite
 import mysql_suite
+import oracle_parity
 import postgres_suite
 import redis_suite
 from harness import CaseResult, NodeFailure, attach_node, start_node
 
 GATEWAYS = {"postgresql": postgres_suite.run_postgresql, "mysql": mysql_suite.run_mysql}
-SUITES = ("matrix", "payloads", "redis", "mongo")
+SUITES = ("matrix", "payloads", "redis", "mongo", "oracle")
 
 
 def _parse_arguments(argv: list[str]) -> argparse.Namespace:
@@ -39,6 +46,11 @@ def _parse_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--postgresql-port", type=int)
     parser.add_argument("--mysql-port", type=int)
     parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument(
+        "--require-oracle",
+        action="store_true",
+        help="fail when engine-parity probes have no real engine to compare against",
+    )
     arguments = parser.parse_args(argv)
     if arguments.suite == "payloads" and (arguments.gateway != "all" or arguments.postgresql_port or arguments.mysql_port):
         parser.error("--suite payloads always runs every driver against its own node")
@@ -120,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.suite == "payloads":
             results.extend(binary_payload_suite.run_binary_payloads(node))
+        elif arguments.suite == "oracle":
+            results.extend(oracle_parity.run_parity(node))
         else:
             for gateway in _selected_gateways(arguments.gateway):
                 results.extend(GATEWAYS[gateway](node))
@@ -130,6 +144,22 @@ def main(argv: list[str] | None = None) -> int:
     for result in results:
         detail = f" - {result.detail}" if result.detail else ""
         print(f"{result.status.upper()} {result.name}{detail}")
+
+    if arguments.suite == "oracle":
+        failures = [result for result in results if result.status == "fail"]
+        unverified = [result for result in results if result.status == "unverified"]
+        verified = len(results) - len(failures) - len(unverified)
+        print(f"{verified} engine-parity probes passed, {len(failures)} divergent, {len(unverified)} unverified")
+        if unverified:
+            print(
+                "unverified probes have only driver-level evidence: set `YYDS_ORACLE_*` and rerun to compare against a real engine",
+                file=sys.stderr,
+            )
+        if failures and node is not None:
+            print(node.logs(), file=sys.stderr)
+        if failures:
+            return 1
+        return 1 if (unverified and arguments.require_oracle) else 0
 
     failures = [result for result in results if result.status != "pass"]
     passed = len(results) - len(failures)
