@@ -16,11 +16,11 @@ from pymongo import MongoClient
 from harness import CaseResult, start_mongo_node
 from scenarios.support import (
     MONGO_URL_ENV,
-    compare_facts,
     confirm,
     mongo_client,
-    no_oracle,
     oracle_mongo,
+    parity_against_oracle,
+    run_cases,
     run_module,
 )
 
@@ -141,45 +141,39 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 confirm(gateway["b_intact"], "the delete crossed into another database")
                 confirm(gateway["b_value"] == "b", "the surviving document is not the one written to the other database")
 
-            for name, case in ((CASES[0], counts), (CASES[1], isolation)):
-                try:
-                    case()
-                except Exception as error:  # noqa: BLE001
-                    results.append(CaseResult(name, "fail", f"{type(error).__name__}: {error}"))
-                else:
-                    results.append(CaseResult(name, "pass", f"{scale}-document delete behaves as declared"))
+            results.extend(
+                run_cases(
+                    ((CASES[0], counts), (CASES[1], isolation)),
+                    detail=f"{scale}-document delete behaves as declared",
+                )
+            )
         finally:
             client.close()
 
-        engine = oracle_mongo()
-        if engine is None:
-            results.append(no_oracle(CASES[2], MONGO_URL_ENV))
-        else:
-            try:
-                engine_facts = _engine_facts(engine, scale)
-            finally:
-                engine.close()
-            results.append(
-                compare_facts(
-                    CASES[2],
-                    gateway,
-                    engine_facts,
-                    (
-                        "zero_deleted",
-                        "zero_count",
-                        "one_deleted",
-                        "one_count",
-                        "one_target_gone",
-                        "one_head_intact",
-                        "one_other_intact",
-                        "all_deleted",
-                        "all_count",
-                        "a_empty",
-                        "b_intact",
-                        "b_value",
-                    ),
-                )
+        results.append(
+            parity_against_oracle(
+                CASES[2],
+                gateway,
+                oracle_mongo,
+                _engine_facts,
+                (
+                    "zero_deleted",
+                    "zero_count",
+                    "one_deleted",
+                    "one_count",
+                    "one_target_gone",
+                    "one_head_intact",
+                    "one_other_intact",
+                    "all_deleted",
+                    "all_count",
+                    "a_empty",
+                    "b_intact",
+                    "b_value",
+                ),
+                scale,
+                MONGO_URL_ENV,
             )
+        )
     finally:
         node.stop()
 

@@ -12,16 +12,16 @@ from __future__ import annotations
 import sys
 
 from pymongo import MongoClient
-from pymongo.errors import OperationFailure
 
 from harness import CaseResult, start_mongo_node
 from scenarios.support import (
     MONGO_URL_ENV,
-    compare_facts,
+    command_error_code,
     confirm,
     mongo_client,
-    no_oracle,
     oracle_mongo,
+    parity_against_oracle,
+    run_cases,
     run_module,
 )
 
@@ -34,24 +34,16 @@ CASES = (
 )
 
 
-def _code(database, command: dict) -> int | None:
-    try:
-        database.command(command)
-    except OperationFailure as error:
-        return error.code
-    return None
-
-
 def _facts(database, scale: int) -> dict:
     codes = {
-        "unknown_code": _code(database, {"yydsUnknownCommand": 1}),
-        "empty_namespace_code": _code(database, {"insert": "", "documents": [{"_id": scale}]}),
-        "empty_find_code": _code(database, {"find": "", "filter": {}}),
-        "dotted_collection_code": _code(database, {"insert": "dotted.name", "documents": [{"_id": 1}]}),
-        "dollar_collection_code": _code(database, {"insert": "money$name", "documents": [{"_id": 2}]}),
+        "unknown_code": command_error_code(database, {"yydsUnknownCommand": 1}),
+        "empty_namespace_code": command_error_code(database, {"insert": "", "documents": [{"_id": scale}]}),
+        "empty_find_code": command_error_code(database, {"find": "", "filter": {}}),
+        "dotted_collection_code": command_error_code(database, {"insert": "dotted.name", "documents": [{"_id": 1}]}),
+        "dollar_collection_code": command_error_code(database, {"insert": "money$name", "documents": [{"_id": 2}]}),
         # `$lookup` is a legal MongoDB stage the gateway does not implement, so the
         # risk is silently yielding an empty or unfiltered batch instead of saying so.
-        "unsupported_stage_code": _code(
+        "unsupported_stage_code": command_error_code(
             database,
             {"aggregate": "aggregate-probe", "pipeline": [{"$lookup": {"from": "other", "pipeline": []}}], "cursor": {}},
         ),
@@ -103,41 +95,35 @@ def run(scale: int = 1000) -> list[CaseResult]:
                     f"an unimplemented `$lookup` stage answered code {gateway['unsupported_stage_code']}, expected 59",
                 )
 
-            for name, case in ((CASES[0], unknown), (CASES[1], namespace), (CASES[2], unsupported_stage)):
-                try:
-                    case()
-                except Exception as error:  # noqa: BLE001
-                    results.append(CaseResult(name, "fail", f"{type(error).__name__}: {error}"))
-                else:
-                    results.append(CaseResult(name, "pass", f"checked at scale {scale}"))
+            results.extend(
+                run_cases(
+                    ((CASES[0], unknown), (CASES[1], namespace), (CASES[2], unsupported_stage)),
+                    detail=f"checked at scale {scale}",
+                )
+            )
         finally:
             client.close()
 
-        engine = oracle_mongo()
-        if engine is None:
-            results.append(no_oracle(CASES[3], MONGO_URL_ENV))
-        else:
-            try:
-                engine_facts = _engine_facts(engine, scale)
-            finally:
-                engine.close()
-            results.append(
-                compare_facts(
-                    CASES[3],
-                    gateway,
-                    engine_facts,
-                    (
-                        "unknown_code",
-                        "empty_namespace_code",
-                        "empty_find_code",
-                        "dotted_collection_code",
-                        "dollar_collection_code",
-                        # `unsupported_stage_code` is deliberately left out: a real
-                        # server runs `$lookup`, while this gateway declares 59 for
-                        # stages it does not implement.
-                    ),
-                )
+        results.append(
+            parity_against_oracle(
+                CASES[3],
+                gateway,
+                oracle_mongo,
+                _engine_facts,
+                (
+                    "unknown_code",
+                    "empty_namespace_code",
+                    "empty_find_code",
+                    "dotted_collection_code",
+                    "dollar_collection_code",
+                    # `unsupported_stage_code` is deliberately left out: a real
+                    # server runs `$lookup`, while this gateway declares 59 for
+                    # stages it does not implement.
+                ),
+                scale,
+                MONGO_URL_ENV,
             )
+        )
     finally:
         node.stop()
 

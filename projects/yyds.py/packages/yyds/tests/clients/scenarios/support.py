@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterable
 
 import redis
 from pymongo import MongoClient
+from pymongo.errors import OperationFailure
 from pymongo.server_api import ServerApi
 
 from harness import CaseResult
@@ -138,12 +139,73 @@ def wait_until(predicate: Callable[[], bool], *, timeout: float, interval: float
     return predicate()
 
 
+def run_cases(
+    cases: Iterable[tuple[str, Callable[[], None]]],
+    *,
+    detail: str = "",
+) -> list[CaseResult]:
+    """Turns every `(case name, assertion)` pair into one verdict.
+
+    This is the only place a scenario case becomes a result, so a module supplies
+    cases and facts and never grows its own loop.
+    """
+
+    results: list[CaseResult] = []
+    for name, case in cases:
+        try:
+            case()
+        except Exception as error:  # noqa: BLE001 - any driver failure is the case outcome
+            results.append(CaseResult(name, "fail", f"{type(error).__name__}: {error}"))
+        else:
+            results.append(CaseResult(name, "pass", detail))
+    return results
+
+
+def parity_against_oracle(
+    name: str,
+    gateway: dict[str, Any],
+    oracle_factory: Callable[[], Any],
+    facts: Callable[[Any, int], dict[str, Any]],
+    fields: tuple[str, ...],
+    scale: int,
+    variable: str,
+) -> CaseResult:
+    """Compares gateway facts with a real engine, or reports `unverified`.
+
+    The engine is optional by design: without one the case stays `unverified`
+    and is never counted as a pass.
+    """
+
+    engine = oracle_factory()
+    if engine is None:
+        return no_oracle(name, variable)
+    try:
+        engine_facts = facts(engine, scale)
+    finally:
+        engine.close()
+    return compare_facts(name, gateway, engine_facts, fields)
+
+
 def unverified(name: str, reason: str) -> CaseResult:
     return CaseResult(name, "unverified", reason)
 
 
 def no_oracle(name: str, variable: str) -> CaseResult:
     return unverified(name, f"only driver-level evidence: set `{variable}` to compare against a real engine")
+
+
+def command_error_code(database, command: dict) -> int | None:
+    """Runs one command and returns its server error code, or `None` on success.
+
+    A driver that receives a wrong batch cannot see a generic failure, so cases
+    branch on the exact code rather than on "something was raised".
+    """
+
+    try:
+        database.command(command)
+    except OperationFailure as error:
+        return error.code
+    return None
 
 
 def compare_facts(
