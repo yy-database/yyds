@@ -29,13 +29,20 @@ The probe creates and drops its own table, so the oracle account needs
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Callable
 
-from harness import CaseResult, YydsNode, check
+from harness import CaseResult, YydsNode, check, start_node
 
-TABLE = "yyds_parity_probe"
+MYSQL_TABLE = "yyds_parity_mysql"
+PG_TABLE = "yyds_parity_pg"
+# The simulated node publishes one catalog for both gateways, so each engine
+# needs its own table name. A real MySQL and a real PostgreSQL never share a
+# database, making a shared probe name a harness artefact rather than a
+# capability difference.
 
 MYSQL_ENV = (
     "YYDS_ORACLE_MYSQL_HOST",
@@ -145,34 +152,35 @@ def _pg_outcome(connection, sql: str, *, fetch: bool) -> tuple:
 def _mysql_probe_results(connect: Callable[[], Any]) -> dict[str, tuple]:
     """Runs the MySQL probe list against whatever endpoint `connect` opens."""
 
+    table = MYSQL_TABLE
     results: dict[str, tuple] = {}
     connection = connect()
     try:
-        _mysql_outcome(connection, f"DROP TABLE IF EXISTS {TABLE}", fetch=False)
+        _mysql_outcome(connection, f"DROP TABLE IF EXISTS {table}", fetch=False)
         results["select_literal"] = _mysql_outcome(connection, "SELECT 1", fetch=True)
         results["create_table"] = _mysql_outcome(
             connection,
-            f"CREATE TABLE {TABLE} (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(16) NOT NULL, score DOUBLE NULL) "
+            f"CREATE TABLE {table} (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(16) NOT NULL, score DOUBLE NULL) "
             "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
             fetch=False,
         )
         with connection.cursor() as cursor:
-            results["insert_autoincrement_first"] = _mysql_insert(cursor, f"INSERT INTO {TABLE} (name) VALUES ('a')")
-            results["insert_autoincrement_second"] = _mysql_insert(cursor, f"INSERT INTO {TABLE} (name) VALUES ('b')")
-        results["select_rows"] = _mysql_outcome(connection, f"SELECT id, name, score FROM {TABLE} ORDER BY id", fetch=True)
-        results["duplicate_key"] = _mysql_outcome(connection, f"INSERT INTO {TABLE} (id, name) VALUES (1, 'dup')", fetch=False)
-        results["unknown_column"] = _mysql_outcome(connection, f"SELECT missing_column FROM {TABLE}", fetch=True)
+            results["insert_autoincrement_first"] = _mysql_insert(cursor, f"INSERT INTO {table} (name) VALUES ('a')")
+            results["insert_autoincrement_second"] = _mysql_insert(cursor, f"INSERT INTO {table} (name) VALUES ('b')")
+        results["select_rows"] = _mysql_outcome(connection, f"SELECT id, name, score FROM {table} ORDER BY id", fetch=True)
+        results["duplicate_key"] = _mysql_outcome(connection, f"INSERT INTO {table} (id, name) VALUES (1, 'dup')", fetch=False)
+        results["unknown_column"] = _mysql_outcome(connection, f"SELECT missing_column FROM {table}", fetch=True)
         results["unknown_table"] = _mysql_outcome(connection, "SELECT id FROM yyds_parity_missing_table", fetch=True)
         results["information_schema_columns"] = _mysql_outcome(
             connection,
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_KEY FROM information_schema.COLUMNS "
-            f"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{TABLE}' ORDER BY ORDINAL_POSITION",
+            f"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{table}' ORDER BY ORDINAL_POSITION",
             fetch=True,
         )
         results["information_schema_tables"] = _mysql_outcome(
             connection,
             "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{TABLE}'",
+            f"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{table}'",
             fetch=True,
         )
     finally:
@@ -183,8 +191,8 @@ def _mysql_probe_results(connect: Callable[[], Any]) -> dict[str, tuple]:
     continuation = connect()
     try:
         with continuation.cursor() as cursor:
-            results["sequence_continues_on_new_connection"] = _mysql_insert(cursor, f"INSERT INTO {TABLE} (name) VALUES ('c')")
-        _mysql_outcome(continuation, f"DROP TABLE IF EXISTS {TABLE}", fetch=False)
+            results["sequence_continues_on_new_connection"] = _mysql_insert(cursor, f"INSERT INTO {table} (name) VALUES ('c')")
+        _mysql_outcome(continuation, f"DROP TABLE IF EXISTS {table}", fetch=False)
     finally:
         continuation.close()
     return results
@@ -204,40 +212,41 @@ def _mysql_insert(cursor, sql: str) -> tuple:
 def _pg_probe_results(connect: Callable[[], Any]) -> dict[str, tuple]:
     """Runs the PostgreSQL probe list against whatever endpoint `connect` opens."""
 
+    table = PG_TABLE
     results: dict[str, tuple] = {}
     connection = connect()
     try:
-        _pg_outcome(connection, f"DROP TABLE IF EXISTS {TABLE}", fetch=False)
+        _pg_outcome(connection, f"DROP TABLE IF EXISTS {table}", fetch=False)
         results["select_literal"] = _pg_outcome(connection, "SELECT 1", fetch=True)
         results["create_table"] = _pg_outcome(
             connection,
-            f"CREATE TABLE {TABLE} (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, score DOUBLE PRECISION NULL)",
+            f"CREATE TABLE {table} (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, score DOUBLE PRECISION NULL)",
             fetch=False,
         )
         results["insert_bigserial_first"] = _pg_outcome(
             connection,
-            f"INSERT INTO {TABLE} (name) VALUES ('a') RETURNING id",
+            f"INSERT INTO {table} (name) VALUES ('a') RETURNING id",
             fetch=True,
         )
         results["insert_bigserial_second"] = _pg_outcome(
             connection,
-            f"INSERT INTO {TABLE} (name) VALUES ('b') RETURNING id",
+            f"INSERT INTO {table} (name) VALUES ('b') RETURNING id",
             fetch=True,
         )
-        results["select_rows"] = _pg_outcome(connection, f"SELECT id, name, score FROM {TABLE} ORDER BY id", fetch=True)
-        results["duplicate_key"] = _pg_outcome(connection, f"INSERT INTO {TABLE} (id, name) VALUES (1, 'dup')", fetch=False)
-        results["unknown_column"] = _pg_outcome(connection, f"SELECT missing_column FROM {TABLE}", fetch=True)
+        results["select_rows"] = _pg_outcome(connection, f"SELECT id, name, score FROM {table} ORDER BY id", fetch=True)
+        results["duplicate_key"] = _pg_outcome(connection, f"INSERT INTO {table} (id, name) VALUES (1, 'dup')", fetch=False)
+        results["unknown_column"] = _pg_outcome(connection, f"SELECT missing_column FROM {table}", fetch=True)
         results["unknown_table"] = _pg_outcome(connection, "SELECT id FROM yyds_parity_missing_table", fetch=True)
         results["information_schema_columns"] = _pg_outcome(
             connection,
             "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-            f"WHERE table_schema = 'public' AND table_name = '{TABLE}' ORDER BY ordinal_position",
+            f"WHERE table_schema = 'public' AND table_name = '{table}' ORDER BY ordinal_position",
             fetch=True,
         )
         results["information_schema_tables"] = _pg_outcome(
             connection,
             "SELECT table_name, table_type FROM information_schema.tables "
-            f"WHERE table_schema = 'public' AND table_name = '{TABLE}'",
+            f"WHERE table_schema = 'public' AND table_name = '{table}'",
             fetch=True,
         )
     finally:
@@ -247,10 +256,10 @@ def _pg_probe_results(connect: Callable[[], Any]) -> dict[str, tuple]:
     try:
         results["sequence_continues_on_new_connection"] = _pg_outcome(
             continuation,
-            f"INSERT INTO {TABLE} (name) VALUES ('c') RETURNING id",
+            f"INSERT INTO {table} (name) VALUES ('c') RETURNING id",
             fetch=True,
         )
-        _pg_outcome(continuation, f"DROP TABLE IF EXISTS {TABLE}", fetch=False)
+        _pg_outcome(continuation, f"DROP TABLE IF EXISTS {table}", fetch=False)
     finally:
         continuation.close()
     return results
@@ -316,10 +325,92 @@ def run_parity(node: YydsNode) -> list[CaseResult]:
         results.extend(_unverified("postgresql", PG_PROBES, "no oracle configured: only driver-level evidence, missing engine parity"))
     else:
         real = _pg_probe_results(_pg_connect(pg_oracle.host, pg_oracle.port, pg_oracle.user, pg_oracle.password, pg_oracle.database))
-        simulated = _pg_probe_results(_pg_connect(node.host, node.pgsql_port, "yyds", "", "yyds"))
+        # The simulated node publishes a single catalog for both SQL gateways.
+        # A real MySQL and a real PostgreSQL never share a database, so the
+        # PostgreSQL probes get their own node instead of colliding with MySQL's
+        # table and row namespace.
+        pg_node = start_node()
+        try:
+            simulated = _pg_probe_results(_pg_connect(pg_node.host, pg_node.pgsql_port, "yyds", "", "yyds"))
+        finally:
+            pg_node.stop()
         results.extend(_compare("postgresql", real, simulated))
 
+    for engine in ("mysql", "postgresql"):
+        results.append(_restart_sequence_probe(engine, use_catalog=True))
+        results.append(_restart_sequence_probe(engine, use_catalog=False))
     return results
+
+
+def _restart_sequence_probe(engine: str, *, use_catalog: bool) -> CaseResult:
+    """Checks `AUTO_INCREMENT` / `BIGSERIAL` continues after a node process restart.
+
+    The counter must live in durable storage: two inserts on the first process,
+    one insert after a restart on the same data directory, and the third value
+    must be 3 rather than restarting at 1. Both engines keep the table and the
+    counter across a real restart, so this is engine behaviour, not an
+    interpretation.
+
+    `use_catalog` runs the node the way every other probe does. When it is
+    false the node owns a persisted schema registry instead, which separates
+    "the counter is not durable" from "catalog-derived DDL is not persisted".
+    """
+
+    data_dir = Path(tempfile.mkdtemp(prefix=f"yyds-{engine}-restart-"))
+    cluster_id = f"restart-cluster-{os.getpid()}"
+    node_id = f"restart-node-{os.getpid()}"
+    label = f"{engine}/oracle/sequence_survives_node_restart"
+    if not use_catalog:
+        label += "_local_registry"
+    mysql = engine == "mysql"
+    table = "yyds_restart_mysql" if mysql else "yyds_restart_pg"
+
+    def open_connection(node: YydsNode):
+        if mysql:
+            return _mysqldb_connect("127.0.0.1", node.mysql_port, "yyds", "", "")(), None
+        return _pg_connect("127.0.0.1", node.pgsql_port, "yyds", "", "yyds")(), None
+
+    def insert(connection) -> Any:
+        if mysql:
+            with connection.cursor() as cursor:
+                cursor.execute(f"INSERT INTO {table} (name) VALUES ('x')")
+                return cursor.lastrowid
+        with connection.cursor() as cursor:
+            cursor.execute(f"INSERT INTO {table} (name) VALUES ('x') RETURNING id")
+            return cursor.fetchone()[0]
+
+    node = start_node(data_dir=data_dir, cluster_id=cluster_id, node_id=node_id, use_catalog=use_catalog)
+    try:
+        connection, _ = open_connection(node)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(f"DROP TABLE IF EXISTS {table}")
+                cursor.execute(
+                    f"CREATE TABLE {table} (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(16) NOT NULL)"
+                    if mysql
+                    else f"CREATE TABLE {table} (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL)"
+                )
+            first = insert(connection)
+            second = insert(connection)
+        finally:
+            connection.close()
+        node.stop(wipe=False)
+        node = start_node(data_dir=data_dir, cluster_id=cluster_id, node_id=node_id, use_catalog=use_catalog)
+        connection, _ = open_connection(node)
+        try:
+            third = insert(connection)
+        finally:
+            connection.close()
+    except Exception as error:  # noqa: BLE001 - the observed values are the assertion
+        return CaseResult(label, "fail", f"restart probe raised {type(error).__name__}: {error}")
+    finally:
+        try:
+            node.stop()
+        except Exception:  # noqa: BLE001 - an already stopped node still leaves results
+            pass
+    if (first, second, third) == (1, 2, 3):
+        return CaseResult(label, "pass", "ids before restart 1,2 and after restart 3")
+    return CaseResult(label, "fail", f"ids were {first!r}, {second!r}, {third!r}; expected 1,2,3")
 
 
 def assert_parity(node: YydsNode) -> None:
