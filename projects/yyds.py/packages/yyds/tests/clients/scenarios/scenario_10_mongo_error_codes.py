@@ -29,6 +29,7 @@ SCENARIO_ID = "10-mongo-error-codes"
 CASES = (
     "10-mongo-error-codes/mongo/unknown-command-59",
     "10-mongo-error-codes/mongo/invalid-namespace-73",
+    "10-mongo-error-codes/mongo/unsupported-stage-59",
     "10-mongo-error-codes/mongo/engine-parity",
 )
 
@@ -48,6 +49,12 @@ def _facts(database, scale: int) -> dict:
         "empty_find_code": _code(database, {"find": "", "filter": {}}),
         "dotted_collection_code": _code(database, {"insert": "dotted.name", "documents": [{"_id": 1}]}),
         "dollar_collection_code": _code(database, {"insert": "money$name", "documents": [{"_id": 2}]}),
+        # `$lookup` is a legal MongoDB stage the gateway does not implement, so the
+        # risk is silently yielding an empty or unfiltered batch instead of saying so.
+        "unsupported_stage_code": _code(
+            database,
+            {"aggregate": "aggregate-probe", "pipeline": [{"$lookup": {"from": "other", "pipeline": []}}], "cursor": {}},
+        ),
     }
     return codes
 
@@ -90,7 +97,13 @@ def run(scale: int = 1000) -> list[CaseResult]:
                     f"a dotted collection name is legal in MongoDB but answered code {gateway['dotted_collection_code']}",
                 )
 
-            for name, case in ((CASES[0], unknown), (CASES[1], namespace)):
+            def unsupported_stage() -> None:
+                confirm(
+                    gateway["unsupported_stage_code"] == 59,
+                    f"an unimplemented `$lookup` stage answered code {gateway['unsupported_stage_code']}, expected 59",
+                )
+
+            for name, case in ((CASES[0], unknown), (CASES[1], namespace), (CASES[2], unsupported_stage)):
                 try:
                     case()
                 except Exception as error:  # noqa: BLE001
@@ -102,7 +115,7 @@ def run(scale: int = 1000) -> list[CaseResult]:
 
         engine = oracle_mongo()
         if engine is None:
-            results.append(no_oracle(CASES[2], MONGO_URL_ENV))
+            results.append(no_oracle(CASES[3], MONGO_URL_ENV))
         else:
             try:
                 engine_facts = _engine_facts(engine, scale)
@@ -110,7 +123,7 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 engine.close()
             results.append(
                 compare_facts(
-                    CASES[2],
+                    CASES[3],
                     gateway,
                     engine_facts,
                     (
@@ -119,6 +132,9 @@ def run(scale: int = 1000) -> list[CaseResult]:
                         "empty_find_code",
                         "dotted_collection_code",
                         "dollar_collection_code",
+                        # `unsupported_stage_code` is deliberately left out: a real
+                        # server runs `$lookup`, while this gateway declares 59 for
+                        # stages it does not implement.
                     ),
                 )
             )
