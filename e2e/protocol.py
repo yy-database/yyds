@@ -5,6 +5,11 @@ mysql-connector-python. Each assertion is derived from what the driver sent, so
 the drivers themselves are the oracle for handshake, round-trip, missing-key and
 error surfaces.
 
+The Redis cases run twice, once on RESP2 and once on RESP3, because redis-py
+negotiates RESP3 with `HELLO 3` on connect and then parses replies strictly: a
+RESP2 null bulk string (`$-1`) inside a RESP3 session is a protocol error the
+client answers by reconnecting until its timeout.
+
 Run through `node e2e/run.mjs`, or by hand with the ``YYDS_*_PORT`` variables
 pointing at an already running node.
 """
@@ -39,15 +44,11 @@ def check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def redis_client(decode_responses: bool = True) -> redis.Redis:
-    # `protocol=2` matches the documented gateway surface. redis-py 8 negotiates
-    # RESP3 with `HELLO 3` and then treats the RESP2 `$-1` null as a protocol
-    # error, so the connection retries until it times out. See the RESP3 null
-    # spelling gap recorded next to the Rust wire suites.
+def redis_client(decode_responses: bool = True, protocol: int = 2) -> redis.Redis:
     return redis.Redis(
         host=HOST,
         port=REDIS_PORT,
-        protocol=2,
+        protocol=protocol,
         decode_responses=decode_responses,
         socket_timeout=30,
     )
@@ -78,31 +79,33 @@ def mysql_connect() -> mysql.connector.MySQLConnection:
     )
 
 
-def case_redis_ping() -> None:
-    client = redis_client()
+def case_redis_ping(protocol: int) -> None:
+    client = redis_client(protocol=protocol)
     try:
         check(client.ping() is True, "PING did not answer PONG")
     finally:
         client.close()
 
 
-def case_redis_kv_roundtrip_and_missing() -> None:
-    client = redis_client()
+def case_redis_kv_roundtrip_and_missing(protocol: int) -> None:
+    client = redis_client(protocol=protocol)
     try:
         key = f"{REDIS_PREFIX}:kv"
         value = f"value-{TAG}-ü-🚀"
         check(client.set(key, value) is True, "SET did not answer OK")
         check(client.get(key) == value, "GET returned a different value")
         check(client.get(f"{REDIS_PREFIX}:absent") is None, "missing GET did not answer None")
+        # The null reply must not cost the connection: the same client keeps answering.
+        check(client.ping() is True, "connection stopped answering after a missing GET")
         check(client.delete(key) == 1, "DEL did not remove the key")
         check(client.get(key) is None, "deleted key is still readable")
     finally:
         client.close()
 
 
-def case_redis_binary_payload_roundtrip() -> None:
-    writer = redis_client()
-    reader = redis_client(decode_responses=False)
+def case_redis_binary_payload_roundtrip(protocol: int) -> None:
+    writer = redis_client(protocol=protocol)
+    reader = redis_client(protocol=protocol, decode_responses=False)
     try:
         payload = b"\x00\x01\x02\x7f\x80\xfe\xff"
         key = f"{REDIS_PREFIX}:binary"
@@ -114,8 +117,8 @@ def case_redis_binary_payload_roundtrip() -> None:
         reader.close()
 
 
-def case_redis_unsupported_command() -> None:
-    client = redis_client()
+def case_redis_unsupported_command(protocol: int) -> None:
+    client = redis_client(protocol=protocol)
     try:
         message = None
         try:
@@ -206,18 +209,39 @@ def case_mysql_unknown_table() -> None:
         connection.close()
 
 
-CASES: list[tuple[str, str, Callable[[], None]]] = [
-    ("redis", "ping_answers_pong", case_redis_ping),
-    ("redis", "kv_roundtrip_and_missing_is_none", case_redis_kv_roundtrip_and_missing),
-    ("redis", "binary_payload_roundtrip", case_redis_binary_payload_roundtrip),
-    ("redis", "unsupported_command_is_rejected_and_connection_survives", case_redis_unsupported_command),
-    ("mongo", "ping_command_succeeds", case_mongo_ping),
-    ("mongo", "document_roundtrip_and_missing_is_none", case_mongo_document_roundtrip_and_missing),
-    ("postgres", "server_version_is_stable_across_connections", case_pg_version_stable),
-    ("postgres", "unknown_table_is_structured_error_and_connection_survives", case_pg_unknown_table),
-    ("mysql", "server_version_is_stable_across_connections", case_mysql_version_stable),
-    ("mysql", "unknown_table_is_structured_error_and_connection_survives", case_mysql_unknown_table),
-]
+CASES: list[tuple[str, str, Callable[[], None]]] = []
+for protocol in (2, 3):
+    suffix = f"resp{protocol}"
+    CASES.extend(
+        [
+            ("redis", f"ping_answers_pong_{suffix}", lambda protocol=protocol: case_redis_ping(protocol)),
+            (
+                "redis",
+                f"kv_roundtrip_and_missing_is_none_{suffix}",
+                lambda protocol=protocol: case_redis_kv_roundtrip_and_missing(protocol),
+            ),
+            (
+                "redis",
+                f"binary_payload_roundtrip_{suffix}",
+                lambda protocol=protocol: case_redis_binary_payload_roundtrip(protocol),
+            ),
+            (
+                "redis",
+                f"unsupported_command_is_rejected_and_connection_survives_{suffix}",
+                lambda protocol=protocol: case_redis_unsupported_command(protocol),
+            ),
+        ]
+    )
+CASES.extend(
+    [
+        ("mongo", "ping_command_succeeds", case_mongo_ping),
+        ("mongo", "document_roundtrip_and_missing_is_none", case_mongo_document_roundtrip_and_missing),
+        ("postgres", "server_version_is_stable_across_connections", case_pg_version_stable),
+        ("postgres", "unknown_table_is_structured_error_and_connection_survives", case_pg_unknown_table),
+        ("mysql", "server_version_is_stable_across_connections", case_mysql_version_stable),
+        ("mysql", "unknown_table_is_structured_error_and_connection_survives", case_mysql_unknown_table),
+    ]
+)
 
 
 def main() -> int:
