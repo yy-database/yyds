@@ -1,0 +1,125 @@
+{
+  "contract": "yyds-sql-scenario-catalog/v0",
+  "scenarios": [
+    {
+      "name": "bulk_insert_1000",
+      "feature": "single-statement bulk INSERT",
+      "risk": "SQL frontend and batch execution caps",
+      "rows": 1000,
+      "shape": "one INSERT carrying 1000 value tuples",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/bulk_insert_1000",
+        "ts": "mysql2,pg/scenario/bulk_insert_1000"
+      }
+    },
+    {
+      "name": "limit_offset_order_boundaries",
+      "feature": "ORDER BY, LIMIT and OFFSET boundaries over 1000 rows",
+      "risk": "planner and ordering boundaries",
+      "rows": 1000,
+      "shape": "1000 ordered rows queried with LIMIT 0, LIMIT 1000, LIMIT 100 OFFSET 900, DESC LIMIT 10 and aggregates",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/limit_offset_order_boundaries",
+        "ts": "mysql2,pg/scenario/limit_offset_order_boundaries"
+      }
+    },
+    {
+      "name": "transactions_rollback_registry",
+      "feature": "50 transactions over 1000 rows with interleaved rollbacks",
+      "risk": "registry transaction consistency and checkpoint restore",
+      "rows": 1000,
+      "shape": "50 transactions of 20 inserts, half committed, half rolled back, plus one transactional DDL attempt",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/transactions_rollback_registry",
+        "ts": "mysql2,pg/scenario/transactions_rollback_registry"
+      }
+    },
+    {
+      "name": "alter_add_column_after_1000",
+      "feature": "ALTER TABLE ADD COLUMN against 1000 existing rows",
+      "risk": "catalog projection, defaults and row read-back",
+      "rows": 1000,
+      "shape": "1000 rows, then ADD COLUMN with DEFAULT, then a bounded update and full read-back",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/alter_add_column_after_1000",
+        "ts": "mysql2,pg/scenario/alter_add_column_after_1000"
+      }
+    },
+    {
+      "name": "unique_conflict_late_rows",
+      "feature": "unique constraint failure at row 990 of a 1000-row statement",
+      "risk": "write-path duplicate detection and error localisation",
+      "rows": 1000,
+      "shape": "1000-row multi-insert with a duplicate late in the statement, then sequential inserts with a duplicate at position 990",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/unique_conflict_late_rows",
+        "ts": "mysql2,pg/scenario/unique_conflict_late_rows"
+      }
+    },
+    {
+      "name": "sequence_after_1000_restart",
+      "feature": "AUTO_INCREMENT and BIGSERIAL continuation after 1000 rows and a node restart",
+      "risk": "sequence durability across a catalog-derived node restart",
+      "rows": 1000,
+      "shape": "1000 rows, node stop, node start on the same data directory, one more insert",
+      "external": "real engine restart evidence: MySQL 8.0.44 and PostgreSQL 16.15 continued at 1001 after a restart",
+      "cases": {
+        "python": "scenarios/sequence_after_1000_restart",
+        "ts": "mysql2,pg/scenario/sequence_after_1000_restart"
+      }
+    },
+    {
+      "name": "multistatement_batch_offset",
+      "feature": "10-statement batch whose seventh statement fails",
+      "risk": "batch offset localisation and partial application",
+      "rows": 1000,
+      "shape": "10 statements separated by semicolons, statements 1-6 write, 7 fails, 8-10 follow",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/multistatement_batch_offset",
+        "ts": "mysql2,pg/scenario/multistatement_batch_offset"
+      }
+    },
+    {
+      "name": "prepared_loop_1000",
+      "feature": "1000 prepared or extended-protocol parameterised executions",
+      "risk": "statement reuse and parameter type inference",
+      "rows": 1000,
+      "shape": "1000 parameterised INSERTs through one prepared statement, then parameterised SELECTs",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/prepared_loop_1000",
+        "ts": "mysql2,pg/scenario/prepared_loop_1000"
+      }
+    },
+    {
+      "name": "concurrent_two_connections",
+      "feature": "two connections writing the same table",
+      "risk": "locking and isolation between concurrent sessions",
+      "rows": 1000,
+      "shape": "two connections each insert 1000 rows, then read the union ordered by primary key",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/concurrent_two_connections",
+        "ts": "mysql2,pg/scenario/concurrent_two_connections"
+      }
+    },
+    {
+      "name": "metadata_projection_paging",
+      "feature": "metadata view projection with LIMIT and OFFSET",
+      "risk": "information_schema and pg_catalog implementation",
+      "rows": 1000,
+      "shape": "three tables with five columns each and 1000 rows, metadata views read in pages",
+      "external": "real engine per-row comparison through YYDS_ORACLE_*",
+      "cases": {
+        "python": "scenarios/metadata_projection_paging",
+        "ts": "mysql2,pg/scenario/metadata_projection_paging"
+      }
+    }
+  ]
+}
