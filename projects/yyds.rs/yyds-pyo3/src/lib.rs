@@ -13,7 +13,7 @@ use std::{
 
 use pyo3::{create_exception, exceptions::PyException, prelude::*};
 use serde_json::{json, Value};
-use yyds_control::{LeaseError, LocalOwnership, NodeIdentity, NodeLease};
+use yyds::control::{LeaseError, LocalOwnership, NodeIdentity, NodeLease};
 
 create_exception!(yyds_pyo3, YydsError, PyException);
 

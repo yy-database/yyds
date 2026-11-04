@@ -9,11 +9,11 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use yyds_catalog::Catalog;
-use yyds_control::{LocalOwnership, NodeIdentity, NodeLease};
-use yyds_execution::{KeyValueExecutor, LocalExecutor};
-use yyds_kv::FileShard;
-use yyds_types::{ShardEpoch, ShardId, ShardMap};
+use yyds::catalog::Catalog;
+use yyds::control::{LocalOwnership, NodeIdentity, NodeLease};
+use yyds::execution::{KeyValueExecutor, LocalExecutor};
+use yyds::kv::FileShard;
+use yyds::types::{ShardEpoch, ShardId, ShardMap};
 
 pub const STATUS_FILE: &str = "node.status.json";
 pub const CONTROL_VERSION: u32 = 1;
