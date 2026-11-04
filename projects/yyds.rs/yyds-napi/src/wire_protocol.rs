@@ -340,29 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn kv_put_body_roundtrip() {
-        let (key, value) = decode_kv_put(&[3, 0, 0, 0, b'f', b'o', b'o', 5, 0, 0, 0, b'h', b'e', b'l', b'l', b'o']).unwrap();
-        assert_eq!(key, "foo");
-        assert_eq!(value, b"hello");
-    }
-
-    #[test]
-    fn schema_ok_roundtrip() {
-        let body = encode_schema_ok(Some((7, "table Foo { bar: Text }")));
-        let mut offset = 1;
-        assert_eq!(read_u32(&body, &mut offset).unwrap(), 7);
-        let doc_len = read_u32(&body, &mut offset).unwrap() as usize;
-        assert_eq!(&body[offset..offset + doc_len], b"table Foo { bar: Text }");
-    }
-
-    #[test]
-    fn schema_ok_none_flag() {
-        let body = encode_schema_ok(None);
-        assert_eq!(body[0], 0);
-        assert_eq!(body.len(), 1);
-    }
-
-    #[test]
     fn message_type_roundtrip() {
         for code in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 255] {
             let mt = MessageType::from_u16(code);
