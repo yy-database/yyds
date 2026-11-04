@@ -14,11 +14,12 @@ use std::{
 use crate::wire::{decode_message, decode_startup, encode_message, FrameError, StartupParameterError, StartupParameters};
 use yyds_execution::{KeyValueExecutor, TransactionHandle};
 use yyds_gateway::{
-    analyze_meta_query, apply_auto_increment, bind_sql_catalog, describe_plan, detect_session_reset_statement, encode_hex,
-    execute_plan, neutralized_sql_parameters, nulled_sql_parameters, parse_ddl, parse_session_command,
+    analyze_meta_query, apply_auto_increment, bind_sql_catalog, describe_bound_insert, describe_plan,
+    detect_session_reset_statement, encode_hex, execute_plan, neutralized_sql_parameters, parse_ddl, parse_session_command,
     plan_statement_for_dialect, split_sql_batch, substitute_sql_parameters, DiscardTarget, SqlBoundExpression, SqlBoundLiteral,
-    SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType, SqlFrontendError, SqlParameterStyle,
-    SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue, PG_SERVER_VERSION,
+    SqlCatalog, SqlCatalogBoundStatement, SqlColumn, SqlDialect, SqlErrorKind, SqlExecutionPlan, SqlFieldType,
+    SqlFrontendError, SqlParameterStyle, SqlSchemaRegistry, SqlSessionCommand, SqlTransactionAction, SqlValue,
+    PG_SERVER_VERSION,
 };
 
 /// PostgreSQL type OIDs supported by the gateway.
@@ -438,6 +439,13 @@ fn handle_simple_query(
     extended: &mut ExtendedSession,
     runtime: Option<&Arc<PgsqlSqlRuntime>>,
 ) -> io::Result<()> {
+    // PostgreSQL answers an empty query string with EmptyQueryResponse rather
+    // than a syntax error. Connection pools (`r2d2` and others) probe a
+    // checked-out connection exactly this way, so an error here rejects every
+    // checkout even though the connection itself is healthy.
+    if sql.trim().is_empty() {
+        return write_message(stream, b'I', &[]);
+    }
     let statements = match split_sql_batch(sql) {
         Ok(statements) => statements,
         Err(error) => {
@@ -1006,21 +1014,21 @@ fn handle_bind(
     else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
     };
-    let Some(statement) = extended.statements.get_mut(statement_name)
-    else {
+    let Some(statement) = extended.statements.get_mut(statement_name) else {
         return extended_protocol_error(stream, "26000", &format!("prepared statement \"{statement_name}\" does not exist"));
     };
     let sql = statement.sql.clone();
-    let parameter_oids = statement.parameter_oids.clone();
+    // Bind decodes binary parameter bytes by OID, so it must use the same
+    // catalog-inferred types Describe reported rather than only what Parse
+    // declared (which is usually empty).
+    let parameter_oids = statement_parameter_description(&sql, &statement.parameter_oids, runtime);
 
-    let Some(format_count) = take_i16(payload, &mut cursor)
-    else {
+    let Some(format_count) = take_i16(payload, &mut cursor) else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind message");
     };
     let mut parameter_formats = Vec::with_capacity(format_count.max(0) as usize);
     for _ in 0..format_count.max(0) {
-        let Some(format) = take_i16(payload, &mut cursor)
-        else {
+        let Some(format) = take_i16(payload, &mut cursor) else {
             return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Bind format codes");
         };
         if format != 0 && format != 1 {
@@ -1122,22 +1130,19 @@ fn handle_describe(
     session: &mut TransactionSession,
     runtime: Option<&Arc<PgsqlSqlRuntime>>,
 ) -> io::Result<ExtendedStep> {
-    let Some((&kind, rest)) = payload.split_first()
-    else {
+    let Some((&kind, rest)) = payload.split_first() else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Describe message");
     };
     let mut cursor = 0;
-    let Some(name) = take_cstring(rest, &mut cursor)
-    else {
+    let Some(name) = take_cstring(rest, &mut cursor) else {
         return extended_protocol_error(stream, "08P01", "malformed PostgreSQL Describe target");
     };
     match kind {
         b'S' => {
-            let Some(statement) = extended.statements.get_mut(name)
-            else {
+            let Some(statement) = extended.statements.get_mut(name) else {
                 return extended_protocol_error(stream, "26000", &format!("prepared statement \"{name}\" does not exist"));
             };
-            let parameters = statement_parameter_description(&statement.sql, &statement.parameter_oids);
+            let parameters = statement_parameter_description(&statement.sql, &statement.parameter_oids, runtime);
             // Session utility statements have no catalog shape; the empty
             // description below answers them with `NoData`, like PostgreSQL.
             if statement.description.is_none() && statement.session_command.is_none() {
@@ -1188,11 +1193,265 @@ fn handle_describe(
 
 /// Number of placeholders the SQL surface references, padding declared
 /// parameter OIDs with zero (`unspecified`) when the client sent fewer.
-fn statement_parameter_description(sql: &str, declared: &[u32]) -> Vec<u32> {
+///
+/// An `unspecified` OID forces strict drivers (`tokio-postgres` and the sync
+/// `postgres` crate) to resolve the type through `pg_catalog`, which this
+/// gateway answers with metadata-only shapes. A client that parsed with no
+/// OIDs therefore needs the catalog-derived OID here, otherwise every
+/// parameterized statement fails before it executes.
+fn statement_parameter_description(sql: &str, declared: &[u32], runtime: Option<&Arc<PgsqlSqlRuntime>>) -> Vec<u32> {
     let referenced = neutralized_sql_parameters(sql, SqlParameterStyle::DollarNumber).map(|(_, count)| count).unwrap_or(0);
     let mut parameters = declared.to_vec();
     parameters.resize(parameters.len().max(referenced), 0);
+    if let Some(runtime) = runtime {
+        let catalog = runtime.schema.catalog();
+        let inferred = infer_parameter_oids(sql, &catalog, referenced);
+        for (position, oid) in parameters.iter_mut().enumerate() {
+            if *oid == 0 {
+                // Placeholders are 1-based (`$1` is the first parameter), so the
+                // parameter at `position` reads inference slot `position + 1`.
+                if let Some(inferred) = inferred.get(position + 1).copied().filter(|oid| *oid != 0) {
+                    *oid = inferred;
+                }
+            }
+        }
+    }
+    for oid in parameters.iter_mut() {
+        // PostgreSQL always resolves a parameter to a concrete type. A shape the
+        // text scan cannot attribute — `strpos("body", $1)`, for example — falls
+        // back to `text`, which is how the gateway's own literal binder reads an
+        // untyped value. Returning `unspecified` would make strict drivers query
+        // `pg_catalog` for the type.
+        if *oid == 0 {
+            *oid = OID_TEXT;
+        }
+    }
     parameters
+}
+
+/// Catalog-derived parameter OIDs for a statement that declares none.
+///
+/// The text scan covers the shapes a client can bind against a catalog:
+/// `INSERT ... (columns) VALUES (placeholders)` maps placeholders positionally
+/// and `column = placeholder` maps a placeholder to the column on either side.
+/// Placeholders outside those shapes stay `unspecified`.
+fn infer_parameter_oids(sql: &str, catalog: &SqlCatalog, count: usize) -> Vec<u32> {
+    let tokens = tokenize_sql_context(sql);
+    // Slot 0 is unused: `$1` writes to index 1 so placeholder numbers index the
+    // vector directly.
+    let mut oids = vec![0u32; count + 1];
+
+    if let Some((table, columns, values_at)) = insert_shape(&tokens) {
+        let mut value_index = 0usize;
+        // `values_at` points past the tuple's opening parenthesis.
+        let mut depth = 1usize;
+        for token in &tokens[values_at..] {
+            match token {
+                SqlToken::Open => depth += 1,
+                SqlToken::Close => {
+                    if depth <= 1 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                SqlToken::Comma if depth == 1 => value_index += 1,
+                SqlToken::Placeholder(index) if depth == 1 => {
+                    if let Some(column) = columns.get(value_index) {
+                        set_inferred_oid(&mut oids, *index, catalog_column_oid(catalog, Some(&table), column));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for (position, token) in tokens.iter().enumerate() {
+        let Some(column) = identifier(token) else {
+            continue;
+        };
+        let pair = match tokens.get(position + 1) {
+            Some(SqlToken::Equals) => tokens.get(position + 2).and_then(|next| match next {
+                SqlToken::Placeholder(index) => Some(*index),
+                _ => None,
+            }),
+            Some(SqlToken::Placeholder(index)) => Some(*index),
+            _ => None,
+        };
+        if let Some(index) = pair {
+            set_inferred_oid(&mut oids, index, catalog_column_oid(catalog, None, column));
+        }
+    }
+
+    for (position, token) in tokens.iter().enumerate() {
+        let SqlToken::Placeholder(index) = token else {
+            continue;
+        };
+        if !matches!(tokens.get(position + 1), Some(SqlToken::Equals)) {
+            continue;
+        }
+        let Some(column) = tokens.get(position + 2).and_then(identifier) else {
+            continue;
+        };
+        set_inferred_oid(&mut oids, *index, catalog_column_oid(catalog, None, column));
+    }
+
+    oids
+}
+
+/// A column or table name, quoted or bare. Bare identifiers reach the tokenizer
+/// as [`SqlToken::Word`] because the same token class carries SQL keywords.
+fn identifier(token: &SqlToken) -> Option<&str> {
+    match token {
+        SqlToken::Ident(name) | SqlToken::Word(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn set_inferred_oid(oids: &mut [u32], index: usize, oid: u32) {
+    if let Some(slot) = oids.get_mut(index) {
+        if *slot == 0 {
+            *slot = oid;
+        }
+    }
+}
+
+/// Column type OID for a named catalog column. `table` restricts the lookup to
+/// one catalog table when the statement already named it.
+fn catalog_column_oid(catalog: &SqlCatalog, table: Option<&str>, column: &str) -> u32 {
+    for candidate in catalog.tables() {
+        if table.is_some_and(|name| name != candidate.name) {
+            continue;
+        }
+        if let Some(field) = candidate.fields.iter().find(|field| field.name == column) {
+            return pg_oid(&field.field_type.inner());
+        }
+    }
+    0
+}
+
+/// Token context for parameter type inference: quoted identifiers,
+/// placeholders, and the punctuation that separates them.
+#[derive(Debug, PartialEq, Eq)]
+enum SqlToken {
+    Ident(String),
+    Word(String),
+    Placeholder(usize),
+    Equals,
+    Comma,
+    Open,
+    Close,
+    Other,
+}
+
+fn tokenize_sql_context(sql: &str) -> Vec<SqlToken> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let current = chars[index];
+        if current == '"' {
+            let mut name = String::new();
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == '"' {
+                    if chars.get(index + 1) == Some(&'"') {
+                        name.push('"');
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                name.push(chars[index]);
+                index += 1;
+            }
+            tokens.push(SqlToken::Ident(name));
+            continue;
+        }
+        if current == '\'' {
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == '\'' {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            tokens.push(SqlToken::Other);
+            continue;
+        }
+        if current == '$' {
+            let start = index + 1;
+            let mut end = start;
+            while end < chars.len() && chars[end].is_ascii_digit() {
+                end += 1;
+            }
+            if let Ok(value) = chars[start..end].iter().collect::<String>().parse::<usize>() {
+                tokens.push(SqlToken::Placeholder(value));
+                index = end;
+                continue;
+            }
+        }
+        if current.is_alphanumeric() || current == '_' {
+            let mut word = String::new();
+            while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+                word.push(chars[index]);
+                index += 1;
+            }
+            tokens.push(SqlToken::Word(word));
+            continue;
+        }
+        if current.is_whitespace() {
+            // Whitespace carries no shape; skipping it keeps keyword and
+            // identifier adjacency meaningful for the position checks below.
+            index += 1;
+            continue;
+        }
+        match current {
+            '=' => tokens.push(SqlToken::Equals),
+            ',' => tokens.push(SqlToken::Comma),
+            '(' => tokens.push(SqlToken::Open),
+            ')' => tokens.push(SqlToken::Close),
+            _ => tokens.push(SqlToken::Other),
+        }
+        index += 1;
+    }
+    tokens
+}
+
+/// `INSERT INTO "table" ("c1", "c2", ...) VALUES (...)` positions, returning
+/// the target table, its column names in VALUES order, and the token index of
+/// the first VALUES tuple's contents.
+fn insert_shape(tokens: &[SqlToken]) -> Option<(String, Vec<String>, usize)> {
+    let insert_at =
+        tokens.iter().position(|token| matches!(token, SqlToken::Word(word) if word.eq_ignore_ascii_case("INSERT")))?;
+    if !matches!(tokens.get(insert_at + 1), Some(SqlToken::Word(word)) if word.eq_ignore_ascii_case("INTO")) {
+        return None;
+    }
+    let Some(table) = tokens.get(insert_at + 2).and_then(identifier) else {
+        return None;
+    };
+    let mut columns = Vec::new();
+    if matches!(tokens.get(insert_at + 3), Some(SqlToken::Open)) {
+        for token in &tokens[insert_at + 4..] {
+            match token {
+                SqlToken::Close => break,
+                other => {
+                    if let Some(name) = identifier(other) {
+                        columns.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let values_at = tokens.iter().enumerate().skip(insert_at).find_map(|(position, token)| match token {
+        SqlToken::Word(word) if word.eq_ignore_ascii_case("VALUES") => Some(position),
+        _ => None,
+    })?;
+    if !matches!(tokens.get(values_at + 1), Some(SqlToken::Open)) {
+        return None;
+    }
+    Some((table.to_string(), columns, values_at + 2))
 }
 
 /// Resolves Bind result formats into one entry per described column.
@@ -1237,12 +1496,29 @@ fn statement_description(
     {
         return Ok(meta.describe());
     }
-    if let Ok(description) = plan_description(&neutral_sql, runtime) {
-        return Ok(description);
+    describe_without_values(&neutral_sql, runtime)
+}
+
+/// Describes a statement that still carries placeholder stand-ins.
+///
+/// Write values are validated only when the statement executes, and a
+/// metadata describe has no real parameters: a neutral `0` cannot be written
+/// to text/uuid/bool columns and a neutral `NULL` cannot be a primary key.
+/// Writes therefore describe from their bound shape instead of being planned.
+fn describe_without_values(sql: &str, runtime: &Arc<PgsqlSqlRuntime>) -> Result<Vec<SqlColumn>, (String, String)> {
+    let catalog = runtime.schema.catalog();
+    let bound = bind_sql_catalog(sql, &catalog, catalog.schema_version(), SqlDialect::Postgres)
+        .map_err(|error| statement_error("bind", error))?;
+    match bound {
+        SqlCatalogBoundStatement::Insert(insert) => Ok(describe_bound_insert(&insert, &catalog, SqlDialect::Postgres)),
+        // `UPDATE` / `DELETE` in this gateway carry no `RETURNING` shape.
+        SqlCatalogBoundStatement::Update(_) | SqlCatalogBoundStatement::Delete(_) => Ok(Vec::new()),
+        bound => {
+            let plan = plan_statement_for_dialect(bound, &catalog, SqlDialect::Postgres)
+                .map_err(|error| statement_error("plan", error))?;
+            Ok(describe_plan(&plan))
+        }
     }
-    let (nulled_sql, _) =
-        nulled_sql_parameters(sql, SqlParameterStyle::DollarNumber).map_err(|error| statement_error("parameter", error))?;
-    plan_description(&nulled_sql, runtime)
 }
 
 /// Binds and plans rendered SQL only to read its result shape.
@@ -1290,13 +1566,17 @@ fn handle_execute(
             }
         };
     }
-    let Some(portal) = extended.portals.get_mut(name)
-    else {
+    let Some(portal) = extended.portals.get_mut(name) else {
         return extended_protocol_error(stream, "34000", &format!("portal \"{name}\" does not exist"));
     };
+    // Same contract as SimpleQuery: an empty statement executes to an
+    // EmptyQueryResponse with no command tag.
+    if portal.sql.trim().is_empty() {
+        write_message(stream, b'I', &[])?;
+        return Ok(ExtendedStep::Continue);
+    }
     prepare_portal(portal, session, runtime);
-    let Some(outcome) = portal.outcome.as_ref()
-    else {
+    let Some(outcome) = portal.outcome.as_ref() else {
         unreachable!("prepare_portal always stores an outcome");
     };
     match outcome {
@@ -1730,8 +2010,7 @@ fn read_message(stream: &mut impl Read, pending: &mut Vec<u8>) -> io::Result<Opt
                     if error.kind() == io::ErrorKind::UnexpectedEof {
                         return if pending.is_empty() {
                             Ok(None)
-                        }
-                        else {
+                        } else {
                             Err(io::Error::new(io::ErrorKind::InvalidData, "truncated PostgreSQL message"))
                         };
                     }

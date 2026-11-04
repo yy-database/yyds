@@ -6,10 +6,10 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    catalog_bind::SqlFieldType,
-    sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator},
-    sql_planner::{JoinPlan, ReadPlan, ReturningProjections, ScanPlan, SqlExecutionPlan},
-    SqlCatalogBoundExpression,
+    catalog_bind::{SqlCatalogBoundInsert, SqlFieldType},
+    sql::{SqlBoundBinaryOperator, SqlBoundLiteral, SqlBoundUnaryOperator, SqlDialect},
+    sql_planner::{plan_returning, JoinPlan, ReadPlan, ReturningProjections, ScanPlan, SqlExecutionPlan},
+    SqlCatalog, SqlCatalogBoundExpression,
 };
 
 /// One described result column.
@@ -49,10 +49,27 @@ pub fn describe_plan(plan: &SqlExecutionPlan) -> Vec<SqlColumn> {
     }
 }
 
+/// Describes `INSERT ... RETURNING` from the bound statement alone.
+///
+/// Write values are only validated at execute time, when the real parameters
+/// exist. A metadata describe has no values, so planning it with stand-in
+/// literals rejects valid schemas: `0` cannot be written to text columns and
+/// `NULL` cannot be a primary key. Column types come from the catalog instead.
+pub fn describe_bound_insert(insert: &SqlCatalogBoundInsert, catalog: &SqlCatalog, dialect: SqlDialect) -> Vec<SqlColumn> {
+    let Some(table) = catalog.tables().iter().find(|table| table.type_id == insert.table.type_id) else {
+        return Vec::new();
+    };
+    let Ok(returning) = plan_returning(insert.returning.clone(), table, dialect) else {
+        return Vec::new();
+    };
+    let field_types: BTreeMap<u64, SqlFieldType> =
+        table.fields.iter().map(|field| (field.field_id, field.field_type.clone())).collect();
+    describe_returning(&returning, &field_types)
+}
+
 /// `INSERT ... RETURNING` 的结果形状：写语句只有带 `RETURNING` 时才有列定义。
 fn describe_returning(returning: &Option<ReturningProjections>, field_types: &BTreeMap<u64, SqlFieldType>) -> Vec<SqlColumn> {
-    let Some(projections) = returning
-    else {
+    let Some(projections) = returning else {
         return Vec::new();
     };
     projections
