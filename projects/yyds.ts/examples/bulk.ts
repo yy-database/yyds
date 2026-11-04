@@ -114,8 +114,93 @@ async function bulkMysql() {
     }
 }
 
+const PG_ERR_TABLE = "example_err_pg";
+const MYSQL_ERR_TABLE = "example_err_mysql";
+
+// 结构化错误只断言驱动侧码值（PostgreSQL SQLSTATE / MySQL errno + SQLSTATE），
+// 不看错误文案，也不看网关内部枚举。
+async function pgExpect(client, label, sql, expected) {
+    try {
+        await client.query(sql);
+    } catch (error) {
+        check(
+            error.code === expected.code,
+            `${label}: expected SQLSTATE ${expected.code}, got ${error.code} (${error.message})`,
+        );
+        return;
+    }
+    throw new Error(`${label}: expected SQLSTATE ${expected.code}, no error raised`);
+}
+
+async function mysqlExpect(connection, label, sql, expected) {
+    try {
+        await connection.query(sql);
+    } catch (error) {
+        check(error.errno === expected.errno, `${label}: expected errno ${expected.errno}, got ${error.errno}`);
+        check(
+            error.sqlState === expected.sqlState,
+            `${label}: expected SQLSTATE ${expected.sqlState}, got ${error.sqlState}`,
+        );
+        return;
+    }
+    throw new Error(`${label}: expected errno ${expected.errno}, no error raised`);
+}
+
+async function errorsPg() {
+    const client = await pgConnect();
+    try {
+        await client.query(`DROP TABLE IF EXISTS ${PG_ERR_TABLE}`);
+        await client.query(
+            `CREATE TABLE ${PG_ERR_TABLE} (id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL, `
+                + "code VARCHAR(8), note TEXT, UNIQUE (email))",
+        );
+        await client.query(`INSERT INTO ${PG_ERR_TABLE} (id, email, code, note) VALUES (1, 'dup@example.test', 'ok', 'n1')`);
+        await client.query(`INSERT INTO ${PG_ERR_TABLE} (id, email, code, note) VALUES (2, 'two@example.test', 'ok', 'n2')`);
+
+        await pgExpect(client, "duplicate-key", `INSERT INTO ${PG_ERR_TABLE} (id, email, code, note) VALUES (3, 'dup@example.test', 'ok', 'n3')`, { code: "23505" });
+        await pgExpect(client, "value-too-long", `INSERT INTO ${PG_ERR_TABLE} (id, email, code, note) VALUES (4, 'long@example.test', '0123456789abcdef', 'n4')`, { code: "22001" });
+        await pgExpect(client, "invalid-grouping", `SELECT email, note FROM ${PG_ERR_TABLE} GROUP BY email`, { code: "42803" });
+        await pgExpect(client, "scalar-subquery-multi-row", `SELECT (SELECT email FROM ${PG_ERR_TABLE}) AS x`, { code: "21000" });
+        await pgExpect(client, "in-subquery-multi-column", `SELECT id FROM ${PG_ERR_TABLE} WHERE id IN (SELECT id, email FROM ${PG_ERR_TABLE})`, { code: "42601" });
+
+        // 对外可观测的拒绝语义：客户端能按 SQLSTATE 区分「未实现」与「写错了」。
+        await pgExpect(client, "unsupported-temporary-table", `CREATE TEMPORARY TABLE ${PG_ERR_TABLE}_tmp (id BIGINT)`, { code: "0A000" });
+        await pgExpect(client, "unsupported-distinct-on", `SELECT DISTINCT ON (email) id FROM ${PG_ERR_TABLE} ORDER BY email`, { code: "0A000" });
+        await pgExpect(client, "set-operation-column-count", `SELECT id FROM ${PG_ERR_TABLE} UNION SELECT id, email FROM ${PG_ERR_TABLE}`, { code: "42601" });
+        await pgExpect(client, "cross-database-reference", `SELECT id FROM other.public.${PG_ERR_TABLE}`, { code: "42P01" });
+    } finally {
+        await client.end();
+    }
+}
+
+async function errorsMysql() {
+    const connection = await mysqlConnect();
+    try {
+        await connection.query(`DROP TABLE IF EXISTS ${MYSQL_ERR_TABLE}`);
+        await connection.query(
+            `CREATE TABLE ${MYSQL_ERR_TABLE} (id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY, `
+                + "email VARCHAR(191) NOT NULL, code VARCHAR(8), note TEXT, UNIQUE KEY uq_error_email (email))",
+        );
+        await connection.query(`INSERT INTO ${MYSQL_ERR_TABLE} (id, email, code, note) VALUES (1, 'dup@example.test', 'ok', 'n1')`);
+        await connection.query(`INSERT INTO ${MYSQL_ERR_TABLE} (id, email, code, note) VALUES (2, 'two@example.test', 'ok', 'n2')`);
+
+        await mysqlExpect(connection, "duplicate-key", `INSERT INTO ${MYSQL_ERR_TABLE} (id, email, code, note) VALUES (3, 'dup@example.test', 'ok', 'n3')`, { errno: 1062, sqlState: "23000" });
+        await mysqlExpect(connection, "value-too-long", `INSERT INTO ${MYSQL_ERR_TABLE} (id, email, code, note) VALUES (4, 'long@example.test', '0123456789abcdef', 'n4')`, { errno: 1406, sqlState: "22001" });
+        await mysqlExpect(connection, "invalid-grouping", `SELECT email, note FROM ${MYSQL_ERR_TABLE} GROUP BY email`, { errno: 1055, sqlState: "42000" });
+        await mysqlExpect(connection, "scalar-subquery-multi-row", `SELECT (SELECT email FROM ${MYSQL_ERR_TABLE}) AS x`, { errno: 1242, sqlState: "21000" });
+        await mysqlExpect(connection, "in-subquery-multi-column", `SELECT id FROM ${MYSQL_ERR_TABLE} WHERE id IN (SELECT id, email FROM ${MYSQL_ERR_TABLE})`, { errno: 1241, sqlState: "21000" });
+
+        await mysqlExpect(connection, "unsupported-temporary-table", `CREATE TEMPORARY TABLE ${MYSQL_ERR_TABLE}_tmp (id BIGINT)`, { errno: 1235, sqlState: "42000" });
+        await mysqlExpect(connection, "unsupported-distinct-on", `SELECT DISTINCT ON (email) id FROM ${MYSQL_ERR_TABLE} ORDER BY email`, { errno: 1235, sqlState: "42000" });
+        await mysqlExpect(connection, "set-operation-column-count", `SELECT id FROM ${MYSQL_ERR_TABLE} UNION SELECT id, email FROM ${MYSQL_ERR_TABLE}`, { errno: 1064, sqlState: "42000" });
+        await mysqlExpect(connection, "cross-database-reference", `SELECT id FROM other.public.${MYSQL_ERR_TABLE}`, { errno: 1146, sqlState: "42S02" });
+    } finally {
+        await connection.end();
+    }
+}
+
 let failed = 0;
-for (const [name, body] of [["pg", bulkPg], ["mysql", bulkMysql]]) {
+for (const [name, body] of [["pg", bulkPg], ["mysql", bulkMysql], ["pg-errors", errorsPg], ["mysql-errors", errorsMysql]]) {
     try {
         await body();
         console.log(`PASS examples/bulk.ts ${name} ${ROWS} rows`);
