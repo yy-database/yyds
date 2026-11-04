@@ -96,7 +96,7 @@
       "id": "08-mongo-find-cursor",
       "module": "scenario_08_mongo_find_cursor",
       "feature": "mongo/find",
-      "risk": "cursor semantics: `sort`, `skip`, non-`_id` filter, empty result and `batchSize` must shape the first batch, not just return every document",
+      "risk": "cursor semantics and counters: `sort`, `skip`, non-`_id` filter, empty result, `batchSize` and `count`/`aggregate` must shape the result, not just return every document",
       "scale": 1000,
       "oracle": "mongo",
       "cases": [
@@ -105,6 +105,9 @@
         "08-mongo-find-cursor/mongo/empty-batch",
         "08-mongo-find-cursor/mongo/range-filter-1000",
         "08-mongo-find-cursor/mongo/full-sort-1000",
+        "08-mongo-find-cursor/mongo/count-1000",
+        "08-mongo-find-cursor/mongo/aggregate-count-1000",
+        "08-mongo-find-cursor/mongo/aggregate-project",
         "08-mongo-find-cursor/mongo/batch-size",
         "08-mongo-find-cursor/mongo/engine-parity"
       ]
@@ -126,12 +129,13 @@
       "id": "10-mongo-error-codes",
       "module": "scenario_10_mongo_error_codes",
       "feature": "mongo/error codes",
-      "risk": "error-code truth: an unknown command must answer 59 and an invalid namespace must answer 73, including at a namespace name the real engine refuses",
+      "risk": "error-code truth: an unknown command must answer 59, an invalid namespace must answer 73, and an unimplemented aggregation stage must answer 59 instead of returning a wrong batch",
       "scale": 1000,
       "oracle": "mongo",
       "cases": [
         "10-mongo-error-codes/mongo/unknown-command-59",
         "10-mongo-error-codes/mongo/invalid-namespace-73",
+        "10-mongo-error-codes/mongo/unsupported-stage-59",
         "10-mongo-error-codes/mongo/engine-parity"
       ]
     }

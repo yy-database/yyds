@@ -32,6 +32,9 @@ CASES = (
     "08-mongo-find-cursor/mongo/empty-batch",
     "08-mongo-find-cursor/mongo/range-filter-1000",
     "08-mongo-find-cursor/mongo/full-sort-1000",
+    "08-mongo-find-cursor/mongo/count-1000",
+    "08-mongo-find-cursor/mongo/aggregate-count-1000",
+    "08-mongo-find-cursor/mongo/aggregate-project",
     "08-mongo-find-cursor/mongo/batch-size",
     "08-mongo-find-cursor/mongo/engine-parity",
 )
@@ -40,11 +43,22 @@ COLLECTION = "find-scale"
 BATCH_SIZE = 250
 
 
+def _probe(call):
+    """Runs one probe, turning a driver failure into a fact the case can name."""
+    try:
+        return call()
+    except Exception as error:  # noqa: BLE001 - the case reports the driver error
+        return f"error: {type(error).__name__}: {error}"
+
+
 def _facts(database, scale: int) -> dict:
     collection = database[COLLECTION]
     collection.delete_many({})
     # `_id` ascends while `n` descends, so key order and sort order disagree.
-    collection.insert_many([{"_id": index, "n": scale - 1 - index} for index in range(scale)], ordered=True)
+    collection.insert_many(
+        [{"_id": index, "n": scale - 1 - index, "label": f"doc-{index:04d}"} for index in range(scale)],
+        ordered=True,
+    )
 
     sorted_window = [document["n"] for document in collection.find({}, sort=[("n", 1)], limit=10)]
     skipped_window = [
@@ -55,6 +69,35 @@ def _facts(database, scale: int) -> dict:
     # Return order without `sort` is unspecified, so compare as a set of ids.
     range_filtered = sorted(document["_id"] for document in collection.find({"n": {"$gte": scale // 2}}))
     full_sorted = [document["n"] for document in collection.find({}, sort=[("n", 1)])]
+
+    # pymongo drives `count_documents` through `aggregate`, so both commands are
+    # probed here. A gateway that answers 59 records that failure as a fact.
+    count_all = _probe(lambda: collection.count_documents({}))
+    count_range = _probe(
+        lambda: database.command({"count": COLLECTION, "query": {"n": {"$gte": scale // 2}}})["n"]
+    )
+    count_documents_range = _probe(lambda: collection.count_documents({"n": {"$gte": scale // 2}}))
+    aggregate_count = _probe(
+        lambda: next(
+            collection.aggregate(
+                [
+                    {"$match": {"n": {"$gte": scale // 2}}},
+                    {"$group": {"_id": None, "total": {"$sum": 1}}},
+                ]
+            )
+        )["total"]
+    )
+    projected = _probe(
+        lambda: [
+            dict(document)
+            for document in collection.aggregate(
+                [
+                    {"$match": {"n": {"$eq": scale // 2}}},
+                    {"$project": {"_id": 0, "label": 1}},
+                ]
+            )
+        ]
+    )
 
     reply = database.command({"find": COLLECTION, "batchSize": BATCH_SIZE})
     cursor = reply["cursor"]
@@ -76,10 +119,15 @@ def _facts(database, scale: int) -> dict:
         "empty": empty,
         "range_filtered": range_filtered,
         "full_sorted": full_sorted,
+        "count_all": count_all,
+        "count_range": count_range,
+        "count_documents_range": count_documents_range,
+        "aggregate_count": aggregate_count,
+        "projected": projected,
         "first_batch": first_batch,
         "cursor_opened": cursor_id != 0 or first_batch < scale,
         "drained": drained,
-        # A plain `find` scan: `count` / `aggregate` are not served by this gateway.
+        # A plain `find` scan, kept as the reference count the other probes must match.
         "documents": sum(1 for _ in collection.find({})),
     }
 
@@ -144,6 +192,33 @@ def run(scale: int = 1000) -> list[CaseResult]:
                     f"sorting the full collection returned {gateway['full_sorted'][:5]}..., expected 0..{scale - 1}",
                 )
 
+            def count_1000() -> None:
+                confirm(
+                    gateway["count_all"] == scale,
+                    f"`count` returned {gateway['count_all']}, expected {scale}",
+                )
+                confirm(
+                    gateway["count_range"] == scale // 2,
+                    f"`count` with a `$gte` query returned {gateway['count_range']}, expected {scale // 2}",
+                )
+                confirm(
+                    gateway["count_documents_range"] == scale // 2,
+                    f"`count_documents` returned {gateway['count_documents_range']}, expected {scale // 2}",
+                )
+
+            def aggregate_count_1000() -> None:
+                confirm(
+                    gateway["aggregate_count"] == scale // 2,
+                    f"`$group` counting returned {gateway['aggregate_count']}, expected {scale // 2}",
+                )
+
+            def aggregate_project() -> None:
+                expected = [{"label": f"doc-{scale - 1 - scale // 2:04d}"}]
+                confirm(
+                    gateway["projected"] == expected,
+                    f"`$project` returned {gateway['projected']}, expected {expected}",
+                )
+
             def batch_size() -> None:
                 confirm(
                     gateway["first_batch"] == BATCH_SIZE,
@@ -158,7 +233,10 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 (CASES[2], empty_batch),
                 (CASES[3], range_filter_1000),
                 (CASES[4], full_sort_1000),
-                (CASES[5], batch_size),
+                (CASES[5], count_1000),
+                (CASES[6], aggregate_count_1000),
+                (CASES[7], aggregate_project),
+                (CASES[8], batch_size),
             ):
                 try:
                     case()
@@ -171,7 +249,7 @@ def run(scale: int = 1000) -> list[CaseResult]:
 
         engine = oracle_mongo()
         if engine is None:
-            results.append(no_oracle(CASES[6], MONGO_URL_ENV))
+            results.append(no_oracle(CASES[9], MONGO_URL_ENV))
         else:
             try:
                 engine_facts = _engine_facts(engine, scale)
@@ -179,7 +257,7 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 engine.close()
             results.append(
                 compare_facts(
-                    CASES[6],
+                    CASES[9],
                     gateway,
                     engine_facts,
                     (
@@ -189,6 +267,11 @@ def run(scale: int = 1000) -> list[CaseResult]:
                         "empty",
                         "range_filtered",
                         "full_sorted",
+                        "count_all",
+                        "count_range",
+                        "count_documents_range",
+                        "aggregate_count",
+                        "projected",
                         "first_batch",
                         "cursor_opened",
                         "drained",
