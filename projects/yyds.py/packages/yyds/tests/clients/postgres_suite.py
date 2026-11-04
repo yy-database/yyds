@@ -58,11 +58,13 @@ def _fetch(connection, sql: str, parameters=None) -> list[tuple]:
         return cursor.fetchall()
 
 
-def _expect_error(connection, sql: str, sqlstate: str, message: str, parameters=None) -> None:
-    """Asserts the SQLSTATE and the readable text the driver surfaces.
+def _expect_error(connection, sql: str, sqlstate: str, message: str | None = None, parameters=None) -> None:
+    """Asserts the SQLSTATE and, when asked, readable text the driver surfaces.
 
-    `psycopg2` exposes `pgcode` while `psycopg3` exposes `sqlstate` the two
-    names are checked in that order so one case list covers both drivers.
+    PostgreSQL wording is engine-owned, so message text is only asserted where
+    the gateway reproduces an engine string verbatim. `psycopg2` exposes
+    `pgcode` while `psycopg3` exposes `sqlstate` the two names are checked in
+    that order so one case list covers both drivers.
     """
 
     try:
@@ -75,7 +77,8 @@ def _expect_error(connection, sql: str, sqlstate: str, message: str, parameters=
             state == sqlstate,
             f"expected SQLSTATE {sqlstate}, got {state!r} from {type(error).__name__}: {text}",
         )
-        check(re.search(message, text, re.IGNORECASE) is not None, f"expected message matching /{message}/, got {text!r}")
+        if message is not None:
+            check(re.search(message, text, re.IGNORECASE) is not None, f"expected message matching /{message}/, got {text!r}")
         return
     raise AssertionError(f"expected SQLSTATE {sqlstate}, but the statement succeeded")
 
@@ -153,17 +156,17 @@ def _case_affected_rows(node: YydsNode, connect, base: int) -> None:
 
 def _case_error_unknown_table(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_error(connection, "SELECT id FROM missing_table", "42P01", r"unknown SQL table")
+        _expect_error(connection, "SELECT id FROM missing_table", "42P01")
 
 
 def _case_error_unknown_column(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_error(connection, "SELECT missing_column FROM users", "42703", r"unknown SQL column")
+        _expect_error(connection, "SELECT missing_column FROM users", "42703")
 
 
 def _case_error_syntax(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
-        _expect_error(connection, "SELEC 1", "42601", r".*")
+        _expect_error(connection, "SELEC 1", "42601")
 
 
 def _case_error_unique_violation(node: YydsNode, connect, base: int) -> None:
@@ -175,7 +178,7 @@ def _case_error_unique_violation(node: YydsNode, connect, base: int) -> None:
             connection,
             INSERT_USER,
             "23505",
-            r"duplicate key",
+            None,
             (identifier, "unique-again", 26, 2.0, False, None),
         )
 
@@ -185,7 +188,7 @@ def _case_error_grouping(node: YydsNode, connect, base: int) -> None:
     with _session(node, connect) as connection:
         with connection.cursor() as cursor:
             cursor.execute(INSERT_USER, (identifier, "grouping", 28, 1.75, True, None))
-        _expect_error(connection, "SELECT id, name, COUNT(*) FROM users GROUP BY id", "42803", r"GROUP BY")
+        _expect_error(connection, "SELECT id, name, COUNT(*) FROM users GROUP BY id", "42803")
 
 
 def _case_error_subquery_operand_columns(node: YydsNode, connect, base: int) -> None:
@@ -194,7 +197,6 @@ def _case_error_subquery_operand_columns(node: YydsNode, connect, base: int) -> 
             connection,
             "SELECT id FROM users WHERE id IN (SELECT id, name FROM users)",
             "42601",
-            r"exactly one column",
         )
 
 
@@ -209,7 +211,6 @@ def _case_error_scalar_subquery_cardinality(node: YydsNode, connect, base: int) 
             connection,
             "SELECT id FROM users WHERE id = (SELECT id FROM users)",
             "21000",
-            r"more than one row",
         )
 
 
@@ -217,6 +218,9 @@ def _case_error_batch_statement_index(node: YydsNode, connect, base: int) -> Non
     """A failing statement in a SimpleQuery batch keeps its SQLSTATE and index."""
 
     with _session(node, connect) as connection:
+        # Batch offset reporting is a gateway extension, not engine behaviour:
+        # PostgreSQL only returns the failing statement's own error. The offset
+        # text is asserted because it is part of this gateway's contract.
         _expect_error(
             connection,
             "SELECT 1; SELECT id FROM missing_table",
