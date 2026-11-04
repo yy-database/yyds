@@ -8,6 +8,9 @@ reuses an already running node instead.
 `--suite payloads` runs the binary payload cases against a node published from
 `payload_schema.vos`, so the regular matrix keeps its own `users` catalog.
 
+`--suite redis` and `--suite mongo` each start their own gateway-only node and
+drive it with the real Python client for that protocol.
+
 Exit codes: 0 every case passed, 1 at least one case failed, 2 the node never
 became usable.
 """
@@ -18,13 +21,14 @@ import argparse
 import sys
 
 import binary_payload_suite
+import mongo_suite
 import mysql_suite
 import postgres_suite
 import redis_suite
 from harness import CaseResult, NodeFailure, attach_node, start_node
 
 GATEWAYS = {"postgresql": postgres_suite.run_postgresql, "mysql": mysql_suite.run_mysql}
-SUITES = ("matrix", "payloads", "redis")
+SUITES = ("matrix", "payloads", "redis", "mongo")
 
 
 def _parse_arguments(argv: list[str]) -> argparse.Namespace:
@@ -40,6 +44,8 @@ def _parse_arguments(argv: list[str]) -> argparse.Namespace:
         parser.error("--suite payloads always runs every driver against its own node")
     if arguments.suite == "redis" and (arguments.gateway != "all" or arguments.postgresql_port or arguments.mysql_port):
         parser.error("--suite redis always starts its own redis-only node")
+    if arguments.suite == "mongo" and (arguments.gateway != "all" or arguments.postgresql_port or arguments.mysql_port):
+        parser.error("--suite mongo always starts its own mongo-only node")
     return arguments
 
 
@@ -66,6 +72,19 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.suite == "redis":
         try:
             results = redis_suite.run_redis()
+        except NodeFailure as error:
+            print(error, file=sys.stderr)
+            return 2
+        for result in results:
+            detail = f" - {result.detail}" if result.detail else ""
+            print(f"{result.status.upper()} {result.name}{detail}")
+        failures = [result for result in results if result.status != "pass"]
+        print(f"{len(results) - len(failures)}/{len(results)} cases passed")
+        return 1 if failures else 0
+
+    if arguments.suite == "mongo":
+        try:
+            results = mongo_suite.run_mongo()
         except NodeFailure as error:
             print(error, file=sys.stderr)
             return 2

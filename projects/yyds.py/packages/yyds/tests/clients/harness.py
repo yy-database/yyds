@@ -116,6 +116,7 @@ class YydsNode:
     mysql_port: int
     redis_port: int
     data_dir: Path | None
+    mongo_port: int = 0
     process: subprocess.Popen | None = None
     stdout_lines: list[str] = field(default_factory=list)
     stderr_lines: list[str] = field(default_factory=list)
@@ -269,6 +270,59 @@ def start_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS, schema_path: Path = 
         threading.Thread(target=_pump, args=(node.process.stderr, node.stderr_lines), daemon=True).start()
         _wait_until_ready(node, timeout)
         return node
+    except Exception:
+        node.stop()
+        raise
+
+
+def start_mongo_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> YydsNode:
+    """Starts one node serving only the MongoDB gateway (no catalog, no SQL listeners)."""
+
+    reserved: set[int] = set()
+    mongo_port = _free_port(reserved)
+    data_dir = Path(tempfile.mkdtemp(prefix="yyds-mongo-clients-"))
+    cluster_id = f"cluster-{os.getpid()}-{int(time.time())}"
+    node_id = f"node-{os.getpid()}"
+
+    node = YydsNode(host="127.0.0.1", pgsql_port=0, mysql_port=0, redis_port=0, data_dir=data_dir, mongo_port=mongo_port)
+    try:
+        init = _run_cli(["init", "--data-dir", str(data_dir), "--cluster-id", cluster_id, "--node-id", node_id], 30.0)
+        if init.returncode != 0:
+            raise NodeFailure(f"yyds init exited with code {init.returncode}: {init.stderr.strip()}")
+        node.process = subprocess.Popen(
+            _cli_arguments(
+                [
+                    "start",
+                    "--data-dir",
+                    str(data_dir),
+                    "--cluster-id",
+                    cluster_id,
+                    "--node-id",
+                    node_id,
+                    "--mongo-port",
+                    str(mongo_port),
+                ]
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert node.process.stdout is not None and node.process.stderr is not None
+        threading.Thread(target=_pump, args=(node.process.stdout, node.stdout_lines), daemon=True).start()
+        threading.Thread(target=_pump, args=(node.process.stderr, node.stderr_lines), daemon=True).start()
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if node.process.poll() is not None:
+                raise NodeFailure(f"yyds start exited with code {node.process.returncode} before readiness\n{node.logs()}")
+            announced = any(_parse_addresses(line).get("mongo", "null") not in ("", "null") for line in node.stdout_lines)
+            if announced and _port_open(node.host, mongo_port):
+                return node
+            time.sleep(PROBE_INTERVAL_SECONDS)
+        raise NodeFailure(f"node did not accept MongoDB connections within {timeout:.0f}s\n{node.logs()}")
     except Exception:
         node.stop()
         raise
