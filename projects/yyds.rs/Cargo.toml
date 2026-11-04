@@ -13,7 +13,7 @@ license = "MPL-2.0"
 repository = "https://github.com/yy-database/yyds"
 
 [workspace.dependencies]
-# Sole database.rs dependency ¡ª the `yyds` facade. Pin full 40-char rev.
+# Sole database.rs dependency Â· the `yyds` facade. Pin full 40-char rev.
 # Local absolute path overrides belong in `.cargo/config.toml` (facade only).
 yyds = { git = "https://github.com/oovm/database.rs.git", rev = "224941598608759e33dc38bf61b4682d921f9b29" }
 
