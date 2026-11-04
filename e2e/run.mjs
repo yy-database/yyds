@@ -216,6 +216,16 @@ try {
     );
     failures += await runSuite("py", python, [join(ROOT, "e2e/smoke.py")], { ...env, YYDS_SMOKE_TAG: "py" });
     failures += await runSuite(
+        "protocol-ts",
+        process.execPath,
+        ["--experimental-strip-types", join(ROOT, "e2e/protocol.ts")],
+        { ...env, YYDS_PROTOCOL_TAG: "ts" },
+    );
+    failures += await runSuite("protocol-py", python, [join(ROOT, "e2e/protocol.py")], {
+        ...env,
+        YYDS_PROTOCOL_TAG: "py",
+    });
+    failures += await runSuite(
         "examples-ts",
         process.execPath,
         ["--experimental-strip-types", join(ROOT, "projects/yyds.ts/examples/bulk.ts")],
@@ -261,7 +271,7 @@ try {
     });
 
     exitCode = failures === 0 ? 0 : 1;
-    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=10 failed=${failures}`);
+    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=12 failed=${failures}`);
 } catch (error) {
     console.error(`[smoke] error: ${error.message}`);
     console.error(nodeLogs());
