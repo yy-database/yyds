@@ -47,6 +47,19 @@ def _selected_gateways(name: str) -> list[str]:
     return list(GATEWAYS) if name == "all" else [name]
 
 
+def _expected_matrix_cases(name: str) -> int:
+    """Every declared case runs once per driver, so a truncated run is a failure."""
+
+    expected = 0
+    for gateway in _selected_gateways(name):
+        if gateway == "postgresql":
+            expected += len(postgres_suite.CASES) * len(postgres_suite.DRIVER_BLOCKS)
+        else:
+            expected += len(mysql_suite.CASES) * len(mysql_suite.DRIVER_BLOCKS)
+            expected += sum(len(cases) for cases in mysql_suite.EXTRA_CASES.values())
+    return expected
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = _parse_arguments(sys.argv[1:] if argv is None else argv)
 
@@ -102,6 +115,11 @@ def main(argv: list[str] | None = None) -> int:
     failures = [result for result in results if result.status != "pass"]
     passed = len(results) - len(failures)
     print(f"{passed}/{len(results)} cases passed")
+    if arguments.suite == "matrix":
+        expected = _expected_matrix_cases(arguments.gateway)
+        if len(results) < expected:
+            print(f"matrix ran {len(results)} cases, expected at least {expected}", file=sys.stderr)
+            return 1
     if failures and node is not None:
         print(node.logs(), file=sys.stderr)
     return 1 if failures else 0
