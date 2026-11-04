@@ -94,3 +94,51 @@ test("MySQL session surface covers collations, variables and rejected statements
     const [prepared] = await connection.execute("SELECT 1 AS value");
     assert.deepEqual(prepared, [{ value: 1 }]);
 });
+
+test("MySQL DDL subset and information_schema projections stay driver-visible", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const connection = await mysql.createConnection({
+        host: node.mysql.host,
+        port: node.mysql.port,
+        user: "yyds",
+        database: "yyds",
+    });
+    t.after(async () => {
+        await connection.end().catch(() => undefined);
+        await node.stop();
+    });
+
+    await connection.query(
+        "CREATE TABLE ddl_probe (id INT NOT NULL, name VARCHAR(32) NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+    );
+    await connection.query("ALTER TABLE ddl_probe ADD COLUMN score INT");
+    await connection.query("CREATE UNIQUE INDEX ddl_probe_name_key ON ddl_probe (name)");
+    await connection.query("INSERT INTO ddl_probe (id, name, score) VALUES (1, 'alpha', 1)");
+    await assert.rejects(
+        connection.query("INSERT INTO ddl_probe (id, name, score) VALUES (2, 'alpha', 2)"),
+        (error: unknown) => {
+            const failure = error as ServerError;
+            assert.equal(failure.errno, 1062);
+            assert.equal(failure.sqlState, "23000");
+            assert.match(failure.sqlMessage ?? "", /duplicate/i);
+            return true;
+        },
+    );
+
+    await connection.query("DROP INDEX ddl_probe_name_key ON ddl_probe");
+    const [rows] = await connection.query("SELECT id, name FROM ddl_probe ORDER BY id");
+    assert.deepEqual(rows, [{ id: 1, name: "alpha" }]);
+
+    const [tables] = await connection.query(
+        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+    );
+    assert.deepEqual((tables as Array<{ TABLE_NAME: string }>).map((row) => row.TABLE_NAME), ["ddl_probe"]);
+
+    const [columns] = await connection.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+        ["ddl_probe"],
+    );
+    assert.deepEqual((columns as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME), ["id", "name", "score"]);
+
+    await connection.query("DROP TABLE ddl_probe");
+});
