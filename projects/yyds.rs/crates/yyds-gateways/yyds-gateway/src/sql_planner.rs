@@ -704,7 +704,7 @@ fn check_conflict_value(expression: &SqlCatalogBoundExpression) -> Result<(), Sq
 /// 计划 `INSERT ... RETURNING`：把投影绑成可对最终落库行求值的表达式。
 ///
 /// MySQL 的 `INSERT` 没有 `RETURNING` 子句，同一语句在该方言下按语法错误拒绝。
-fn plan_returning(
+pub(crate) fn plan_returning(
     returning: Option<Vec<SqlCatalogBoundProjection>>,
     table: &crate::SqlCatalogTable,
     dialect: SqlDialect,

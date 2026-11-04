@@ -882,6 +882,105 @@ fn nested_call_columns_keep_declared_types() {
     server.join().unwrap();
 }
 
+/// `Parse` with no declared parameter OIDs must still describe parameter types
+/// from the catalog. An `unspecified` (zero) OID forces strict drivers such as
+/// `tokio-postgres` into a `pg_catalog` type lookup this gateway does not answer.
+#[test]
+fn describe_statement_infers_parameter_oids_from_the_catalog() {
+    let (mut client, server) = start_server_with_runtime();
+
+    let mut parse = cstring("ins");
+    parse.extend_from_slice(&cstring("INSERT INTO users (id, name) VALUES ($1, $2) RETURNING id, name"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'D', &describe_of(&cstring("ins")));
+    send_message(&mut client, b'S', &[]);
+
+    let described = receive_until_ready(&mut client);
+    assert_eq!(described[0].0, b'1');
+    assert_eq!(described[1].0, b't');
+    let parameter = &described[1].1;
+    let count = i16::from_be_bytes([parameter[0], parameter[1]]) as usize;
+    let oids: Vec<u32> =
+        (0..count).map(|index| u32::from_be_bytes(parameter[2 + index * 4..6 + index * 4].try_into().unwrap())).collect();
+    // `users.id: i64` -> INT8 and `users.name: utf8` -> TEXT, positionally.
+    assert_eq!(oids, vec![20, 25]);
+
+    assert_eq!(described[2].0, b'T');
+    let columns = parse_row_description(&described[2].1);
+    let names: Vec<&str> = columns.iter().map(|(name, _, _, _)| name.as_str()).collect();
+    assert_eq!(names, vec!["id", "name"]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// `Bind` must decode binary parameter bytes with the same catalog-inferred
+/// OIDs `Describe` reported. A statement that declared no OIDs at `Parse` has
+/// to bind `int8` / `text` payloads instead of failing with `42P18`.
+#[test]
+fn bind_decodes_binary_parameters_from_catalog_inferred_oids() {
+    let (mut client, server) = start_server_with_runtime();
+
+    let mut parse = cstring("bin");
+    parse.extend_from_slice(&cstring("INSERT INTO users (id, name) VALUES ($1, $2) RETURNING id, name"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+
+    let mut bind = cstring("bp");
+    bind.extend_from_slice(&cstring("bin"));
+    bind.extend_from_slice(&1_i16.to_be_bytes()); // one format code for every parameter
+    bind.extend_from_slice(&1_i16.to_be_bytes()); // binary
+    bind.extend_from_slice(&2_i16.to_be_bytes());
+    bind.extend_from_slice(&8_i32.to_be_bytes());
+    bind.extend_from_slice(&7_i64.to_be_bytes());
+    bind.extend_from_slice(&3_i32.to_be_bytes());
+    bind.extend_from_slice(b"ann");
+    bind.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'B', &bind);
+
+    let mut execute = cstring("bp");
+    execute.extend_from_slice(&0_i32.to_be_bytes());
+    send_message(&mut client, b'E', &execute);
+    send_message(&mut client, b'S', &[]);
+
+    let executed = receive_until_ready(&mut client);
+    assert!(executed.iter().all(|(tag, _)| *tag != b'E'), "{executed:?}");
+    assert!(executed.iter().any(|(tag, _)| *tag == b'C'), "{executed:?}");
+    assert_eq!(executed.iter().filter(|(tag, _)| *tag == b'D').count(), 1, "{executed:?}");
+
+    drop(client);
+    server.join().unwrap();
+}
+
+/// A parameter the text scan cannot attribute to a column — a function argument
+/// such as `strpos(name, $1)` — must still resolve to a concrete OID. PostgreSQL
+/// never returns `unspecified`, and drivers query `pg_catalog` when it does.
+#[test]
+fn describe_statement_resolves_an_unattributed_parameter_to_text() {
+    let (mut client, server) = start_server_with_runtime();
+
+    let mut parse = cstring("sel");
+    parse.extend_from_slice(&cstring("SELECT * FROM users WHERE strpos(name, $1) > 0"));
+    parse.extend_from_slice(&0_i16.to_be_bytes());
+    send_message(&mut client, b'P', &parse);
+    send_message(&mut client, b'D', &describe_of(&cstring("sel")));
+    send_message(&mut client, b'S', &[]);
+
+    let described = receive_until_ready(&mut client);
+    assert_eq!(described[0].0, b'1');
+    assert_eq!(described[1].0, b't');
+    let parameter = &described[1].1;
+    let count = i16::from_be_bytes([parameter[0], parameter[1]]) as usize;
+    let oids: Vec<u32> =
+        (0..count).map(|index| u32::from_be_bytes(parameter[2 + index * 4..6 + index * 4].try_into().unwrap())).collect();
+    assert_eq!(oids, vec![25]);
+    assert_eq!(described[2].0, b'T');
+
+    drop(client);
+    server.join().unwrap();
+}
+
 fn describe_of(statement: &[u8]) -> Vec<u8> {
     let mut describe = vec![b'S'];
     describe.extend_from_slice(statement);
@@ -2108,6 +2207,21 @@ fn pgsql_runs_a_multi_statement_simple_query_batch() {
     assert!(rows(&mut client, "SELECT \"shard\" FROM \"_iris_commit\"").is_empty());
     assert!(rows(&mut client, "SELECT \"seq\" FROM \"_iris_outbox\"").is_empty());
     assert_eq!(single_row(&mut client, "SELECT COUNT(*) FROM \"_iris_outbox\""), vec![Some(b"0".to_vec())]);
+
+    drop(client);
+    server.join().unwrap();
+}
+
+#[test]
+fn pgsql_answers_an_empty_query_with_empty_query_response() {
+    let (mut client, server) = start_server_with_empty_schema();
+
+    send_query(&mut client, "");
+    let responses = receive_until_ready(&mut client);
+    assert_eq!(responses, vec![(b'I', Vec::new()), (b'Z', b"I".to_vec())]);
+
+    // The connection stays usable: a probe must not abort the session.
+    assert!(rows(&mut client, "SELECT 1").len() == 1);
 
     drop(client);
     server.join().unwrap();

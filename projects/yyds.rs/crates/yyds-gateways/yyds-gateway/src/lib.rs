@@ -30,7 +30,7 @@ pub use crate::{
     },
     sql_batch::{split_sql_batch, SqlBatchStatement},
     sql_ddl::{is_accepted_collation, is_ddl_statement, parse_ddl, DdlColumn, SqlDdlStatement, ACCEPTED_COLLATIONS},
-    sql_describe::{describe_plan, SqlColumn},
+    sql_describe::{describe_bound_insert, describe_plan, SqlColumn},
     sql_execute::{decode_row, encode_row, execute_plan, RowFieldValues, SqlResult, SqlValue},
     sql_meta::{analyze_meta_query, mysql_data_type, postgres_type, MetaQuery, PG_SERVER_VERSION},
     sql_parameters::{neutralized_sql_parameters, nulled_sql_parameters, substitute_sql_parameters, SqlParameterStyle},
