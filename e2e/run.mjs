@@ -200,6 +200,13 @@ try {
         { ...env, YYDS_SMOKE_TAG: "ts" },
     );
     failures += await runSuite("py", python, [join(ROOT, "e2e/smoke.py")], { ...env, YYDS_SMOKE_TAG: "py" });
+    failures += await runSuite(
+        "examples-ts",
+        process.execPath,
+        ["--experimental-strip-types", join(ROOT, "projects/yyds.ts/examples/bulk.ts")],
+        env,
+    );
+    failures += await runSuite("examples-py", python, [join(ROOT, "projects/yyds.py/examples/bulk.py")], env);
 
     if (!existsSync(schemaPath)) throw new Error(`schema registry was not persisted at ${schemaPath}`);
     console.log(`[schema] ${schemaPath} (${statSync(schemaPath).size} bytes)`);
@@ -226,7 +233,7 @@ try {
     });
 
     exitCode = failures === 0 ? 0 : 1;
-    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=4 failed=${failures}`);
+    console.log(`[smoke] ${failures === 0 ? "PASS" : "FAIL"} suites=6 failed=${failures}`);
 } catch (error) {
     console.error(`[smoke] error: ${error.message}`);
     console.error(nodeLogs());
