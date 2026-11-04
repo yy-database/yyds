@@ -20,11 +20,11 @@ from pymongo.errors import BulkWriteError
 from harness import CaseResult, start_mongo_node
 from scenarios.support import (
     MONGO_URL_ENV,
-    compare_facts,
     confirm,
     mongo_client,
-    no_oracle,
     oracle_mongo,
+    parity_against_oracle,
+    run_cases,
     run_module,
 )
 
@@ -139,48 +139,42 @@ def run(scale: int = 1000) -> list[CaseResult]:
                 )
                 confirm(gateway["unordered_count"] == scale, f"final collection holds {gateway['unordered_count']}/{scale} documents")
 
-            for name, case in (
-                (CASES[0], documents),
-                (CASES[1], ordered_abort),
-                (CASES[2], unordered_continue),
-            ):
-                try:
-                    case()
-                except Exception as error:  # noqa: BLE001
-                    results.append(CaseResult(name, "fail", f"{type(error).__name__}: {error}"))
-                else:
-                    results.append(CaseResult(name, "pass", f"{scale}-document batches behave as declared"))
+            results.extend(
+                run_cases(
+                    (
+                        (CASES[0], documents),
+                        (CASES[1], ordered_abort),
+                        (CASES[2], unordered_continue),
+                    ),
+                    detail=f"{scale}-document batches behave as declared",
+                )
+            )
         finally:
             client.close()
 
-        engine = oracle_mongo()
-        if engine is None:
-            results.append(no_oracle(CASES[3], MONGO_URL_ENV))
-        else:
-            try:
-                engine_facts = _engine_facts(engine, scale)
-            finally:
-                engine.close()
-            results.append(
-                compare_facts(
-                    CASES[3],
-                    gateway,
-                    engine_facts,
-                    (
-                        "base_count",
-                        "base_first",
-                        "ordered_n_inserted",
-                        "ordered_error_codes",
-                        "ordered_error_count",
-                        "ordered_count",
-                        "ordered_first_retained",
-                        "unordered_n_inserted",
-                        "unordered_error_codes",
-                        "unordered_error_count",
-                        "unordered_count",
-                    ),
-                )
+        results.append(
+            parity_against_oracle(
+                CASES[3],
+                gateway,
+                oracle_mongo,
+                _engine_facts,
+                (
+                    "base_count",
+                    "base_first",
+                    "ordered_n_inserted",
+                    "ordered_error_codes",
+                    "ordered_error_count",
+                    "ordered_count",
+                    "ordered_first_retained",
+                    "unordered_n_inserted",
+                    "unordered_error_codes",
+                    "unordered_error_count",
+                    "unordered_count",
+                ),
+                scale,
+                MONGO_URL_ENV,
             )
+        )
     finally:
         node.stop()
 
