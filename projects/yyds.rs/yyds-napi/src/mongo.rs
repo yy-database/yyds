@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds::gateway::mongo::{service::MongoService, wire::FrameLimits};
+use database::server::mongo::{service::MongoService, wire::FrameLimits};
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle};
 
