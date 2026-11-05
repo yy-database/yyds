@@ -44,3 +44,57 @@ test("mongodb driver completes the handshake and runs document CRUD", { timeout:
     // rather than an empty or fabricated result.
     await assert.rejects(collection.updateOne({}, { $set: { value: 2 } }), /unsupported/i);
 });
+
+test("mongodb driver drains a batched cursor and killCursors reclaims it", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode({ mongo: true });
+    assert.ok(node.mongo, "the harness must expose the MongoDB probe address");
+    const client = new MongoClient(`mongodb://${node.mongo.host}:${node.mongo.port}`, {
+        directConnection: true,
+        serverApi: { version: "1", strict: false, deprecationErrors: false },
+        serverSelectionTimeoutMS: 10_000,
+        retryWrites: false,
+        retryReads: false,
+    });
+    await client.connect();
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const db = client.db("yyds");
+    const collection = db.collection<{ _id: string; v: number }>("cursor-probe");
+    const ids = [0, 1, 2, 3, 4].map((index) => `cursor-${index}`);
+    await collection.deleteMany({});
+    await collection.insertMany(ids.map((id, index) => ({ _id: id, v: index })));
+
+    // A batch smaller than the result set forces the driver through `getMore`
+    // frames until the server reports cursor id 0.
+    const observed: string[] = [];
+    for await (const document of collection.find({}, { batchSize: 2 })) {
+        observed.push(document._id);
+    }
+    assert.deepEqual(observed, ids);
+
+    // Send the cursor commands directly so the id is observable: a killed cursor
+    // must leave the server, and a later `getMore` answers cursor id not found.
+    const first = await db.command({ find: "cursor-probe", batchSize: 2 });
+    const cursorId = first.cursor.id as number;
+    assert.notEqual(cursorId, 0, "a partial find must return a live cursor id");
+    assert.equal(first.cursor.firstBatch.length, 2);
+
+    const killed = await db.command({ killCursors: "cursor-probe", cursors: [cursorId] });
+    assert.equal(killed.ok, 1);
+    assert.deepEqual(killed.cursorsKilled, [cursorId]);
+    await assert.rejects(
+        db.command({ getMore: cursorId, collection: "cursor-probe" }),
+        (error: unknown) => (error as { code?: number }).code === 43,
+    );
+
+    // An id the server never issued is reported as not found instead of faked.
+    const absent = 999_999_999;
+    const missing = await db.command({ killCursors: "cursor-probe", cursors: [absent] });
+    assert.equal(missing.ok, 1);
+    assert.deepEqual(missing.cursorsNotFound, [absent]);
+
+    await collection.deleteMany({});
+});
