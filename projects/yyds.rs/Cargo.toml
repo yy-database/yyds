@@ -14,7 +14,7 @@ repository = "https://github.com/yy-database/yyds"
 
 [workspace.dependencies]
 # Sole database.rs dependency · the `database` facade. Pin full 40-char rev.
-database = { git = "https://github.com/oovm/database.rs.git", rev = "bbf58deb3a87553d0bd71f43fd2706133806e55b" }
+database = { git = "https://github.com/oovm/database.rs.git", rev = "5c4201fb50357015aaf0b007871e9ed127a25921" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

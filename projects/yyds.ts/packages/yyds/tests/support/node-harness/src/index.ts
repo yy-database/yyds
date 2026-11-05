@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,6 +63,8 @@ interface RuntimeStatus {
     mysqlAddress?: string | null;
     pgsqlAddress?: string | null;
 }
+
+const STATUS_FILE = "node.status.json";
 
 function runCli(args: string[], timeoutMs = 10_000): Promise<CliResult> {
     return new Promise((resolve, reject) => {
@@ -139,31 +141,27 @@ export function parseAddress(value: string): YydsAddress {
     return { host: trimmed.slice(0, separator) || "127.0.0.1", port };
 }
 
-interface StatusSnapshot {
-    ownership: string;
-    runtime: RuntimeStatus | null;
-}
-
-function lastJsonLine(stdout: string): RuntimeStatus | null {
-    const lines = stdout.trim().split(/\r?\n/);
-    const last = lines[lines.length - 1] ?? "";
-    try {
-        const snapshot = JSON.parse(last) as StatusSnapshot;
-        return snapshot.runtime;
-    } catch {
-        throw new Error(`unexpected status output: ${JSON.stringify(stdout)}`);
-    }
-}
-
 function describeFailure(stderr: string, stdout: string): string {
     const detail = `${stderr}\n${stdout}`.trim();
     return detail.length > 0 ? detail : "no child output";
 }
 
+/**
+ * Reads the runtime snapshot the node publishes atomically into its data
+ * directory. The `status` command would work too, but it probes ownership by
+ * taking an exclusive lock on the directory, so polling it races the node's
+ * own boot-time lease acquisition and can make a fresh start fail with
+ * `node data directory is already owned`.
+ */
 async function readStatus(dataDir: string): Promise<RuntimeStatus | null> {
-    const result = await runCli(["status", "--data-dir", dataDir], 10_000);
-    if (result.code !== 0) throw new Error(`status exited with ${result.code}: ${describeFailure(result.stderr, result.stdout)}`);
-    return lastJsonLine(result.stdout);
+    let text: string;
+    try {
+        text = await readFile(join(dataDir, STATUS_FILE), "utf8");
+    } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+    }
+    return JSON.parse(text) as RuntimeStatus;
 }
 
 interface NodePorts {

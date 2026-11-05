@@ -105,11 +105,17 @@ def start_redis_node(
         raise
 
 
-def _client(node: YydsNode) -> redis.Redis:
-    # The gateway speaks RESP2 only and does not implement `HELLO` or `CLIENT SETINFO`,
-    # so the driver stays on protocol 2 and skips library metadata.
+def _client(node: YydsNode, protocol: int = 2) -> redis.Redis:
+    # RESP2 stays the default so most assertions keep the older wire shape. RESP3 is
+    # opt-in for the optimistic-lock cases that must observe the dedicated null type.
+    # Library metadata is skipped to keep every handshake minimal.
     return redis.Redis(
-        host=node.host, port=node.redis_port, decode_responses=True, protocol=2, lib_name=None, lib_version=None
+        host=node.host,
+        port=node.redis_port,
+        decode_responses=True,
+        protocol=protocol,
+        lib_name=None,
+        lib_version=None,
     )
 
 
@@ -337,6 +343,79 @@ def _case_exec_empty(node: YydsNode) -> None:
         client.close()
 
 
+def _case_watch_abort(node: YydsNode, protocol: int) -> None:
+    writer = _client(node, protocol)
+    rival = _client(node, protocol)
+    key = f"py-watch-abort-{protocol}"
+    try:
+        check(writer.execute_command("WATCH", key) in (True, "OK"), "WATCH must answer OK")
+        check(rival.set(key, "rival") is True, "the rival write must land")
+        check(writer.execute_command("MULTI") in (True, "OK"), "MULTI must answer OK")
+        writer.execute_command("SET", key, "transaction")
+
+        executed = writer.execute_command("EXEC")
+        check(executed is None, f"EXEC must answer nil after a watched write, got {executed!r}")
+        check(rival.get(key) == "rival", "an aborted transaction must not apply its queue")
+        check(writer.ping() is True, "the connection must keep answering after an aborted EXEC")
+    finally:
+        writer.close()
+        rival.close()
+
+
+def _case_watch_unwatch_and_discard(node: YydsNode) -> None:
+    watcher = _client(node)
+    rival = _client(node)
+    try:
+        # UNWATCH releases the pin, so a rival write no longer voids the transaction.
+        watcher.execute_command("WATCH", "py-watch-unwatch")
+        rival.set("py-watch-unwatch", "rival")
+        check(watcher.execute_command("UNWATCH") in (True, "OK"), "UNWATCH must answer OK")
+        watcher.execute_command("MULTI")
+        watcher.execute_command("SET", "py-watch-unwatch", "committed")
+        executed = watcher.execute_command("EXEC")
+        check(
+            isinstance(executed, list) and len(executed) == 1,
+            f"EXEC after UNWATCH must run the queue, got {executed!r}",
+        )
+        check(rival.get("py-watch-unwatch") == "committed", "the transaction must land after UNWATCH")
+
+        # DISCARD also drops the pin: the next transaction runs despite the rival write.
+        watcher.execute_command("WATCH", "py-watch-discard")
+        rival.set("py-watch-discard", "dirty")
+        watcher.execute_command("MULTI")
+        watcher.execute_command("SET", "py-watch-discard", "queued")
+        check(watcher.execute_command("DISCARD") in (True, "OK"), "DISCARD must answer OK")
+        watcher.execute_command("MULTI")
+        watcher.execute_command("SET", "py-watch-discard", "after-discard")
+        executed = watcher.execute_command("EXEC")
+        check(
+            isinstance(executed, list) and len(executed) == 1,
+            f"EXEC after DISCARD must run the queue, got {executed!r}",
+        )
+        check(rival.get("py-watch-discard") == "after-discard", "the transaction must land after DISCARD")
+    finally:
+        watcher.close()
+        rival.close()
+
+
+def _case_watch_inside_multi(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        client.execute_command("MULTI")
+        try:
+            client.execute_command("WATCH", "py-watch-guard")
+        except redis.exceptions.ResponseError as error:
+            check(
+                _error_message(error) == "ERR WATCH inside MULTI is not allowed",
+                f"WATCH inside MULTI must be refused, got {_error_message(error)!r}",
+            )
+        else:
+            raise AssertionError("WATCH inside MULTI must be refused")
+        check(client.execute_command("DISCARD") in (True, "OK"), "DISCARD must close the rejected transaction")
+    finally:
+        client.close()
+
+
 def _case_rename_rotation(node: YydsNode) -> None:
     client = _client(node)
     reader = _client(node)
@@ -478,6 +557,10 @@ def run_redis(node: YydsNode | None = None) -> list[CaseResult]:
             ("multi-isolation", lambda: _case_multi_isolation(node)),
             ("discard", lambda: _case_discard(node)),
             ("exec-empty", lambda: _case_exec_empty(node)),
+            ("watch-abort-resp2", lambda: _case_watch_abort(node, 2)),
+            ("watch-abort-resp3", lambda: _case_watch_abort(node, 3)),
+            ("watch-unwatch-and-discard", lambda: _case_watch_unwatch_and_discard(node)),
+            ("watch-inside-multi", lambda: _case_watch_inside_multi(node)),
             ("rename-rotation", lambda: _case_rename_rotation(node)),
             ("error-paths", lambda: _case_error_paths(node)),
             ("background-reclaim", lambda: _case_background_reclaim(node)),

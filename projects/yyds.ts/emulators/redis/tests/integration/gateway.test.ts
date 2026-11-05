@@ -6,12 +6,13 @@ import { createClient } from "redis";
 
 type ProbeNode = Awaited<ReturnType<typeof startYydsNode>>;
 
-async function connectRedis(node: ProbeNode) {
-    // The gateway speaks RESP2 only and does not implement HELLO or CLIENT
-    // SETINFO, so the driver must not send those handshake commands.
+async function connectRedis(node: ProbeNode, protocol: 2 | 3 = 2) {
+    // RESP2 is the default so most assertions keep the older wire shape. RESP3 is
+    // opt-in for the optimistic-lock cases that must observe the dedicated null
+    // type. CLIENT SETINFO is disabled to keep every handshake minimal.
     const client = createClient({
         url: `redis://${node.redis.host}:${node.redis.port}`,
-        RESP: 2,
+        RESP: protocol,
         disableClientInfo: true,
     });
     client.on("error", () => undefined);
@@ -147,4 +148,98 @@ test("node-redis returns an empty array for EXEC on an empty queue", { timeout: 
     // The connection leaves the transaction cleanly and accepts normal writes.
     assert.equal(await client.set("empty-tx", "v"), "OK");
     assert.equal(await client.get("empty-tx"), "v");
+});
+
+async function assertWatchAbort(node: ProbeNode, protocol: 2 | 3) {
+    const writer = await connectRedis(node, protocol);
+    const rival = await connectRedis(node, protocol);
+    const key = `watch-abort-resp${protocol}`;
+    try {
+        assert.equal(await writer.sendCommand(["WATCH", key]), "OK");
+        assert.equal(await rival.set(key, "rival"), "OK");
+
+        assert.equal(await writer.sendCommand(["MULTI"]), "OK");
+        assert.equal(await writer.sendCommand(["SET", key, "transaction"]), "QUEUED");
+
+        // A watched key changed by another connection turns EXEC into a protocol
+        // null: `*-1` on RESP2 and `_` on RESP3. node-redis surfaces both as null.
+        assert.equal(await writer.sendCommand(["EXEC"]), null);
+        assert.equal(await rival.get(key), "rival");
+        assert.equal(await writer.ping(), "PONG");
+    } finally {
+        await writer.close().catch(() => undefined);
+        await rival.close().catch(() => undefined);
+    }
+}
+
+test("node-redis aborts a watched transaction on RESP2", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    t.after(() => node.stop());
+
+    await assertWatchAbort(node, 2);
+});
+
+test("node-redis aborts a watched transaction on RESP3", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    t.after(() => node.stop());
+
+    await assertWatchAbort(node, 3);
+});
+
+test("node-redis releases a watch with UNWATCH and DISCARD", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const writer = await connectRedis(node);
+    const rival = await connectRedis(node);
+    t.after(async () => {
+        await rival.close().catch(() => undefined);
+        await writer.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "watch-release";
+
+    await writer.set(key, "old");
+    assert.equal(await writer.sendCommand(["WATCH", key]), "OK");
+    assert.equal(await rival.set(key, "rival"), "OK");
+    // UNWATCH drops the watch, so the following transaction commits even though
+    // the key changed after it was watched.
+    assert.equal(await writer.sendCommand(["UNWATCH"]), "OK");
+    assert.equal(await writer.sendCommand(["MULTI"]), "OK");
+    assert.equal(await writer.sendCommand(["SET", key, "after-unwatch"]), "QUEUED");
+    assert.deepEqual(await writer.sendCommand(["EXEC"]), ["OK"]);
+    assert.equal(await rival.get(key), "after-unwatch");
+
+    assert.equal(await writer.sendCommand(["WATCH", key]), "OK");
+    assert.equal(await rival.set(key, "rival-again"), "OK");
+    // DISCARD closes the transaction and releases the watch with it.
+    assert.equal(await writer.sendCommand(["MULTI"]), "OK");
+    assert.equal(await writer.sendCommand(["SET", key, "discarded"]), "QUEUED");
+    assert.equal(await writer.sendCommand(["DISCARD"]), "OK");
+    assert.equal(await rival.get(key), "rival-again");
+
+    assert.equal(await writer.sendCommand(["MULTI"]), "OK");
+    assert.equal(await writer.sendCommand(["SET", key, "after-discard"]), "QUEUED");
+    assert.deepEqual(await writer.sendCommand(["EXEC"]), ["OK"]);
+    assert.equal(await rival.get(key), "after-discard");
+});
+
+test("node-redis refuses WATCH inside MULTI", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    assert.equal(await client.sendCommand(["MULTI"]), "OK");
+    await assert.rejects(
+        client.sendCommand(["WATCH", "watch-inside-multi"]),
+        /WATCH inside MULTI is not allowed/,
+    );
+    assert.equal(await client.sendCommand(["DISCARD"]), "OK");
+
+    assert.equal(await client.sendCommand(["MULTI"]), "OK");
+    assert.equal(await client.sendCommand(["SET", "watch-inside-multi", "v"]), "QUEUED");
+    assert.deepEqual(await client.sendCommand(["EXEC"]), ["OK"]);
+    assert.equal(await client.get("watch-inside-multi"), "v");
 });
