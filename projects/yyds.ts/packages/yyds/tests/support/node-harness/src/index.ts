@@ -58,6 +58,7 @@ interface CliResult {
 }
 
 interface RuntimeStatus {
+    pid?: number;
     redisAddress?: string | null;
     mysqlAddress?: string | null;
     pgsqlAddress?: string | null;
@@ -220,13 +221,22 @@ function killChild(child: ReturnType<typeof spawn>): void {
 async function waitForAddresses(
     dataDir: string,
     startupTimeoutMs: number,
+    expectedPid?: number,
 ): Promise<RuntimeStatus> {
     const deadline = Date.now() + startupTimeoutMs;
     let lastError: unknown = null;
     while (Date.now() < deadline) {
         try {
             const runtime = await readStatus(dataDir);
-            if (runtime?.redisAddress && runtime.mysqlAddress && runtime.pgsqlAddress) {
+            // A restart over an existing data directory leaves the previous
+            // node's runtime snapshot readable, so only the freshly spawned
+            // process may publish the addresses of this start.
+            if (
+                runtime?.redisAddress &&
+                runtime.mysqlAddress &&
+                runtime.pgsqlAddress &&
+                (expectedPid === undefined || runtime.pid === expectedPid)
+            ) {
                 return runtime;
             }
         } catch (error) {
@@ -295,7 +305,7 @@ export async function startYydsNode(options: StartYydsNodeOptions = {}): Promise
     };
 
     try {
-        const runtime = await waitForAddresses(dataDir, startupTimeoutMs);
+        const runtime = await waitForAddresses(dataDir, startupTimeoutMs, child.pid);
         if (child.exitCode !== null) {
             throw new Error(
                 `start exited with ${child.exitCode} before publishing addresses: ${describeFailure(output().stderr, output().stdout)}`,

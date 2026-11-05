@@ -42,22 +42,22 @@ const PYTHON_CLIENTS = "projects/yyds.py/packages/yyds/tests/clients/run_all.py"
 
 const GATES = {
     "redis-ts": {
-        minimum: 43,
+        minimum: 45,
         command: `pnpm --filter @yydb/redis test`,
         parse: parseNodeTest,
     },
     "mongo-ts": {
-        minimum: 7,
+        minimum: 9,
         command: `pnpm --filter @yydb/mongodb test`,
         parse: parseNodeTest,
     },
     "redis-py": {
-        minimum: 15,
+        minimum: 17,
         command: `python ${PYTHON_CLIENTS} --suite redis`,
         parse: parsePythonSuite,
     },
     "mongo-py": {
-        minimum: 6,
+        minimum: 8,
         command: `python ${PYTHON_CLIENTS} --suite mongo`,
         parse: parsePythonSuite,
     },
