@@ -103,6 +103,53 @@ def _case_count_and_aggregate(node: YydsNode) -> None:
         client.close()
 
 
+def _case_aggregate_empty_group(node: YydsNode) -> None:
+    client = _client(node)
+    collection = client["yyds"]["py-agg-group"]
+    try:
+        collection.delete_many({})
+        empty = list(collection.aggregate([{"$group": {"_id": None, "n": {"$sum": 1}}}]))
+        check(empty == [], f"a $group over no input must yield an empty batch, got {empty!r}")
+
+        # A non-empty control proves the empty reply comes from the input, not a stub.
+        collection.insert_many([{"_id": "g1", "v": 1}, {"_id": "g2", "v": 2}])
+        counted = list(collection.aggregate([{"$group": {"_id": None, "n": {"$sum": 1}}}]))
+        check(counted == [{"_id": None, "n": 2}], f"the same $group must fold two documents into one, got {counted!r}")
+    finally:
+        collection.delete_many({})
+        client.close()
+
+
+def _case_aggregate_projection_exclusion(node: YydsNode) -> None:
+    client = _client(node)
+    collection = client["yyds"]["py-agg-projection"]
+    try:
+        collection.delete_many({})
+        collection.insert_many(
+            [
+                {"_id": "p1", "keep": "visible", "secret": "hidden"},
+                {"_id": "p2", "keep": "other", "secret": "hidden"},
+            ]
+        )
+
+        # An exclusion spec drops only the named field and keeps `_id` by default.
+        masked = list(collection.aggregate([{"$project": {"secret": 0}}]))
+        check(
+            masked == [{"_id": "p1", "keep": "visible"}, {"_id": "p2", "keep": "other"}],
+            f"excluding `secret` must keep everything else, got {masked!r}",
+        )
+
+        # `_id: 0` is a second exclusion rule and removes the identifier too.
+        no_id = list(collection.aggregate([{"$project": {"_id": 0, "secret": 0}}]))
+        check(
+            no_id == [{"keep": "visible"}, {"keep": "other"}],
+            f"excluding `_id` and `secret` must leave only `keep`, got {no_id!r}",
+        )
+    finally:
+        collection.delete_many({})
+        client.close()
+
+
 def _case_cursor_batching_and_reclaim(node: YydsNode) -> None:
     client = _client(node)
     collection = client["yyds"]["py-cursor"]
@@ -172,6 +219,8 @@ def run_mongo(node: YydsNode | None = None) -> list[CaseResult]:
             ("handshake", lambda: _case_handshake(node)),
             ("crud", lambda: _case_crud(node)),
             ("count-and-aggregate", lambda: _case_count_and_aggregate(node)),
+            ("aggregate-empty-group", lambda: _case_aggregate_empty_group(node)),
+            ("aggregate-projection-exclusion", lambda: _case_aggregate_projection_exclusion(node)),
             ("cursor-batching-and-reclaim", lambda: _case_cursor_batching_and_reclaim(node)),
             ("invalid-namespace", lambda: _case_invalid_namespace(node)),
         ]
