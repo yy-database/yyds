@@ -4,7 +4,7 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use database::cluster::catalog::Catalog;
 use database::query::SqlCatalog;
-use database::server::pgsql::service::PgsqlService;
+use database::server::yyds::pgsql::service::PgsqlService;
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle, schema::SqlSchemaRegistryHandle};
 
