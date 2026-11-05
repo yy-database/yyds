@@ -4,8 +4,9 @@ import test from "node:test";
 import { startYydsNode } from "@yydb/yyds-node-harness";
 import { MongoClient } from "mongodb";
 
-test("mongodb driver completes the handshake and runs document CRUD", { timeout: 60_000 }, async (t) => {
-    const node = await startYydsNode({ mongo: true });
+type ProbeNode = Awaited<ReturnType<typeof startYydsNode>>;
+
+async function connectMongo(node: ProbeNode): Promise<MongoClient> {
     assert.ok(node.mongo, "the harness must expose the MongoDB probe address");
     const client = new MongoClient(`mongodb://${node.mongo.host}:${node.mongo.port}`, {
         directConnection: true,
@@ -18,6 +19,12 @@ test("mongodb driver completes the handshake and runs document CRUD", { timeout:
         retryReads: false,
     });
     await client.connect();
+    return client;
+}
+
+test("mongodb driver completes the handshake and runs document CRUD", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode({ mongo: true });
+    const client = await connectMongo(node);
     t.after(async () => {
         await client.close().catch(() => undefined);
         await node.stop();
@@ -47,15 +54,7 @@ test("mongodb driver completes the handshake and runs document CRUD", { timeout:
 
 test("mongodb driver drains a batched cursor and killCursors reclaims it", { timeout: 60_000 }, async (t) => {
     const node = await startYydsNode({ mongo: true });
-    assert.ok(node.mongo, "the harness must expose the MongoDB probe address");
-    const client = new MongoClient(`mongodb://${node.mongo.host}:${node.mongo.port}`, {
-        directConnection: true,
-        serverApi: { version: "1", strict: false, deprecationErrors: false },
-        serverSelectionTimeoutMS: 10_000,
-        retryWrites: false,
-        retryReads: false,
-    });
-    await client.connect();
+    const client = await connectMongo(node);
     t.after(async () => {
         await client.close().catch(() => undefined);
         await node.stop();
@@ -95,6 +94,58 @@ test("mongodb driver drains a batched cursor and killCursors reclaims it", { tim
     const missing = await db.command({ killCursors: "cursor-probe", cursors: [absent] });
     assert.equal(missing.ok, 1);
     assert.deepEqual(missing.cursorsNotFound, [absent]);
+
+    await collection.deleteMany({});
+});
+
+test("aggregate $group over empty input returns no documents", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode({ mongo: true });
+    const client = await connectMongo(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const collection = client.db("yyds").collection<{ _id: string; v: number }>("group-probe");
+    await collection.deleteMany({});
+    const pipeline = [{ $group: { _id: null, n: { $sum: 1 } } }];
+    assert.deepEqual(await collection.aggregate(pipeline).toArray(), []);
+
+    // A non-empty control proves the empty reply comes from the input, not a stub.
+    await collection.insertMany([{ _id: "g1", v: 1 }, { _id: "g2", v: 2 }]);
+    assert.deepEqual(await collection.aggregate(pipeline).toArray(), [{ _id: null, n: 2 }]);
+
+    await collection.deleteMany({});
+});
+
+test("aggregate $project exclusion drops only the excluded fields", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode({ mongo: true });
+    const client = await connectMongo(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const collection = client
+        .db("yyds")
+        .collection<{ _id: string; keep: string; secret: string }>("projection-probe");
+    await collection.deleteMany({});
+    await collection.insertMany([
+        { _id: "p1", keep: "visible", secret: "hidden" },
+        { _id: "p2", keep: "other", secret: "hidden" },
+    ]);
+
+    // An exclusion spec drops only the named field and keeps `_id` by default.
+    assert.deepEqual(await collection.aggregate([{ $project: { secret: 0 } }]).toArray(), [
+        { _id: "p1", keep: "visible" },
+        { _id: "p2", keep: "other" },
+    ]);
+
+    // `_id: 0` is a second exclusion rule and removes the identifier too.
+    assert.deepEqual(await collection.aggregate([{ $project: { _id: 0, secret: 0 } }]).toArray(), [
+        { keep: "visible" },
+        { keep: "other" },
+    ]);
 
     await collection.deleteMany({});
 });

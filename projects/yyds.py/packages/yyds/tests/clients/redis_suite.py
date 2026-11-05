@@ -258,6 +258,52 @@ def _case_multi_exec(node: YydsNode) -> None:
         client.close()
 
 
+def _case_multi_nested(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        check(client.execute_command("MULTI") in (True, "OK"), "MULTI must answer OK")
+        # redis-py maps the `QUEUED` reply to False, so only the queue's effect
+        # is asserted: the nested call below must be refused, not the write.
+        client.execute_command("SET", "py-nested", "v")
+
+        # Real Redis refuses a second MULTI without dropping the open queue.
+        try:
+            client.execute_command("MULTI")
+        except redis.exceptions.ResponseError as error:
+            check(
+                _error_message(error) == "ERR MULTI calls can not be nested",
+                f"nested MULTI must be refused, got {_error_message(error)!r}",
+            )
+        else:
+            raise AssertionError("nested MULTI must be refused")
+
+        executed = client.execute_command("EXEC")
+        check(isinstance(executed, list) and len(executed) == 1, f"EXEC must replay the one queued command, got {executed!r}")
+        check(client.get("py-nested") == "v", "the queued write must commit on EXEC")
+    finally:
+        client.close()
+
+
+def _case_multi_isolation(node: YydsNode) -> None:
+    writer = _client(node)
+    reader = _client(node)
+    try:
+        writer.set("py-tx-isolation", "old")
+
+        writer.execute_command("MULTI")
+        writer.execute_command("SET", "py-tx-isolation", "new")
+        # The queued write belongs to the writer's connection only: a second
+        # connection keeps reading the committed value until EXEC runs.
+        check(reader.get("py-tx-isolation") == "old", "a queued write must not leak to another connection")
+
+        executed = writer.execute_command("EXEC")
+        check(isinstance(executed, list) and len(executed) == 1, f"EXEC must replay the one queued command, got {executed!r}")
+        check(reader.get("py-tx-isolation") == "new", "EXEC must publish the queued write to every connection")
+    finally:
+        writer.close()
+        reader.close()
+
+
 def _case_rename_rotation(node: YydsNode) -> None:
     client = _client(node)
     reader = _client(node)
@@ -395,6 +441,8 @@ def run_redis(node: YydsNode | None = None) -> list[CaseResult]:
             ("cross-connection", lambda: _case_cross_connection(node)),
             ("reconnect", lambda: _case_reconnect(node)),
             ("multi-exec", lambda: _case_multi_exec(node)),
+            ("multi-nested", lambda: _case_multi_nested(node)),
+            ("multi-isolation", lambda: _case_multi_isolation(node)),
             ("rename-rotation", lambda: _case_rename_rotation(node)),
             ("error-paths", lambda: _case_error_paths(node)),
             ("background-reclaim", lambda: _case_background_reclaim(node)),

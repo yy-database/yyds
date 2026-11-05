@@ -4,8 +4,9 @@ import test from "node:test";
 import { startYydsNode } from "@yydb/yyds-node-harness";
 import { createClient } from "redis";
 
-test("node-redis drives string commands, batches and namespace isolation", { timeout: 60_000 }, async (t) => {
-    const node = await startYydsNode();
+type ProbeNode = Awaited<ReturnType<typeof startYydsNode>>;
+
+async function connectRedis(node: ProbeNode) {
     // The gateway speaks RESP2 only and does not implement HELLO or CLIENT
     // SETINFO, so the driver must not send those handshake commands.
     const client = createClient({
@@ -15,6 +16,12 @@ test("node-redis drives string commands, batches and namespace isolation", { tim
     });
     client.on("error", () => undefined);
     await client.connect();
+    return client;
+}
+
+test("node-redis drives string commands, batches and namespace isolation", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
     t.after(async () => {
         await client.close().catch(() => undefined);
         await node.stop();
@@ -71,4 +78,40 @@ test("node-redis drives string commands, batches and namespace isolation", { tim
     await assert.rejects(client.sendCommand(["AUTH", "secret"]), /unsupported/i);
     assert.equal(await client.ttl("scoped"), -1);
     assert.equal(await client.ttl("missing"), -2);
+});
+
+test("node-redis refuses a nested MULTI without dropping the open queue", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    assert.equal(await client.sendCommand(["MULTI"]), "OK");
+    assert.equal(await client.sendCommand(["SET", "nested-tx", "v"]), "QUEUED");
+    await assert.rejects(client.sendCommand(["MULTI"]), /MULTI calls can not be nested/);
+
+    // The refused nesting leaves the transaction open, so the queued write still commits.
+    assert.deepEqual(await client.sendCommand(["EXEC"]), ["OK"]);
+    assert.equal(await client.get("nested-tx"), "v");
+});
+
+test("node-redis keeps a queued MULTI write invisible to another connection", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const writer = await connectRedis(node);
+    const reader = await connectRedis(node);
+    t.after(async () => {
+        await reader.close().catch(() => undefined);
+        await writer.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    await writer.set("tx-isolation", "old");
+    assert.equal(await writer.sendCommand(["MULTI"]), "OK");
+    assert.equal(await writer.sendCommand(["SET", "tx-isolation", "new"]), "QUEUED");
+    assert.equal(await reader.get("tx-isolation"), "old");
+
+    assert.deepEqual(await writer.sendCommand(["EXEC"]), ["OK"]);
+    assert.equal(await reader.get("tx-isolation"), "new");
 });
