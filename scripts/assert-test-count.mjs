@@ -47,7 +47,7 @@ const GATES = {
         parse: parseNodeTest,
     },
     "mongo-ts": {
-        minimum: 4,
+        minimum: 5,
         command: `pnpm --filter @yydb/mongodb test`,
         parse: parseNodeTest,
     },
@@ -57,7 +57,7 @@ const GATES = {
         parse: parsePythonSuite,
     },
     "mongo-py": {
-        minimum: 1,
+        minimum: 5,
         command: `python ${PYTHON_CLIENTS} --suite mongo`,
         parse: parsePythonSuite,
     },

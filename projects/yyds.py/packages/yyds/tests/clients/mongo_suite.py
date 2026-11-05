@@ -103,6 +103,46 @@ def _case_count_and_aggregate(node: YydsNode) -> None:
         client.close()
 
 
+def _case_cursor_batching_and_reclaim(node: YydsNode) -> None:
+    client = _client(node)
+    collection = client["yyds"]["py-cursor"]
+    try:
+        ids = [f"py-cursor-{index}" for index in range(5)]
+        collection.insert_many([{"_id": key, "v": index} for index, key in enumerate(ids)])
+
+        # A batch smaller than the result set forces the driver through `getMore`
+        # frames until the server reports cursor id 0.
+        observed = [document["_id"] for document in collection.find({}, batch_size=2)]
+        check(observed == ids, f"a batched find must return every document in order, got {observed!r}")
+
+        # Send the cursor commands directly so the id is observable: a killed cursor
+        # must leave the server, and a later `getMore` answers cursor id not found.
+        first = client["yyds"].command({"find": "py-cursor", "batchSize": 2})
+        cursor = first.get("cursor", {})
+        cursor_id = cursor.get("id")
+        check(isinstance(cursor_id, int) and cursor_id != 0, f"a partial find must return a live cursor id, got {cursor_id!r}")
+        check(len(cursor.get("firstBatch", [])) == 2, "the first batch must carry the requested size")
+
+        killed = client["yyds"].command({"killCursors": "py-cursor", "cursors": [cursor_id]})
+        check(killed.get("ok") == 1, f"killCursors must answer ok: 1, got {killed}")
+        check(cursor_id in killed.get("cursorsKilled", []), f"killCursors must report the reclaimed id, got {killed}")
+        try:
+            client["yyds"].command({"getMore": cursor_id, "collection": "py-cursor"})
+        except OperationFailure as error:
+            check(error.code == 43, f"getMore on a reclaimed cursor must answer code 43, got {error.code}: {error}")
+        else:
+            raise AssertionError("getMore on a reclaimed cursor must be refused")
+
+        # An id the server never issued is reported as not found instead of faked.
+        absent = 999_999_999
+        missing = client["yyds"].command({"killCursors": "py-cursor", "cursors": [absent]})
+        check(missing.get("ok") == 1, f"killCursors must still answer ok: 1, got {missing}")
+        check(absent in missing.get("cursorsNotFound", []), f"an unknown cursor id must be reported missing, got {missing}")
+    finally:
+        collection.delete_many({})
+        client.close()
+
+
 def _case_invalid_namespace(node: YydsNode) -> None:
     client = _client(node)
     try:
@@ -132,6 +172,7 @@ def run_mongo(node: YydsNode | None = None) -> list[CaseResult]:
             ("handshake", lambda: _case_handshake(node)),
             ("crud", lambda: _case_crud(node)),
             ("count-and-aggregate", lambda: _case_count_and_aggregate(node)),
+            ("cursor-batching-and-reclaim", lambda: _case_cursor_batching_and_reclaim(node)),
             ("invalid-namespace", lambda: _case_invalid_namespace(node)),
         ]
         return run_cases("pymongo", cases)
