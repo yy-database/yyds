@@ -39,5 +39,6 @@ messages are stable strings and never contain Rust debug output.
 python -m unittest discover -s projects/yyds.py/packages/yyds/tests
 ```
 
-Tests fail rather than skip when the native module is importable but broken, and
-skip with an explicit reason when `yyds_pyo3` has not been built yet.
+Tests run against the installed wheel and never add `src` to `sys.path`, so the
+source-tree shim cannot shadow the compiled `yyds_pyo3` package. They skip with
+an explicit reason when the wheel is not installed.

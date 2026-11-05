@@ -77,17 +77,19 @@ test("mongodb boundary surface covers handshake docs, unique _id, cursors and un
     await db.collection<{ _id: string; v: string }>("iso").insertOne({ _id: "iso", v: "here" });
     assert.deepEqual(await client.db("other").collection<{ _id: string }>("iso").find({ _id: "iso" }).toArray(), []);
 
-    // Unimplemented verbs fail with the gateway's unsupported code 59.
-    for (const command of [
-        { count: "boundary" },
-        { aggregate: "boundary", pipeline: [], cursor: {} },
-        { drop: "boundary" },
-    ]) {
-        await assert.rejects(db.command(command), (error: unknown) => {
-            assert.equal((error as ServerCodeFailure).code, 59, `expected code 59 for ${JSON.stringify(command)}`);
-            return true;
-        });
-    }
+    // `count` and `aggregate` are implemented; `drop` is still unsupported (59).
+    await collection.insertMany([{ a: 4 }, { a: 5 }]);
+    const counted = await db.command({ count: "boundary" });
+    assert.equal(counted.ok, 1);
+    assert.equal(counted.n, 2);
+    const aggregate = await db.command({ aggregate: "boundary", pipeline: [], cursor: {} });
+    assert.equal(aggregate.ok, 1);
+    assert.equal(aggregate.cursor.ns, "yyds.boundary");
+    assert.equal(aggregate.cursor.firstBatch.length, 2);
+    await assert.rejects(db.command({ drop: "boundary" }), (error: unknown) => {
+        assert.equal((error as ServerCodeFailure).code, 59, "expected code 59 for drop");
+        return true;
+    });
 });
 
 test("mongodb answers an empty collection name with 73 and a duplicate _id with 11000", { timeout: 60_000 }, async (t) => {

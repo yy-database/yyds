@@ -78,16 +78,27 @@ def _case_crud(node: YydsNode) -> None:
         client.close()
 
 
-def _case_unsupported_commands(node: YydsNode) -> None:
+def _case_count_and_aggregate(node: YydsNode) -> None:
     client = _client(node)
+    collection = client["yyds"]["py-count"]
     try:
-        for command in ({"count": "py-crud"}, {"drop": "py-crud"}):
-            try:
-                client["yyds"].command(command)
-            except OperationFailure as error:
-                check(error.code == 59, f"{command} must answer code 59, got {error.code}: {error}")
-            else:
-                raise AssertionError(f"{command} must be refused with code 59")
+        collection.insert_many([{"a": 1}, {"a": 2}])
+        counted = client["yyds"].command({"count": "py-count"})
+        check(counted.get("ok") == 1, f"count must answer ok: 1, got {counted}")
+        check(counted.get("n") == 2, f"count must report 2 documents, got {counted.get('n')}")
+
+        aggregate = client["yyds"].command({"aggregate": "py-count", "pipeline": [], "cursor": {}})
+        check(aggregate.get("ok") == 1, f"aggregate must answer ok: 1, got {aggregate}")
+        first_batch = aggregate.get("cursor", {}).get("firstBatch", [])
+        check(len(first_batch) == 2, f"aggregate must return 2 documents, got {len(first_batch)}")
+
+        # `drop` is still unimplemented and must keep the gateway's unsupported code.
+        try:
+            client["yyds"].command({"drop": "py-count"})
+        except OperationFailure as error:
+            check(error.code == 59, f"drop must answer code 59, got {error.code}: {error}")
+        else:
+            raise AssertionError("drop must be refused with code 59")
     finally:
         client.close()
 
@@ -120,7 +131,7 @@ def run_mongo(node: YydsNode | None = None) -> list[CaseResult]:
         cases: list[tuple[str, object]] = [
             ("handshake", lambda: _case_handshake(node)),
             ("crud", lambda: _case_crud(node)),
-            ("unsupported-commands", lambda: _case_unsupported_commands(node)),
+            ("count-and-aggregate", lambda: _case_count_and_aggregate(node)),
             ("invalid-namespace", lambda: _case_invalid_namespace(node)),
         ]
         return run_cases("pymongo", cases)

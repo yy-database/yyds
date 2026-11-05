@@ -2,27 +2,23 @@
 
 import json
 import os
-import sys
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
 from typing import Any
 
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SKIP_REASON = ""
 
+# Tests run against the installed wheel and never add ``src`` to ``sys.path``,
+# so the source-tree shim cannot shadow the compiled ``yyds_pyo3`` package.
 try:
     from yyds import Node, YydsError, version
 except ImportError as error:
-    sys.path.insert(0, str(PACKAGE_ROOT / "src"))
-    try:
-        from yyds import Node, YydsError, version
-    except ImportError as fallback_error:
-        Node = None  # type: ignore[assignment]
-        YydsError = Exception  # type: ignore[assignment,misc]
-        version = None  # type: ignore[assignment]
-        SKIP_REASON = f"native module yyds_pyo3 is not built: {fallback_error or error}"
+    Node = None  # type: ignore[assignment]
+    YydsError = Exception  # type: ignore[assignment,misc]
+    version = None  # type: ignore[assignment]
+    SKIP_REASON = f"installed yyds wheel is required: {error}"
 
 
 def status_payload(generation: str) -> dict[str, Any]:
