@@ -6,7 +6,7 @@ use crate::node_runtime::{
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds::control::{NodeIdentity, NodeLease};
+use database::cluster::control::{NodeIdentity, NodeLease};
 
 /// Cluster and node identity for a YYDS data directory.
 #[napi]
@@ -108,7 +108,7 @@ pub fn node_wait_until_stopped(data_dir: String, generation: String, timeout_ms:
         .map_err(map_string)
 }
 
-fn map_lease(error: yyds::control::LeaseError) -> Error {
+fn map_lease(error: database::cluster::control::LeaseError) -> Error {
     Error::from_reason(error.to_string())
 }
 

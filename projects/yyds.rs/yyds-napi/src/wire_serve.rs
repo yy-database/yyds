@@ -511,9 +511,10 @@ mod tests {
     // smoke pair.
 
     use std::collections::HashMap;
-    use yyds::execution::LocalExecutor;
-    use yyds::kv::MemoryShard;
-    use yyds::types::{ShardEpoch, ShardId, ShardMap};
+    use database::cluster::topology::ShardMap;
+    use database::execution::cluster::LocalExecutor;
+    use database::storage::cluster_kv::MemoryShard;
+    use database::types::cluster::{ShardEpoch, ShardId};
 
     fn auth_test_ctx() -> WireContext {
         let routing = ShardMap::new(ShardEpoch(1), vec![ShardId("local-0".into())]).unwrap();

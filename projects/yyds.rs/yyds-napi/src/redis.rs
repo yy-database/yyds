@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds::gateway::redis::{resp::RequestLimits, service::RedisService};
+use database::server::redis::{resp::RequestLimits, service::RedisService};
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle};
 

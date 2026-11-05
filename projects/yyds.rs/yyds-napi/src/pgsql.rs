@@ -2,9 +2,9 @@ use std::{net::SocketAddr, sync::Arc};
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use yyds::catalog::Catalog;
-use yyds::gateway::SqlCatalog;
-use yyds::gateway::pgsql::service::PgsqlService;
+use database::cluster::catalog::Catalog;
+use database::query::SqlCatalog;
+use database::server::pgsql::service::PgsqlService;
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle, schema::SqlSchemaRegistryHandle};
 
@@ -36,7 +36,7 @@ impl PgsqlServiceHandle {
     ) -> Result<Self> {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let yyds_catalog = Catalog::open(&catalog_path).map_err(|msg| Error::from_reason(format!("open catalog: {msg}")))?;
-        let catalog = SqlCatalog::from_yyds_catalog(&yyds_catalog)
+        let catalog = SqlCatalog::from_catalog(&yyds_catalog)
             .map_err(|error| Error::from_reason(format!("invalid YYDS catalog: {}", error.message)))?;
         let service =
             PgsqlService::start_with_executor_lane(Arc::clone(&lease.inner), address, Arc::clone(&executor.inner), catalog, 2)
