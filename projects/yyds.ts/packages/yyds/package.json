@@ -7,24 +7,24 @@
     "sideEffects": false,
     "exports": {
         ".": {
-            "types": "./src/node/index.ts",
-            "node": "./src/node/index.ts",
-            "default": "./src/node/unsupported.ts"
+            "types": "./dist/node/index.d.ts",
+            "node": "./dist/node/index.js",
+            "default": "./dist/node/unsupported.js"
         },
         "./node": {
-            "types": "./src/node/index.ts",
-            "node": "./src/node/index.ts",
-            "default": "./src/node/unsupported.ts"
+            "types": "./dist/node/index.d.ts",
+            "node": "./dist/node/index.js",
+            "default": "./dist/node/unsupported.js"
         },
         "./node/cluster": {
-            "types": "./src/node/cluster.ts",
-            "node": "./src/node/cluster.ts",
-            "default": "./src/node/unsupported.ts"
+            "types": "./dist/node/cluster.d.ts",
+            "node": "./dist/node/cluster.js",
+            "default": "./dist/node/unsupported.js"
         },
         "./node/runtime": {
-            "types": "./src/node/runtime.ts",
-            "node": "./src/node/runtime.ts",
-            "default": "./src/node/unsupported.ts"
+            "types": "./dist/node/runtime.d.ts",
+            "node": "./dist/node/runtime.js",
+            "default": "./dist/node/unsupported.js"
         }
     },
     "bin": {
@@ -32,11 +32,13 @@
     },
     "files": [
         "bin",
-        "src",
-        "webui"
+        "dist",
+        "webui",
+        "readme.md"
     ],
     "scripts": {
-        "build": "node scripts/bundle-webui.mjs",
+        "build": "tsc -p tsconfig.build.json",
+        "build:webui": "node scripts/bundle-webui.mjs",
         "typecheck": "tsc --noEmit -p tsconfig.json",
         "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\" \"./src/node/**/*.test.ts\""
     },

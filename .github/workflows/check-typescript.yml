@@ -24,10 +24,12 @@ jobs:
       - run: pnpm install
       - run: pnpm typecheck
       - run: pnpm build:napi
+      - run: pnpm build:ts
       - run: pnpm test:ts
       - run: pnpm test:integration
       - run: pnpm gate:test-count:ts
+      - run: pnpm gate:install:ts
       - run: pnpm --filter @yydb/yyds-webui check
       - run: pnpm --filter @yydb/yyds-homepage check
-      - run: pnpm --filter @yydb/yyds build
+      - run: pnpm build:webui
       - run: pnpm --filter @yydb/yyds-homepage build

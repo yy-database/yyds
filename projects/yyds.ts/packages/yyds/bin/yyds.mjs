@@ -2,9 +2,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { loadYydsNative } from "../src/node/load.ts";
-import { parseStartOptions, runNodeStart } from "../src/node/runtime.ts";
-import { parseWebuiArgs, runWebui } from "../src/node/webui-cmd.ts";
+import { loadYydsNative } from "../dist/node/load.js";
+import { parseStartOptions, runNodeStart } from "../dist/node/runtime.js";
+import { parseWebuiArgs, runWebui } from "../dist/node/webui-cmd.js";
 
 function usage() {
     return "usage: yyds <init|start|status|stop|webui|catalog> ...";

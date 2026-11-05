@@ -16,10 +16,10 @@ classifiers = [
 ]
 
 [tool.maturin]
-manifest-path = "../../../yyds.rs/ffis/yyds-pyo3/Cargo.toml"
+manifest-path = "../../../yyds.rs/yyds-pyo3/Cargo.toml"
 module-name = "yyds_pyo3"
 python-source = "src"
-python-packages = ["yyds"]
+python-packages = ["yyds", "yyds_pyo3"]
 exclude = ["**/__pycache__/**", "**/*.pyc", "dist/**"]
 
 [tool.pytest.ini_options]
