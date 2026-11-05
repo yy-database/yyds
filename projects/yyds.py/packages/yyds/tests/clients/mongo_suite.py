@@ -150,6 +150,60 @@ def _case_aggregate_projection_exclusion(node: YydsNode) -> None:
         client.close()
 
 
+def _case_aggregate_stage_order(node: YydsNode) -> None:
+    client = _client(node)
+    collection = client["yyds"]["py-agg-stages"]
+    try:
+        collection.delete_many({})
+        collection.insert_many(
+            [
+                {"_id": "s1", "k": "a", "v": 1},
+                {"_id": "s2", "k": "a", "v": 2},
+                {"_id": "s3", "k": "b", "v": 3},
+            ]
+        )
+
+        narrowed = list(collection.aggregate([{"$match": {"k": "a"}}, {"$group": {"_id": None, "n": {"$sum": 1}}}]))
+        check(narrowed == [{"_id": None, "n": 2}], f"`$match` before `$group` must count two documents, got {narrowed!r}")
+
+        # Running the stages in the opposite order folds all three first, so the
+        # following `$match` on `n: 2` finds nothing.
+        reversed_stages = list(collection.aggregate([{"$group": {"_id": None, "n": {"$sum": 1}}}, {"$match": {"n": 2}}]))
+        check(reversed_stages == [], f"`$group` before `$match` must fold all three, got {reversed_stages!r}")
+    finally:
+        collection.delete_many({})
+        client.close()
+
+
+def _case_aggregate_projection_inclusion(node: YydsNode) -> None:
+    client = _client(node)
+    collection = client["yyds"]["py-agg-inclusion"]
+    try:
+        collection.delete_many({})
+        collection.insert_many(
+            [
+                {"_id": "i1", "k": "a", "v": 1},
+                {"_id": "i2", "k": "a", "v": 2},
+                {"_id": "i3", "k": "b", "v": 3},
+            ]
+        )
+
+        included = list(collection.aggregate([{"$project": {"v": 1}}]))
+        check(
+            included == [{"_id": "i1", "v": 1}, {"_id": "i2", "v": 2}, {"_id": "i3", "v": 3}],
+            f"an inclusion spec must keep only `v` plus `_id`, got {included!r}",
+        )
+
+        without_id = list(collection.aggregate([{"$project": {"_id": 0, "v": 1}}]))
+        check(
+            without_id == [{"v": 1}, {"v": 2}, {"v": 3}],
+            f"an inclusion spec that excludes `_id` must leave only `v`, got {without_id!r}",
+        )
+    finally:
+        collection.delete_many({})
+        client.close()
+
+
 def _case_cursor_batching_and_reclaim(node: YydsNode) -> None:
     client = _client(node)
     collection = client["yyds"]["py-cursor"]
@@ -221,6 +275,8 @@ def run_mongo(node: YydsNode | None = None) -> list[CaseResult]:
             ("count-and-aggregate", lambda: _case_count_and_aggregate(node)),
             ("aggregate-empty-group", lambda: _case_aggregate_empty_group(node)),
             ("aggregate-projection-exclusion", lambda: _case_aggregate_projection_exclusion(node)),
+            ("aggregate-stage-order", lambda: _case_aggregate_stage_order(node)),
+            ("aggregate-projection-inclusion", lambda: _case_aggregate_projection_inclusion(node)),
             ("cursor-batching-and-reclaim", lambda: _case_cursor_batching_and_reclaim(node)),
             ("invalid-namespace", lambda: _case_invalid_namespace(node)),
         ]

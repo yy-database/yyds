@@ -149,3 +149,73 @@ test("aggregate $project exclusion drops only the excluded fields", { timeout: 6
 
     await collection.deleteMany({});
 });
+
+test("aggregate stages run in pipeline order", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode({ mongo: true });
+    const client = await connectMongo(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const collection = client
+        .db("yyds")
+        .collection<{ _id: string; k: string; v: number }>("stage-probe");
+    await collection.deleteMany({});
+    await collection.insertMany([
+        { _id: "s1", k: "a", v: 1 },
+        { _id: "s2", k: "a", v: 2 },
+        { _id: "s3", k: "b", v: 3 },
+    ]);
+
+    assert.deepEqual(
+        await collection
+            .aggregate([{ $match: { k: "a" } }, { $group: { _id: null, n: { $sum: 1 } } }])
+            .toArray(),
+        [{ _id: null, n: 2 }],
+    );
+
+    // Running the stages in the opposite order folds all three first, so the
+    // following `$match` on `n: 2` finds nothing.
+    assert.deepEqual(
+        await collection
+            .aggregate([{ $group: { _id: null, n: { $sum: 1 } } }, { $match: { n: 2 } }])
+            .toArray(),
+        [],
+    );
+
+    await collection.deleteMany({});
+});
+
+test("aggregate $project inclusion keeps only the listed fields", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode({ mongo: true });
+    const client = await connectMongo(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const collection = client
+        .db("yyds")
+        .collection<{ _id: string; k: string; v: number }>("inclusion-probe");
+    await collection.deleteMany({});
+    await collection.insertMany([
+        { _id: "i1", k: "a", v: 1 },
+        { _id: "i2", k: "a", v: 2 },
+        { _id: "i3", k: "b", v: 3 },
+    ]);
+
+    assert.deepEqual(await collection.aggregate([{ $project: { v: 1 } }]).toArray(), [
+        { _id: "i1", v: 1 },
+        { _id: "i2", v: 2 },
+        { _id: "i3", v: 3 },
+    ]);
+
+    assert.deepEqual(await collection.aggregate([{ $project: { _id: 0, v: 1 } }]).toArray(), [
+        { v: 1 },
+        { v: 2 },
+        { v: 3 },
+    ]);
+
+    await collection.deleteMany({});
+});

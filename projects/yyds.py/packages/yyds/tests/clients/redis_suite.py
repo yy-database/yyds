@@ -304,6 +304,39 @@ def _case_multi_isolation(node: YydsNode) -> None:
         reader.close()
 
 
+def _case_discard(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        try:
+            client.execute_command("DISCARD")
+        except redis.exceptions.ResponseError as error:
+            check(
+                _error_message(error) == "ERR DISCARD without MULTI",
+                f"DISCARD outside a MULTI must be refused, got {_error_message(error)!r}",
+            )
+        else:
+            raise AssertionError("DISCARD outside a MULTI must be refused")
+
+        client.set("py-discard", "before")
+        client.execute_command("MULTI")
+        client.execute_command("SET", "py-discard", "after")
+        check(client.execute_command("DISCARD") in (True, "OK"), "DISCARD must answer OK")
+        check(client.get("py-discard") == "before", "DISCARD must drop the queued write")
+    finally:
+        client.close()
+
+
+def _case_exec_empty(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        check(client.execute_command("MULTI") in (True, "OK"), "MULTI must answer OK")
+        check(client.execute_command("EXEC") == [], "EXEC on an empty queue must return an empty array")
+        check(client.set("py-empty-tx", "v") is True, "the connection must stay usable after an empty EXEC")
+        check(client.get("py-empty-tx") == "v", "a post-EXEC write must land")
+    finally:
+        client.close()
+
+
 def _case_rename_rotation(node: YydsNode) -> None:
     client = _client(node)
     reader = _client(node)
@@ -443,6 +476,8 @@ def run_redis(node: YydsNode | None = None) -> list[CaseResult]:
             ("multi-exec", lambda: _case_multi_exec(node)),
             ("multi-nested", lambda: _case_multi_nested(node)),
             ("multi-isolation", lambda: _case_multi_isolation(node)),
+            ("discard", lambda: _case_discard(node)),
+            ("exec-empty", lambda: _case_exec_empty(node)),
             ("rename-rotation", lambda: _case_rename_rotation(node)),
             ("error-paths", lambda: _case_error_paths(node)),
             ("background-reclaim", lambda: _case_background_reclaim(node)),

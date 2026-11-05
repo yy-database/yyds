@@ -115,3 +115,36 @@ test("node-redis keeps a queued MULTI write invisible to another connection", { 
     assert.deepEqual(await writer.sendCommand(["EXEC"]), ["OK"]);
     assert.equal(await reader.get("tx-isolation"), "new");
 });
+
+test("node-redis DISCARD drops the queued write", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    await assert.rejects(client.sendCommand(["DISCARD"]), /DISCARD without MULTI/);
+
+    await client.set("discard-tx", "before");
+    assert.equal(await client.sendCommand(["MULTI"]), "OK");
+    assert.equal(await client.sendCommand(["SET", "discard-tx", "after"]), "QUEUED");
+    assert.equal(await client.sendCommand(["DISCARD"]), "OK");
+    assert.equal(await client.get("discard-tx"), "before");
+});
+
+test("node-redis returns an empty array for EXEC on an empty queue", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    assert.equal(await client.sendCommand(["MULTI"]), "OK");
+    assert.deepEqual(await client.sendCommand(["EXEC"]), []);
+
+    // The connection leaves the transaction cleanly and accepts normal writes.
+    assert.equal(await client.set("empty-tx", "v"), "OK");
+    assert.equal(await client.get("empty-tx"), "v");
+});
