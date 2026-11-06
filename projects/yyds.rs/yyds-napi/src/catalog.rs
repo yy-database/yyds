@@ -1,8 +1,8 @@
 //! Catalog publishing surface for the node CLI.
 
+use database::cluster::catalog::Catalog;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use database::cluster::catalog::Catalog;
 
 /// Publishes a VOS schema document into a `.yyds` catalog file.
 ///

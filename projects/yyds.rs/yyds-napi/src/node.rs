@@ -1,12 +1,12 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crate::node_runtime::{
-    clear_runtime_artifacts, init_node, inspect_node, read_runtime_status, request_stop, stop_requested, wait_until_stopped,
-    write_runtime_status, RuntimeStatus,
+    RuntimeStatus, clear_runtime_artifacts, init_node, inspect_node, read_runtime_status, request_stop, stop_requested,
+    wait_until_stopped, write_runtime_status,
 };
+use database::cluster::control::{NodeIdentity, NodeLease};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use database::cluster::control::{NodeIdentity, NodeLease};
 
 /// Cluster and node identity for a YYDS data directory.
 #[napi]
