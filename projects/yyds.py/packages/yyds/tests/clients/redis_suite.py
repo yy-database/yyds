@@ -523,6 +523,108 @@ def _case_getex_missing_and_invalid(node: YydsNode) -> None:
         client.close()
 
 
+def _case_expire_deadlines(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        key = "py-expire-deadlines"
+        check(client.execute_command("SET", key, "v", "PX", "120000") is True, "SET must answer OK")
+
+        check(client.execute_command("EXPIRE", key, "60") == 1, "EXPIRE must report one applied key")
+        pttl = client.pttl(key)
+        check(55_000 < pttl <= 60_000, f"EXPIRE deadline was {pttl}")
+        ttl = client.ttl(key)
+        check(55 <= ttl <= 60, f"EXPIRE seconds deadline was {ttl}")
+
+        check(client.execute_command("PEXPIRE", key, "30000") == 1, "PEXPIRE must report one applied key")
+        pttl = client.pttl(key)
+        check(25_000 < pttl <= 30_000, f"PEXPIRE deadline was {pttl}")
+
+        at_seconds = int(time.time()) + 120
+        check(client.execute_command("EXPIREAT", key, str(at_seconds)) == 1, "EXPIREAT must report one applied key")
+        pttl = client.pttl(key)
+        check(110_000 < pttl <= 120_000, f"EXPIREAT deadline was {pttl}")
+
+        at_ms = int(time.time() * 1000) + 90_000
+        check(client.execute_command("PEXPIREAT", key, str(at_ms)) == 1, "PEXPIREAT must report one applied key")
+        pttl = client.pttl(key)
+        check(80_000 < pttl <= 90_000, f"PEXPIREAT deadline was {pttl}")
+
+        past_ms = int(time.time() * 1000) - 1_000
+        check(client.execute_command("PEXPIREAT", key, str(past_ms)) == 1, "a past deadline must be accepted")
+        check(client.exists(key) == 0, "a past deadline must remove the key")
+        check(client.get(key) is None, "a past deadline must clear the value")
+
+        check(client.execute_command("SET", key, "v", "PX", "120000") is True, "SET must answer OK")
+        check(client.execute_command("EXPIRE", key, "0") == 1, "a zero TTL must report one applied key")
+        check(client.exists(key) == 0, "a zero TTL must remove the key")
+        check(client.execute_command("EXPIRE", "py-expire-absent", "10") == 0, "EXPIRE on a missing key must report zero")
+    finally:
+        client.close()
+
+
+def _case_ttl_sentinels_and_persist(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        key = "py-expire-sentinels"
+        check(client.execute_command("SET", key, "v", "PX", "120000") is True, "SET must answer OK")
+        check(client.pttl(key) > 100_000, "the key must carry a deadline before PERSIST")
+
+        check(client.execute_command("PERSIST", key) == 1, "PERSIST must report the cleared deadline")
+        check(client.ttl(key) == -1, "TTL must answer -1 without a deadline")
+        check(client.pttl(key) == -1, "PTTL must answer -1 without a deadline")
+        check(client.get(key) == "v", "PERSIST must keep the value")
+
+        check(client.execute_command("PERSIST", key) == 0, "a key without a deadline cannot be persisted again")
+
+        check(client.ttl("py-expire-absent") == -2, "TTL must answer -2 for a missing key")
+        check(client.pttl("py-expire-absent") == -2, "PTTL must answer -2 for a missing key")
+    finally:
+        client.close()
+
+
+def _case_set_keepttl(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        key = "py-expire-keepttl"
+        check(client.execute_command("SET", key, "v", "PX", "120000") is True, "SET must answer OK")
+        before = client.pttl(key)
+
+        check(client.execute_command("SET", key, "v2", "KEEPTTL") is True, "SET KEEPTTL must answer OK")
+        after = client.pttl(key)
+        check(100_000 < after <= before and before - after < 2_000, f"KEEPTTL changed the deadline from {before} to {after}")
+        check(client.get(key) == "v2", "KEEPTTL must replace the value")
+
+        check(client.execute_command("SET", key, "v3") is True, "a plain SET must answer OK")
+        check(client.ttl(key) == -1, "a plain SET must clear the deadline")
+
+        check(client.execute_command("SET", "py-expire-no-ttl", "v") is True, "SET must answer OK")
+        check(client.execute_command("SET", "py-expire-no-ttl", "v2", "KEEPTTL") is True, "SET KEEPTTL must answer OK")
+        check(client.pttl("py-expire-no-ttl") == -1, "KEEPTTL must not invent a deadline")
+    finally:
+        client.close()
+
+
+def _case_expired_key_surface(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        key = "py-expire-surface"
+        check(client.execute_command("SET", key, "v", "PX", "100") is True, "SET must answer OK")
+        time.sleep(0.25)
+
+        check(client.exists(key) == 0, "EXISTS must hide an expired key")
+        check(client.get(key) is None, "GET must answer nil for an expired key")
+        check(client.type(key) == "none", "TYPE must answer none for an expired key")
+        check(client.ttl(key) == -2, "TTL must answer -2 for an expired key")
+        check(client.pttl(key) == -2, "PTTL must answer -2 for an expired key")
+
+        check(client.execute_command("SET", key, "v", "PX", "60000") is True, "SET must answer OK")
+        check(client.exists(key) == 1, "EXISTS must report a live key")
+        check(client.type(key) == "string", "TYPE must report a live string")
+        check(client.ttl(key) > 0, "TTL must stay positive for a live key")
+    finally:
+        client.close()
+
+
 def _case_rename_rotation(node: YydsNode) -> None:
     client = _client(node)
     reader = _client(node)
@@ -672,6 +774,10 @@ def run_redis(node: YydsNode | None = None) -> list[CaseResult]:
             ("getex-without-options", lambda: _case_getex_without_options(node)),
             ("getex-conflicting-options", lambda: _case_getex_conflicting_options(node)),
             ("getex-missing-and-invalid", lambda: _case_getex_missing_and_invalid(node)),
+            ("expire-deadlines", lambda: _case_expire_deadlines(node)),
+            ("ttl-sentinels-and-persist", lambda: _case_ttl_sentinels_and_persist(node)),
+            ("set-keepttl", lambda: _case_set_keepttl(node)),
+            ("expired-key-surface", lambda: _case_expired_key_surface(node)),
             ("rename-rotation", lambda: _case_rename_rotation(node)),
             ("error-paths", lambda: _case_error_paths(node)),
             ("background-reclaim", lambda: _case_background_reclaim(node)),

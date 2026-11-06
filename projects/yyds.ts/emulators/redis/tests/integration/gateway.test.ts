@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { startYydsNode } from "@yydb/yyds-node-harness";
 import { createClient } from "redis";
@@ -343,4 +344,123 @@ test("node-redis answers nil for a missing key and defers GETEX numeric validati
     assert.equal(await client.get(key), "v");
     const after = await client.pTTL(key);
     assert.ok(after > 90_000 && after <= before && before - after < 2_000, `a rejected GETEX changed the deadline from ${before} to ${after}`);
+});
+
+test("node-redis applies EXPIRE, PEXPIRE, EXPIREAT and PEXPIREAT deadlines", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "expire-deadlines";
+    assert.equal(await client.set(key, "v", { PX: 120_000 }), "OK");
+
+    assert.equal(await client.sendCommand(["EXPIRE", key, "60"]), 1);
+    let pttl = await client.pTTL(key);
+    assert.ok(pttl > 55_000 && pttl <= 60_000, `EXPIRE deadline was ${pttl}`);
+    const ttl = await client.ttl(key);
+    assert.ok(ttl >= 55 && ttl <= 60, `EXPIRE seconds deadline was ${ttl}`);
+
+    assert.equal(await client.sendCommand(["PEXPIRE", key, "30000"]), 1);
+    pttl = await client.pTTL(key);
+    assert.ok(pttl > 25_000 && pttl <= 30_000, `PEXPIRE deadline was ${pttl}`);
+
+    const atSeconds = Math.floor(Date.now() / 1000) + 120;
+    assert.equal(await client.sendCommand(["EXPIREAT", key, String(atSeconds)]), 1);
+    pttl = await client.pTTL(key);
+    assert.ok(pttl > 110_000 && pttl <= 120_000, `EXPIREAT deadline was ${pttl}`);
+
+    const atMillis = Date.now() + 90_000;
+    assert.equal(await client.sendCommand(["PEXPIREAT", key, String(atMillis)]), 1);
+    pttl = await client.pTTL(key);
+    assert.ok(pttl > 80_000 && pttl <= 90_000, `PEXPIREAT deadline was ${pttl}`);
+
+    // A deadline in the past removes the record, and so does a zero TTL.
+    const pastMillis = Date.now() - 1_000;
+    assert.equal(await client.sendCommand(["PEXPIREAT", key, String(pastMillis)]), 1);
+    assert.equal(await client.exists(key), 0);
+    assert.equal(await client.get(key), null);
+
+    assert.equal(await client.set(key, "v", { PX: 120_000 }), "OK");
+    assert.equal(await client.sendCommand(["EXPIRE", key, "0"]), 1);
+    assert.equal(await client.exists(key), 0);
+    assert.equal(await client.sendCommand(["EXPIRE", "expire-absent", "10"]), 0);
+});
+
+test("node-redis reports TTL sentinels and clears deadlines with PERSIST", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "expire-sentinels";
+    assert.equal(await client.set(key, "v", { PX: 120_000 }), "OK");
+    assert.ok(await client.pTTL(key) > 100_000, "the key must carry a deadline before PERSIST");
+
+    assert.equal(await client.sendCommand(["PERSIST", key]), 1);
+    assert.equal(await client.ttl(key), -1);
+    assert.equal(await client.pTTL(key), -1);
+    assert.equal(await client.get(key), "v");
+
+    // A key without a deadline cannot be persisted again.
+    assert.equal(await client.sendCommand(["PERSIST", key]), 0);
+
+    assert.equal(await client.ttl("expire-absent"), -2);
+    assert.equal(await client.pTTL("expire-absent"), -2);
+});
+
+test("node-redis SET KEEPTTL preserves the previous deadline", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "expire-keepttl";
+    assert.equal(await client.set(key, "v", { PX: 120_000 }), "OK");
+    const before = await client.pTTL(key);
+
+    assert.equal(await client.sendCommand(["SET", key, "v2", "KEEPTTL"]), "OK");
+    const after = await client.pTTL(key);
+    assert.ok(after > 100_000 && after <= before && before - after < 2_000, `KEEPTTL changed the deadline from ${before} to ${after}`);
+    assert.equal(await client.get(key), "v2");
+
+    // A plain overwrite clears the deadline, which KEEPTTL must not do.
+    assert.equal(await client.set(key, "v3"), "OK");
+    assert.equal(await client.ttl(key), -1);
+
+    // KEEPTTL on a key that never had a deadline stays at -1.
+    assert.equal(await client.set("expire-no-ttl", "v"), "OK");
+    assert.equal(await client.sendCommand(["SET", "expire-no-ttl", "v2", "KEEPTTL"]), "OK");
+    assert.equal(await client.pTTL("expire-no-ttl"), -1);
+});
+
+test("node-redis hides an expired key from EXISTS, GET and TYPE", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "expire-surface";
+    assert.equal(await client.set(key, "v", { PX: 100 }), "OK");
+    await sleep(250);
+
+    assert.equal(await client.exists(key), 0);
+    assert.equal(await client.get(key), null);
+    assert.equal(await client.type(key), "none");
+    assert.equal(await client.ttl(key), -2);
+    assert.equal(await client.pTTL(key), -2);
+
+    // A live record keeps its string surface.
+    assert.equal(await client.set(key, "v", { PX: 60_000 }), "OK");
+    assert.equal(await client.exists(key), 1);
+    assert.equal(await client.type(key), "string");
+    assert.ok(await client.ttl(key) > 0, "a live key must keep a positive TTL");
 });
