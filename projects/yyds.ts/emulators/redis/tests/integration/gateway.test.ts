@@ -243,3 +243,104 @@ test("node-redis refuses WATCH inside MULTI", { timeout: 60_000 }, async (t) => 
     assert.deepEqual(await client.sendCommand(["EXEC"]), ["OK"]);
     assert.equal(await client.get("watch-inside-multi"), "v");
 });
+
+test("node-redis applies each GETEX expiry option to the stored deadline", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "getex-options";
+    assert.equal(await client.set(key, "v", { PX: 120_000 }), "OK");
+
+    assert.equal(await client.sendCommand(["GETEX", key, "EX", "60"]), "v");
+    let pttl = await client.pTTL(key);
+    assert.ok(pttl > 55_000 && pttl <= 60_000, `EX deadline was ${pttl}`);
+
+    assert.equal(await client.sendCommand(["GETEX", key, "PX", "30000"]), "v");
+    pttl = await client.pTTL(key);
+    assert.ok(pttl > 25_000 && pttl <= 30_000, `PX deadline was ${pttl}`);
+
+    const atSeconds = Math.floor(Date.now() / 1000) + 120;
+    assert.equal(await client.sendCommand(["GETEX", key, "EXAT", String(atSeconds)]), "v");
+    pttl = await client.pTTL(key);
+    assert.ok(pttl > 110_000 && pttl <= 120_000, `EXAT deadline was ${pttl}`);
+
+    const atMillis = Date.now() + 90_000;
+    assert.equal(await client.sendCommand(["GETEX", key, "PXAT", String(atMillis)]), "v");
+    pttl = await client.pTTL(key);
+    assert.ok(pttl > 80_000 && pttl <= 90_000, `PXAT deadline was ${pttl}`);
+
+    assert.equal(await client.sendCommand(["GETEX", key, "PERSIST"]), "v");
+    assert.equal(await client.pTTL(key), -1);
+    assert.equal(await client.get(key), "v");
+});
+
+test("node-redis GETEX without options keeps the existing deadline", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "getex-plain";
+    assert.equal(await client.set(key, "v", { PX: 120_000 }), "OK");
+    const before = await client.pTTL(key);
+    assert.equal(await client.sendCommand(["GETEX", key]), "v");
+    const after = await client.pTTL(key);
+    assert.ok(after > 100_000 && after <= before, `a plain GETEX changed the deadline from ${before} to ${after}`);
+    assert.ok(before - after < 5_000, `a plain GETEX reset the deadline from ${before} to ${after}`);
+});
+
+test("node-redis rejects conflicting GETEX options without touching the value", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    const key = "getex-conflict";
+    assert.equal(await client.set(key, "v", { PX: 120_000 }), "OK");
+    const before = await client.pTTL(key);
+
+    await assert.rejects(client.sendCommand(["GETEX", key, "EX", "60", "PX", "60000"]), /syntax error/);
+    assert.equal(await client.get(key), "v");
+    await assert.rejects(client.sendCommand(["GETEX", key, "PERSIST", "EXAT", "60"]), /syntax error/);
+    assert.equal(await client.get(key), "v");
+
+    const after = await client.pTTL(key);
+    assert.ok(after > 100_000 && after <= before && before - after < 2_000, `a rejected GETEX changed the deadline from ${before} to ${after}`);
+});
+
+test("node-redis answers nil for a missing key and defers GETEX numeric validation", { timeout: 60_000 }, async (t) => {
+    const node = await startYydsNode();
+    const client = await connectRedis(node);
+    t.after(async () => {
+        await client.close().catch(() => undefined);
+        await node.stop();
+    });
+
+    // Option structure is checked before the lookup, but the numeric value is not
+    // parsed until the key exists.
+    assert.equal(await client.sendCommand(["GETEX", "getex-missing"]), null);
+    assert.equal(await client.sendCommand(["GETEX", "getex-missing", "EX", "not-a-number"]), null);
+    assert.equal(await client.sendCommand(["GETEX", "getex-missing", "EX", "0"]), null);
+    assert.equal(await client.sendCommand(["GETEX", "getex-missing", "EXAT", "0"]), null);
+
+    const key = "getex-invalid";
+    assert.equal(await client.set(key, "v", { PX: 100_000 }), "OK");
+    const before = await client.pTTL(key);
+
+    await assert.rejects(client.sendCommand(["GETEX", key, "EX", "not-a-number"]), /value is not an integer or out of range/);
+    await assert.rejects(client.sendCommand(["GETEX", key, "EX", "0"]), /invalid expire time in 'getex'/);
+    await assert.rejects(client.sendCommand(["GETEX", key, "PX", "-5"]), /invalid expire time in 'getex'/);
+    await assert.rejects(client.sendCommand(["GETEX", key, "EX"]), /syntax error/);
+
+    assert.equal(await client.get(key), "v");
+    const after = await client.pTTL(key);
+    assert.ok(after > 90_000 && after <= before && before - after < 2_000, `a rejected GETEX changed the deadline from ${before} to ${after}`);
+});

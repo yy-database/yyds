@@ -416,6 +416,113 @@ def _case_watch_inside_multi(node: YydsNode) -> None:
         client.close()
 
 
+def _case_getex_options(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        key = "py-getex-options"
+        check(client.execute_command("SET", key, "v", "PX", "120000") is True, "SET must answer OK")
+
+        check(client.execute_command("GETEX", key, "EX", "60") == "v", "GETEX EX must return the value")
+        pttl = client.pttl(key)
+        check(55_000 < pttl <= 60_000, f"GETEX EX must set a 60s deadline, got {pttl}")
+
+        check(client.execute_command("GETEX", key, "PX", "30000") == "v", "GETEX PX must return the value")
+        pttl = client.pttl(key)
+        check(25_000 < pttl <= 30_000, f"GETEX PX must set a 30s deadline, got {pttl}")
+
+        at_seconds = int(time.time()) + 120
+        check(client.execute_command("GETEX", key, "EXAT", str(at_seconds)) == "v", "GETEX EXAT must return the value")
+        pttl = client.pttl(key)
+        check(110_000 < pttl <= 120_000, f"GETEX EXAT must set an absolute 120s deadline, got {pttl}")
+
+        at_ms = int(time.time() * 1000) + 90_000
+        check(client.execute_command("GETEX", key, "PXAT", str(at_ms)) == "v", "GETEX PXAT must return the value")
+        pttl = client.pttl(key)
+        check(80_000 < pttl <= 90_000, f"GETEX PXAT must set an absolute 90s deadline, got {pttl}")
+
+        check(client.execute_command("GETEX", key, "PERSIST") == "v", "GETEX PERSIST must return the value")
+        check(client.ttl(key) == -1, "GETEX PERSIST must clear the deadline")
+        check(client.get(key) == "v", "GETEX PERSIST must keep the value")
+    finally:
+        client.close()
+
+
+def _case_getex_without_options(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        key = "py-getex-plain"
+        check(client.execute_command("SET", key, "v", "PX", "120000") is True, "SET must answer OK")
+        before = client.pttl(key)
+        check(client.execute_command("GETEX", key) == "v", "GETEX without options must return the value")
+        after = client.pttl(key)
+        check(100_000 < after <= before, f"GETEX without options must keep the deadline, got {before} then {after}")
+        check(before - after < 5_000, f"GETEX without options must not reset the deadline, got {before} then {after}")
+    finally:
+        client.close()
+
+
+def _case_getex_conflicting_options(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        key = "py-getex-conflict"
+        check(client.execute_command("SET", key, "v", "PX", "120000") is True, "SET must answer OK")
+        before = client.pttl(key)
+
+        pairs = (
+            ("EX+PX", ("GETEX", key, "EX", "60", "PX", "60000")),
+            ("PERSIST+EXAT", ("GETEX", key, "PERSIST", "EXAT", "60")),
+        )
+        for label, args in pairs:
+            try:
+                client.execute_command(*args)
+            except redis.exceptions.ResponseError as error:
+                check(_error_message(error) == "ERR syntax error", f"{label}: expected a syntax error, got {_error_message(error)!r}")
+            else:
+                raise AssertionError(f"{label}: two expiry options must be refused")
+            check(client.get(key) == "v", f"{label}: the rejected command must keep the value")
+
+        after = client.pttl(key)
+        check(100_000 < after <= before and before - after < 2_000, f"a rejected GETEX must keep the deadline, got {before} then {after}")
+    finally:
+        client.close()
+
+
+def _case_getex_missing_and_invalid(node: YydsNode) -> None:
+    client = _client(node)
+    try:
+        nil_cases = (
+            ("plain", ("GETEX", "py-getex-missing")),
+            ("invalid-number", ("GETEX", "py-getex-missing", "EX", "not-a-number")),
+            ("zero", ("GETEX", "py-getex-missing", "EX", "0")),
+            ("exat-zero", ("GETEX", "py-getex-missing", "EXAT", "0")),
+        )
+        for label, args in nil_cases:
+            check(client.execute_command(*args) is None, f"GETEX on a missing key must answer nil ({label})")
+
+        key = "py-getex-invalid"
+        check(client.execute_command("SET", key, "v", "PX", "100000") is True, "SET must answer OK")
+        before = client.pttl(key)
+        failures = (
+            (("GETEX", key, "EX", "not-a-number"), "ERR value is not an integer or out of range"),
+            (("GETEX", key, "EX", "0"), "ERR invalid expire time in 'getex' command"),
+            (("GETEX", key, "PX", "-5"), "ERR invalid expire time in 'getex' command"),
+            (("GETEX", key, "EX"), "ERR syntax error"),
+        )
+        for args, message in failures:
+            try:
+                client.execute_command(*args)
+            except redis.exceptions.ResponseError as error:
+                check(_error_message(error) == message, f"{args[2]}: expected {message!r}, got {_error_message(error)!r}")
+            else:
+                raise AssertionError(f"{args[2]}: an existing key must report {message!r}")
+
+        check(client.get(key) == "v", "a rejected GETEX must keep the value")
+        after = client.pttl(key)
+        check(90_000 < after <= before and before - after < 2_000, f"a rejected GETEX must keep the deadline, got {before} then {after}")
+    finally:
+        client.close()
+
+
 def _case_rename_rotation(node: YydsNode) -> None:
     client = _client(node)
     reader = _client(node)
@@ -561,6 +668,10 @@ def run_redis(node: YydsNode | None = None) -> list[CaseResult]:
             ("watch-abort-resp3", lambda: _case_watch_abort(node, 3)),
             ("watch-unwatch-and-discard", lambda: _case_watch_unwatch_and_discard(node)),
             ("watch-inside-multi", lambda: _case_watch_inside_multi(node)),
+            ("getex-option-ttls", lambda: _case_getex_options(node)),
+            ("getex-without-options", lambda: _case_getex_without_options(node)),
+            ("getex-conflicting-options", lambda: _case_getex_conflicting_options(node)),
+            ("getex-missing-and-invalid", lambda: _case_getex_missing_and_invalid(node)),
             ("rename-rotation", lambda: _case_rename_rotation(node)),
             ("error-paths", lambda: _case_error_paths(node)),
             ("background-reclaim", lambda: _case_background_reclaim(node)),
