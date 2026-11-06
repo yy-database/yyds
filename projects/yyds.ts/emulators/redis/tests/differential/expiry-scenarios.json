@@ -100,7 +100,7 @@
                 { "cmd": ["DECRBY", "d5-n", "-1"], "expect": 6 },
                 { "cmd": ["INCRBY", "d5-n", "+5"], "expect": { "error": "ERR value is not an integer or out of range" } },
                 { "cmd": ["INCRBY", "d5-n", "05"], "expect": { "error": "ERR value is not an integer or out of range" } },
-                { "cmd": ["LPUSH", "d5-list", "v"], "expect": { "error": "ERR unsupported command" } },
+                { "cmd": ["LPUSH", "d5-list", "v"], "expect": 1 },
                 { "cmd": ["SELECT", "16"], "expect": { "error": "ERR DB index is out of range" } }
             ]
         },
