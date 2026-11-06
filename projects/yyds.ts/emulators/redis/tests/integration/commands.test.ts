@@ -121,7 +121,7 @@ test("TYPE, STRLEN, APPEND, EXISTS and MGET report value shapes", async () => {
         ]);
         expectError(await client.command("MGET"), "ERR wrong number of arguments");
 
-        expectError(await client.command("LPUSH", "list", "v"), "ERR unsupported command");
+        expectInteger(await client.command("LPUSH", "list", "v"), 1);
     } finally {
         client.destroy();
     }
