@@ -6,13 +6,15 @@
 
 use std::sync::Arc;
 
-use database::cluster::catalog::Catalog;
-use database::execution::cluster::KeyValueExecutor;
-use database::query::cluster_kv::{KeyValueAction, KeyValueCommand, KeyValueResult};
-use database::types::cluster::Namespace;
+use database::{
+    cluster::catalog::Catalog,
+    execution::cluster::KeyValueExecutor,
+    query::cluster_kv::{KeyValueAction, KeyValueCommand, KeyValueResult},
+    types::cluster::Namespace,
+};
 
 use crate::wire_protocol::{
-    decode_kv_get, decode_kv_put, decode_schema_ensure, encode_kv_get_ok, encode_schema_ok, error_frame, Frame, MessageType,
+    Frame, MessageType, decode_kv_get, decode_kv_put, decode_schema_ensure, encode_kv_get_ok, encode_schema_ok, error_frame,
 };
 
 /// Default namespace for YY-native protocol KV requests.
@@ -182,11 +184,13 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use database::{
+        cluster::topology::ShardMap,
+        execution::cluster::LocalExecutor,
+        storage::cluster_kv::MemoryShard,
+        types::cluster::{ShardEpoch, ShardId},
+    };
     use std::collections::HashMap;
-    use database::cluster::topology::ShardMap;
-    use database::execution::cluster::LocalExecutor;
-    use database::storage::cluster_kv::MemoryShard;
-    use database::types::cluster::{ShardEpoch, ShardId};
 
     fn test_ctx() -> WireContext {
         let routing = ShardMap::new(ShardEpoch(1), vec![ShardId("local-0".into())]).unwrap();

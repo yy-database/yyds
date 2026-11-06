@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::node_runtime::open_executor;
+use database::execution::cluster::{ExpirySweeper, KeyValueExecutor};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use database::execution::cluster::{ExpirySweeper, KeyValueExecutor};
 
 /// Local key-value executor for one node directory.
 #[napi]
@@ -56,10 +56,8 @@ impl LocalExecutorHandle {
     /// key cursor on the next call, so the shard tail is never starved.
     #[napi]
     pub fn sweep_expired_budgeted(&self, budget_per_shard: u32) -> Result<SweepOutcome> {
-        let report = self
-            .inner
-            .sweep_expired(Some(budget_per_shard as usize))
-            .map_err(|error| Error::from_reason(error.to_string()))?;
+        let report =
+            self.inner.sweep_expired(Some(budget_per_shard as usize)).map_err(|error| Error::from_reason(error.to_string()))?;
         Ok(SweepOutcome {
             examined: u32::try_from(report.examined).map_err(|_| Error::from_reason("examined record count exceeds u32"))?,
             reclaimed: u32::try_from(report.reclaimed).map_err(|_| Error::from_reason("reclaimed record count exceeds u32"))?,

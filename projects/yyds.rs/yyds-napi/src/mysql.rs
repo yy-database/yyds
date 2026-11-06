@@ -1,10 +1,8 @@
 use std::{net::SocketAddr, sync::Arc};
 
+use database::{cluster::catalog::Catalog, query::SqlCatalog, server::yyds::mysql::service::MysqlService};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
-use database::cluster::catalog::Catalog;
-use database::query::SqlCatalog;
-use database::server::yyds::mysql::service::MysqlService;
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle, schema::SqlSchemaRegistryHandle};
 

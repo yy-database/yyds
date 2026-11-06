@@ -20,8 +20,8 @@ use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -32,8 +32,8 @@ use sha1::{Digest, Sha1};
 
 use crate::{
     node_runtime::open_executor,
-    wire_dispatch::{dispatch, WireContext},
-    wire_protocol::{decode_authenticate_body, decode_frame, error_frame, read_frame, write_frame, Frame, MessageType},
+    wire_dispatch::{WireContext, dispatch},
+    wire_protocol::{Frame, MessageType, decode_authenticate_body, decode_frame, error_frame, read_frame, write_frame},
 };
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -227,12 +227,7 @@ fn handle_client(stream: TcpStream, ctx: &WireContext, peer_is_loopback: bool) -
     let state = Arc::new(ConnectionState::new(peer_is_loopback));
     let mut peek = [0_u8; 4];
     let n = stream.peek(&mut peek).map_err(|e| e.to_string())?;
-    if n >= 3 && &peek[..3] == b"GET" {
-        handle_websocket(stream, ctx, state)
-    }
-    else {
-        handle_tcp(stream, ctx, state)
-    }
+    if n >= 3 && &peek[..3] == b"GET" { handle_websocket(stream, ctx, state) } else { handle_tcp(stream, ctx, state) }
 }
 
 fn handle_tcp(mut stream: TcpStream, ctx: &WireContext, state: Arc<ConnectionState>) -> Result<(), String> {
@@ -279,12 +274,7 @@ fn handle_websocket(mut stream: TcpStream, ctx: &WireContext, state: Arc<Connect
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            if name.eq_ignore_ascii_case("Sec-WebSocket-Key") {
-                Some(value.trim().to_owned())
-            }
-            else {
-                None
-            }
+            if name.eq_ignore_ascii_case("Sec-WebSocket-Key") { Some(value.trim().to_owned()) } else { None }
         })
         .ok_or("missing Sec-WebSocket-Key".to_string())?;
 
@@ -510,11 +500,13 @@ mod tests {
     // `ConnectionState`. The accept and reject transitions stay here as the
     // smoke pair.
 
+    use database::{
+        cluster::topology::ShardMap,
+        execution::cluster::LocalExecutor,
+        storage::cluster_kv::MemoryShard,
+        types::cluster::{ShardEpoch, ShardId},
+    };
     use std::collections::HashMap;
-    use database::cluster::topology::ShardMap;
-    use database::execution::cluster::LocalExecutor;
-    use database::storage::cluster_kv::MemoryShard;
-    use database::types::cluster::{ShardEpoch, ShardId};
 
     fn auth_test_ctx() -> WireContext {
         let routing = ShardMap::new(ShardEpoch(1), vec![ShardId("local-0".into())]).unwrap();

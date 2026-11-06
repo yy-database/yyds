@@ -2,8 +2,8 @@
 
 #![deny(clippy::all)]
 
-use napi_derive::napi;
 use database::types::cluster::version;
+use napi_derive::napi;
 
 mod catalog;
 mod executor;
