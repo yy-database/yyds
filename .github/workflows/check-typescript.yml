@@ -22,9 +22,9 @@ jobs:
         with:
           node-version: 24
       - run: pnpm install
-      - run: pnpm typecheck
       - run: pnpm build:napi
       - run: pnpm build:ts
+      - run: pnpm typecheck
       - run: pnpm test:ts
       - run: pnpm test:integration
       - run: pnpm gate:test-count:ts
