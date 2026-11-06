@@ -303,11 +303,14 @@ def start_mongo_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> YydsNode:
 
     reserved: set[int] = set()
     mongo_port = _free_port(reserved)
+    # `yyds start` always mounts a Redis listener, so this node must not leave it
+    # on the well-known default port where a real engine may already listen.
+    redis_port = _free_port(reserved)
     data_dir = Path(tempfile.mkdtemp(prefix="yyds-mongo-clients-"))
     cluster_id = f"cluster-{os.getpid()}-{int(time.time())}"
     node_id = f"node-{os.getpid()}"
 
-    node = YydsNode(host="127.0.0.1", pgsql_port=0, mysql_port=0, redis_port=0, data_dir=data_dir, mongo_port=mongo_port)
+    node = YydsNode(host="127.0.0.1", pgsql_port=0, mysql_port=0, redis_port=redis_port, data_dir=data_dir, mongo_port=mongo_port)
     try:
         init = _run_cli(["init", "--data-dir", str(data_dir), "--cluster-id", cluster_id, "--node-id", node_id], 30.0)
         if init.returncode != 0:
@@ -322,6 +325,8 @@ def start_mongo_node(*, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> YydsNode:
                     cluster_id,
                     "--node-id",
                     node_id,
+                    "--redis-port",
+                    str(redis_port),
                     "--mongo-port",
                     str(mongo_port),
                 ]
