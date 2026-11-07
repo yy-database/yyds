@@ -58,7 +58,7 @@ pnpm placeholder:trust:skills
 
 ## `publish.packages`
 
-`@yydb/yyds`, `@yydb/yyds-win32-x64`, `@yydb/yyds-linux-x64`, `@yydb/yyds-darwin-x64`, `@yydb/yyds-darwin-arm64`, `@yydb/redis`, `@yydb/mysql`, `@yydb/postgresql`
+`@yydb/yyds`, `@yydb/yyds-win32-x64`, `@yydb/yyds-linux-x64`, `@yydb/yyds-darwin-x64`, `@yydb/yyds-darwin-arm64`
 
 ## Maintainer release notes
 

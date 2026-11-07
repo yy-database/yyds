@@ -19,9 +19,6 @@ files. The smallest building block is **`yyds-kv`**.
 | `projects/yyds.rs/ffis/yyds-napi` | Node-API binding (node lifecycle, wire, gateways) |
 | `projects/yyds.ts/packages/yyds` | TypeScript facade (`@yydb/yyds`) |
 | `projects/yyds.ts/platforms/yyds-*` | Platform Node-API binaries |
-| `projects/yyds.ts/emulators/redis` | Redis disguise (`@yydb/redis`) |
-| `projects/yyds.ts/emulators/mysql` | MySQL disguise (`@yydb/mysql`) |
-| `projects/yyds.ts/emulators/postgresql` | PostgreSQL disguise (`@yydb/postgresql`) |
 | `scripts/` | Workspace tooling (`format`, `build:napi`) |
 
 ## Storage model (vs YYDB)

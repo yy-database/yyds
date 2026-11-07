@@ -1,15 +1,15 @@
 // 下游验收示例：真实 mysql2 / pg 驱动对 yyds 节点做 1000 行批写与重连后批读。
 //
 // 期望值由本示例按写入输入自行推导（行数、连续 id 区间、去重键数、抽样行），
-// 不引用 yyds 内部常量，也不复用仓内用例表。驱动复用 `e2e` 已安装的依赖。
+// 不引用 yyds 内部常量，也不复用仓内用例表。驱动复用 `yyds-harness` 已安装的依赖。
 //
-// 节点由 `node e2e/run.mjs` 启动并通过 YYDS_PG_PORT / YYDS_MYSQL_PORT 传入。
+// 节点由 `node projects/yyds.ts/packages/yyds-harness/run.mjs` 启动并通过 YYDS_PG_PORT / YYDS_MYSQL_PORT 传入。
 
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "../../..");
-const require = createRequire(join(ROOT, "e2e/package.json"));
+const require = createRequire(join(ROOT, "projects/yyds.ts/packages/yyds-harness/package.json"));
 const mysql = require("mysql2/promise");
 const { Client } = require("pg");
 

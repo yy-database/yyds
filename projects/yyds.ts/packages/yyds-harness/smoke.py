@@ -4,7 +4,7 @@ Mirrors `smoke.ts`: same cases, same assertions, same table names. The node is
 started in schema-registry mode by `run.mjs`, so this script owns its DDL and
 leaves `<data-dir>/sql-schema.v0.json` behind for the harness to inspect.
 
-Run through `node e2e/run.mjs`, or by hand with `YYDS_PG_PORT` and
+Run through `node projects/yyds.ts/packages/yyds-harness/run.mjs`, or by hand with `YYDS_PG_PORT` and
 `YYDS_MYSQL_PORT` pointing at an already running node.
 """
 

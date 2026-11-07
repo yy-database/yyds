@@ -1,7 +1,7 @@
 """下游验收示例：真实 pymongo 对 yyds Mongo 网关做 1000 文档写入、读取、排序与删除。
 
 期望值由本示例按写入输入自行推导（文档数、抽样文档、排序结果、删除计数、重复键码值），
-不看网关内部常量。节点由 `node e2e/run.mjs` 启动并通过 `YYDS_MONGO_PORT` 传入。
+不看网关内部常量。节点由 `node projects/yyds.ts/packages/yyds-harness/run.mjs` 启动并通过 `YYDS_MONGO_PORT` 传入。
 
 设置 `YYDS_ORACLE_MONGO_URL`（例如 `mongodb://127.0.0.1:27017`）时，同一批操作会在真实
 MongoDB 上重放一次并对拍事实；没有 oracle 时只输出 `UNVERIFIED`，不计作通过。

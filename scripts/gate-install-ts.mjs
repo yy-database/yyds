@@ -22,13 +22,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const PACKAGES = [
-    { name: "@yydb/yyds", dir: "projects/yyds.ts/packages/yyds" },
-    { name: "@yydb/redis", dir: "projects/yyds.ts/emulators/redis" },
-    { name: "@yydb/mysql", dir: "projects/yyds.ts/emulators/mysql" },
-    { name: "@yydb/postgresql", dir: "projects/yyds.ts/emulators/postgresql" },
-    { name: "@yydb/mongodb", dir: "projects/yyds.ts/emulators/mongodb" },
-];
+const PACKAGES = [{ name: "@yydb/yyds", dir: "projects/yyds.ts/packages/yyds" }];
 const PLATFORM_PACKAGES = {
     "win32-x64": "yyds-win32-x64",
     "darwin-x64": "yyds-darwin-x64",

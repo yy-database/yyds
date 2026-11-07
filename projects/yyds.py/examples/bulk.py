@@ -1,7 +1,7 @@
 """下游验收示例：真实 PyMySQL / psycopg 驱动对 yyds 节点做 1000 行批写与重连后批读。
 
 期望值由本示例按写入输入自行推导（行数、连续 id 区间、去重键数、抽样行），
-不引用 yyds 内部常量，也不复用仓内用例表。节点由 `node e2e/run.mjs` 启动。
+不引用 yyds 内部常量，也不复用仓内用例表。节点由 `node projects/yyds.ts/packages/yyds-harness/run.mjs` 启动。
 """
 
 from __future__ import annotations

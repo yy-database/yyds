@@ -11,10 +11,9 @@ import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
 const PLATFORM_DIRS = new Set(["yyds-win32-x64", "yyds-linux-x64", "yyds-darwin-x64", "yyds-darwin-arm64"]);
-const EMULATOR_DIRS = new Set(["redis", "mysql", "postgresql"]);
 const dirs = (
     process.env.PUBLISH_PACKAGES ||
-    "yyds-win32-x64 yyds-linux-x64 yyds-darwin-x64 yyds-darwin-arm64 yyds redis mysql postgresql"
+    "yyds-win32-x64 yyds-linux-x64 yyds-darwin-x64 yyds-darwin-arm64 yyds"
 )
     .trim()
     .split(/\s+/)
@@ -23,9 +22,6 @@ const dirs = (
 function resolvePackageDir(dirName) {
     if (PLATFORM_DIRS.has(dirName)) {
         return path.join(root, "projects", "yyds.ts", "platforms", dirName);
-    }
-    if (EMULATOR_DIRS.has(dirName)) {
-        return path.join(root, "projects", "yyds.ts", "emulators", dirName);
     }
     return path.join(root, "projects", "yyds.ts", "packages", dirName);
 }

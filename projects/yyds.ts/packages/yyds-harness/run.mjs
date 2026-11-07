@@ -1,7 +1,7 @@
 // One-command SQL smoke: start a yyds node, run the TypeScript and Python
 // real-driver suites against it, then stop the node.
 //
-// `node e2e/run.mjs` is the CI entry point. It needs no external database:
+// `node projects/yyds.ts/packages/yyds-harness/run.mjs` is the CI entry point. It needs no external database:
 // the node starts in schema-registry mode, so `smoke.ts` / `smoke.py` create
 // their own tables and the registry is persisted to
 // `<data-dir>/sql-schema.v0.json`, which this script verifies after the runs.
@@ -14,7 +14,7 @@ import { createServer, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const ROOT = resolve(import.meta.dirname, "..");
+const ROOT = resolve(import.meta.dirname, "../../../..");
 const CLI = join(ROOT, "projects/yyds.ts/packages/yyds/bin/yyds.mjs");
 const START_TIMEOUT_MS = 90_000;
 const RUNNING_LINE = /^yyds running pid=\d+ mode=(\S+)/;
@@ -211,17 +211,17 @@ try {
     failures += await runSuite(
         "ts",
         process.execPath,
-        ["--experimental-strip-types", join(ROOT, "e2e/smoke.ts")],
+        ["--experimental-strip-types", join(import.meta.dirname, "smoke.ts")],
         { ...env, YYDS_SMOKE_TAG: "ts" },
     );
-    failures += await runSuite("py", python, [join(ROOT, "e2e/smoke.py")], { ...env, YYDS_SMOKE_TAG: "py" });
+    failures += await runSuite("py", python, [join(import.meta.dirname, "smoke.py")], { ...env, YYDS_SMOKE_TAG: "py" });
     failures += await runSuite(
         "protocol-ts",
         process.execPath,
-        ["--experimental-strip-types", join(ROOT, "e2e/protocol.ts")],
+        ["--experimental-strip-types", join(import.meta.dirname, "protocol.ts")],
         { ...env, YYDS_PROTOCOL_TAG: "ts" },
     );
-    failures += await runSuite("protocol-py", python, [join(ROOT, "e2e/protocol.py")], {
+    failures += await runSuite("protocol-py", python, [join(import.meta.dirname, "protocol.py")], {
         ...env,
         YYDS_PROTOCOL_TAG: "py",
     });
@@ -255,7 +255,7 @@ try {
         ...env,
         YYDS_RECOVERY_STATE: recoveryStatePath,
     };
-    failures += await runSuite("recovery-seed", python, [join(ROOT, "e2e/recovery.py")], {
+    failures += await runSuite("recovery-seed", python, [join(import.meta.dirname, "recovery.py")], {
         ...recoveryEnv,
         YYDS_RECOVERY_PHASE: "seed",
     });
@@ -265,7 +265,7 @@ try {
     for (const port of [redisPort, pgPort, mysqlPort, mongoPort]) await waitPortClosed(port);
     await startNode();
 
-    failures += await runSuite("recovery-verify", python, [join(ROOT, "e2e/recovery.py")], {
+    failures += await runSuite("recovery-verify", python, [join(import.meta.dirname, "recovery.py")], {
         ...recoveryEnv,
         YYDS_RECOVERY_PHASE: "verify",
     });

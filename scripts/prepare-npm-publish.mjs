@@ -16,7 +16,6 @@ function resolveVersion() {
 }
 
 const version = resolveVersion();
-const EMULATOR_DIRS = new Set(["redis", "mysql", "postgresql"]);
 
 function walkFiles(dir, acc = []) {
     if (!fs.existsSync(dir)) return acc;
@@ -101,11 +100,8 @@ for (const [pkg, binding] of platforms) {
     preparePackageJson(path.join(root, "projects", "yyds.ts", "platforms", pkg));
 }
 
-for (const dir of ["yyds", "redis", "mysql", "postgresql"]) {
-    const pkgDir = EMULATOR_DIRS.has(dir)
-        ? path.join(root, "projects", "yyds.ts", "emulators", dir)
-        : path.join(root, "projects", "yyds.ts", "packages", dir);
-    preparePackageJson(pkgDir);
+for (const dir of ["yyds"]) {
+    preparePackageJson(path.join(root, "projects", "yyds.ts", "packages", dir));
 }
 
 console.log("npm packages prepared", version || "(package.json versions)");

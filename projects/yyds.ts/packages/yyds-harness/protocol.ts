@@ -7,14 +7,13 @@
 // unsupported request is the oracle. No expectation is copied from gateway
 // internals — every value is derived from what the driver sent.
 //
-// Run through `node e2e/run.mjs`, or by hand with the `YYDS_*_PORT` variables
+// Run through `node projects/yyds.ts/packages/yyds-harness/run.mjs`, or by hand with the `YYDS_*_PORT` variables
 // pointing at an already running node.
 
 import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
-const ROOT = resolve(import.meta.dirname, "..");
-const require = createRequire(join(ROOT, "e2e/package.json"));
+const require = createRequire(join(import.meta.dirname, "package.json"));
 const Redis = require("ioredis");
 const { MongoClient } = require("mongodb");
 const mysql = require("mysql2/promise");

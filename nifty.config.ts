@@ -40,9 +40,6 @@ export default defineConfig({
             '@yydb/yyds-darwin-x64',
             '@yydb/yyds-darwin-arm64',
             '@yydb/yyds',
-            '@yydb/redis',
-            '@yydb/mysql',
-            '@yydb/postgresql',
         ],
     },
 });

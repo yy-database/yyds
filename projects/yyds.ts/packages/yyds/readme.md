@@ -33,8 +33,5 @@ yyds stop --data-dir ./node-data
 yyds webui --data-dir ./node-data --cluster-id local --node-id node-1
 ```
 
-## Related packages
 
-- [`@yydb/redis`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/redis) �?Redis protocol disguise
-- [`@yydb/mysql`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/mysql) �?MySQL protocol disguise
-- [`@yydb/postgresql`](https://github.com/yy-database/yyds/tree/dev/projects/yyds.ts/packages/postgresql) �?PostgreSQL protocol disguise
+

@@ -10,7 +10,7 @@ negotiates RESP3 with `HELLO 3` on connect and then parses replies strictly: a
 RESP2 null bulk string (`$-1`) inside a RESP3 session is a protocol error the
 client answers by reconnecting until its timeout.
 
-Run through `node e2e/run.mjs`, or by hand with the ``YYDS_*_PORT`` variables
+Run through `node projects/yyds.ts/packages/yyds-harness/run.mjs`, or by hand with the ``YYDS_*_PORT`` variables
 pointing at an already running node.
 """
 

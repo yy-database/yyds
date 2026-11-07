@@ -1,7 +1,7 @@
 """下游验收示例：真实 redis-py 对 yyds Redis 网关做 1000 键写入、读取、过期与删除。
 
 期望值由本示例按写入输入自行推导（键数、字节值、TTL、删除计数），不看网关内部常量。
-节点由 `node e2e/run.mjs` 启动并通过 `YYDS_REDIS_PORT` 传入。
+节点由 `node projects/yyds.ts/packages/yyds-harness/run.mjs` 启动并通过 `YYDS_REDIS_PORT` 传入。
 
 设置 `YYDS_ORACLE_REDIS_URL`（例如 `redis://127.0.0.1:6379/0`）时，同一批操作会在真实
 Redis 上重放一次并对拍事实；没有 oracle 时只输出 `UNVERIFIED`，不计作通过。

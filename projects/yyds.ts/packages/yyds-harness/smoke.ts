@@ -8,7 +8,7 @@
 // `YYDS_SMOKE_TAG` namespaces the tables so the Python suite can run against
 // the same node without colliding with the rows written here.
 //
-// Run through `node e2e/run.mjs`, or by hand with `YYDS_PG_PORT` and
+// Run through `node projects/yyds.ts/packages/yyds-harness/run.mjs`, or by hand with `YYDS_PG_PORT` and
 // `YYDS_MYSQL_PORT` pointing at an already running node.
 
 import mysql from "mysql2/promise";
