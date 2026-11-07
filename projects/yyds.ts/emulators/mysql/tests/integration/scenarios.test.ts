@@ -176,19 +176,15 @@ test("mysql: information_schema projections stay driver-visible", { timeout: 60_
     );
     assert.deepEqual((columns as Array<{ COLUMN_NAME: string }>).map((row) => row.COLUMN_NAME), ["id", "name", "score"]);
 
-    // MySQL accepts a `LIKE` predicate on metadata views. This gateway rejects
-    // it with `1235`, so metadata filtering is limited to exact equality. The
-    // errno is pinned as the current gap, not as desired behaviour.
-    await assert.rejects(
-        connection.query(`SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'scenario_%'`),
-        (error: unknown) => {
-            assert.equal((error as { errno?: number }).errno, 1235);
-            return true;
-        },
+    // MySQL answers a `LIKE` predicate on metadata views, so the projection
+    // filters on the same pattern a real client would send.
+    const [filtered] = await connection.query(
+        `SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'scenario_%'`,
     );
+    assert.deepEqual((filtered as Array<{ TABLE_NAME: string }>).map((row) => row.TABLE_NAME), [table]);
 });
 
-test("mysql: ALTER TABLE ADD COLUMN leaves existing rows null (known gap)", { timeout: 60_000 }, async (t) => {
+test("mysql: ALTER TABLE ADD COLUMN backfills the declared default", { timeout: 60_000 }, async (t) => {
     const node = await startYydsNode();
     const connection = await connect(node);
     t.after(async () => {
@@ -203,8 +199,7 @@ test("mysql: ALTER TABLE ADD COLUMN leaves existing rows null (known gap)", { ti
     await connection.query(`ALTER TABLE ${table} ADD COLUMN note VARCHAR(8) DEFAULT 'n'`);
 
     // MySQL backfills the declared default for rows written before the column
-    // existed. This gateway only records the column, so the read-back is null.
-    // The assertion pins the current gap so a fix turns this red.
+    // existed, so every stored row reads back the same value.
     const [rows] = await connection.query(`SELECT id, note FROM ${table} ORDER BY id LIMIT 10`);
-    assert.deepEqual((rows as Array<{ note: string | null }>).map((row) => row.note), Array.from({ length: 10 }, () => null));
+    assert.deepEqual((rows as Array<{ note: string | null }>).map((row) => row.note), Array.from({ length: 10 }, () => "n"));
 });
