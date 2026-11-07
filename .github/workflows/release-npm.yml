@@ -30,12 +30,12 @@ jobs:
     name: Python binding gate
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-07-20
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-20
+          toolchain: nightly
           components: rustfmt
       - uses: actions/setup-python@v6
         with:
@@ -91,7 +91,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-20
+          toolchain: nightly
       - name: Install compilation target
         run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
@@ -123,7 +123,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2026-07-20
+          toolchain: nightly
       - name: Install both macOS targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
