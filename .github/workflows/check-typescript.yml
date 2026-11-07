@@ -15,8 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
-        with:
-          toolchain: nightly
+      - run: rustc --version && cargo --version
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
