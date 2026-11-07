@@ -183,18 +183,15 @@ test("postgresql: information_schema projection pages deterministically", { time
     );
     assert.deepEqual(second.rows.map((row) => row.column_name), ["score"]);
 
-    // `COUNT(*)` over a metadata view is still unsupported. The SQLSTATE stays
-    // pinned so the gap cannot turn into a silently empty result.
-    await assert.rejects(
-        client.query(`SELECT COUNT(*) FROM information_schema.columns WHERE table_name = '${table}'`),
-        (error: unknown) => {
-            assert.equal((error as { code?: string }).code, "0A000");
-            return true;
-        },
+    // PostgreSQL aggregates over a metadata view like any other relation, so the
+    // count has to reflect the three declared columns.
+    const counted = await client.query(
+        `SELECT COUNT(*) AS n FROM information_schema.columns WHERE table_name = '${table}'`,
     );
+    assert.equal(Number(counted.rows[0]?.n), 3);
 });
 
-test("postgresql: ALTER TABLE ADD COLUMN leaves existing rows null (known gap)", { timeout: 60_000 }, async (t) => {
+test("postgresql: ALTER TABLE ADD COLUMN backfills the declared default", { timeout: 60_000 }, async (t) => {
     const node = await startYydsNode();
     const client = await connect(node);
     t.after(async () => {
@@ -209,9 +206,7 @@ test("postgresql: ALTER TABLE ADD COLUMN leaves existing rows null (known gap)",
     await client.query(`ALTER TABLE ${table} ADD COLUMN note VARCHAR(8) DEFAULT 'n'`);
 
     // PostgreSQL backfills the declared default for rows written before the
-    // column existed. This gateway only records the column, so the read-back is
-    // null. The assertion pins the current gap so a fix turns this red and the
-    // test gets updated with the engine behaviour.
+    // column existed, so every stored row reads back the same value.
     const rows = await client.query(`SELECT id, note FROM ${table} ORDER BY id LIMIT 10`);
-    assert.deepEqual(rows.rows.map((row) => row.note), Array.from({ length: 10 }, () => null));
+    assert.deepEqual(rows.rows.map((row) => row.note), Array.from({ length: 10 }, () => "n"));
 });
