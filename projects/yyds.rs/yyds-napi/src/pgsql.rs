@@ -1,6 +1,10 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use database::{cluster::catalog::Catalog, query::SqlCatalog, server::yyds::pgsql::service::PgsqlService};
+use database::{
+    cluster::catalog::Catalog,
+    query::{SqlCatalog, sql_meta::set_pg_server_version},
+    server::yyds::pgsql::service::PgsqlService,
+};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -17,6 +21,7 @@ impl PgsqlServiceHandle {
     /// Starts a protocol-only PostgreSQL listener (no SQL runtime).
     #[napi(constructor)]
     pub fn start(lease: &NodeLeaseHandle, port: u16) -> Result<Self> {
+        install_identity();
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let service = PgsqlService::start(Arc::clone(&lease.inner), address).map_err(map_io)?;
         Ok(Self { inner: Some(service) })
@@ -32,6 +37,7 @@ impl PgsqlServiceHandle {
         executor: &LocalExecutorHandle,
         catalog_path: String,
     ) -> Result<Self> {
+        install_identity();
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let yyds_catalog = Catalog::open(&catalog_path).map_err(|msg| Error::from_reason(format!("open catalog: {msg}")))?;
         let catalog = SqlCatalog::from_catalog(&yyds_catalog)
@@ -53,6 +59,7 @@ impl PgsqlServiceHandle {
         executor: &LocalExecutorHandle,
         schema: &SqlSchemaRegistryHandle,
     ) -> Result<Self> {
+        install_identity();
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let service = PgsqlService::start_with_registry(
             Arc::clone(&lease.inner),
@@ -79,6 +86,14 @@ impl PgsqlServiceHandle {
         let service = self.inner.take().ok_or_else(missing)?;
         service.stop().map_err(map_io)
     }
+}
+
+/// Advertises this gateway as `YYDS <version>` instead of the facade crate name.
+///
+/// The facade only accepts the identity once per process, so repeated calls from
+/// every listener constructor are harmless.
+fn install_identity() {
+    set_pg_server_version(concat!("YYDS ", env!("CARGO_PKG_VERSION")));
 }
 
 fn missing() -> Error {
