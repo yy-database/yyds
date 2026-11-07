@@ -26,6 +26,7 @@ jobs:
       - run: pnpm build:ts
       - run: pnpm typecheck
       - run: pnpm test:ts
+      - run: pnpm gate:test-count:ts
       - run: pnpm gate:install:ts
       - run: pnpm --filter @yydb/yyds-webui check
       - run: pnpm --filter @yydb/yyds-homepage check

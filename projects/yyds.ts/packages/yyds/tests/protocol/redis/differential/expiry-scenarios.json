@@ -1,0 +1,141 @@
+{
+    "description": "One canonical operation sequence for the YYDS Redis gateway. The TS suite drives it through node-redis and the Python suite through redis-py; both interpreters must observe identical results, which pins the wire semantics twice. Timing windows are deliberately wide so scheduler jitter never decides the outcome.",
+    "scenarios": [
+        {
+            "name": "relative-ttl-countdown-and-persist",
+            "steps": [
+                { "cmd": ["SET", "d1-a", "1"], "expect": "OK" },
+                { "cmd": ["EXPIRE", "d1-a", "100"], "expect": 1 },
+                { "cmd": ["TTL", "d1-a"], "expect": { "intBetween": [90, 100] } },
+                { "cmd": ["PTTL", "d1-a"], "expect": { "intBetween": [90000, 100000] } },
+                { "cmd": ["PERSIST", "d1-a"], "expect": 1 },
+                { "cmd": ["TTL", "d1-a"], "expect": -1 },
+                { "cmd": ["PERSIST", "d1-a"], "expect": 0 },
+                { "cmd": ["PEXPIRE", "d1-a", "80"], "expect": 1 },
+                { "sleep": 160 },
+                { "cmd": ["GET", "d1-a"], "expect": null },
+                { "cmd": ["TTL", "d1-a"], "expect": -2 },
+                { "cmd": ["EXPIRE", "d1-missing", "100"], "expect": 0 },
+                { "cmd": ["SET", "d1-b", "1"], "expect": "OK" },
+                { "cmd": ["EXPIRE", "d1-b", "0"], "expect": 1 },
+                { "cmd": ["GET", "d1-b"], "expect": null }
+            ]
+        },
+        {
+            "name": "absolute-deadlines",
+            "steps": [
+                { "cmd": ["SET", "d2-a", "v"], "expect": "OK" },
+                { "cmd": ["EXPIREAT", "d2-a", { "unixSecondsFromNow": 100 }], "expect": 1 },
+                { "cmd": ["TTL", "d2-a"], "expect": { "intBetween": [90, 100] } },
+                { "cmd": ["PEXPIREAT", "d2-a", { "unixMsFromNow": 60000 }], "expect": 1 },
+                { "cmd": ["PTTL", "d2-a"], "expect": { "intBetween": [55000, 60000] } },
+                { "cmd": ["SET", "d2-b", "v", "EXAT", { "unixSecondsFromNow": 100 }], "expect": "OK" },
+                { "cmd": ["TTL", "d2-b"], "expect": { "intBetween": [90, 100] } },
+                { "cmd": ["SET", "d2-c", "v", "EXAT", "1"], "expect": "OK" },
+                { "cmd": ["GET", "d2-c"], "expect": null },
+                { "cmd": ["TTL", "d2-c"], "expect": -2 },
+                { "cmd": ["SET", "d2-d", "v"], "expect": "OK" },
+                { "cmd": ["EXPIREAT", "d2-d", "0"], "expect": 1 },
+                { "cmd": ["GET", "d2-d"], "expect": null },
+                { "cmd": ["EXPIREAT", "d2-d", "-5"], "expect": 0 }
+            ]
+        },
+        {
+            "name": "getex-read-and-touch",
+            "steps": [
+                { "cmd": ["SET", "d3-a", "payload", "EX", "100"], "expect": "OK" },
+                { "cmd": ["GETEX", "d3-a", "EX", "500"], "expect": "payload" },
+                { "cmd": ["TTL", "d3-a"], "expect": { "intBetween": [490, 500] } },
+                { "cmd": ["GETEX", "d3-a", "PERSIST"], "expect": "payload" },
+                { "cmd": ["TTL", "d3-a"], "expect": -1 },
+                { "cmd": ["GETEX", "d3-a"], "expect": "payload" },
+                { "cmd": ["TTL", "d3-a"], "expect": -1 },
+                { "cmd": ["GETEX", "d3-a", "EXAT", { "unixSecondsFromNow": 200 }], "expect": "payload" },
+                { "cmd": ["TTL", "d3-a"], "expect": { "intBetween": [190, 200] } },
+                { "cmd": ["GETEX", "d3-missing", "EX", "10"], "expect": null },
+                { "cmd": ["EXISTS", "d3-missing"], "expect": 0 },
+                { "cmd": ["GETEX", "d3-a", "EX", "0"], "expect": { "error": "ERR invalid expire time in 'getex' command" } },
+                { "cmd": ["GETEX", "d3-a", "FOO"], "expect": { "error": "ERR syntax error" } },
+                { "cmd": ["GETEX", "d3-a", "EX", "1", "PERSIST"], "expect": { "error": "ERR syntax error" } }
+            ]
+        },
+        {
+            "name": "set-condition-and-expiry-matrix",
+            "steps": [
+                { "cmd": ["SET", "d4-a", "first", "NX"], "expect": "OK" },
+                { "cmd": ["SET", "d4-a", "second", "NX"], "expect": null },
+                { "cmd": ["GET", "d4-a"], "expect": "first" },
+                { "cmd": ["SET", "d4-b", "v", "XX"], "expect": null },
+                { "cmd": ["SET", "d4-a", "v", "XX", "EX", "100"], "expect": "OK" },
+                { "cmd": ["TTL", "d4-a"], "expect": { "intBetween": [90, 100] } },
+                { "cmd": ["SET", "d4-a", "v2", "KEEPTTL"], "expect": "OK" },
+                { "cmd": ["TTL", "d4-a"], "expect": { "intBetween": [85, 100] } },
+                { "cmd": ["GET", "d4-a"], "expect": "v2" },
+                { "cmd": ["SET", "d4-a", "v3"], "expect": "OK" },
+                { "cmd": ["TTL", "d4-a"], "expect": -1 },
+                { "cmd": ["SET", "d4-a", "v", "EX", "10", "PX", "1000"], "expect": { "error": "ERR syntax error" } },
+                { "cmd": ["SET", "d4-a", "v", "EX"], "expect": { "error": "ERR syntax error" } },
+                { "cmd": ["SET", "d4-a", "v", "EX", "0"], "expect": { "error": "ERR invalid expire time in 'set' command" } },
+                { "cmd": ["SET", "d4-a", "v", "GET"], "expect": { "error": "ERR unsupported SET options" } },
+                { "cmd": ["SET", "d4-a"], "expect": { "error": "ERR wrong number of arguments for 'set' command" } }
+            ]
+        },
+        {
+            "name": "value-shapes-and-counters",
+            "steps": [
+                { "cmd": ["TYPE", "d5-missing"], "expect": "none" },
+                { "cmd": ["SET", "d5-a", "hello"], "expect": "OK" },
+                { "cmd": ["TYPE", "d5-a"], "expect": "string" },
+                { "cmd": ["STRLEN", "d5-a"], "expect": 5 },
+                { "cmd": ["APPEND", "d5-a", "-x"], "expect": 7 },
+                { "cmd": ["GET", "d5-a"], "expect": "hello-x" },
+                { "cmd": ["EXISTS", "d5-a", "d5-missing"], "expect": 1 },
+                { "cmd": ["MGET", "d5-a", "d5-missing"], "expect": ["hello-x", null] },
+                { "cmd": ["GETSET", "d5-a", "swapped"], "expect": "hello-x" },
+                { "cmd": ["GETDEL", "d5-a"], "expect": "swapped" },
+                { "cmd": ["GET", "d5-a"], "expect": null },
+                { "cmd": ["INCR", "d5-n"], "expect": 1 },
+                { "cmd": ["INCRBY", "d5-n", "5"], "expect": 6 },
+                { "cmd": ["DECR", "d5-n"], "expect": 5 },
+                { "cmd": ["DECRBY", "d5-n", "-1"], "expect": 6 },
+                { "cmd": ["INCRBY", "d5-n", "+5"], "expect": { "error": "ERR value is not an integer or out of range" } },
+                { "cmd": ["INCRBY", "d5-n", "05"], "expect": { "error": "ERR value is not an integer or out of range" } },
+                { "cmd": ["LPUSH", "d5-list", "v"], "expect": 1 },
+                { "cmd": ["SELECT", "16"], "expect": { "error": "ERR DB index is out of range" } }
+            ]
+        },
+        {
+            "name": "rename-session-rotation",
+            "steps": [
+                { "cmd": ["SET", "d6-src", "session", "PX", "60000"], "expect": "OK" },
+                { "cmd": ["SET", "d6-occupied", "old"], "expect": "OK" },
+                { "cmd": ["RENAME", "d6-src", "d6-dst"], "expect": "OK" },
+                { "cmd": ["GET", "d6-dst"], "expect": "session" },
+                { "cmd": ["GET", "d6-src"], "expect": null },
+                { "cmd": ["PTTL", "d6-dst"], "expect": { "intBetween": [55000, 60000] } },
+                { "cmd": ["RENAMENX", "d6-dst", "d6-occupied"], "expect": 0 },
+                { "cmd": ["GET", "d6-dst"], "expect": "session" },
+                { "cmd": ["GET", "d6-occupied"], "expect": "old" },
+                { "cmd": ["RENAMENX", "d6-dst", "d6-free"], "expect": 1 },
+                { "cmd": ["GET", "d6-free"], "expect": "session" },
+                { "cmd": ["GET", "d6-dst"], "expect": null },
+                { "cmd": ["PTTL", "d6-free"], "expect": { "intBetween": [55000, 60000] } },
+                { "cmd": ["RENAME", "d6-free", "d6-occupied"], "expect": "OK" },
+                { "cmd": ["GET", "d6-occupied"], "expect": "session" },
+                { "cmd": ["SET", "d6-same", "v", "PX", "60000"], "expect": "OK" },
+                { "cmd": ["RENAME", "d6-same", "d6-same"], "expect": "OK" },
+                { "cmd": ["RENAMENX", "d6-same", "d6-same"], "expect": 0 },
+                { "cmd": ["GET", "d6-same"], "expect": "v" }
+            ]
+        },
+        {
+            "name": "rename-missing-and-arity",
+            "steps": [
+                { "cmd": ["RENAME", "d6-missing", "d6-target"], "expect": { "error": "ERR no such key" } },
+                { "cmd": ["RENAMENX", "d6-missing", "d6-target"], "expect": { "error": "ERR no such key" } },
+                { "cmd": ["RENAME", "d6-only"], "expect": { "error": "ERR wrong number of arguments for 'rename' command" } },
+                { "cmd": ["RENAMENX", "d6-a", "d6-b", "d6-c"], "expect": { "error": "ERR wrong number of arguments for 'renamenx' command" } }
+            ]
+        }
+    ]
+}

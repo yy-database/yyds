@@ -1,7 +1,7 @@
 """Redis real-client suite driven by redis-py against a node started by `yyds start`.
 
 The single-command semantics come from one shared scenario table
-(`projects/yyds.ts/emulators/redis/tests/differential/expiry-scenarios.json`) that the
+(`projects/yyds.ts/packages/yyds/tests/protocol/redis/differential/expiry-scenarios.json`) that the
 Node suite executes through node-redis, so the same operation sequence is observed
 through two independent client stacks. Lifecycle cases (reconnect, restart, background
 reclamation) are Python-local and use the same redis-py driver.
@@ -35,7 +35,7 @@ from harness import (
 
 REPO_ROOT = Path(__file__).resolve().parents[6]
 SCENARIO_PATH = (
-    REPO_ROOT / "projects/yyds.ts/emulators/redis/tests/differential/expiry-scenarios.json"
+    REPO_ROOT / "projects/yyds.ts/packages/yyds/tests/protocol/redis/differential/expiry-scenarios.json"
 )
 SHARD_FILE = "local-0.yykv"
 

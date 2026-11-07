@@ -12,6 +12,7 @@
         "gate:install:ts": "node scripts/gate-install-ts.mjs",
         "typecheck": "pnpm -r --filter @yydb/yyds --filter @yydb/yyds-node-harness run typecheck",
         "test:ts": "pnpm -r --filter @yydb/yyds run test",
+        "gate:test-count:ts": "node scripts/assert-test-count.mjs protocol-ts",
         "gate:test-count:py": "node scripts/assert-test-count.mjs redis-py mongo-py",
         "test:py": "python -m unittest discover -s projects/yyds.py/packages/yyds/tests",
         "test:sql-smoke": "node projects/yyds.ts/packages/yyds-harness/run.mjs",

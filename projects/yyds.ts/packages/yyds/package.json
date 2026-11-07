@@ -40,7 +40,8 @@
         "build": "tsc -p tsconfig.build.json",
         "build:webui": "node scripts/bundle-webui.mjs",
         "typecheck": "tsc --noEmit -p tsconfig.json",
-        "test": "node --experimental-strip-types --test \"./tests/**/*.test.ts\" \"./src/node/**/*.test.ts\""
+        "test": "node --experimental-strip-types --test \"./tests/*.test.ts\" \"./src/node/**/*.test.ts\"",
+        "test:protocol": "node --experimental-strip-types --test --test-concurrency=1 \"./tests/protocol/**/*.test.ts\""
     },
     "repository": {
         "type": "git",
@@ -68,7 +69,13 @@
     },
     "devDependencies": {
         "@types/node": "^22.15.0",
+        "@types/pg": "^8.18.0",
+        "@yydb/yyds-node-harness": "workspace:*",
         "@yydb/yyds-webui": "workspace:*",
+        "mongodb": "^7.7.0",
+        "mysql2": "^3.24.6",
+        "pg": "^8.23.1",
+        "redis": "^6.3.0",
         "typescript": "^5.9.2"
     },
     "engines": {

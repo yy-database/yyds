@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Execution-count gate for the Redis and MongoDB Python client suites.
+ * Execution-count gate for the gateway protocol suite and the Redis and MongoDB Python client suites.
  *
  * A suite can lose cases without turning red: a deleted file, a filtered glob, an
  * early `t.skip`, or a driver import failure that silently drops work all leave a
@@ -8,7 +8,7 @@
  * case count, and any skipped case is a failure.
  *
  * Usage: `node scripts/assert-test-count.mjs <gate>...` where the gate names are
- * `redis-py`, `mongo-py`. With no argument every gate runs.
+ * `protocol-ts`, `redis-py`, `mongo-py`. With no argument every gate runs.
  */
 
 import { spawnSync } from "node:child_process";
@@ -41,6 +41,11 @@ function parsePythonSuite(output) {
 const PYTHON_CLIENTS = "projects/yyds.py/packages/yyds/tests/clients/run_all.py";
 
 const GATES = {
+    "protocol-ts": {
+        minimum: 80,
+        command: `pnpm --filter @yydb/yyds run test:protocol`,
+        parse: parseNodeTest,
+    },
     "redis-py": {
         minimum: 29,
         command: `python ${PYTHON_CLIENTS} --suite redis`,
