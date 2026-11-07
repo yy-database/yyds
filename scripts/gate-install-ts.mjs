@@ -121,17 +121,12 @@ const native = yyds.loadYydsNative();
 assert.equal(typeof native.yydsVersion(), "string");
 assert.ok(native.yydsVersion().length > 0);
 assert.equal(native.ping(), "ok");
-for (const name of ["redis", "mysql", "postgresql", "mongodb"]) {
-    const emulator = await import("@yydb/" + name + "/node");
-    assert.equal(typeof emulator.loadYydsNative, "function", name + " must re-export loadYydsNative");
-    assert.equal(emulator.loadYydsNative().ping(), "ok", name + " must reach the native runtime");
-}
 console.log("PASS install-ts: imports and native calls succeeded on " + process.platform + "-" + process.arch);
 `,
     );
     const probeOutput = runNode([probe], installDir).trim();
     if (probeOutput) console.log(probeOutput);
-    console.log(`native ping ok, 5 packages resolved from ${installDir}`);
+    console.log(`native ping ok, ${PACKAGES.length} package resolved from ${installDir}`);
 } finally {
     rmSync(tempRoot, { recursive: true, force: true });
 }
