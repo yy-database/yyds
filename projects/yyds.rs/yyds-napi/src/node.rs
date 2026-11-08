@@ -42,6 +42,17 @@ impl NodeLeaseHandle {
     }
 }
 
+/// napi 边界 DTO：节点身份对外 JSON 形态。
+///
+/// JS 侧保持 camelCase 键，核心类型 [`NodeIdentity`] 的命名不参与对外序列化，
+/// 便于核心层后续去掉 serde 重命名。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NodeIdentityJson<'a> {
+    cluster_id: &'a str,
+    node_id: &'a str,
+}
+
 #[napi(object)]
 pub struct NodeStatusJson {
     pub directory: String,
@@ -63,7 +74,11 @@ pub fn node_inspect(data_dir: String) -> Result<NodeStatusJson> {
         directory: snapshot.directory,
         ownership: snapshot.ownership,
         health: snapshot.health,
-        identity: serde_json::to_string(&snapshot.identity).map_err(map_serde)?,
+        identity: serde_json::to_string(&NodeIdentityJson {
+            cluster_id: snapshot.identity.cluster_id(),
+            node_id: snapshot.identity.node_id(),
+        })
+        .map_err(map_serde)?,
         runtime: snapshot.runtime.map(|runtime| serde_json::to_string(&runtime).map_err(map_serde)).transpose()?,
     })
 }

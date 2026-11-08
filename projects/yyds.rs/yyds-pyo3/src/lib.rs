@@ -49,11 +49,14 @@ fn node_init(data_dir: &str, cluster_id: &str, node_id: &str) -> PyResult<()> {
 }
 
 /// Returns node identity, ownership and the published runtime status as JSON.
+///
+/// 返回给 Python 的键一律使用 snake_case；落盘文件仍是 camelCase，
+/// 两者之间的翻译只在 [`runtime_view`] 这一处发生。
 #[pyfunction]
 fn node_status(data_dir: &str) -> PyResult<String> {
     let status = NodeLease::inspect(data_dir).map_err(map_lease)?;
     let runtime = if status.ownership == LocalOwnership::Held {
-        read_runtime_status(&status.directory).map_err(YydsError::new_err)?
+        read_runtime_status(&status.directory).map_err(YydsError::new_err)?.as_ref().map(runtime_view)
     }
     else {
         None
@@ -61,8 +64,8 @@ fn node_status(data_dir: &str) -> PyResult<String> {
     Ok(json!({
         "directory": status.directory.display().to_string(),
         "identity": {
-            "clusterId": status.identity.cluster_id(),
-            "nodeId": status.identity.node_id(),
+            "cluster_id": status.identity.cluster_id(),
+            "node_id": status.identity.node_id(),
         },
         "ownership": match status.ownership {
             LocalOwnership::Held => "held",
@@ -71,6 +74,29 @@ fn node_status(data_dir: &str) -> PyResult<String> {
         "runtime": runtime,
     })
     .to_string())
+}
+
+/// 把落盘运行时状态里的 camelCase 键翻译成 Python 侧惯用的 snake_case。
+///
+/// 文件格式本身不在这里改动，未列出的键原样保留。
+fn runtime_view(runtime: &Value) -> Value {
+    let Some(object) = runtime.as_object()
+    else {
+        return runtime.clone();
+    };
+    let mut translated = serde_json::Map::with_capacity(object.len());
+    for (key, value) in object {
+        let translated_key = match key.as_str() {
+            "startedAtUnixMs" => "started_at_unix_ms",
+            "redisAddress" => "redis_address",
+            "pgsqlAddress" => "pgsql_address",
+            "mysqlAddress" => "mysql_address",
+            "wireAddress" => "wire_address",
+            _ => key.as_str(),
+        };
+        translated.insert(translated_key.to_string(), value.clone());
+    }
+    Value::Object(translated)
 }
 
 /// Creates a stop marker for the generation published by the running node.

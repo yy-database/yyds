@@ -58,7 +58,7 @@ class NodeTests(unittest.TestCase):
 
         status = node.status()
         self.assertEqual(status["ownership"], "available")
-        self.assertEqual(status["identity"], {"clusterId": "example-cluster", "nodeId": "example-node"})
+        self.assertEqual(status["identity"], {"cluster_id": "example-cluster", "node_id": "example-node"})
         self.assertIsNone(status["runtime"])
         self.assertTrue(os.path.samefile(status["directory"], self.data_dir))
 
