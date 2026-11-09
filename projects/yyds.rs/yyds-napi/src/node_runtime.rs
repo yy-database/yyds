@@ -39,8 +39,10 @@ pub struct RuntimeStatus {
 }
 
 /// JSON shape returned by node status inspection.
+///
+/// 本结构只被 `node.rs` 逐字段读取并另建 `NodeStatusJson`，从不整体序列化；
+/// 面向 JS 的 camelCase 键由 `NodeIdentityJson` / `RuntimeStatus` 各自负责。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct NodeStatusSnapshot {
     pub directory: String,
     pub identity: NodeIdentity,
