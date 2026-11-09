@@ -42,18 +42,15 @@ pub struct RuntimeStatus {
 ///
 /// 本结构只被 `node.rs` 逐字段读取并另建 `NodeStatusJson`，从不整体序列化；
 /// 面向 JS 的 camelCase 键由 `NodeIdentityJson` / `RuntimeStatus` 各自负责。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct NodeStatusSnapshot {
     pub directory: String,
     pub identity: NodeIdentity,
     pub ownership: String,
     pub runtime: Option<RuntimeStatus>,
     pub health: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_revision: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub routing_epoch: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub shard_count: Option<usize>,
 }
 
