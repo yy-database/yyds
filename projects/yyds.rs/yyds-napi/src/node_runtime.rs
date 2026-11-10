@@ -38,6 +38,21 @@ pub struct RuntimeStatus {
     pub wire_address: Option<String>,
 }
 
+/// JSON projection of [`NodeIdentity`]: the core type no longer carries serde derives.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NodeIdentityView {
+    pub cluster_id: String,
+    pub node_id: String,
+}
+
+impl NodeIdentityView {
+    /// Copies the validated identity fields into their published JSON shape.
+    pub fn of(identity: &NodeIdentity) -> Self {
+        Self { cluster_id: identity.cluster_id().to_owned(), node_id: identity.node_id().to_owned() }
+    }
+}
+
 /// JSON shape returned by node status inspection.
 ///
 /// 本结构只被 `node.rs` 逐字段读取并另建 `NodeStatusJson`，从不整体序列化；
@@ -45,7 +60,7 @@ pub struct RuntimeStatus {
 #[derive(Debug, Clone)]
 pub struct NodeStatusSnapshot {
     pub directory: String,
-    pub identity: NodeIdentity,
+    pub identity: NodeIdentityView,
     pub ownership: String,
     pub runtime: Option<RuntimeStatus>,
     pub health: String,
@@ -181,7 +196,7 @@ pub fn inspect_node(data_dir: &Path, catalog_path: Option<&Path>) -> Result<Node
     let facts = load_catalog_facts(catalog_path);
     Ok(NodeStatusSnapshot {
         directory: state.directory.display().to_string(),
-        identity: state.identity,
+        identity: NodeIdentityView::of(&state.identity),
         ownership: match state.ownership {
             LocalOwnership::Held => "held".into(),
             LocalOwnership::Available => "available".into(),
