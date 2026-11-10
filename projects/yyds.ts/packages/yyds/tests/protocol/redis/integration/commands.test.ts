@@ -58,7 +58,9 @@ test("EXPIRE and TTL cover missing keys, bad integers and zero TTL deletes", asy
     try {
         expectInteger(await client.command("EXPIRE", "exp-missing", "100"), 0);
         expectError(await client.command("EXPIRE", "exp-a"), "ERR wrong number of arguments for 'expire' command");
-        expectError(await client.command("EXPIRE", "exp-a", "1", "2"), "ERR wrong number of arguments for 'expire' command");
+        // A trailing non-option argument is rejected like the real server: the
+        // third argument is parsed as an expiry option, not a second duration.
+        expectError(await client.command("EXPIRE", "exp-a", "1", "2"), "ERR Unsupported option 2");
         expectError(await client.command("EXPIRE", "exp-a", "+5"), "ERR value is not an integer or out of range");
         expectError(await client.command("EXPIRE", "exp-a", "05"), "ERR value is not an integer or out of range");
         expectError(await client.command("EXPIRE", "exp-a", "abc"), "ERR value is not an integer or out of range");
@@ -144,9 +146,10 @@ test("SET NX and XX combine with every expiry option, unknown options are refuse
         const ttl = await client.command("TTL", "nx-exp");
         assert.ok(ttl.kind === "integer" && ttl.value > 90 && ttl.value <= 100, `unexpected TTL ${JSON.stringify(ttl)}`);
 
-        // The `GET` option and unknown options remain explicitly refused.
-        expectError(await client.command("SET", "nx", "v", "GET"), "ERR unsupported SET options");
-        expectError(await client.command("SET", "nx", "v", "BOGUS"), "ERR unsupported SET options");
+        // `GET` is a real `SET` option and replies the old value; only unknown
+        // options are refused, and the real server words that refusal as a syntax error.
+        expectBulk(await client.command("SET", "nx", "v", "GET"), "first");
+        expectError(await client.command("SET", "nx", "v", "BOGUS"), "ERR syntax error");
         // Conflicting or incomplete expiry options are syntax errors.
         expectError(await client.command("SET", "nx", "v", "EX", "10", "PX", "1000"), "ERR syntax error");
         expectError(await client.command("SET", "nx", "v", "EX"), "ERR syntax error");

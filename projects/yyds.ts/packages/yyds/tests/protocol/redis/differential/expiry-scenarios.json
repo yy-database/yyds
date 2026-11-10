@@ -76,7 +76,7 @@
                 { "cmd": ["SET", "d4-a", "v", "EX", "10", "PX", "1000"], "expect": { "error": "ERR syntax error" } },
                 { "cmd": ["SET", "d4-a", "v", "EX"], "expect": { "error": "ERR syntax error" } },
                 { "cmd": ["SET", "d4-a", "v", "EX", "0"], "expect": { "error": "ERR invalid expire time in 'set' command" } },
-                { "cmd": ["SET", "d4-a", "v", "GET"], "expect": { "error": "ERR unsupported SET options" } },
+                { "cmd": ["SET", "d4-a", "v", "GET"], "expect": "v3" },
                 { "cmd": ["SET", "d4-a"], "expect": { "error": "ERR wrong number of arguments for 'set' command" } }
             ]
         },
