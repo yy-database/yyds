@@ -42,9 +42,9 @@ const AUTH_CODE: &str = "yyds.auth.required";
 /// Error code returned when an Authenticate frame carries a wrong token.
 const AUTH_FAILED_CODE: &str = "yyds.auth.failed";
 
-/// Owned listener with a join handle; dropped handles stop on the next accept.
+/// Accept-loop handle; `stop` flips the shared flag and joins the thread.
 pub struct WireServer {
-    listener: Arc<TcpListener>,
+    stopping: Arc<AtomicBool>,
     address: SocketAddr,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -100,12 +100,14 @@ impl WireServer {
             }
         }
         let listener = Arc::new(listener);
+        let stopping = Arc::new(AtomicBool::new(false));
         let listener_for_thread = Arc::clone(&listener);
+        let stopping_for_thread = Arc::clone(&stopping);
         let join = thread::Builder::new()
             .name("yyds-wire-accept".into())
-            .spawn(move || accept_loop(listener_for_thread, ctx))
+            .spawn(move || accept_loop(listener_for_thread, ctx, stopping_for_thread))
             .map_err(|e| format!("wire spawn: {e}"))?;
-        Ok(Self { listener, address, join: Some(join) })
+        Ok(Self { stopping, address, join: Some(join) })
     }
 
     /// Returns the address the server bound to.
@@ -114,8 +116,12 @@ impl WireServer {
     }
 
     /// Ask the accept loop to stop and join it. Idempotent.
+    ///
+    /// The accept thread holds its own listener handle, so dropping the
+    /// server-side `Arc` alone would never wake a blocked `accept`. The stop
+    /// flag is the real teardown signal; the loop polls it between accepts.
     pub fn stop(mut self) -> Result<(), String> {
-        drop(self.listener); // causes accept() to return an error → exit
+        self.stopping.store(true, Ordering::Release);
         if let Some(join) = self.join.take() {
             join.join().map_err(|_| "wire accept thread panicked".to_string())?;
         }
@@ -128,10 +134,20 @@ impl WireServer {
     }
 }
 
-fn accept_loop(listener: Arc<TcpListener>, ctx: WireContext) {
+fn accept_loop(listener: Arc<TcpListener>, ctx: WireContext, stopping: Arc<AtomicBool>) {
+    // Non-blocking accept so the loop can observe the stop flag without a live
+    // peer. Accepted streams are switched back to blocking because
+    // `handle_client` reads and writes with the blocking std API.
+    if listener.set_nonblocking(true).is_err() {
+        return;
+    }
     loop {
+        if stopping.load(Ordering::Acquire) {
+            return;
+        }
         match listener.accept() {
             Ok((stream, peer)) => {
+                let _ = stream.set_nonblocking(false);
                 let ctx = ctx.clone();
                 thread::Builder::new()
                     .name(format!("yyds-wire-{peer}"))
@@ -142,7 +158,8 @@ fn accept_loop(listener: Arc<TcpListener>, ctx: WireContext) {
                     })
                     .ok();
             }
-            Err(_) => return, // listener closed
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(1)),
+            Err(_) => return, // listener unusable
         }
     }
 }

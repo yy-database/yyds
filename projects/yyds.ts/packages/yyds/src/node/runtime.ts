@@ -192,7 +192,9 @@ export async function runNodeStart(options: StartNodeOptions): Promise<void> {
             new native.MongoServiceHandle(lease, port, executor),
         );
         if (mongo) started.push(mongo);
-        wire = startOptionalListener("wire", options.wirePort, (port) => new native.WireServerHandle(port, executor));
+        wire = startOptionalListener("wire", options.wirePort, (port) =>
+            native.WireServerHandle.startWithExecutor(port, executor),
+        );
         if (wire) started.push(wire);
 
         runtime = {
