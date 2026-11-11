@@ -171,9 +171,17 @@ def _run_scenario(node: YydsNode, scenario: dict) -> None:
                 continue
             args = [_resolve(argument) for argument in step["cmd"]]
             expect = step["expect"]
+            # redis-py's SET callback folds an "OK" reply into True and, without the
+            # typed ``get=True`` option, also folds the old value that ``SET ... GET``
+            # returns into False. The runner speaks raw commands, so it must hand
+            # redis-py the same option its own ``set(get=True)`` passes; otherwise the
+            # Python side observes a different shape than node-redis on the same wire.
+            options: dict[str, bool] = {}
+            if args and args[0].upper() == "SET" and any(token.upper() == "GET" for token in args[3:]):
+                options["get"] = True
             if isinstance(expect, dict) and "error" in expect:
                 try:
-                    client.execute_command(*args)
+                    client.execute_command(*args, **options)
                 except redis.exceptions.ResponseError as error:
                     check(
                         _error_message(error) == expect["error"],
@@ -182,7 +190,7 @@ def _run_scenario(node: YydsNode, scenario: dict) -> None:
                 else:
                     raise AssertionError(f"{label}: expected {args[0]} to fail")
                 continue
-            _check(expect, client.execute_command(*args), label)
+            _check(expect, client.execute_command(*args, **options), label)
     finally:
         client.close()
 
