@@ -47,9 +47,15 @@ test("mongodb driver completes the handshake and runs document CRUD", { timeout:
     assert.equal(deleted.deletedCount, 1);
     assert.deepEqual(await collection.find({}).toArray(), []);
 
-    // Anything outside the CRUD surface stays an explicit unsupported error
-    // rather than an empty or fabricated result.
-    await assert.rejects(collection.updateOne({}, { $set: { value: 2 } }), /unsupported/i);
+    // `update` is part of the CRUD surface: a `$set` on a matched document reports the
+    // counts the real server would, and the new value round-trips through the wire.
+    const updates = client.db("yyds").collection<{ _id: string; value: number }>("probe");
+    await updates.insertOne({ _id: "probe-update", value: 1 });
+    const updated = await updates.updateOne({ _id: "probe-update" }, { $set: { value: 2 } });
+    assert.equal(updated.acknowledged, true);
+    assert.equal(updated.matchedCount, 1);
+    assert.equal(updated.modifiedCount, 1);
+    assert.equal((await updates.find({ _id: "probe-update" }).toArray())[0]?.value, 2);
 });
 
 test("mongodb driver drains a batched cursor and killCursors reclaims it", { timeout: 60_000 }, async (t) => {

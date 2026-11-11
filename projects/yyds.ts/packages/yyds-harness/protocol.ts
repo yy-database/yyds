@@ -147,7 +147,7 @@ const cases = [
                     message = error?.message ?? String(error);
                 }
                 check(message !== null, "unsupported command was accepted");
-                check(/unsupported command/i.test(message), `unsupported command answered ${message}`);
+                check(/unknown command/i.test(message), `unsupported command answered ${message}, expected the upstream 'unknown command' wording`);
                 check((await client.ping()) === "PONG", "connection stopped answering after the rejected command");
             } finally {
                 client.disconnect();

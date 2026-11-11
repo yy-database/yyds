@@ -126,7 +126,7 @@ def case_redis_unsupported_command(protocol: int) -> None:
         except redis.ResponseError as error:
             message = str(error)
         check(message is not None, "unsupported command was accepted")
-        check("unsupported command" in message.lower(), f"unsupported command answered {message}")
+        check("unknown command" in message.lower(), f"unsupported command answered {message}, expected the upstream 'unknown command' wording")
         check(client.ping() is True, "connection stopped answering after the rejected command")
     finally:
         client.close()

@@ -211,9 +211,18 @@ test("MULTI queues with syntax checks, EXEC replays and DISCARD drops", async ()
         expectError(await client.command("MULTI"), "ERR MULTI calls can not be nested");
         expectSimple(await client.command("SET", "multi-a", "1"), "QUEUED");
         expectSimple(await client.command("INCR", "multi-counter"), "QUEUED");
-        // Syntax errors surface at queue time, before EXEC replays anything.
+        // Syntax errors surface at queue time and poison the transaction: `EXEC` answers
+        // `EXECABORT` without replaying anything, like upstream Redis.
         expectError(await client.command("ECHO"), "ERR wrong number of arguments for 'echo' command");
         expectError(await client.command("FOOBAR", "x"), "ERR unsupported command");
+        expectError(await client.command("EXEC"), "EXECABORT Transaction discarded because of previous errors.");
+        expectBulk(await client.command("GET", "multi-a"), null);
+        expectBulk(await client.command("GET", "multi-counter"), null);
+
+        // A clean transaction after the aborted one still replays every queued command.
+        expectSimple(await client.command("MULTI"), "OK");
+        expectSimple(await client.command("SET", "multi-a", "1"), "QUEUED");
+        expectSimple(await client.command("INCR", "multi-counter"), "QUEUED");
         expectArray(await client.command("EXEC"), [
             { kind: "simple", value: "OK" },
             { kind: "integer", value: 1 },

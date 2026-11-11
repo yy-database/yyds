@@ -89,11 +89,13 @@ test("MULTI queues RENAME and defers source lookup to EXEC", async () => {
         { kind: "simple", value: "PONG" },
     ]);
 
-    // A malformed arity is rejected while queuing, so it never reaches the replay.
+    // A malformed arity is rejected while queuing and poisons the transaction: upstream
+    // answers `EXEC` with `EXECABORT` instead of replaying the rest of the queue.
     expectSimple(await client.command("MULTI"), "OK");
     expectError(await client.command("RENAME", "rn-tx-only"), "ERR wrong number of arguments for 'rename' command");
     expectSimple(await client.command("PING"), "QUEUED");
-    expectArray(await client.command("EXEC"), [{ kind: "simple", value: "PONG" }]);
+    expectError(await client.command("EXEC"), "EXECABORT Transaction discarded because of previous errors.");
+    expectSimple(await client.command("PING"), "PONG");
 });
 
 test("a rename and its deadline survive a node restart", { timeout: 120_000 }, async () => {

@@ -159,13 +159,14 @@ test("MULTI queues expiry commands and EXEC replays them in order", async () => 
         const ttl = await client.command("TTL", "tx-exp");
         assert.ok(ttl.kind === "integer" && ttl.value > 990 && ttl.value <= 1_000, `EXEC replayed deadline, got ${JSON.stringify(ttl)}`);
 
-        // Syntax failures are rejected at queue time and never reach the EXEC replay.
+        // Queue-time rejections poison the transaction: `EXEC` answers `EXECABORT` and the
+        // whole queue is dropped without a replay, like upstream Redis.
         expectSimple(await client.command("MULTI"), "OK");
         expectError(await client.command("EXPIREAT", "tx-exp", "abc"), "ERR value is not an integer or out of range");
         expectError(await client.command("GETEX", "tx-exp", "BADOPT"), "ERR syntax error");
         expectSimple(await client.command("SET", "tx-clean", "v"), "QUEUED");
-        expectArray(await client.command("EXEC"), [{ kind: "simple", value: "OK" }]);
-        expectBulk(await client.command("GET", "tx-clean"), "v");
+        expectError(await client.command("EXEC"), "EXECABORT Transaction discarded because of previous errors.");
+        expectBulk(await client.command("GET", "tx-clean"), null);
 
         // A runtime failure lands inside the EXEC result array and does not abort the rest.
         expectSimple(await client.command("SET", "tx-text", "abc"), "OK");

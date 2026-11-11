@@ -77,7 +77,8 @@ test("mongodb boundary surface covers handshake docs, unique _id, cursors and un
     await db.collection<{ _id: string; v: string }>("iso").insertOne({ _id: "iso", v: "here" });
     assert.deepEqual(await client.db("other").collection<{ _id: string }>("iso").find({ _id: "iso" }).toArray(), []);
 
-    // `count` and `aggregate` are implemented; `drop` is still unsupported (59).
+    // `count`, `aggregate` and `drop` are wired into the command surface; verbs outside
+    // it still report the explicit unsupported code 59 rather than an empty result.
     await collection.insertMany([{ a: 4 }, { a: 5 }]);
     const counted = await db.command({ count: "boundary" });
     assert.equal(counted.ok, 1);
@@ -86,8 +87,10 @@ test("mongodb boundary surface covers handshake docs, unique _id, cursors and un
     assert.equal(aggregate.ok, 1);
     assert.equal(aggregate.cursor.ns, "yyds.boundary");
     assert.equal(aggregate.cursor.firstBatch.length, 2);
-    await assert.rejects(db.command({ drop: "boundary" }), (error: unknown) => {
-        assert.equal((error as ServerCodeFailure).code, 59, "expected code 59 for drop");
+    const dropped = await db.command({ drop: "boundary" });
+    assert.equal(dropped.ok, 1);
+    await assert.rejects(db.command({ yydsNoSuchVerb: 1 }), (error: unknown) => {
+        assert.equal((error as ServerCodeFailure).code, 59, "expected code 59 for an unknown verb");
         return true;
     });
 });

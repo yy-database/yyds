@@ -59,7 +59,7 @@ test("node-redis drives string commands, batches and namespace isolation", { tim
         ["fulfilled", "rejected", "fulfilled", "fulfilled"],
     );
     const auth = batched[1] as PromiseRejectedResult;
-    assert.match(String(auth.reason), /unsupported/i);
+    assert.match(String(auth.reason), /AUTH|password/i);
     assert.equal(await client.get("batch-b"), "b");
 
     // SELECT switches the executor namespace, so keys do not leak across shards.
@@ -76,8 +76,8 @@ test("node-redis drives string commands, batches and namespace isolation", { tim
     assert.deepEqual(tx, ["OK", 1]);
     assert.equal(await client.get("tx"), "1");
 
-    // AUTH is not implemented and must fail loudly.
-    await assert.rejects(client.sendCommand(["AUTH", "secret"]), /unsupported/i);
+    // 网关没有口令模型，AUTH 必须像真机一样明确拒绝，而不是当成未知命令。
+    await assert.rejects(client.sendCommand(["AUTH", "secret"]), /AUTH|password/i);
     assert.equal(await client.ttl("scoped"), -1);
     assert.equal(await client.ttl("missing"), -2);
 });
