@@ -15,6 +15,8 @@ Rust：
 
 完整说明（Agent skill）：[`yydb-serve-protocol`](https://github.com/yy-database/yyds/tree/dev/projects/yydb.ts/packages/yydb-skills/skills/yydb-serve-protocol/SKILL.md)（[`@yydb/yyds-skills`](https://www.npmjs.com/package/@yydb/yyds-skills)）。
 
-当前帧类型：Hello、Info、SchemaGet / SchemaEnsure、KvGet / KvPut（见 skill 中的 `msg_type` 表）。
+当前帧类型：Hello、Info、SchemaGet / SchemaEnsure、KvGet / KvPut、MicroRegister / MicroHostInvoke、ScalarCall、Authenticate（`19`）、Prepare / ExecutePrepared，错误统一为 `Error`（`255`，body 是结构化诊断 JSON），完整消息码表见 skill。
+
+YYDB 与 YYDS 共用同一套消息码与编解码，唯一 owner 是 Rust 共享协议包；`msg_type` 不按产品分叉，也不保留旧编号兼容。
 
 本地演示见站点 `/wire` 页面。

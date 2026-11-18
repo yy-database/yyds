@@ -16,7 +16,6 @@ mod redis;
 mod schema;
 mod wire;
 mod wire_dispatch;
-mod wire_protocol;
 mod wire_serve;
 
 /// Library version (matches `yyds-types::version()`).

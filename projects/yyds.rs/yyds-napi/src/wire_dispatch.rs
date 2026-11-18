@@ -9,12 +9,11 @@ use std::sync::Arc;
 use database::{
     cluster::catalog::Catalog,
     execution::cluster::KeyValueExecutor,
+    protocol::yy::{
+        Frame, MessageType, decode_kv_get, decode_kv_put, decode_schema_ensure, encode_kv_get_ok, encode_schema_ok, error_frame,
+    },
     query::cluster_kv::{KeyValueAction, KeyValueCommand, KeyValueResult},
-    types::cluster::Namespace,
-};
-
-use crate::wire_protocol::{
-    Frame, MessageType, decode_kv_get, decode_kv_put, decode_schema_ensure, encode_kv_get_ok, encode_schema_ok, error_frame,
+    types::{Error as DatabaseError, SchemaVersion, cluster::Namespace},
 };
 
 /// Default namespace for YY-native protocol KV requests.
@@ -27,12 +26,10 @@ use crate::wire_protocol::{
 /// once the kernel contract (schema ↔ KV) is wired up.
 pub const DEFAULT_NAMESPACE: &str = "default";
 
-/// Error code returned when a requested operation is not yet wired up.
-const UNSUPPORTED_CODE: &str = "yyds.unsupported";
-/// Error code for malformed wire bodies.
-const PROTOCOL_CODE: &str = "yyds.protocol.invalid";
-/// Error code for kernel-level errors.
-const KERNEL_CODE: &str = "yyds.kernel.error";
+/// 内核侧失败统一按协议错误回复,诊断文本保留原始 `Display`,不按文案分支。
+fn kernel_error(id: u32, message: impl Into<String>) -> Frame {
+    error_frame(id, &DatabaseError::Protocol { message: message.into() })
+}
 
 /// Shared context for wire dispatch: KV executor + optional catalog.
 ///
@@ -102,10 +99,12 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
             match guard.as_ref() {
                 Some(catalog_arc) => match catalog_arc.lock() {
                     Ok(catalog) => {
-                        let schema = catalog.schema().map(|s| (s.version, s.document.as_str()));
+                        let schema = catalog
+                            .schema()
+                            .map(|schema| SchemaVersion { version: schema.version, document: schema.document.clone() });
                         Frame::new(MessageType::SchemaGetOk, id, encode_schema_ok(schema))
                     }
-                    Err(_) => error_frame(id, KERNEL_CODE, "catalog lock poisoned"),
+                    Err(_) => kernel_error(id, "catalog lock poisoned"),
                 },
                 None => Frame::new(MessageType::SchemaGetOk, id, encode_schema_ok(None)),
             }
@@ -113,7 +112,7 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
         MessageType::SchemaEnsure => {
             let (version, document) = match decode_schema_ensure(&request.body) {
                 Ok(pair) => pair,
-                Err(error) => return error_frame(id, PROTOCOL_CODE, error),
+                Err(error) => return error_frame(id, &error),
             };
             let guard = ctx.catalog.lock().unwrap();
             match guard.as_ref() {
@@ -121,21 +120,21 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                     Ok(mut catalog) => match catalog.ensure_schema(version, &document) {
                         Ok(()) => {
                             if let Err(error) = catalog.flush() {
-                                return error_frame(id, KERNEL_CODE, error.to_string());
+                                return kernel_error(id, error.to_string());
                             }
                             Frame::new(MessageType::SchemaEnsureOk, id, Vec::new())
                         }
-                        Err(error) => error_frame(id, KERNEL_CODE, error.to_string()),
+                        Err(error) => kernel_error(id, error.to_string()),
                     },
-                    Err(_) => error_frame(id, KERNEL_CODE, "catalog lock poisoned"),
+                    Err(_) => kernel_error(id, "catalog lock poisoned"),
                 },
-                None => error_frame(id, UNSUPPORTED_CODE, "YYDS wire catalog is not wired up yet"),
+                None => error_frame(id, &DatabaseError::Unsupported("YYDS wire catalog is not wired up yet")),
             }
         }
         MessageType::KvGet => {
             let key = match decode_kv_get(&request.body) {
                 Ok(k) => k,
-                Err(error) => return error_frame(id, PROTOCOL_CODE, error),
+                Err(error) => return error_frame(id, &error),
             };
             let command = KeyValueCommand {
                 namespace: Namespace(DEFAULT_NAMESPACE.to_string()),
@@ -144,14 +143,14 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
             };
             match ctx.executor.execute(None, command) {
                 Ok(KeyValueResult::Get(value)) => Frame::new(MessageType::KvGetOk, id, encode_kv_get_ok(value)),
-                Ok(_) => error_frame(id, KERNEL_CODE, "executor returned unexpected result for Get"),
-                Err(error) => error_frame(id, KERNEL_CODE, error.to_string()),
+                Ok(_) => kernel_error(id, "executor returned unexpected result for Get"),
+                Err(error) => kernel_error(id, error.to_string()),
             }
         }
         MessageType::KvPut => {
             let (key, value) = match decode_kv_put(&request.body) {
                 Ok(pair) => pair,
-                Err(error) => return error_frame(id, PROTOCOL_CODE, error),
+                Err(error) => return error_frame(id, &error),
             };
             let command = KeyValueCommand {
                 namespace: Namespace(DEFAULT_NAMESPACE.to_string()),
@@ -163,8 +162,8 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
                     let _ = revision; // revision not exposed on wire in Phase-1
                     Frame::new(MessageType::KvPutOk, id, Vec::new())
                 }
-                Ok(_) => error_frame(id, KERNEL_CODE, "executor returned unexpected result for Put"),
-                Err(error) => error_frame(id, KERNEL_CODE, error.to_string()),
+                Ok(_) => kernel_error(id, "executor returned unexpected result for Put"),
+                Err(error) => kernel_error(id, error.to_string()),
             }
         }
         // ---- Messages the server never initiates, or are handled above dispatch ----
@@ -174,10 +173,21 @@ pub fn dispatch(ctx: &WireContext, request: &Frame) -> Frame {
         | MessageType::SchemaEnsureOk
         | MessageType::KvGetOk
         | MessageType::KvPutOk
+        | MessageType::MicroRegisterOk
+        | MessageType::MicroHostInvoke
+        | MessageType::MicroHostInvokeOk
+        | MessageType::ScalarCallOk
         | MessageType::Authenticate
         | MessageType::AuthenticateOk
-        | MessageType::Error => error_frame(id, PROTOCOL_CODE, "unexpected client message type"),
-        MessageType::Unknown(code) => error_frame(id, PROTOCOL_CODE, format!("unknown msg_type {code}")),
+        | MessageType::Prepare
+        | MessageType::PrepareOk
+        | MessageType::ExecutePrepared
+        | MessageType::ExecutePreparedOk
+        | MessageType::Error => kernel_error(id, "unexpected client message type"),
+        MessageType::MicroRegister | MessageType::ScalarCall => {
+            error_frame(id, &DatabaseError::Unsupported("YYDS wire dispatch does not serve UDF micro frames yet"))
+        }
+        MessageType::Unknown(code) => kernel_error(id, format!("unknown msg_type {code}")),
     }
 }
 

@@ -33,14 +33,14 @@ use sha1::{Digest, Sha1};
 use crate::{
     node_runtime::open_executor,
     wire_dispatch::{WireContext, dispatch},
-    wire_protocol::{Frame, MessageType, decode_authenticate_body, decode_frame, error_frame, read_frame, write_frame},
+};
+
+use database::{
+    protocol::yy::{Frame, MAGIC_YYDS, MessageType, decode_authenticate, encode_authenticate_ok, error_frame, read_frame},
+    types::Error as DatabaseError,
 };
 
 const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-/// Error code returned when a connection issues commands before authenticating.
-const AUTH_CODE: &str = "yyds.auth.required";
-/// Error code returned when an Authenticate frame carries a wrong token.
-const AUTH_FAILED_CODE: &str = "yyds.auth.failed";
 
 /// Accept-loop handle; `stop` flips the shared flag and joins the thread.
 pub struct WireServer {
@@ -218,7 +218,13 @@ pub fn process_frame_with_auth(ctx: &WireContext, state: &ConnectionState, reque
 
     // Business frames require authenticated state.
     if !state.is_authenticated() {
-        return error_frame(id, AUTH_CODE, "authentication required: send Authenticate(frame 13) with a bootstrap token first");
+        return error_frame(
+            id,
+            &DatabaseError::AuthInsufficientPermission {
+                required: "authenticate".to_string(),
+                frame: format!("{:?}", request.msg_type),
+            },
+        );
     }
 
     dispatch(ctx, request)
@@ -226,17 +232,18 @@ pub fn process_frame_with_auth(ctx: &WireContext, state: &ConnectionState, reque
 
 fn handle_authenticate(ctx: &WireContext, state: &ConnectionState, request: &Frame) -> Frame {
     let id = request.request_id;
-    let token = match decode_authenticate_body(&request.body) {
+    let token = match decode_authenticate(&request.body) {
         Ok(t) => t,
-        Err(e) => return error_frame(id, "yyds.protocol.invalid", format!("Authenticate body: {e}")),
+        Err(error) => return error_frame(id, &error),
     };
 
     if ctx.bootstrap_tokens.contains(&token) {
         state.set_authenticated();
-        Frame::new(MessageType::AuthenticateOk, id, Vec::new())
+        let session_token = uuid::Uuid::new_v4().to_string();
+        Frame::new(MessageType::AuthenticateOk, id, encode_authenticate_ok(&session_token))
     }
     else {
-        error_frame(id, AUTH_FAILED_CODE, "bootstrap token not recognized")
+        error_frame(id, &DatabaseError::AuthTokenInvalid { message: "bootstrap token not recognized".to_string() })
     }
 }
 
@@ -251,12 +258,19 @@ fn handle_tcp(mut stream: TcpStream, ctx: &WireContext, state: Arc<ConnectionSta
     loop {
         let request = match read_frame(&mut stream) {
             Ok(frame) => frame,
-            Err(error) if is_disconnect(&error) => return Ok(()),
-            Err(error) => return Err(error),
+            Err(error) if is_disconnect(&error.to_string()) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
         };
         let response = process_frame_with_auth(ctx, &state, &request);
-        write_frame(&mut stream, &response)?;
+        write_product_frame(&mut stream, &response)?;
     }
+}
+
+/// 按 YYDS 自声明的 magic 写出一帧;帧布局与 body 编解码来自共享协议包。
+fn write_product_frame(stream: &mut TcpStream, frame: &Frame) -> Result<(), String> {
+    let bytes = frame.encode_as(MAGIC_YYDS).map_err(|error| error.to_string())?;
+    stream.write_all(&bytes).map_err(|error| error.to_string())?;
+    stream.flush().map_err(|error| error.to_string())
 }
 
 fn handle_websocket(mut stream: TcpStream, ctx: &WireContext, state: Arc<ConnectionState>) -> Result<(), String> {
@@ -313,9 +327,9 @@ fn handle_websocket(mut stream: TcpStream, ctx: &WireContext, state: Arc<Connect
             Some(bytes) => bytes,
             None => return Ok(()),
         };
-        let request = decode_frame(&payload)?;
+        let request = Frame::decode(&payload).map_err(|error| error.to_string())?;
         let response = process_frame_with_auth(ctx, &state, &request);
-        let encoded = response.encode()?;
+        let encoded = response.encode_as(MAGIC_YYDS).map_err(|error| error.to_string())?;
         write_ws_binary(&mut stream, &encoded)?;
     }
 }
@@ -547,7 +561,7 @@ mod tests {
     fn auth_remote_connection_accepts_correct_token() {
         let ctx = auth_test_ctx();
         let state = ConnectionState::new(false);
-        let body = crate::wire_protocol::encode_authenticate_body("t-secret");
+        let body = database::protocol::yy::encode_authenticate("t-secret");
         let request = Frame::new(MessageType::Authenticate, 1, body);
         let response = process_frame_with_auth(&ctx, &state, &request);
         assert_eq!(response.msg_type, MessageType::AuthenticateOk);
@@ -560,16 +574,55 @@ mod tests {
     }
 
     #[test]
+    fn tcp_roundtrip_speaks_the_shared_yy_protocol() {
+        use database::protocol::yy::{
+            encode_authenticate, encode_kv_get, encode_kv_put, read_frame as read_shared, write_frame as write_shared,
+        };
+        use std::net::TcpStream;
+
+        with_env("YYDS_AUTH_TOKENS", Some("t-secret"), || {
+            let server =
+                WireServer::start("127.0.0.1:0".parse().expect("bind address"), auth_test_ctx()).expect("start wire server");
+            let mut stream = TcpStream::connect(server.address()).expect("connect");
+            stream.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+
+            // Hello handshake over the shared codec (client default magic `YYDB`, server self-claims `YYDS`).
+            write_shared(&mut stream, &Frame::new(MessageType::Hello, 1, Vec::new())).expect("write hello");
+            let hello = read_shared(&mut stream).expect("read hello ok");
+            assert_eq!(hello.msg_type, MessageType::HelloOk);
+            assert_eq!(hello.request_id, 1);
+
+            // Authenticate uses the shared message code 19, so the official TS client and this listener agree.
+            let authenticate = Frame::new(MessageType::Authenticate, 2, encode_authenticate("t-secret"));
+            assert_eq!(authenticate.msg_type.as_u16(), 19, "Authenticate must stay at the shared code 19");
+            write_shared(&mut stream, &authenticate).expect("write authenticate");
+            let authenticated = read_shared(&mut stream).expect("read authenticate ok");
+            assert_eq!(authenticated.msg_type, MessageType::AuthenticateOk);
+            assert!(!authenticated.body.is_empty(), "AuthenticateOk carries the opaque session token");
+
+            write_shared(&mut stream, &Frame::new(MessageType::KvPut, 3, encode_kv_put("k1", b"v1"))).expect("write kv put");
+            assert_eq!(read_shared(&mut stream).expect("read kv put ok").msg_type, MessageType::KvPutOk);
+
+            write_shared(&mut stream, &Frame::new(MessageType::KvGet, 4, encode_kv_get("k1"))).expect("write kv get");
+            let got = read_shared(&mut stream).expect("read kv get ok");
+            assert_eq!(got.msg_type, MessageType::KvGetOk);
+            assert_eq!(got.request_id, 4);
+
+            server.stop().expect("stop wire server");
+        });
+    }
+
+    #[test]
     fn auth_remote_connection_rejects_wrong_token() {
         let ctx = auth_test_ctx();
         let state = ConnectionState::new(false);
-        let body = crate::wire_protocol::encode_authenticate_body("wrong-token");
+        let body = database::protocol::yy::encode_authenticate("wrong-token");
         let request = Frame::new(MessageType::Authenticate, 1, body);
         let response = process_frame_with_auth(&ctx, &state, &request);
         assert_eq!(response.msg_type, MessageType::Error);
         assert!(
-            String::from_utf8_lossy(&response.body).contains(AUTH_FAILED_CODE),
-            "error body should mention AUTH_FAILED_CODE `{AUTH_FAILED_CODE}`, got: {}",
+            String::from_utf8_lossy(&response.body).contains("database.auth.token_invalid"),
+            "error body should carry the structured auth code, got: {}",
             String::from_utf8_lossy(&response.body)
         );
         assert!(!state.is_authenticated(), "state must remain unauthenticated after bad token");
