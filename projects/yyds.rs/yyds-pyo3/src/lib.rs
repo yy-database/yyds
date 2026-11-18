@@ -1,25 +1,25 @@
 //! Python extension for YYDS node lifecycle and control-plane inspection.
 //!
 //! The surface is deliberately narrow: identity initialization, ownership and
-//! runtime status inspection, stop-marker creation and a bounded stop wait. It
-//! does not expose SQL ASTs, wire packets, key-value commands or YYDB types.
+//! runtime status inspection, stop-marker creation and a bounded stop wait. Runtime
+//! status reading, the running generation and the stop coordination come from the
+//! server node owner, so this module only maps parameters and results. It does not
+//! expose SQL ASTs, wire packets, key-value commands or YYDB types.
 
-use std::{
-    fs::OpenOptions,
-    io::{self, Read},
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::time::Duration;
 
 use pyo3::{create_exception, exceptions::PyException, prelude::*};
 use serde_json::{Value, json};
-use yyds::cluster::control::{LeaseError, LocalOwnership, NodeIdentity, NodeLease};
+use yyds::{
+    cluster::control::{LeaseError, LocalOwnership, NodeIdentity, NodeLease},
+    runtime::{RuntimeStatus, read_runtime_status, request_stop, wait_until_stopped},
+    server::node::{NodeControlError, RuntimeStatusError},
+};
 
 create_exception!(yyds_pyo3, YydsError, PyException);
 
-const CONTROL_VERSION: u32 = 1;
-const STATUS_FILE: &str = "node.status.json";
-const MAX_STATUS_BYTES: u64 = 4096;
+/// 运行状态文件版本，取自服务端运行状态 owner。
+const CONTROL_VERSION: u32 = yyds::runtime::CONTROL_VERSION;
 
 #[pymodule]
 fn yyds_pyo3(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -56,7 +56,7 @@ fn node_init(data_dir: &str, cluster_id: &str, node_id: &str) -> PyResult<()> {
 fn node_status(data_dir: &str) -> PyResult<String> {
     let status = NodeLease::inspect(data_dir).map_err(map_lease)?;
     let runtime = if status.ownership == LocalOwnership::Held {
-        read_runtime_status(&status.directory).map_err(YydsError::new_err)?.as_ref().map(runtime_view)
+        read_runtime_status(&status.directory).map_err(map_status)?.as_ref().map(runtime_view)
     }
     else {
         None
@@ -76,123 +76,53 @@ fn node_status(data_dir: &str) -> PyResult<String> {
     .to_string())
 }
 
-/// 把落盘运行时状态里的 camelCase 键翻译成 Python 侧惯用的 snake_case。
-///
-/// 文件格式本身不在这里改动，未列出的键原样保留。
-fn runtime_view(runtime: &Value) -> Value {
-    let Some(object) = runtime.as_object()
-    else {
-        return runtime.clone();
-    };
-    let mut translated = serde_json::Map::with_capacity(object.len());
-    for (key, value) in object {
-        let translated_key = match key.as_str() {
-            "startedAtUnixMs" => "started_at_unix_ms",
-            "redisAddress" => "redis_address",
-            "pgsqlAddress" => "pgsql_address",
-            "mysqlAddress" => "mysql_address",
-            "wireAddress" => "wire_address",
-            _ => key.as_str(),
-        };
-        translated.insert(translated_key.to_string(), value.clone());
-    }
-    Value::Object(translated)
+/// 把服务端运行状态投影成 Python 侧惯用的 snake_case 键。
+fn runtime_view(runtime: &RuntimeStatus) -> Value {
+    json!({
+        "version": runtime.version,
+        "generation": runtime.generation.to_string(),
+        "pid": runtime.pid,
+        "started_at_unix_ms": runtime.started_at_unix_ms,
+        "redis_address": runtime.redis_address,
+        "pgsql_address": runtime.pgsql_address,
+        "mysql_address": runtime.mysql_address,
+        "wire_address": runtime.wire_address,
+    })
 }
 
 /// Creates a stop marker for the generation published by the running node.
 #[pyfunction]
 fn node_request_stop(data_dir: &str) -> PyResult<()> {
     let status = NodeLease::inspect(data_dir).map_err(map_lease)?;
-    let runtime = read_runtime_status(&status.directory)
-        .map_err(YydsError::new_err)?
-        .ok_or_else(|| YydsError::new_err("node owner has not published runtime status"))?;
-    let generation =
-        runtime.get("generation").and_then(Value::as_str).ok_or_else(|| YydsError::new_err("corrupt runtime status"))?;
-    let marker = status.directory.join(format!("node.stop.{generation}"));
-    match OpenOptions::new().write(true).create_new(true).open(marker) {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(YydsError::new_err(format!("stop marker I/O error: {error}"))),
-    }
+    let runtime = published_runtime(&status.directory)?;
+    request_stop(&status.directory, runtime.generation).map_err(map_status)
 }
 
 /// Waits until the node directory is released or the timeout elapses.
 #[pyfunction]
 fn node_wait_until_stopped(data_dir: &str, timeout_ms: u64) -> PyResult<()> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        match NodeLease::inspect(data_dir) {
-            Ok(state) if state.ownership == LocalOwnership::Available => return Ok(()),
-            Ok(_) => {}
-            Err(error) => return Err(map_lease(error)),
-        }
-        if Instant::now() >= deadline {
-            return Err(YydsError::new_err("timed out waiting for node stop"));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let status = NodeLease::inspect(data_dir).map_err(map_lease)?;
+    let runtime = published_runtime(&status.directory)?;
+    wait_until_stopped(&status.directory, runtime.generation, Duration::from_millis(timeout_ms)).map_err(map_control)
 }
 
-fn read_runtime_status(directory: &Path) -> Result<Option<Value>, String> {
-    let path = directory.join(STATUS_FILE);
-    let file = match std::fs::File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("node status I/O error: {error}")),
+/// 读取运行中节点发布的运行状态；未发布时按「宿主还没起来」拒绝。
+fn published_runtime(directory: &std::path::Path) -> PyResult<RuntimeStatus> {
+    read_runtime_status(directory)
+        .map_err(map_status)?
+        .ok_or_else(|| YydsError::new_err("node owner has not published runtime status"))
+}
+
+fn map_status(error: RuntimeStatusError) -> PyErr {
+    let message = match error {
+        RuntimeStatusError::Io(error) => format!("node status I/O error: {error}"),
+        RuntimeStatusError::Corrupt(_) => String::from("corrupt runtime status"),
     };
-    if !file.metadata().map_err(|error| format!("node status I/O error: {error}"))?.is_file() {
-        return Err("corrupt runtime status".into());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_STATUS_BYTES + 1).read_to_end(&mut bytes).map_err(|error| format!("node status I/O error: {error}"))?;
-    if bytes.len() as u64 > MAX_STATUS_BYTES {
-        return Err("corrupt runtime status".into());
-    }
-    let runtime: Value = serde_json::from_slice(&bytes).map_err(|_| String::from("corrupt runtime status"))?;
-    if runtime.get("version").and_then(Value::as_u64) != Some(u64::from(CONTROL_VERSION))
-        || !runtime.get("generation").and_then(Value::as_str).is_some_and(is_uuid_text)
-    {
-        return Err("corrupt runtime status".into());
-    }
-    // The Redis address is mandatory. SQL addresses stay optional so a node that
-    // publishes only one of them remains inspectable.
-    if !runtime.get("redisAddress").and_then(Value::as_str).is_some_and(is_loopback_address) {
-        return Err("corrupt runtime status".into());
-    }
-    for key in ["pgsqlAddress", "mysqlAddress"] {
-        match runtime.get(key) {
-            None | Some(Value::Null) => {}
-            Some(address) if address.as_str().is_some_and(is_loopback_address) => {}
-            Some(_) => return Err("corrupt runtime status".into()),
-        }
-    }
-    Ok(Some(runtime))
+    YydsError::new_err(message)
 }
 
-fn is_loopback_address(value: &str) -> bool {
-    value.starts_with("127.0.0.1:") || value.starts_with("[::1]:")
-}
-
-fn is_uuid_text(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 36 {
-        return false;
-    }
-    let mut significant = false;
-    for (index, byte) in bytes.iter().enumerate() {
-        if matches!(index, 8 | 13 | 18 | 23) {
-            if *byte != b'-' {
-                return false;
-            }
-        }
-        else if !byte.is_ascii_hexdigit() {
-            return false;
-        }
-        else if *byte != b'0' {
-            significant = true;
-        }
-    }
-    significant
+fn map_control(error: NodeControlError) -> PyErr {
+    YydsError::new_err(error.to_string())
 }
 
 fn map_lease(error: LeaseError) -> PyErr {
