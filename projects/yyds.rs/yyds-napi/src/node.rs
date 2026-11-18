@@ -115,8 +115,8 @@ fn map_lease(error: yyds::cluster::control::LeaseError) -> Error {
     Error::from_reason(error.to_string())
 }
 
-fn map_string(error: String) -> Error {
-    Error::from_reason(error)
+fn map_string(error: impl std::fmt::Display) -> Error {
+    Error::from_reason(error.to_string())
 }
 
 fn map_serde(error: serde_json::Error) -> Error {

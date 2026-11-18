@@ -36,7 +36,7 @@ impl LocalExecutorHandle {
         let catalog_owned = catalog_path.filter(|path| !path.is_empty()).map(|path| PathBuf::from(path));
         let catalog: Option<&Path> = catalog_owned.as_deref();
         Ok(Self {
-            inner: open_executor(PathBuf::from(data_dir).as_path(), catalog).map_err(|error| Error::from_reason(error))?,
+            inner: open_executor(PathBuf::from(data_dir).as_path(), catalog).map_err(|error| Error::from_reason(error.to_string()))?,
         })
     }
 

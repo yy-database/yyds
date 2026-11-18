@@ -53,10 +53,7 @@ export interface YydsBindings {
         port: number,
         executor: unknown,
     ) => MongoServiceBinding;
-    WireServerHandle: {
-        startStandalone(dataDir: string, catalogPath: string, port: number): WireServiceBinding;
-        startWithExecutor(port: number, executor: LocalExecutorBinding): WireServiceBinding;
-    };
+    WireServerHandle: new (port: number, executor: LocalExecutorBinding) => WireServiceBinding;
     catalogPublishSchema(catalogPath: string, schemaVersion: number, schemaDocument: string): void;
     nodeInit(dataDir: string, identity: unknown): void;
     nodeInspect(dataDir: string): NodeStatusBinding;

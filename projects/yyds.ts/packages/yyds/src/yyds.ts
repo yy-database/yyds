@@ -271,7 +271,7 @@ export class Yyds {
         }
         const native = this.#loadNative();
         try {
-            const service = native.WireServerHandle.startWithExecutor(port, this.#handles.executor);
+            const service = new native.WireServerHandle(port, this.#handles.executor);
             const address = service.address();
             let endpoint: TcpEndpoint;
             try {

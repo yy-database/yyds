@@ -1,18 +1,17 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, sync::Arc};
 
 use crate::executor::LocalExecutorHandle;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use yyds::{
-    runtime::open_executor,
     server::yydb::WireServe,
     wire::{KvBackendFactory, serve_options},
 };
 
 /// Loopback `/wire` listener for the YY native protocol.
 ///
-/// 线协议循环、鉴权门与权限门由上游 `database.server::yydb` 提供,本句柄只
-/// 组装分片执行后端与启动参数,不再持有 serve/dispatch 状态机。
+/// 线协议循环、鉴权门与权限门由上游 `database.server::yydb` 提供,本句柄只把
+/// 节点已打开的分片执行器接进共享后端并启动监听,不自己装配执行器。
 #[napi]
 pub struct WireServerHandle {
     inner: Option<WireServe>,
@@ -20,30 +19,11 @@ pub struct WireServerHandle {
 
 #[napi]
 impl WireServerHandle {
-    /// Open the catalog-driven executor from a node directory, then start
-    /// the wire server on a loopback port.
+    /// Serves the shared YY wire protocol with the node's own executor.
     ///
-    /// This is the **node start chain** entry point — one call wires up
-    /// `open_executor` + the shared wire serve instead of asking the caller
-    /// to construct the executor separately.
-    ///
-    /// `catalog_path` is optional (pass an empty string to fall back to
-    /// local-only shards, mirroring [`LocalExecutorHandle::open`]).
-    #[napi]
-    pub fn start_standalone(data_dir: String, catalog_path: String, port: u16) -> Result<Self> {
-        let address = SocketAddr::from(([127, 0, 0, 1], port));
-        let directory = PathBuf::from(&data_dir);
-        let catalog = if catalog_path.is_empty() { None } else { Some(PathBuf::from(catalog_path)) };
-        let executor = open_executor(directory.as_path(), catalog.as_deref()).map_err(Error::from_reason)?;
-        let factory = Arc::new(KvBackendFactory::new(executor, None));
-        let options = serve_options(address).map_err(Error::from_reason)?;
-        let server = WireServe::start(options, factory).map_err(Error::from_reason)?;
-        Ok(Self { inner: Some(server) })
-    }
-
-    /// Legacy manual start — pass a pre-built executor.
-    #[napi]
-    pub fn start_with_executor(port: u16, executor: &LocalExecutorHandle) -> Result<Self> {
+    /// 传入节点已打开的执行器句柄,保证线服务与其它协议网关读写同一份分片状态。
+    #[napi(constructor)]
+    pub fn new(port: u16, executor: &LocalExecutorHandle) -> Result<Self> {
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let factory = Arc::new(KvBackendFactory::new(Arc::clone(&executor.inner), None));
         let options = serve_options(address).map_err(Error::from_reason)?;
