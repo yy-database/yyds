@@ -1,12 +1,12 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use database::{
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+use yyds::{
     cluster::catalog::Catalog,
     query::{SqlCatalog, sql_meta::set_pg_server_version},
     server::yyds::pgsql::service::PgsqlService,
 };
-use napi::bindgen_prelude::*;
-use napi_derive::napi;
 
 use crate::{executor::LocalExecutorHandle, node::NodeLeaseHandle, schema::SqlSchemaRegistryHandle};
 

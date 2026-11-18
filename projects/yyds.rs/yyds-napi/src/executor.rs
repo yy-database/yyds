@@ -4,10 +4,12 @@ use std::{
     time::Duration,
 };
 
-use crate::node_runtime::open_executor;
-use database::execution::cluster::{ExpirySweeper, KeyValueExecutor};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use yyds::{
+    execution::cluster::{ExpirySweeper, KeyValueExecutor},
+    runtime::open_executor,
+};
 
 /// Local key-value executor for one node directory.
 #[napi]

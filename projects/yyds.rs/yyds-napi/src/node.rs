@@ -1,12 +1,14 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use crate::node_runtime::{
-    RuntimeStatus, clear_runtime_artifacts, init_node, inspect_node, read_runtime_status, request_stop, stop_requested,
-    wait_until_stopped, write_runtime_status,
-};
-use database::cluster::control::{NodeIdentity, NodeLease};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use yyds::{
+    cluster::control::{NodeIdentity, NodeLease},
+    runtime::{
+        RuntimeStatus, clear_runtime_artifacts, init_node, inspect_node, read_runtime_status, request_stop, stop_requested,
+        wait_until_stopped, write_runtime_status,
+    },
+};
 
 /// Cluster and node identity for a YYDS data directory.
 #[napi]
@@ -109,7 +111,7 @@ pub fn node_wait_until_stopped(data_dir: String, generation: String, timeout_ms:
         .map_err(map_string)
 }
 
-fn map_lease(error: database::cluster::control::LeaseError) -> Error {
+fn map_lease(error: yyds::cluster::control::LeaseError) -> Error {
     Error::from_reason(error.to_string())
 }
 

@@ -11,9 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use database::cluster::control::{LeaseError, LocalOwnership, NodeIdentity, NodeLease};
 use pyo3::{create_exception, exceptions::PyException, prelude::*};
 use serde_json::{Value, json};
+use yyds::cluster::control::{LeaseError, LocalOwnership, NodeIdentity, NodeLease};
 
 create_exception!(yyds_pyo3, YydsError, PyException);
 
