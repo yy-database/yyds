@@ -14,7 +14,7 @@ repository = "https://github.com/yy-database/yyds"
 
 [workspace.dependencies]
 # Sole dependency · the `yyds` product facade. Pin full 40-char rev.
-yyds = { git = "https://github.com/oovm/boost.rs.git", rev = "ea61d4ebe399d220e48c6bbb7b6ce6406a92aaf7" }
+yyds = { git = "https://github.com/oovm/boost.rs.git", rev = "f3c91a8aad028c07ee297a66da8e75beeefcae12" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
