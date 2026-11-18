@@ -15,8 +15,7 @@ mod pgsql;
 mod redis;
 mod schema;
 mod wire;
-mod wire_dispatch;
-mod wire_serve;
+mod wire_backend;
 
 /// Library version (matches `yyds-types::version()`).
 #[napi]
